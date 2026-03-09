@@ -1,0 +1,1240 @@
+"""Tests for knowledge supersession — Phase 8a of adaptive memory.
+
+Covers:
+- Schema: temporal columns (valid_from, valid_until, version, lineage_id)
+- Schema: pending_contradictions table
+- Storage: knowledge CRUD with temporal fields
+- Storage: lineage queries
+- Storage: contradiction queue (add, list, resolve)
+- Core: include_historical threading
+- Core: confidence-based lineage dedup
+- Core: _format_knowledge_block with historical/temporal labels
+- Server: recall_contradict tool, recall_search include_historical
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+from synapt.recall.storage import RecallDB
+from synapt.recall.core import TranscriptChunk, TranscriptIndex
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_db(tmp_path) -> RecallDB:
+    return RecallDB(tmp_path / "test.db")
+
+
+def _make_knowledge_node(
+    node_id=None, content="test fact", category="workflow",
+    confidence=0.7, status="active", lineage_id="",
+    version=1, valid_from=None, valid_until=None,
+    source_sessions=None, contradiction_note="",
+    superseded_by="",
+):
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "id": node_id or uuid.uuid4().hex[:12],
+        "content": content,
+        "category": category,
+        "confidence": confidence,
+        "source_sessions": source_sessions or ["sess-1"],
+        "created_at": now,
+        "updated_at": now,
+        "status": status,
+        "superseded_by": superseded_by,
+        "contradiction_note": contradiction_note,
+        "tags": [],
+        "valid_from": valid_from,
+        "valid_until": valid_until,
+        "version": version,
+        "lineage_id": lineage_id,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schema tests
+# ---------------------------------------------------------------------------
+
+class TestSchemaSupersession:
+    """Verify temporal columns and pending_contradictions table exist."""
+
+    def test_knowledge_has_temporal_columns(self, tmp_path):
+        db = _make_db(tmp_path)
+        cols = {
+            r[1] for r in db._conn.execute("PRAGMA table_info(knowledge)").fetchall()
+        }
+        assert "valid_from" in cols
+        assert "valid_until" in cols
+        assert "version" in cols
+        assert "lineage_id" in cols
+
+    def test_pending_contradictions_table_exists(self, tmp_path):
+        db = _make_db(tmp_path)
+        tables = {
+            r[0] for r in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "pending_contradictions" in tables
+
+    def test_pending_contradictions_columns(self, tmp_path):
+        db = _make_db(tmp_path)
+        cols = {
+            r[1] for r in db._conn.execute(
+                "PRAGMA table_info(pending_contradictions)"
+            ).fetchall()
+        }
+        expected = {
+            "id", "old_node_id", "new_content", "category", "reason",
+            "source_sessions", "detected_at", "detected_by", "status",
+            "resolved_at",
+        }
+        assert expected <= cols
+
+    def test_migration_adds_temporal_columns(self, tmp_path):
+        """Simulate an old DB missing temporal columns, then migrate."""
+        db_path = tmp_path / "old.db"
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE knowledge ("
+            "  rowid INTEGER PRIMARY KEY, id TEXT UNIQUE, content TEXT, "
+            "  category TEXT, confidence REAL, source_sessions TEXT, "
+            "  created_at TEXT, updated_at TEXT, status TEXT, "
+            "  superseded_by TEXT, tags TEXT"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+        # Opening RecallDB runs migrations
+        db = RecallDB(db_path)
+        cols = {
+            r[1] for r in db._conn.execute("PRAGMA table_info(knowledge)").fetchall()
+        }
+        assert "valid_from" in cols
+        assert "lineage_id" in cols
+
+
+# ---------------------------------------------------------------------------
+# Knowledge CRUD with temporal fields
+# ---------------------------------------------------------------------------
+
+class TestKnowledgeTemporal:
+    """Save and load knowledge nodes with temporal fields."""
+
+    def test_save_and_load_with_temporal(self, tmp_path):
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(
+            lineage_id="lineage-abc",
+            version=2,
+            valid_from="2026-01-01T00:00:00+00:00",
+        )
+        db.save_knowledge_nodes([node])
+        loaded = db.load_knowledge_nodes()
+        assert len(loaded) == 1
+        assert loaded[0]["lineage_id"] == "lineage-abc"
+        assert loaded[0]["version"] == 2
+        assert loaded[0]["valid_from"] == "2026-01-01T00:00:00+00:00"
+        assert loaded[0]["valid_until"] is None
+
+    def test_upsert_updates_temporal(self, tmp_path):
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="n1", version=1)
+        db.save_knowledge_nodes([node])
+
+        node["version"] = 2
+        node["valid_from"] = "2026-02-01T00:00:00+00:00"
+        db.upsert_knowledge_node(node)
+
+        loaded = db.load_knowledge_nodes()
+        assert len(loaded) == 1
+        assert loaded[0]["version"] == 2
+
+    def test_default_version_is_1(self, tmp_path):
+        db = _make_db(tmp_path)
+        # Save without explicit version
+        node = _make_knowledge_node()
+        del node["version"]
+        del node["lineage_id"]
+        db.save_knowledge_nodes([node])
+        loaded = db.load_knowledge_nodes()
+        assert loaded[0]["version"] == 1
+        assert loaded[0]["lineage_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Lineage queries
+# ---------------------------------------------------------------------------
+
+class TestKnowledgeLineage:
+    """Test knowledge_lineage() — fetch all versions of a fact."""
+
+    def test_lineage_returns_ordered_versions(self, tmp_path):
+        db = _make_db(tmp_path)
+        lid = "lineage-xyz"
+        v1 = _make_knowledge_node(
+            node_id="v1", lineage_id=lid, version=1,
+            content="old fact", status="contradicted",
+            valid_until="2026-03-01T00:00:00+00:00",
+        )
+        v2 = _make_knowledge_node(
+            node_id="v2", lineage_id=lid, version=2,
+            content="new fact",
+            valid_from="2026-03-01T00:00:00+00:00",
+        )
+        db.save_knowledge_nodes([v2, v1])  # Insert out of order
+
+        lineage = db.knowledge_lineage(lid)
+        assert len(lineage) == 2
+        assert lineage[0]["version"] == 1
+        assert lineage[1]["version"] == 2
+
+    def test_lineage_empty_for_unknown_id(self, tmp_path):
+        db = _make_db(tmp_path)
+        assert db.knowledge_lineage("nonexistent") == []
+
+    def test_lineage_empty_for_blank_id(self, tmp_path):
+        db = _make_db(tmp_path)
+        assert db.knowledge_lineage("") == []
+
+
+# ---------------------------------------------------------------------------
+# FTS search with include_historical
+# ---------------------------------------------------------------------------
+
+class TestKnowledgeFtsHistorical:
+    """Test knowledge_fts_search with include_historical flag."""
+
+    def test_default_excludes_contradicted(self, tmp_path):
+        db = _make_db(tmp_path)
+        active = _make_knowledge_node(
+            node_id="a1", content="Python uses pytest for testing",
+            status="active",
+        )
+        contradicted = _make_knowledge_node(
+            node_id="c1", content="Python uses unittest for testing",
+            status="contradicted",
+        )
+        db.save_knowledge_nodes([active, contradicted])
+
+        results = db.knowledge_fts_search("Python testing")
+        ids = {db._knowledge_dict_from_row(
+            db._conn.execute("SELECT * FROM knowledge WHERE rowid = ?", (r,)).fetchone()
+        )["id"] for r, _ in results}
+        assert "a1" in ids
+        assert "c1" not in ids
+
+    def test_include_historical_returns_contradicted(self, tmp_path):
+        db = _make_db(tmp_path)
+        active = _make_knowledge_node(
+            node_id="a1", content="Python uses pytest for testing",
+            status="active",
+        )
+        contradicted = _make_knowledge_node(
+            node_id="c1", content="Python uses unittest for testing",
+            status="contradicted",
+        )
+        db.save_knowledge_nodes([active, contradicted])
+
+        results = db.knowledge_fts_search("Python testing", include_historical=True)
+        ids = {db._knowledge_dict_from_row(
+            db._conn.execute("SELECT * FROM knowledge WHERE rowid = ?", (r,)).fetchone()
+        )["id"] for r, _ in results}
+        assert "a1" in ids
+        assert "c1" in ids
+
+
+# ---------------------------------------------------------------------------
+# Pending contradictions
+# ---------------------------------------------------------------------------
+
+class TestPendingContradictions:
+    """Test contradiction queue: add, list, resolve."""
+
+    def test_add_and_list(self, tmp_path):
+        db = _make_db(tmp_path)
+        cid = db.add_pending_contradiction(
+            old_node_id="n1",
+            new_content="updated fact",
+            category="workflow",
+            reason="new evidence found",
+            source_sessions=["sess-5"],
+            detected_by="consolidation",
+        )
+        assert cid > 0
+
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["old_node_id"] == "n1"
+        assert pending[0]["new_content"] == "updated fact"
+        assert pending[0]["reason"] == "new evidence found"
+        assert pending[0]["detected_by"] == "consolidation"
+        assert pending[0]["source_sessions"] == ["sess-5"]
+
+    def test_resolve_confirmed(self, tmp_path):
+        db = _make_db(tmp_path)
+        cid = db.add_pending_contradiction("n1", "new fact")
+        ok = db.resolve_contradiction(cid, "confirmed")
+        assert ok
+
+        # No longer pending
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 0
+
+    def test_resolve_dismissed(self, tmp_path):
+        db = _make_db(tmp_path)
+        cid = db.add_pending_contradiction("n1", "new fact")
+        ok = db.resolve_contradiction(cid, "dismissed")
+        assert ok
+        assert len(db.list_pending_contradictions()) == 0
+
+    def test_resolve_invalid_status(self, tmp_path):
+        db = _make_db(tmp_path)
+        cid = db.add_pending_contradiction("n1", "new fact")
+        ok = db.resolve_contradiction(cid, "invalid")
+        assert not ok
+        assert len(db.list_pending_contradictions()) == 1
+
+    def test_resolve_nonexistent(self, tmp_path):
+        db = _make_db(tmp_path)
+        ok = db.resolve_contradiction(999, "confirmed")
+        assert not ok
+
+    def test_resolve_already_resolved(self, tmp_path):
+        db = _make_db(tmp_path)
+        cid = db.add_pending_contradiction("n1", "new fact")
+        db.resolve_contradiction(cid, "confirmed")
+        # Second resolve should fail
+        ok = db.resolve_contradiction(cid, "dismissed")
+        assert not ok
+
+    def test_multiple_pending(self, tmp_path):
+        db = _make_db(tmp_path)
+        db.add_pending_contradiction("n1", "fact A")
+        db.add_pending_contradiction("n2", "fact B")
+        db.add_pending_contradiction("n3", "fact C")
+
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 3
+
+        # Resolve one
+        db.resolve_contradiction(pending[0]["id"], "confirmed")
+        assert len(db.list_pending_contradictions()) == 2
+
+
+# ---------------------------------------------------------------------------
+# Confidence-based lineage dedup
+# ---------------------------------------------------------------------------
+
+class TestConfidenceBasedDedup:
+    """Test _dedup_knowledge_by_lineage in core.py."""
+
+    def test_keeps_higher_confidence(self):
+        nodes = [
+            {"id": "v1", "lineage_id": "L1", "confidence": 0.5, "content": "old"},
+            {"id": "v2", "lineage_id": "L1", "confidence": 0.8, "content": "new"},
+        ]
+        result = TranscriptIndex._dedup_knowledge_by_lineage(nodes)
+        assert len(result) == 1
+        assert result[0]["id"] == "v2"
+
+    def test_no_lineage_passes_through(self):
+        nodes = [
+            {"id": "a", "lineage_id": "", "confidence": 0.5},
+            {"id": "b", "confidence": 0.6},  # Missing lineage_id key
+        ]
+        result = TranscriptIndex._dedup_knowledge_by_lineage(nodes)
+        assert len(result) == 2
+
+    def test_different_lineages_kept(self):
+        nodes = [
+            {"id": "v1", "lineage_id": "L1", "confidence": 0.5},
+            {"id": "v2", "lineage_id": "L2", "confidence": 0.8},
+        ]
+        result = TranscriptIndex._dedup_knowledge_by_lineage(nodes)
+        assert len(result) == 2
+
+    def test_mixed_lineage_and_no_lineage(self):
+        nodes = [
+            {"id": "a", "lineage_id": "", "confidence": 0.9},
+            {"id": "v1", "lineage_id": "L1", "confidence": 0.3},
+            {"id": "v2", "lineage_id": "L1", "confidence": 0.7},
+            {"id": "b", "lineage_id": "", "confidence": 0.4},
+        ]
+        result = TranscriptIndex._dedup_knowledge_by_lineage(nodes)
+        assert len(result) == 3
+        ids = {n["id"] for n in result}
+        assert ids == {"a", "v2", "b"}
+
+    def test_equal_confidence_keeps_first(self):
+        """When confidence is equal, the first node seen wins (strict >)."""
+        nodes = [
+            {"id": "v1", "lineage_id": "L1", "confidence": 0.5},
+            {"id": "v2", "lineage_id": "L1", "confidence": 0.5},
+        ]
+        result = TranscriptIndex._dedup_knowledge_by_lineage(nodes)
+        assert len(result) == 1
+        # v2 is last with equal confidence, NOT higher, so v1 wins (> not >=)
+        assert result[0]["id"] == "v1"
+
+    def test_three_versions_picks_highest_confidence(self):
+        """With 3+ versions, the highest confidence wins regardless of position."""
+        nodes = [
+            {"id": "v1", "lineage_id": "L1", "confidence": 0.3},
+            {"id": "v2", "lineage_id": "L1", "confidence": 0.9},
+            {"id": "v3", "lineage_id": "L1", "confidence": 0.6},
+        ]
+        result = TranscriptIndex._dedup_knowledge_by_lineage(nodes)
+        assert len(result) == 1
+        assert result[0]["id"] == "v2"
+
+
+# ---------------------------------------------------------------------------
+# Format knowledge block with temporal/historical labels
+# ---------------------------------------------------------------------------
+
+class TestFormatKnowledgeBlock:
+    """Test _format_knowledge_block for Phase 8a enhancements."""
+
+    def test_active_node_normal_format(self):
+        node = _make_knowledge_node(confidence=0.8, category="architecture")
+        block = TranscriptIndex._format_knowledge_block(node)
+        assert "[knowledge] architecture (high confidence)" in block
+        assert "historical" not in block
+
+    def test_contradicted_node_historical_label(self):
+        node = _make_knowledge_node(
+            status="contradicted",
+            contradiction_note="replaced by newer approach",
+        )
+        block = TranscriptIndex._format_knowledge_block(node)
+        assert "[knowledge, historical]" in block
+        assert "Superseded: replaced by newer approach" in block
+
+    def test_valid_from_only(self):
+        node = _make_knowledge_node(valid_from="2026-01-15T00:00:00+00:00")
+        block = TranscriptIndex._format_knowledge_block(node)
+        assert "Current since 2026-01-15" in block
+
+    def test_valid_range(self):
+        node = _make_knowledge_node(
+            valid_from="2026-01-01T00:00:00+00:00",
+            valid_until="2026-03-01T00:00:00+00:00",
+        )
+        block = TranscriptIndex._format_knowledge_block(node)
+        assert "Valid 2026-01-01 to 2026-03-01" in block
+
+    def test_confidence_labels(self):
+        high = TranscriptIndex._format_knowledge_block(
+            _make_knowledge_node(confidence=0.8)
+        )
+        assert "high confidence" in high
+
+        medium = TranscriptIndex._format_knowledge_block(
+            _make_knowledge_node(confidence=0.5)
+        )
+        assert "medium confidence" in medium
+
+        low = TranscriptIndex._format_knowledge_block(
+            _make_knowledge_node(confidence=0.2)
+        )
+        assert "low confidence" in low
+
+
+# ---------------------------------------------------------------------------
+# Server: recall_contradict
+# ---------------------------------------------------------------------------
+
+class TestRecallContradict:
+    """Test the recall_contradict MCP tool."""
+
+    def test_list_empty(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = recall_contradict(action="list")
+        assert "No pending contradictions" in result
+
+    def test_list_shows_pending(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        # Add a knowledge node and a contradiction
+        node = _make_knowledge_node(node_id="old-1", content="use unittest")
+        db.save_knowledge_nodes([node])
+        db.add_pending_contradiction(
+            "old-1", "use pytest instead",
+            reason="pytest is now standard",
+        )
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = recall_contradict(action="list")
+        assert "use pytest instead" in result
+        assert "use unittest" in result
+
+    def test_resolve_confirmed_supersedes(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="old-1", content="use unittest")
+        db.save_knowledge_nodes([node])
+        cid = db.add_pending_contradiction(
+            "old-1", "use pytest instead",
+            category="tooling",
+            reason="pytest is standard",
+        )
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="resolve",
+                    contradiction_id=cid,
+                    resolution="confirmed",
+                )
+        assert "confirmed" in result
+        assert "superseded" in result
+
+        # Verify old node is now contradicted with full metadata
+        nodes = db.load_knowledge_nodes()
+        old = [n for n in nodes if n["id"] == "old-1"]
+        assert len(old) == 1
+        assert old[0]["status"] == "contradicted"
+        assert old[0]["valid_until"] is not None  # Timestamp set
+        assert old[0]["contradiction_note"] == "pytest is standard"
+        # Old node's lineage_id backfilled during bootstrap
+        assert old[0]["lineage_id"] == "old-1"
+
+        # Verify new node was created with lineage chain
+        active = [n for n in nodes if n["status"] == "active"]
+        assert len(active) == 1
+        new_node = active[0]
+        assert new_node["content"] == "use pytest instead"
+        assert new_node["version"] == 2
+        # Lineage bootstrapped from old node's id (old node had no lineage_id)
+        assert new_node["lineage_id"] == "old-1"
+        assert new_node["valid_from"] is not None
+        # Old node's superseded_by points to new node
+        assert old[0]["superseded_by"] == new_node["id"]
+
+    def test_resolve_dismissed_keeps_old(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="old-1", content="use unittest")
+        db.save_knowledge_nodes([node])
+        cid = db.add_pending_contradiction("old-1", "use pytest instead")
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="resolve",
+                    contradiction_id=cid,
+                    resolution="dismissed",
+                )
+        assert "dismissed" in result
+
+        # Old node unchanged
+        nodes = db.load_knowledge_nodes(status="active")
+        assert len(nodes) == 1
+        assert nodes[0]["content"] == "use unittest"
+
+    def test_resolve_missing_id(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = recall_contradict(action="resolve")
+        assert "required" in result
+
+    def test_no_index(self):
+        from synapt.recall.server import recall_contradict
+        with patch("synapt.recall.server._get_index", return_value=None):
+            result = recall_contradict(action="list")
+        assert "No index" in result
+
+    def test_chain_supersession_propagates_lineage(self, tmp_path):
+        """v1→v2→v3 chain: lineage_id propagates through all versions."""
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        # v1 already has a lineage_id (from a prior supersession)
+        v1 = _make_knowledge_node(
+            node_id="v1", content="original fact",
+            lineage_id="lineage-root", version=1,
+        )
+        db.save_knowledge_nodes([v1])
+        cid = db.add_pending_contradiction(
+            "v1", "updated fact v2",
+            category="workflow",
+            reason="new evidence",
+        )
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                recall_contradict(
+                    action="resolve", contradiction_id=cid,
+                    resolution="confirmed",
+                )
+
+        nodes = db.load_knowledge_nodes()
+        active = [n for n in nodes if n["status"] == "active"]
+        assert len(active) == 1
+        # Lineage carried forward from v1's existing lineage_id
+        assert active[0]["lineage_id"] == "lineage-root"
+        assert active[0]["version"] == 2
+
+    def test_confirm_missing_old_node_no_crash(self, tmp_path):
+        """Confirming a contradiction for a deleted old node does not crash."""
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        # Add contradiction referencing a node that doesn't exist
+        cid = db.add_pending_contradiction("nonexistent", "new fact")
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="resolve", contradiction_id=cid,
+                    resolution="confirmed",
+                )
+        # Should succeed (contradiction resolved) even though supersession
+        # couldn't find the old node — it silently skips
+        assert "confirmed" in result
+
+
+# ---------------------------------------------------------------------------
+# Server: recall_search include_historical
+# ---------------------------------------------------------------------------
+
+class TestRecallSearchHistorical:
+    """Test that include_historical threads through to index.lookup()."""
+
+    def test_include_historical_param_threaded(self, tmp_path):
+        """Verify recall_search passes include_historical to index.lookup()."""
+        from synapt.recall.server import recall_search
+
+        calls = []
+
+        class MockIndex:
+            _db = None
+            chunks = [TranscriptChunk(
+                id="s1:t0", session_id="s1", turn_index=0,
+                timestamp="2026-01-01",
+                user_text="test", assistant_text="reply",
+            )]
+            sessions = {"s1": [0]}
+            _last_diagnostics = None
+
+            def lookup(self, query, **kwargs):
+                calls.append(kwargs)
+                return "result"
+
+        mock_index = MockIndex()
+        with patch("synapt.recall.server._get_index", return_value=mock_index):
+            with patch("synapt.recall.live.search_live_transcript", return_value=""):
+                recall_search("test query", include_historical=True)
+
+        assert len(calls) == 1
+        assert calls[0]["include_historical"] is True
+
+
+# ---------------------------------------------------------------------------
+# SessionStart hook: contradiction surfacing
+# ---------------------------------------------------------------------------
+
+class TestContradictionSessionStart:
+    """Test format_contradictions_for_session_start."""
+
+    def test_no_pending_returns_empty(self, tmp_path):
+        from synapt.recall.server import format_contradictions_for_session_start
+        db = _make_db(tmp_path)
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = format_contradictions_for_session_start()
+        assert result == ""
+
+    def test_pending_formatted_for_model(self, tmp_path):
+        from synapt.recall.server import format_contradictions_for_session_start
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="n1", content="old approach")
+        db.save_knowledge_nodes([node])
+        db.add_pending_contradiction(
+            "n1", "new approach",
+            reason="benchmarks improved",
+            detected_by="consolidation",
+        )
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = format_contradictions_for_session_start()
+        assert "Pending contradictions (1)" in result
+        assert "ask the user to resolve" in result
+        assert "old approach" in result
+        assert "new approach" in result
+        assert "benchmarks improved" in result
+        assert "recall_contradict" in result
+
+    def test_no_index_returns_empty(self):
+        from synapt.recall.server import format_contradictions_for_session_start
+        with patch("synapt.recall.server._get_index", return_value=None):
+            result = format_contradictions_for_session_start()
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeNode dataclass temporal fields
+# ---------------------------------------------------------------------------
+
+class TestKnowledgeNodeDataclass:
+    """Verify KnowledgeNode dataclass has temporal fields."""
+
+    def test_new_fields_exist(self):
+        from synapt.recall.knowledge import KnowledgeNode
+        node = KnowledgeNode.create("test fact", "workflow")
+        assert node.version == 1
+        assert node.lineage_id == ""
+        assert node.valid_from is None
+        assert node.valid_until is None
+
+    def test_to_dict_includes_temporal(self):
+        from synapt.recall.knowledge import KnowledgeNode
+        node = KnowledgeNode.create("test fact", "workflow")
+        node.lineage_id = "L1"
+        node.version = 3
+        d = node.to_dict()
+        assert d["lineage_id"] == "L1"
+        assert d["version"] == 3
+
+    def test_from_dict_with_temporal(self):
+        from synapt.recall.knowledge import KnowledgeNode
+        d = {
+            "id": "abc", "content": "fact", "category": "workflow",
+            "confidence": 0.7, "source_sessions": [], "created_at": "",
+            "updated_at": "", "status": "active", "superseded_by": "",
+            "contradiction_note": "", "tags": [],
+            "valid_from": "2026-01-01", "valid_until": None,
+            "version": 2, "lineage_id": "L1",
+        }
+        node = KnowledgeNode.from_dict(d)
+        assert node.version == 2
+        assert node.lineage_id == "L1"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8b: Consolidation queues contradictions for user review
+# ---------------------------------------------------------------------------
+
+class TestConsolidationContradictQueuing:
+    """Test that _apply_consolidation_result queues contradictions via DB."""
+
+    def test_contradict_queued_when_db_provided(self, tmp_path):
+        """With a DB, contradictions go to pending queue instead of auto-apply."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, append_node
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+        db = _make_db(tmp_path)
+
+        # Create existing node in JSONL and DB
+        old_node = KnowledgeNode.create("use unittest", "tooling")
+        append_node(old_node, kn_path)
+        db.save_knowledge_nodes([old_node.to_dict()])
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": old_node.id,
+                "content": "use pytest instead",
+                "category": "tooling",
+                "contradiction_note": "pytest is standard now",
+                "tags": [],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="testing"),
+        ]
+
+        result = _apply_consolidation_result(
+            parsed, [old_node], cluster, kn_path, db=db,
+        )
+
+        assert result.nodes_contradicted == 1
+        # Node was NOT auto-applied (old node still active in JSONL)
+        from synapt.recall.knowledge import read_nodes
+        nodes = read_nodes(kn_path)
+        assert all(n.status == "active" for n in nodes)
+        # Contradiction was queued in DB
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["new_content"] == "use pytest instead"
+        assert pending[0]["detected_by"] == "consolidation"
+
+    def test_contradict_legacy_when_no_db(self, tmp_path):
+        """Without a DB, contradictions auto-apply (legacy behavior)."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, append_node, read_nodes
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+        old_node = KnowledgeNode.create("use unittest", "tooling")
+        append_node(old_node, kn_path)
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": old_node.id,
+                "content": "use pytest instead",
+                "category": "tooling",
+                "contradiction_note": "pytest is standard",
+                "tags": [],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="testing"),
+        ]
+
+        result = _apply_consolidation_result(
+            parsed, [old_node], cluster, kn_path, db=None,
+        )
+
+        assert result.nodes_contradicted == 1
+        assert result.nodes_created == 1  # Legacy creates replacement inline
+        nodes = read_nodes(kn_path)
+        statuses = {n.status for n in nodes}
+        assert "contradicted" in statuses
+        assert "active" in statuses
+
+    def test_decision_log_shows_queued_action(self, tmp_path):
+        """Decision log records 'contradict-queued' when DB is used."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, append_node
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+        decision_path = tmp_path / "decisions.jsonl"
+        db = _make_db(tmp_path)
+
+        old_node = KnowledgeNode.create("old approach", "workflow")
+        append_node(old_node, kn_path)
+        db.save_knowledge_nodes([old_node.to_dict()])
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": old_node.id,
+                "content": "new approach",
+                "category": "workflow",
+                "contradiction_note": "improved",
+                "tags": [],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="work"),
+        ]
+
+        _apply_consolidation_result(
+            parsed, [old_node], cluster, kn_path,
+            decision_log_path=decision_path, db=db,
+        )
+
+        decisions = []
+        with open(decision_path) as f:
+            for line in f:
+                decisions.append(json.loads(line))
+        assert len(decisions) == 1
+        assert decisions[0]["action"] == "contradict-queued"
+
+    def test_decision_log_shows_contradict_without_db(self, tmp_path):
+        """Decision log records 'contradict' (not queued) when no DB."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, append_node
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+        decision_path = tmp_path / "decisions.jsonl"
+
+        old_node = KnowledgeNode.create("old approach", "workflow")
+        append_node(old_node, kn_path)
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": old_node.id,
+                "content": "new approach",
+                "category": "workflow",
+                "contradiction_note": "improved",
+                "tags": [],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="work"),
+        ]
+
+        _apply_consolidation_result(
+            parsed, [old_node], cluster, kn_path,
+            decision_log_path=decision_path, db=None,
+        )
+
+        decisions = []
+        with open(decision_path) as f:
+            for line in f:
+                decisions.append(json.loads(line))
+        assert len(decisions) == 1
+        assert decisions[0]["action"] == "contradict"
+
+    def test_valid_from_set_on_created_nodes(self, tmp_path):
+        """Newly created nodes during consolidation have valid_from set."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, read_nodes
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": "always use A100 for 8B training",
+                "category": "infrastructure",
+                "confidence": 0.7,
+                "tags": ["gpu"],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="training"),
+            JournalEntry(session_id="s2", timestamp="2026-03-02", focus="training"),
+        ]
+
+        _apply_consolidation_result(parsed, [], cluster, kn_path)
+
+        nodes = read_nodes(kn_path)
+        assert len(nodes) == 1
+        assert nodes[0].valid_from is not None
+        assert nodes[0].valid_from.startswith("2026-")
+
+    def test_valid_from_set_on_legacy_contradict_replacement(self, tmp_path):
+        """Legacy contradict path also sets valid_from on the replacement."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, append_node, read_nodes
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+        old_node = KnowledgeNode.create("old fact", "workflow")
+        append_node(old_node, kn_path)
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": old_node.id,
+                "content": "new fact",
+                "category": "workflow",
+                "contradiction_note": "updated",
+                "tags": [],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="work"),
+        ]
+
+        _apply_consolidation_result(
+            parsed, [old_node], cluster, kn_path, db=None,
+        )
+
+        nodes = read_nodes(kn_path, status="active")
+        assert len(nodes) == 1
+        assert nodes[0].valid_from is not None
+
+    def test_contradict_missing_target_falls_through_to_create(self, tmp_path):
+        """When contradict references a nonexistent ID, the node is created instead."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import read_nodes
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": "nonexistent-id",
+                "content": "new approach to training",
+                "category": "workflow",
+                "contradiction_note": "old approach obsolete",
+                "tags": ["training"],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="s1", timestamp="2026-03-01", focus="training"),
+            JournalEntry(session_id="s2", timestamp="2026-03-02", focus="training"),
+        ]
+
+        result = _apply_consolidation_result(
+            parsed, [], cluster, kn_path, db=None,
+        )
+
+        # Should create the node (not silently drop it)
+        assert result.nodes_created == 1
+        assert result.nodes_contradicted == 0  # No target → no contradiction
+        nodes = read_nodes(kn_path)
+        assert len(nodes) == 1
+        assert nodes[0].content == "new approach to training"
+        assert nodes[0].valid_from is not None
+
+    def test_queued_contradiction_source_sessions(self, tmp_path):
+        """Queued contradictions include the cluster's session IDs."""
+        from synapt.recall.consolidate import _apply_consolidation_result
+        from synapt.recall.knowledge import KnowledgeNode, append_node
+        from synapt.recall.journal import JournalEntry
+
+        kn_path = tmp_path / "knowledge.jsonl"
+        db = _make_db(tmp_path)
+
+        old_node = KnowledgeNode.create("old", "workflow")
+        append_node(old_node, kn_path)
+        db.save_knowledge_nodes([old_node.to_dict()])
+
+        parsed = {
+            "nodes": [{
+                "action": "contradict",
+                "existing_id": old_node.id,
+                "content": "new",
+                "category": "workflow",
+                "contradiction_note": "changed",
+                "tags": [],
+            }]
+        }
+        cluster = [
+            JournalEntry(session_id="sess-A", timestamp="2026-03-01", focus="a"),
+            JournalEntry(session_id="sess-B", timestamp="2026-03-02", focus="b"),
+        ]
+
+        _apply_consolidation_result(
+            parsed, [old_node], cluster, kn_path, db=db,
+        )
+
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert "sess-A" in pending[0]["source_sessions"]
+        assert "sess-B" in pending[0]["source_sessions"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8c: Co-retrieval conflict detection
+# ---------------------------------------------------------------------------
+
+class TestCoRetrievalConflictDetection:
+    """Test _detect_co_retrieval_conflicts in core.py."""
+
+    def _make_index_with_db(self, tmp_path):
+        """Create a minimal TranscriptIndex with a DB attached."""
+        db = _make_db(tmp_path)
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+        return index, db
+
+    def test_detects_conflict_same_category_low_overlap(self, tmp_path):
+        """Two active nodes, same category, divergent content → queued."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(
+                node_id="n1", content="always use unittest for Python testing",
+                category="tooling", confidence=0.7,
+            ),
+            _make_knowledge_node(
+                node_id="n2", content="prefer pytest with fixtures and markers",
+                category="tooling", confidence=0.8,
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["detected_by"] == "co-retrieval"
+        # Lower confidence node (n1) is the "old" one
+        assert pending[0]["old_node_id"] == "n1"
+
+    def test_no_conflict_different_categories(self, tmp_path):
+        """Two active nodes in different categories → no conflict."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(
+                node_id="n1", content="use A100 for training",
+                category="infrastructure", confidence=0.7,
+            ),
+            _make_knowledge_node(
+                node_id="n2", content="always review PRs before merge",
+                category="workflow", confidence=0.8,
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        assert db.pending_contradiction_count() == 0
+
+    def test_no_conflict_high_overlap(self, tmp_path):
+        """Two similar nodes (Jaccard >= 0.3) → no conflict."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(
+                node_id="n1", content="use pytest for unit testing",
+                category="tooling", confidence=0.7,
+            ),
+            _make_knowledge_node(
+                node_id="n2", content="use pytest for integration testing",
+                category="tooling", confidence=0.8,
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        assert db.pending_contradiction_count() == 0
+
+    def test_skips_low_confidence_nodes(self, tmp_path):
+        """Nodes with confidence < 0.4 are ignored."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(
+                node_id="n1", content="use unittest exclusively",
+                category="tooling", confidence=0.2,
+            ),
+            _make_knowledge_node(
+                node_id="n2", content="prefer pytest with markers",
+                category="tooling", confidence=0.8,
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        assert db.pending_contradiction_count() == 0
+
+    def test_skips_same_lineage(self, tmp_path):
+        """Nodes sharing a lineage_id are versions, not conflicts."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(
+                node_id="v1", content="use unittest for testing",
+                category="tooling", confidence=0.5, lineage_id="L1",
+            ),
+            _make_knowledge_node(
+                node_id="v2", content="prefer pytest with fixtures",
+                category="tooling", confidence=0.8, lineage_id="L1",
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        assert db.pending_contradiction_count() == 0
+
+    def test_skips_contradicted_nodes(self, tmp_path):
+        """Non-active nodes are excluded from conflict detection."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(
+                node_id="n1", content="use unittest exclusively",
+                category="tooling", confidence=0.7, status="contradicted",
+            ),
+            _make_knowledge_node(
+                node_id="n2", content="prefer pytest with markers",
+                category="tooling", confidence=0.8,
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        assert db.pending_contradiction_count() == 0
+
+    def test_dedup_skips_already_pending(self, tmp_path):
+        """Does not queue a duplicate if node already has a pending contradiction."""
+        index, db = self._make_index_with_db(tmp_path)
+        # Pre-seed a pending contradiction for n1
+        db.add_pending_contradiction("n1", "some other replacement")
+
+        results = [
+            _make_knowledge_node(
+                node_id="n1", content="use unittest exclusively",
+                category="tooling", confidence=0.7,
+            ),
+            _make_knowledge_node(
+                node_id="n2", content="prefer pytest with fixtures",
+                category="tooling", confidence=0.8,
+            ),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        # Still just the original one — no duplicate
+        assert db.pending_contradiction_count() == 1
+
+    def test_no_db_is_noop(self, tmp_path):
+        """No DB attached → no crash, no action."""
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = None
+        index.chunks = []
+        index.sessions = {}
+
+        results = [
+            _make_knowledge_node(node_id="n1", content="fact A", category="tooling"),
+            _make_knowledge_node(node_id="n2", content="fact B", category="tooling"),
+        ]
+
+        # Should not raise
+        index._detect_co_retrieval_conflicts(results)
+
+    def test_single_result_is_noop(self, tmp_path):
+        """A single result can't conflict with itself."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            _make_knowledge_node(node_id="n1", content="fact", category="tooling"),
+        ]
+
+        index._detect_co_retrieval_conflicts(results)
+
+        assert db.pending_contradiction_count() == 0
+
+    def test_has_pending_contradiction_for(self, tmp_path):
+        """Test the storage dedup helper."""
+        db = _make_db(tmp_path)
+        assert not db.has_pending_contradiction_for("n1")
+        db.add_pending_contradiction("n1", "new fact")
+        assert db.has_pending_contradiction_for("n1")
+        assert not db.has_pending_contradiction_for("n2")

@@ -1,0 +1,1895 @@
+"""SQLite storage backend for the synapt recall index.
+
+Replaces the previous JSON/JSONL file-based storage with a single SQLite
+database using WAL mode for concurrent read/write safety and FTS5 for
+full-text search.
+
+Schema:
+    metadata  — key/value pairs (replaces manifest.json)
+    chunks    — one row per transcript chunk (replaces chunks.jsonl)
+    chunks_fts — FTS5 virtual table for full-text search over chunks
+    knowledge — one row per knowledge node (durable cross-session facts)
+    knowledge_fts — FTS5 virtual table for knowledge node search
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import struct
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from synapt.recall.core import TranscriptChunk
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+EMBEDDING_DIM = 384
+_EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
+_EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
+
+# FTS5 column weights for bm25():
+#   user_text, assistant_text, tools_used, files_touched, tool_content
+_FTS_WEIGHTS = "1.0, 1.5, 2.0, 2.0, 1.5"
+
+_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT UNIQUE NOT NULL,
+    session_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    turn_index INTEGER NOT NULL,
+    user_text TEXT NOT NULL DEFAULT '',
+    assistant_text TEXT NOT NULL DEFAULT '',
+    tools_used TEXT NOT NULL DEFAULT '',
+    files_touched TEXT NOT NULL DEFAULT '',
+    tool_content TEXT NOT NULL DEFAULT '',
+    transcript_path TEXT NOT NULL DEFAULT '',
+    byte_offset INTEGER NOT NULL DEFAULT -1,
+    byte_length INTEGER NOT NULL DEFAULT 0,
+    embedding BLOB
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_timestamp ON chunks(timestamp);
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT UNIQUE NOT NULL,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0.5,
+    source_sessions TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    superseded_by TEXT NOT NULL DEFAULT '',
+    contradiction_note TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]',
+    valid_from TEXT,            -- ISO 8601: when this became true (NULL = since first observation)
+    valid_until TEXT,           -- ISO 8601: when this stopped being true (NULL = still current)
+    version INTEGER NOT NULL DEFAULT 1,
+    lineage_id TEXT NOT NULL DEFAULT ''  -- shared ID across versions of the same fact
+);
+
+CREATE TABLE IF NOT EXISTS pending_contradictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_node_id TEXT NOT NULL,
+    new_content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    source_sessions TEXT NOT NULL DEFAULT '[]',
+    detected_at TEXT NOT NULL,
+    detected_by TEXT NOT NULL DEFAULT 'co-retrieval',  -- 'co-retrieval', 'consolidation', 'manual'
+    status TEXT NOT NULL DEFAULT 'pending',             -- 'pending', 'confirmed', 'dismissed'
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge(status);
+
+CREATE TABLE IF NOT EXISTS clusters (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id  TEXT UNIQUE NOT NULL,
+    topic       TEXT NOT NULL,
+    search_text TEXT NOT NULL DEFAULT '',  -- topic + member chunk keywords for FTS
+    cluster_type TEXT NOT NULL DEFAULT 'topic',
+    session_ids TEXT NOT NULL DEFAULT '[]',
+    branch      TEXT,
+    date_start  TEXT,
+    date_end    TEXT,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    status      TEXT NOT NULL DEFAULT 'active',
+    tags        TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cluster_summaries (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id   TEXT UNIQUE NOT NULL,
+    summary      TEXT NOT NULL,
+    method       TEXT NOT NULL DEFAULT 'concat',
+    token_count  INTEGER,
+    content_hash TEXT,
+    created_at   TEXT NOT NULL,
+    stale        INTEGER NOT NULL DEFAULT 0
+);
+
+-- Join table for cluster membership. No REFERENCES constraints because
+-- PRAGMA foreign_keys is OFF (SQLite default) and clustering is fully
+-- rebuilt on every recall build — orphans are impossible in practice.
+CREATE TABLE IF NOT EXISTS cluster_chunks (
+    cluster_id  TEXT NOT NULL,
+    chunk_id    TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    PRIMARY KEY (cluster_id, chunk_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_chunks_chunk ON cluster_chunks(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
+
+-- Access tracking tables for adaptive memory (Phase 2).
+-- access_log is append-only: every returned search result or drill-down is
+-- recorded.  access_stats is a materialized aggregate rebuilt from the log
+-- during recall_build (or incrementally updated on each access).
+
+CREATE TABLE IF NOT EXISTS access_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_type   TEXT NOT NULL,          -- 'chunk', 'cluster', 'knowledge'
+    item_id     TEXT NOT NULL,          -- chunk id, cluster_id, or knowledge node id
+    query       TEXT NOT NULL DEFAULT '',
+    score       REAL NOT NULL DEFAULT 0.0,
+    session_id  TEXT NOT NULL DEFAULT '',
+    context     TEXT NOT NULL DEFAULT 'search',  -- 'search', 'context', 'hook'
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_log_item
+    ON access_log(item_type, item_id);
+CREATE INDEX IF NOT EXISTS idx_access_log_created
+    ON access_log(created_at);
+
+CREATE TABLE IF NOT EXISTS access_stats (
+    item_type         TEXT NOT NULL,
+    item_id           TEXT NOT NULL,
+    access_count      INTEGER NOT NULL DEFAULT 0,  -- total accesses (search + context + hook)
+    explicit_count    INTEGER NOT NULL DEFAULT 0,  -- user-initiated (search + context), not hook
+    last_accessed     TEXT NOT NULL,
+    first_accessed    TEXT NOT NULL,
+    promotion_tier    TEXT NOT NULL DEFAULT 'raw',  -- raw|clustered|summarized|promoted|knowledge
+    distinct_sessions INTEGER NOT NULL DEFAULT 0,
+    distinct_queries  INTEGER NOT NULL DEFAULT 0,
+    decay_score       REAL NOT NULL DEFAULT 1.0,   -- 0.0-1.0, recomputed during build
+    PRIMARY KEY (item_type, item_id)
+);
+
+CREATE TABLE IF NOT EXISTS access_log_archive (
+    item_type    TEXT NOT NULL,
+    item_id      TEXT NOT NULL,
+    date         TEXT NOT NULL,          -- ISO date (YYYY-MM-DD)
+    access_count INTEGER NOT NULL,
+    avg_score    REAL NOT NULL DEFAULT 0.0,
+    queries      TEXT NOT NULL DEFAULT '[]',  -- JSON array of distinct queries
+    PRIMARY KEY (item_type, item_id, date)
+);
+"""
+
+# FTS5 table + sync triggers (created separately since IF NOT EXISTS
+# doesn't work for virtual tables — we check first).
+_FTS_TABLE_SQL = """\
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    user_text, assistant_text, tools_used, files_touched, tool_content,
+    content=chunks,
+    content_rowid=rowid,
+    tokenize="porter unicode61 tokenchars '._'"
+);
+"""
+
+# Triggers are separated so they can be re-created independently
+# (e.g., after a crash during save_chunks drops chunks_ad).
+_FTS_TRIGGERS_SQL = """\
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
+    VALUES (new.rowid, new.user_text, new.assistant_text, new.tools_used, new.files_touched, new.tool_content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
+    VALUES ('delete', old.rowid, old.user_text, old.assistant_text, old.tools_used, old.files_touched, old.tool_content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF user_text, assistant_text, tools_used, files_touched, tool_content ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
+    VALUES ('delete', old.rowid, old.user_text, old.assistant_text, old.tools_used, old.files_touched, old.tool_content);
+    INSERT INTO chunks_fts(rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
+    VALUES (new.rowid, new.user_text, new.assistant_text, new.tools_used, new.files_touched, new.tool_content);
+END;
+"""
+
+
+# Knowledge FTS5 table + sync triggers (same pattern as chunks_fts)
+_KNOWLEDGE_FTS_TABLE_SQL = """\
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+    content, category, tags,
+    content=knowledge,
+    content_rowid=rowid,
+    tokenize="porter unicode61 tokenchars '._'"
+);
+"""
+
+_KNOWLEDGE_FTS_TRIGGERS_SQL = """\
+CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+    INSERT INTO knowledge_fts(rowid, content, category, tags)
+    VALUES (new.rowid, new.content, new.category, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, category, tags)
+    VALUES ('delete', old.rowid, old.content, old.category, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE OF content, category, tags ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, category, tags)
+    VALUES ('delete', old.rowid, old.content, old.category, old.tags);
+    INSERT INTO knowledge_fts(rowid, content, category, tags)
+    VALUES (new.rowid, new.content, new.category, new.tags);
+END;
+"""
+
+# FTS5 column weights for knowledge bm25(): content, category, tags
+_KNOWLEDGE_FTS_WEIGHTS = "2.0, 1.0, 1.5"
+
+# Cluster topic FTS5 table + sync triggers
+# Note: content_rowid='id' (not 'rowid') because clusters.id is the
+# explicit INTEGER PRIMARY KEY, not the implicit rowid alias used by
+# chunks_fts and knowledge_fts (which use content_rowid=rowid).
+_CLUSTERS_FTS_TABLE_SQL = """\
+CREATE VIRTUAL TABLE clusters_fts USING fts5(
+    topic, search_text,
+    content='clusters',
+    content_rowid='id',
+    tokenize="porter unicode61 tokenchars '._'"
+);
+"""
+
+_CLUSTERS_FTS_TRIGGERS_SQL = """\
+CREATE TRIGGER IF NOT EXISTS clusters_ai AFTER INSERT ON clusters BEGIN
+    INSERT INTO clusters_fts(rowid, topic, search_text)
+    VALUES (new.id, new.topic, new.search_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS clusters_ad AFTER DELETE ON clusters BEGIN
+    INSERT INTO clusters_fts(clusters_fts, rowid, topic, search_text)
+    VALUES ('delete', old.id, old.topic, old.search_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS clusters_au AFTER UPDATE OF topic, search_text ON clusters BEGIN
+    INSERT INTO clusters_fts(clusters_fts, rowid, topic, search_text)
+    VALUES ('delete', old.id, old.topic, old.search_text);
+    INSERT INTO clusters_fts(rowid, topic, search_text)
+    VALUES (new.id, new.topic, new.search_text);
+END;
+"""
+
+
+_FTS5_KEYWORDS = frozenset({"and", "or", "not", "near"})
+
+
+def _escape_fts_tokens(query: str) -> list[str]:
+    """Tokenize and escape a user query for FTS5.
+
+    Returns a list of escaped tokens.  Tokens containing dots are quoted
+    (e.g. ``api_index.py`` → ``"api_index.py"``), as are FTS5 keywords.
+    Single-character tokens are dropped to reduce noise.
+    """
+    tokens = [t for t in re.sub(r"[^a-zA-Z0-9_.]", " ", query.lower()).split() if len(t) > 1]
+    escaped = []
+    for tok in tokens:
+        if "." in tok or tok in _FTS5_KEYWORDS:
+            escaped.append(f'"{tok}"')
+        else:
+            escaped.append(tok)
+    return escaped
+
+
+def _escape_fts_query(query: str, use_or: bool = False) -> str:
+    """Escape a user query string for safe FTS5 matching.
+
+    Tokenizes using the same regex as bm25._tokenize, then quotes any
+    token containing a dot (e.g. ``api_index.py`` → ``"api_index.py"``)
+    or matching an FTS5 keyword (AND, OR, NOT, NEAR).
+
+    By default, tokens are joined with spaces (implicit AND in FTS5).
+    Set *use_or* to join with OR — matches chunks containing ANY term.
+    """
+    tokens = _escape_fts_tokens(query)
+    if not tokens:
+        return ""
+    joiner = " OR " if use_or else " "
+    return joiner.join(tokens)
+
+
+# ---------------------------------------------------------------------------
+# RecallDB
+# ---------------------------------------------------------------------------
+
+
+class RecallDB:
+    """SQLite storage backend for the recall index.
+
+    Opens (or creates) a database at *db_path* with WAL mode enabled for
+    concurrent read/write safety.  Provides CRUD for chunks, FTS5 search,
+    per-row embedding BLOBs, and key/value metadata.
+    """
+
+    def __init__(self, db_path: Path | str):
+        self._path = Path(db_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = self._connect()
+        self._ensure_schema()
+
+    # -- connection --------------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._path), timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")  # 30s — builds can be slow
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        self._conn.executescript(_SCHEMA_SQL)
+        # Migrate existing tables: add columns that may be missing
+        self._migrate_chunks_table()
+        self._migrate_knowledge_table()
+        self._migrate_clusters_table()
+        self._migrate_access_stats_table()
+        # Check if FTS table exists (FTS5 virtual tables don't support
+        # IF NOT EXISTS, so we check manually before creating)
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+        ).fetchone()
+        if row is None:
+            self._conn.executescript(_FTS_TABLE_SQL)
+            self._conn.executescript(_FTS_TRIGGERS_SQL)
+        elif self._needs_fts_migration():
+            # Tokenizer changed (e.g., porter added) — recreate FTS table
+            # and rebuild from the content table so search keeps working.
+            self._conn.execute("DROP TABLE IF EXISTS chunks_fts")
+            for name in ("chunks_ai", "chunks_ad", "chunks_au"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self._conn.executescript(_FTS_TABLE_SQL)
+            self._conn.executescript(_FTS_TRIGGERS_SQL)
+            # Repopulate FTS from existing chunks (external content rebuild)
+            self._conn.execute(
+                "INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')"
+            )
+            self._conn.commit()
+        else:
+            # Verify all three FTS sync triggers exist — they may be missing
+            # after a crash during save_chunks (which drops/recreates chunks_ad)
+            existing = {r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name IN ('chunks_ai', 'chunks_ad', 'chunks_au')"
+            ).fetchall()}
+            if len(existing) < 3:
+                self._conn.executescript(_FTS_TRIGGERS_SQL)
+
+        # Knowledge FTS table (same pattern: check existence, create if missing)
+        krow = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
+        ).fetchone()
+        if krow is None:
+            self._conn.executescript(_KNOWLEDGE_FTS_TABLE_SQL)
+            self._conn.executescript(_KNOWLEDGE_FTS_TRIGGERS_SQL)
+        else:
+            # Verify triggers exist
+            existing_kt = {r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name IN ('knowledge_ai', 'knowledge_ad', 'knowledge_au')"
+            ).fetchall()}
+            if len(existing_kt) < 3:
+                self._conn.executescript(_KNOWLEDGE_FTS_TRIGGERS_SQL)
+
+        # Clusters FTS table (same pattern)
+        crow = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='clusters_fts'"
+        ).fetchone()
+        if crow is None:
+            # Only create if the clusters table exists (it should — _SCHEMA_SQL creates it)
+            ctbl = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='clusters'"
+            ).fetchone()
+            if ctbl is not None:
+                self._conn.executescript(_CLUSTERS_FTS_TABLE_SQL)
+                self._conn.executescript(_CLUSTERS_FTS_TRIGGERS_SQL)
+        elif self._needs_clusters_fts_migration():
+            # Schema changed (e.g., search_text column added) — recreate
+            self._conn.execute("DROP TABLE IF EXISTS clusters_fts")
+            for name in ("clusters_ai", "clusters_ad", "clusters_au"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self._conn.executescript(_CLUSTERS_FTS_TABLE_SQL)
+            self._conn.executescript(_CLUSTERS_FTS_TRIGGERS_SQL)
+            self._conn.execute(
+                "INSERT INTO clusters_fts(clusters_fts) VALUES('rebuild')"
+            )
+            self._conn.commit()
+        else:
+            existing_ct = {r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name IN ('clusters_ai', 'clusters_ad', 'clusters_au')"
+            ).fetchall()}
+            if len(existing_ct) < 3:
+                self._conn.executescript(_CLUSTERS_FTS_TRIGGERS_SQL)
+
+    def _migrate_chunks_table(self) -> None:
+        """Add columns that may be missing from an older chunks table."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        new_cols = {
+            "tool_content": "TEXT NOT NULL DEFAULT ''",
+            "transcript_path": "TEXT NOT NULL DEFAULT ''",
+            "byte_offset": "INTEGER NOT NULL DEFAULT -1",
+            "byte_length": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for col_name, col_def in new_cols.items():
+            if col_name not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE chunks ADD COLUMN {col_name} {col_def}"
+                )
+        self._conn.commit()
+
+    def _migrate_knowledge_table(self) -> None:
+        """Add columns that may be missing from an older knowledge table."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge'"
+        ).fetchone()
+        if row is None:
+            return  # Table doesn't exist yet; CREATE TABLE will handle it
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(knowledge)").fetchall()
+        }
+        migrations = [
+            ("contradiction_note", "TEXT NOT NULL DEFAULT ''"),
+            ("valid_from", "TEXT"),
+            ("valid_until", "TEXT"),
+            ("version", "INTEGER NOT NULL DEFAULT 1"),
+            ("lineage_id", "TEXT NOT NULL DEFAULT ''"),
+        ]
+        for col_name, col_def in migrations:
+            if col_name not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE knowledge ADD COLUMN {col_name} {col_def}"
+                )
+        self._conn.commit()
+
+    def _migrate_clusters_table(self) -> None:
+        """Add columns that may be missing from older tables."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='clusters'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(clusters)").fetchall()
+        }
+        if "search_text" not in cols:
+            self._conn.execute(
+                "ALTER TABLE clusters ADD COLUMN "
+                "search_text TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.commit()
+
+        if "tags" not in cols:
+            self._conn.execute(
+                "ALTER TABLE clusters ADD COLUMN "
+                "tags TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._conn.commit()
+
+        # Add content_hash to cluster_summaries for LLM summary reuse
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='cluster_summaries'"
+        ).fetchone()
+        if row is not None:
+            sum_cols = {
+                r[1]
+                for r in self._conn.execute(
+                    "PRAGMA table_info(cluster_summaries)"
+                ).fetchall()
+            }
+            if "content_hash" not in sum_cols:
+                self._conn.execute(
+                    "ALTER TABLE cluster_summaries ADD COLUMN content_hash TEXT"
+                )
+                self._conn.commit()
+
+    def _migrate_access_stats_table(self) -> None:
+        """Add promotion columns that may be missing from an older access_stats table."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='access_stats'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(access_stats)").fetchall()
+        }
+        migrations = [
+            ("promotion_tier", "TEXT NOT NULL DEFAULT 'raw'"),
+            ("distinct_sessions", "INTEGER NOT NULL DEFAULT 0"),
+            ("distinct_queries", "INTEGER NOT NULL DEFAULT 0"),
+            ("decay_score", "REAL NOT NULL DEFAULT 1.0"),
+        ]
+        for col_name, col_def in migrations:
+            if col_name not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE access_stats ADD COLUMN {col_name} {col_def}"
+                )
+        # Always ensure the tier index exists (safe for fresh or migrated DBs)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_access_stats_tier "
+            "ON access_stats(promotion_tier)"
+        )
+        self._conn.commit()
+
+    def _needs_clusters_fts_migration(self) -> bool:
+        """Check if clusters_fts schema differs from current definition."""
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='clusters_fts'"
+        ).fetchone()
+        if row is None:
+            return False
+        current = " ".join((row[0] or "").lower().split())
+        expected = " ".join(_CLUSTERS_FTS_TABLE_SQL.strip().lower().split())
+        return current != expected
+
+    def _needs_fts_migration(self) -> bool:
+        """Check if the FTS table's definition differs from the current schema.
+
+        Compares the full normalized DDL (whitespace-collapsed, lowercased)
+        rather than checking for a single keyword.  This detects any change
+        to the tokenizer config, column weights, or tokenchars.
+        """
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+        ).fetchone()
+        if row is None:
+            return False
+        current = " ".join((row[0] or "").lower().split())
+        expected = " ".join(_FTS_TABLE_SQL.strip().lower().split())
+        return current != expected
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._conn.close()
+
+    def __enter__(self) -> RecallDB:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def mtime(self) -> float:
+        """File modification time of the database (for cache invalidation)."""
+        try:
+            return self._path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    # -- chunks CRUD -------------------------------------------------------
+
+    def save_chunks(self, chunks: list[TranscriptChunk]) -> None:
+        """Replace all chunks in the database and rebuild the FTS5 index.
+
+        Preserves existing embeddings by matching on chunk ID.  If a chunk
+        already exists with an embedding, the embedding is carried over to
+        the new row.
+        """
+        cur = self._conn.cursor()
+
+        # Snapshot existing embeddings keyed by chunk ID before wiping
+        existing_embs: dict[str, bytes] = {}
+        rows = cur.execute(
+            "SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL"
+        ).fetchall()
+        for r in rows:
+            existing_embs[r[0]] = r[1]
+
+        # Disable triggers during bulk delete to avoid per-row FTS deletes
+        # (we do a single 'delete-all' instead, which is O(1) vs O(n))
+        cur.execute("DROP TRIGGER IF EXISTS chunks_ad")
+        cur.execute("DELETE FROM chunks")
+        cur.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('delete-all')")
+        # Re-create the delete trigger (use execute(), NOT executescript() —
+        # executescript implicitly commits, breaking our transaction atomicity)
+        cur.execute(
+            "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN "
+            "  INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, "
+            "    tools_used, files_touched, tool_content) "
+            "  VALUES ('delete', old.rowid, old.user_text, old.assistant_text, "
+            "    old.tools_used, old.files_touched, old.tool_content); "
+            "END;"
+        )
+
+        # Insert in order (rowid = insertion order, 1-based).
+        # Carry over embeddings by matching chunk IDs.
+        for chunk in chunks:
+            emb_blob = existing_embs.get(chunk.id)
+            cur.execute(
+                "INSERT INTO chunks "
+                "(id, session_id, timestamp, turn_index, user_text, assistant_text, "
+                " tools_used, files_touched, tool_content, "
+                " transcript_path, byte_offset, byte_length, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chunk.id,
+                    chunk.session_id,
+                    chunk.timestamp,
+                    chunk.turn_index,
+                    chunk.user_text,
+                    chunk.assistant_text,
+                    json.dumps(chunk.tools_used),
+                    json.dumps(chunk.files_touched),
+                    chunk.tool_content,
+                    chunk.transcript_path,
+                    chunk.byte_offset,
+                    chunk.byte_length,
+                    emb_blob,
+                ),
+            )
+        self._conn.commit()
+
+    def load_chunks(self) -> list[TranscriptChunk]:
+        """Load all chunks from the database, ordered by rowid."""
+        from synapt.recall.core import TranscriptChunk
+
+        rows = self._conn.execute(
+            "SELECT id, session_id, timestamp, turn_index, "
+            "user_text, assistant_text, tools_used, files_touched, "
+            "tool_content, transcript_path, byte_offset, byte_length "
+            "FROM chunks ORDER BY rowid"
+        ).fetchall()
+
+        chunks = []
+        for r in rows:
+            chunks.append(TranscriptChunk(
+                id=r["id"],
+                session_id=r["session_id"],
+                timestamp=r["timestamp"],
+                turn_index=r["turn_index"],
+                user_text=r["user_text"],
+                assistant_text=r["assistant_text"],
+                tools_used=json.loads(r["tools_used"]) if r["tools_used"] else [],
+                files_touched=json.loads(r["files_touched"]) if r["files_touched"] else [],
+                tool_content=r["tool_content"] or "",
+                transcript_path=r["transcript_path"] or "",
+                byte_offset=r["byte_offset"] if r["byte_offset"] is not None else -1,
+                byte_length=r["byte_length"] if r["byte_length"] is not None else 0,
+            ))
+        return chunks
+
+    def chunk_count(self) -> int:
+        """Number of chunks in the database."""
+        row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        return row[0] if row else 0
+
+    # -- FTS5 search -------------------------------------------------------
+
+    def fts_search(
+        self,
+        query: str,
+        limit: int = 100,
+    ) -> list[tuple[int, float]]:
+        """Full-text search via FTS5 with BM25 scoring.
+
+        Returns list of (rowid, score) tuples sorted by relevance
+        (higher score = more relevant).  FTS5's ``bm25()`` returns
+        negative values, so we negate them.
+
+        Multi-term queries use AND first; if AND returns no results and
+        the query has 2+ tokens, retries with OR so that chunks matching
+        *any* term are surfaced rather than returning nothing.
+        """
+        fts_query = _escape_fts_query(query)
+        if not fts_query:
+            return []
+
+        rows = self._conn.execute(
+            f"SELECT chunks_fts.rowid, "
+            f"  -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+            f"FROM chunks_fts "
+            f"WHERE chunks_fts MATCH ? "
+            f"ORDER BY score DESC "
+            f"LIMIT ?",
+            (fts_query, limit),
+        ).fetchall()
+
+        # OR-fallback: if AND returned nothing and query has multiple tokens
+        if not rows and len(_escape_fts_tokens(query)) > 1:
+            fts_or = _escape_fts_query(query, use_or=True)
+            rows = self._conn.execute(
+                f"SELECT chunks_fts.rowid, "
+                f"  -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+                f"FROM chunks_fts "
+                f"WHERE chunks_fts MATCH ? "
+                f"ORDER BY score DESC "
+                f"LIMIT ?",
+                (fts_or, limit),
+            ).fetchall()
+
+        return [(r[0], r[1]) for r in rows]
+
+    def fts_search_by_session(
+        self,
+        query: str,
+        session_ids: list[str],
+        limit: int = 100,
+    ) -> list[tuple[int, float]]:
+        """FTS5 search restricted to specific sessions.
+
+        Returns list of (rowid, score) tuples.
+        """
+        fts_query = _escape_fts_query(query)
+        if not fts_query or not session_ids:
+            return []
+
+        placeholders = ",".join("?" for _ in session_ids)
+        rows = self._conn.execute(
+            f"SELECT chunks_fts.rowid, "
+            f"  -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+            f"FROM chunks_fts "
+            f"JOIN chunks c ON c.rowid = chunks_fts.rowid "
+            f"WHERE chunks_fts MATCH ? "
+            f"  AND c.session_id IN ({placeholders}) "
+            f"ORDER BY score DESC "
+            f"LIMIT ?",
+            (fts_query, *session_ids, limit),
+        ).fetchall()
+
+        # OR-fallback for session-scoped search
+        if not rows and len(_escape_fts_tokens(query)) > 1:
+            fts_or = _escape_fts_query(query, use_or=True)
+            rows = self._conn.execute(
+                f"SELECT chunks_fts.rowid, "
+                f"  -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+                f"FROM chunks_fts "
+                f"JOIN chunks c ON c.rowid = chunks_fts.rowid "
+                f"WHERE chunks_fts MATCH ? "
+                f"  AND c.session_id IN ({placeholders}) "
+                f"ORDER BY score DESC "
+                f"LIMIT ?",
+                (fts_or, *session_ids, limit),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    # -- embeddings --------------------------------------------------------
+
+    def get_embeddings(self, rowids: list[int]) -> dict[int, list[float]]:
+        """Fetch embeddings for specific rowids.
+
+        Returns {rowid: [float, ...]} for rows that have non-NULL embeddings.
+        """
+        if not rowids:
+            return {}
+        result: dict[int, list[float]] = {}
+        # Batch in groups of 500 to avoid SQLite variable limit
+        for i in range(0, len(rowids), 500):
+            batch = rowids[i : i + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT rowid, embedding FROM chunks "
+                f"WHERE rowid IN ({placeholders}) AND embedding IS NOT NULL",
+                batch,
+            ).fetchall()
+            for r in rows:
+                try:
+                    result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+                except struct.error:
+                    continue  # Skip corrupt/wrong-size BLOBs
+        return result
+
+    def save_embeddings(self, embeddings: dict[int, list[float]]) -> None:
+        """Store embedding BLOBs for specific rowids."""
+        cur = self._conn.cursor()
+        for rowid, emb in embeddings.items():
+            blob = struct.pack(_EMBEDDING_FMT, *emb)
+            cur.execute("UPDATE chunks SET embedding = ? WHERE rowid = ?", (blob, rowid))
+        self._conn.commit()
+
+    def has_embeddings(self) -> bool:
+        """Check if any chunk has an embedding stored."""
+        row = self._conn.execute(
+            "SELECT 1 FROM chunks WHERE embedding IS NOT NULL LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def get_chunk_id_rowid_map(self) -> dict[str, int]:
+        """Return ``{chunk_id: rowid}`` for all chunks.
+
+        Used by :class:`TranscriptIndex` to build the bidirectional mapping
+        between in-memory chunk indices and SQLite rowids.
+        """
+        rows = self._conn.execute("SELECT id, rowid FROM chunks").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    # -- knowledge ---------------------------------------------------------
+
+    def save_knowledge_nodes(self, nodes: list[dict]) -> None:
+        """Bulk upsert knowledge nodes (INSERT OR REPLACE)."""
+        cur = self._conn.cursor()
+        for node in nodes:
+            cur.execute(
+                "INSERT OR REPLACE INTO knowledge "
+                "(id, content, category, confidence, source_sessions, "
+                " created_at, updated_at, status, superseded_by, "
+                " contradiction_note, tags, "
+                " valid_from, valid_until, version, lineage_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    node["id"],
+                    node["content"],
+                    node.get("category", ""),
+                    node.get("confidence", 0.5),
+                    json.dumps(node.get("source_sessions", [])),
+                    node.get("created_at", ""),
+                    node.get("updated_at", ""),
+                    node.get("status", "active"),
+                    node.get("superseded_by", ""),
+                    node.get("contradiction_note", ""),
+                    json.dumps(node.get("tags", [])),
+                    node.get("valid_from"),
+                    node.get("valid_until"),
+                    node.get("version", 1),
+                    node.get("lineage_id", ""),
+                ),
+            )
+        self._conn.commit()
+
+    def upsert_knowledge_node(self, node: dict) -> None:
+        """Insert or replace a single knowledge node."""
+        self.save_knowledge_nodes([node])
+
+    @staticmethod
+    def _knowledge_dict_from_row(r) -> dict:
+        """Convert a knowledge table row to a dict."""
+        d = {
+            "id": r["id"],
+            "content": r["content"],
+            "category": r["category"],
+            "confidence": r["confidence"],
+            "source_sessions": json.loads(r["source_sessions"]),
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "status": r["status"],
+            "superseded_by": r["superseded_by"],
+            "contradiction_note": r["contradiction_note"],
+            "tags": json.loads(r["tags"]),
+        }
+        # Phase 8 columns — graceful fallback for old DBs mid-migration
+        for col, default in [
+            ("valid_from", None), ("valid_until", None),
+            ("version", 1), ("lineage_id", ""),
+        ]:
+            try:
+                d[col] = r[col]
+            except (IndexError, KeyError):
+                d[col] = default
+        return d
+
+    def load_knowledge_nodes(self, status: str | None = None) -> list[dict]:
+        """Load knowledge nodes, optionally filtered by status."""
+        if status:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge WHERE status = ? ORDER BY confidence DESC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge ORDER BY confidence DESC"
+            ).fetchall()
+        return [self._knowledge_dict_from_row(r) for r in rows]
+
+    def knowledge_fts_search(
+        self,
+        query: str,
+        limit: int = 20,
+        include_historical: bool = False,
+    ) -> list[tuple[int, float]]:
+        """Full-text search over knowledge nodes via FTS5.
+
+        Returns list of (rowid, score) sorted by relevance.
+        If include_historical is True, also returns contradicted/superseded nodes.
+        """
+        fts_query = _escape_fts_query(query)
+        if not fts_query:
+            return []
+
+        status_clause = "" if include_historical else "AND k.status = 'active' "
+        sql = (
+            f"SELECT knowledge_fts.rowid, "
+            f"  -bm25(knowledge_fts, {_KNOWLEDGE_FTS_WEIGHTS}) AS score "
+            f"FROM knowledge_fts "
+            f"JOIN knowledge k ON k.rowid = knowledge_fts.rowid "
+            f"WHERE knowledge_fts MATCH ? {status_clause}"
+            f"ORDER BY score DESC "
+            f"LIMIT ?"
+        )
+        rows = self._conn.execute(sql, (fts_query, limit)).fetchall()
+
+        # OR-fallback: reuse same SQL with OR-joined query tokens
+        if not rows and len(_escape_fts_tokens(query)) > 1:
+            fts_or = _escape_fts_query(query, use_or=True)
+            rows = self._conn.execute(sql, (fts_or, limit)).fetchall()
+
+        return [(r[0], r[1]) for r in rows]
+
+    def knowledge_lineage(self, lineage_id: str) -> list[dict]:
+        """Load all knowledge nodes sharing a lineage, ordered by version."""
+        if not lineage_id:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM knowledge WHERE lineage_id = ? ORDER BY version ASC",
+            (lineage_id,),
+        ).fetchall()
+        return [self._knowledge_dict_from_row(r) for r in rows]
+
+    # -- pending contradictions --------------------------------------------
+
+    def add_pending_contradiction(
+        self,
+        old_node_id: str,
+        new_content: str,
+        category: str = "",
+        reason: str = "",
+        source_sessions: list[str] | None = None,
+        detected_by: str = "co-retrieval",
+    ) -> int:
+        """Queue a potential contradiction for user review.
+
+        Returns the ID of the new pending contradiction.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO pending_contradictions "
+            "(old_node_id, new_content, category, reason, "
+            " source_sessions, detected_at, detected_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                old_node_id, new_content, category, reason,
+                json.dumps(source_sessions or []), now, detected_by,
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def list_pending_contradictions(self) -> list[dict]:
+        """Return all pending contradictions awaiting user review."""
+        rows = self._conn.execute(
+            "SELECT * FROM pending_contradictions "
+            "WHERE status = 'pending' ORDER BY detected_at DESC"
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "old_node_id": r["old_node_id"],
+                "new_content": r["new_content"],
+                "category": r["category"],
+                "reason": r["reason"],
+                "source_sessions": json.loads(r["source_sessions"]),
+                "detected_at": r["detected_at"],
+                "detected_by": r["detected_by"],
+            }
+            for r in rows
+        ]
+
+    def has_pending_contradiction_for(self, old_node_id: str) -> bool:
+        """Check if a pending contradiction already exists for a node."""
+        row = self._conn.execute(
+            "SELECT 1 FROM pending_contradictions "
+            "WHERE old_node_id = ? AND status = 'pending' LIMIT 1",
+            (old_node_id,),
+        ).fetchone()
+        return row is not None
+
+    def pending_contradiction_count(self) -> int:
+        """Return count of pending contradictions (no deserialization)."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM pending_contradictions WHERE status = 'pending'"
+        ).fetchone()[0]
+
+    def get_knowledge_node(self, node_id: str) -> dict | None:
+        """Fetch a single knowledge node by ID. Returns None if not found."""
+        row = self._conn.execute(
+            "SELECT * FROM knowledge WHERE id = ?", (node_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._knowledge_dict_from_row(row)
+
+    def resolve_contradiction(
+        self, contradiction_id: int, status: str = "confirmed",
+    ) -> bool:
+        """Mark a pending contradiction as confirmed or dismissed.
+
+        Returns True if a row was updated.
+        """
+        if status not in ("confirmed", "dismissed"):
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self._conn.execute(
+            "UPDATE pending_contradictions SET status = ?, resolved_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (status, now, contradiction_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def knowledge_by_rowid(self, rowids: list[int]) -> dict[int, dict]:
+        """Fetch knowledge nodes by rowid. Returns {rowid: node_dict}."""
+        if not rowids:
+            return {}
+        result: dict[int, dict] = {}
+        for i in range(0, len(rowids), 500):
+            batch = rowids[i : i + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT rowid, * FROM knowledge WHERE rowid IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for r in rows:
+                d = self._knowledge_dict_from_row(r)
+                result[r["rowid"]] = d
+        return result
+
+    def knowledge_count(self) -> int:
+        """Number of active knowledge nodes."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE status = 'active'"
+        ).fetchone()
+        return row[0] if row else 0
+
+    # -- clusters ----------------------------------------------------------
+
+    def save_clusters(
+        self,
+        clusters: list[dict],
+        chunk_memberships: list[tuple[str, str, str]],
+    ) -> None:
+        """Replace all clusters and memberships (full rebuild).
+
+        Args:
+            clusters: List of cluster dicts with keys: cluster_id, topic,
+                cluster_type, session_ids, branch, date_start, date_end,
+                chunk_count, status, created_at, updated_at.
+            chunk_memberships: List of (cluster_id, chunk_id, added_at) tuples.
+        """
+        cur = self._conn.cursor()
+
+        # Clear topic-derived cluster data (preserve access-promoted singletons)
+        cur.execute(
+            "DELETE FROM cluster_chunks WHERE cluster_id IN "
+            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic')"
+        )
+        # Preserve LLM-generated summaries — they're expensive to regenerate
+        # and remain valid when cluster_id is unchanged (deterministic ID).
+        # Orphaned LLM summaries (cluster ID changed due to membership shift)
+        # are cleaned up after new clusters are inserted (see below).
+        cur.execute(
+            "DELETE FROM cluster_summaries WHERE cluster_id IN "
+            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic') "
+            "AND method != 'llm'"
+        )
+        # Disable FTS trigger during bulk delete, then rebuild
+        cur.execute("DROP TRIGGER IF EXISTS clusters_ad")
+        cur.execute(
+            "DELETE FROM clusters WHERE cluster_type = 'topic'"
+        )
+        # Wipe FTS for deleted clusters; will rebuild from all clusters at end
+        cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('delete-all')")
+        # Restore the delete trigger
+        cur.execute(
+            "CREATE TRIGGER IF NOT EXISTS clusters_ad AFTER DELETE ON clusters BEGIN "
+            "  INSERT INTO clusters_fts(clusters_fts, rowid, topic, search_text) "
+            "  VALUES ('delete', old.id, old.topic, old.search_text); "
+            "END;"
+        )
+
+        for c in clusters:
+            cur.execute(
+                "INSERT INTO clusters "
+                "(cluster_id, topic, search_text, cluster_type, session_ids, branch, "
+                " date_start, date_end, chunk_count, status, tags, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    c["cluster_id"],
+                    c["topic"],
+                    c.get("search_text", ""),
+                    c.get("cluster_type", "topic"),
+                    json.dumps(c.get("session_ids", [])),
+                    c.get("branch"),
+                    c.get("date_start"),
+                    c.get("date_end"),
+                    c.get("chunk_count", 0),
+                    c.get("status", "active"),
+                    json.dumps(c.get("tags", [])),
+                    c["created_at"],
+                    c["updated_at"],
+                ),
+            )
+
+        for cluster_id, chunk_id, added_at in chunk_memberships:
+            cur.execute(
+                "INSERT OR IGNORE INTO cluster_chunks "
+                "(cluster_id, chunk_id, added_at) VALUES (?, ?, ?)",
+                (cluster_id, chunk_id, added_at),
+            )
+
+        # Keep orphaned LLM summaries temporarily — they carry content_hash
+        # values that upgrade_large_cluster_summaries() can match against
+        # to avoid regenerating identical summaries. Orphans without
+        # a content_hash (legacy summaries) are cleaned up immediately.
+        cur.execute(
+            "DELETE FROM cluster_summaries "
+            "WHERE method = 'llm' "
+            "AND content_hash IS NULL "
+            "AND cluster_id NOT IN (SELECT cluster_id FROM clusters)"
+        )
+
+        # Rebuild FTS from all clusters (topic + preserved access singletons)
+        cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
+        self._conn.commit()
+
+    def load_clusters(self, status: str = "active") -> list[dict]:
+        """Load clusters filtered by status."""
+        rows = self._conn.execute(
+            "SELECT * FROM clusters WHERE status = ? ORDER BY date_end DESC",
+            (status,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "cluster_id": r["cluster_id"],
+                "topic": r["topic"],
+                "cluster_type": r["cluster_type"],
+                "session_ids": json.loads(r["session_ids"]),
+                "branch": r["branch"],
+                "date_start": r["date_start"],
+                "date_end": r["date_end"],
+                "chunk_count": r["chunk_count"],
+                "status": r["status"],
+                "tags": json.loads(r["tags"]) if r["tags"] else [],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    def get_cluster_chunks(self, cluster_id: str) -> list[str]:
+        """Return chunk IDs belonging to a cluster."""
+        rows = self._conn.execute(
+            "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ? "
+            "ORDER BY added_at",
+            (cluster_id,),
+        ).fetchall()
+        return [r["chunk_id"] for r in rows]
+
+    def get_cluster_chunk_texts(self, cluster_id: str) -> list[dict]:
+        """Return text content for all chunks in a cluster.
+
+        Joins cluster_chunks with chunks to get the actual text.
+        Ordered chronologically for coherent summary generation.
+        """
+        rows = self._conn.execute(
+            "SELECT c.user_text, c.assistant_text, c.tools_used, c.files_touched "
+            "FROM cluster_chunks cc "
+            "JOIN chunks c ON cc.chunk_id = c.id "
+            "WHERE cc.cluster_id = ? "
+            "ORDER BY c.timestamp",
+            (cluster_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_chunk_cluster_id(self, chunk_id: str) -> str | None:
+        """Find the cluster a chunk belongs to, if any."""
+        row = self._conn.execute(
+            "SELECT cluster_id FROM cluster_chunks WHERE chunk_id = ? LIMIT 1",
+            (chunk_id,),
+        ).fetchone()
+        return row["cluster_id"] if row else None
+
+    def get_cluster_summary(self, cluster_id: str) -> dict | None:
+        """Get the summary for a cluster, if it exists."""
+        row = self._conn.execute(
+            "SELECT * FROM cluster_summaries WHERE cluster_id = ?",
+            (cluster_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "cluster_id": row["cluster_id"],
+            "summary": row["summary"],
+            "method": row["method"],
+            "token_count": row["token_count"],
+            "created_at": row["created_at"],
+            "stale": bool(row["stale"]),
+        }
+
+    def save_cluster_summary(
+        self,
+        cluster_id: str,
+        summary: str,
+        method: str = "concat",
+        content_hash: str | None = None,
+    ) -> None:
+        """Upsert a cluster summary."""
+        from datetime import datetime, timezone
+
+        token_count = len(summary) // 4
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO cluster_summaries "
+            "(cluster_id, summary, method, token_count, content_hash, "
+            " created_at, stale) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (cluster_id, summary, method, token_count, content_hash, now),
+        )
+        self._conn.commit()
+
+    def find_summary_by_content_hash(
+        self, content_hash: str,
+    ) -> str | None:
+        """Find an existing LLM summary whose content hash matches.
+
+        Used to reuse expensive LLM summaries when a cluster's ID changes
+        (membership shift) but the actual chunk content is unchanged.
+        """
+        row = self._conn.execute(
+            "SELECT summary FROM cluster_summaries "
+            "WHERE content_hash = ? AND method = 'llm' "
+            "LIMIT 1",
+            (content_hash,),
+        ).fetchone()
+        return row["summary"] if row else None
+
+    def get_cluster(self, cluster_id: str) -> dict | None:
+        """Load a single cluster by ID."""
+        row = self._conn.execute(
+            "SELECT * FROM clusters WHERE cluster_id = ?",
+            (cluster_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "cluster_id": row["cluster_id"],
+            "topic": row["topic"],
+            "cluster_type": row["cluster_type"],
+            "session_ids": json.loads(row["session_ids"]),
+            "branch": row["branch"],
+            "date_start": row["date_start"],
+            "date_end": row["date_end"],
+            "chunk_count": row["chunk_count"],
+            "status": row["status"],
+            "tags": json.loads(row["tags"]) if row["tags"] else [],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def cluster_count(self, cluster_type: str | None = None) -> int:
+        """Number of active clusters, optionally filtered by type."""
+        if cluster_type:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM clusters "
+                "WHERE status = 'active' AND cluster_type = ?",
+                (cluster_type,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM clusters WHERE status = 'active'"
+            ).fetchone()
+        return row[0] if row else 0
+
+    def load_timeline_clusters(
+        self,
+        after: str | None = None,
+        before: str | None = None,
+        branch: str | None = None,
+    ) -> list[dict]:
+        """Load timeline clusters with optional date/branch filters.
+
+        Args:
+            after: Only arcs ending after this date (ISO 8601).
+            before: Only arcs starting before this date (ISO 8601).
+            branch: Filter to arcs on this branch.
+        """
+        query = (
+            "SELECT * FROM clusters "
+            "WHERE cluster_type = 'timeline' AND status = 'active'"
+        )
+        params: list[str] = []
+        if after:
+            query += " AND date_end >= ?"
+            params.append(after)
+        if before:
+            query += " AND date_start <= ?"
+            params.append(before)
+        if branch:
+            query += " AND branch = ?"
+            params.append(branch)
+        query += " ORDER BY date_start"
+
+        rows = self._conn.execute(query, params).fetchall()
+        return [
+            {
+                "cluster_id": r["cluster_id"],
+                "topic": r["topic"],
+                "cluster_type": r["cluster_type"],
+                "session_ids": json.loads(r["session_ids"]),
+                "branch": r["branch"],
+                "date_start": r["date_start"],
+                "date_end": r["date_end"],
+                "chunk_count": r["chunk_count"],
+                "tags": json.loads(r["tags"]) if r["tags"] else [],
+                "search_text": r["search_text"],
+            }
+            for r in rows
+        ]
+
+    def clusters_for_chunk(self, chunk_id: str) -> list[str]:
+        """Return cluster IDs that contain a given chunk.
+
+        Ordered deterministically by cluster_id. Phase 1 clustering
+        produces non-overlapping clusters, but the schema allows
+        multi-membership for future phases.
+        """
+        rows = self._conn.execute(
+            "SELECT cluster_id FROM cluster_chunks WHERE chunk_id = ? "
+            "ORDER BY cluster_id",
+            (chunk_id,),
+        ).fetchall()
+        return [r["cluster_id"] for r in rows]
+
+    def cluster_fts_search(
+        self,
+        query: str,
+        limit: int = 20,
+        include_archived: bool = False,
+    ) -> list[tuple[str, float]]:
+        """Search clusters via FTS5 on topic + search_text.
+
+        Returns list of (cluster_id, score) sorted by relevance.
+        If include_archived is True, also returns archived clusters.
+        """
+        escaped = _escape_fts_query(query, use_or=True)
+        if not escaped:
+            return []
+        try:
+            status_clause = "" if include_archived else "AND c.status = 'active' "
+            rows = self._conn.execute(
+                "SELECT c.cluster_id, bm25(clusters_fts, 2.0, 1.0) as score "
+                "FROM clusters_fts "
+                "JOIN clusters c ON c.id = clusters_fts.rowid "
+                f"WHERE clusters_fts MATCH ? {status_clause}"
+                "AND c.cluster_type != 'timeline' "
+                "ORDER BY score ASC LIMIT ?",
+                (escaped, limit),
+            ).fetchall()
+            return [(r["cluster_id"], -r["score"]) for r in rows]
+        except Exception:
+            return []
+
+    def chunk_fts_to_clusters(
+        self,
+        query: str,
+        limit: int = 50,
+        include_archived: bool = False,
+    ) -> list[tuple[str, float]]:
+        """Search chunks via FTS5 and return parent cluster IDs with scores.
+
+        Fallback for concise mode: when cluster FTS finds nothing, search
+        raw chunks and map them to their parent clusters.  Deduplicates by
+        cluster_id, keeping the highest score per cluster.
+
+        Returns list of (cluster_id, score) sorted by score descending.
+        """
+        fts_query = _escape_fts_query(query, use_or=True)
+        if not fts_query:
+            return []
+        status_clause = "" if include_archived else "AND cl.status = 'active' "
+        try:
+            # Step 1: FTS search for matching chunk rowids + scores.
+            # bm25() must be called with the FTS table as the sole FROM
+            # source — SQLite flattens subqueries so nesting doesn't help.
+            fts_rows = self._conn.execute(
+                f"SELECT chunks_fts.rowid, "
+                f"  -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+                f"FROM chunks_fts "
+                f"WHERE chunks_fts MATCH ? "
+                f"ORDER BY score DESC LIMIT ?",
+                (fts_query, limit * 3),
+            ).fetchall()
+            if not fts_rows:
+                return []
+
+            # Step 2: Map chunk rowids → cluster_ids via JOINs.
+            placeholders = ",".join("?" for _ in fts_rows)
+            score_by_rowid = {r["rowid"]: r["score"] for r in fts_rows}
+            rowids = list(score_by_rowid.keys())
+            cluster_rows = self._conn.execute(
+                f"SELECT c.rowid AS chunk_rowid, cl.cluster_id "
+                f"FROM chunks c "
+                f"JOIN cluster_chunks cc ON cc.chunk_id = c.id "
+                f"JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+                f"WHERE c.rowid IN ({placeholders}) "
+                f"AND cl.cluster_type != 'timeline' {status_clause}",
+                rowids,
+            ).fetchall()
+
+            # Step 3: Aggregate — keep max score per cluster.
+            best: dict[str, float] = {}
+            for r in cluster_rows:
+                cid = r["cluster_id"]
+                score = score_by_rowid[r["chunk_rowid"]]
+                if cid not in best or score > best[cid]:
+                    best[cid] = score
+            result = sorted(best.items(), key=lambda x: x[1], reverse=True)
+            return result[:limit]
+        except Exception:
+            return []
+
+    # -- access tracking ---------------------------------------------------
+
+    def record_access(
+        self,
+        items: list[dict],
+        context: str = "search",
+    ) -> None:
+        """Record access events and update aggregate stats.
+
+        Each item dict has: item_type, item_id, query (optional),
+        score (optional), session_id (optional).
+
+        Args:
+            items: List of accessed items to record.
+            context: Access context — 'search' (auto-returned results),
+                     'context' (explicit drill-down), or 'hook' (session hook).
+        """
+        if not items:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            for item in items:
+                item_type = item["item_type"]
+                item_id = item["item_id"]
+                self._conn.execute(
+                    "INSERT INTO access_log "
+                    "(item_type, item_id, query, score, session_id, context, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        item_type,
+                        item_id,
+                        item.get("query", ""),
+                        item.get("score", 0.0),
+                        item.get("session_id", ""),
+                        context,
+                        now,
+                    ),
+                )
+                # Upsert access_stats: increment counts, update timestamps.
+                # "search" and "context" are user-initiated (explicit);
+                # "hook" is automated and does not count toward promotions.
+                is_explicit = 1 if context in ("search", "context") else 0
+                self._conn.execute(
+                    "INSERT INTO access_stats "
+                    "(item_type, item_id, access_count, explicit_count, "
+                    " first_accessed, last_accessed) "
+                    "VALUES (?, ?, 1, ?, ?, ?) "
+                    "ON CONFLICT(item_type, item_id) DO UPDATE SET "
+                    "access_count = access_count + 1, "
+                    "explicit_count = explicit_count + excluded.explicit_count, "
+                    "last_accessed = excluded.last_accessed",
+                    (item_type, item_id, is_explicit, now, now),
+                )
+                # Update distinct session/query counts from the log
+                if is_explicit:
+                    row = self._conn.execute(
+                        "SELECT COUNT(DISTINCT session_id) AS ds, "
+                        "       COUNT(DISTINCT query) AS dq "
+                        "FROM access_log "
+                        "WHERE item_type = ? AND item_id = ? "
+                        "  AND context IN ('search', 'context') "
+                        "  AND session_id != '' AND query != ''",
+                        (item_type, item_id),
+                    ).fetchone()
+                    if row:
+                        self._conn.execute(
+                            "UPDATE access_stats "
+                            "SET distinct_sessions = ?, distinct_queries = ? "
+                            "WHERE item_type = ? AND item_id = ?",
+                            (row["ds"], row["dq"], item_type, item_id),
+                        )
+
+    def get_access_stats(
+        self,
+        item_type: str,
+        item_id: str,
+    ) -> dict | None:
+        """Get access stats for a specific item."""
+        row = self._conn.execute(
+            "SELECT * FROM access_stats WHERE item_type = ? AND item_id = ?",
+            (item_type, item_id),
+        ).fetchone()
+        if row is None:
+            return None
+        result = {
+            "item_type": row["item_type"],
+            "item_id": row["item_id"],
+            "access_count": row["access_count"],
+            "explicit_count": row["explicit_count"],
+            "last_accessed": row["last_accessed"],
+            "first_accessed": row["first_accessed"],
+        }
+        # New columns (may not exist in un-migrated DBs)
+        for col, default in [
+            ("promotion_tier", "raw"),
+            ("distinct_sessions", 0),
+            ("distinct_queries", 0),
+            ("decay_score", 1.0),
+        ]:
+            try:
+                result[col] = row[col]
+            except (IndexError, KeyError):
+                result[col] = default
+        return result
+
+    def access_summary(self) -> dict:
+        """Aggregate access statistics for recall_stats display."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_events FROM access_log"
+        ).fetchone()
+        total_events = row["total_events"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) as tracked_items FROM access_stats"
+        ).fetchone()
+        tracked_items = row["tracked_items"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) as explicit FROM access_stats "
+            "WHERE explicit_count > 0"
+        ).fetchone()
+        items_drilled = row["explicit"] if row else 0
+
+        # Top 5 most-accessed items
+        top_items = self._conn.execute(
+            "SELECT item_type, item_id, access_count, explicit_count, "
+            "last_accessed FROM access_stats "
+            "ORDER BY access_count DESC LIMIT 5"
+        ).fetchall()
+
+        # Promotion tier distribution
+        try:
+            tier_rows = self._conn.execute(
+                "SELECT promotion_tier, COUNT(*) as cnt FROM access_stats "
+                "GROUP BY promotion_tier"
+            ).fetchall()
+            tier_dist = {r["promotion_tier"]: r["cnt"] for r in tier_rows}
+        except Exception:
+            tier_dist = {}
+
+        return {
+            "total_events": total_events,
+            "tracked_items": tracked_items,
+            "items_drilled_into": items_drilled,
+            "promotion_tiers": tier_dist,
+            "top_items": [
+                {
+                    "item_type": r["item_type"],
+                    "item_id": r["item_id"],
+                    "access_count": r["access_count"],
+                    "explicit_count": r["explicit_count"],
+                    "last_accessed": r["last_accessed"],
+                }
+                for r in top_items
+            ],
+        }
+
+    def access_log_count(self) -> int:
+        """Total number of access log entries."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM access_log"
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    # -- promotion pipeline ------------------------------------------------
+
+    def update_promotion_tier(
+        self, item_type: str, item_id: str, tier: str,
+    ) -> None:
+        """Set the promotion tier for an item in access_stats."""
+        self._conn.execute(
+            "UPDATE access_stats SET promotion_tier = ? "
+            "WHERE item_type = ? AND item_id = ?",
+            (tier, item_type, item_id),
+        )
+        self._conn.commit()
+
+    def items_at_tier(self, tier: str) -> list[dict]:
+        """Return all access_stats rows at a given promotion tier.
+
+        Ordered by explicit_count DESC so budget-capped operations
+        promote the most-accessed items first.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM access_stats WHERE promotion_tier = ? "
+            "ORDER BY explicit_count DESC",
+            (tier,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            d = {
+                "item_type": row["item_type"],
+                "item_id": row["item_id"],
+                "access_count": row["access_count"],
+                "explicit_count": row["explicit_count"],
+                "promotion_tier": row["promotion_tier"],
+                "distinct_sessions": row["distinct_sessions"],
+                "distinct_queries": row["distinct_queries"],
+            }
+            results.append(d)
+        return results
+
+    def create_singleton_cluster(
+        self, chunk_id: str, topic: str = "",
+    ) -> str | None:
+        """Create a singleton cluster for a hot orphan chunk.
+
+        Returns the new cluster_id, or None if chunk doesn't exist.
+        The cluster is tagged with cluster_type='access' to distinguish
+        it from Jaccard-derived topic clusters during rebuild.
+        """
+        import hashlib
+        row = self._conn.execute(
+            "SELECT id FROM chunks WHERE id = ?", (chunk_id,)
+        ).fetchone()
+        if row is None:
+            return None
+
+        cluster_id = "clust-" + hashlib.sha1(
+            chunk_id.encode()
+        ).hexdigest()[:12]
+
+        # Check if already in a cluster
+        existing = self._conn.execute(
+            "SELECT cluster_id FROM cluster_chunks WHERE chunk_id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if existing:
+            return existing["cluster_id"]
+
+        now = datetime.now(timezone.utc).isoformat()
+        if not topic:
+            # Extract a topic from the chunk's user_text
+            cdata = self._conn.execute(
+                "SELECT user_text FROM chunks WHERE id = ?", (chunk_id,)
+            ).fetchone()
+            topic = (cdata["user_text"] or "")[:100] if cdata else ""
+
+        self._conn.execute(
+            "INSERT OR IGNORE INTO clusters "
+            "(cluster_id, topic, cluster_type, session_ids, date_start, "
+            " date_end, chunk_count, status, created_at, updated_at, search_text) "
+            "VALUES (?, ?, 'access', '[]', ?, ?, 1, 'active', ?, ?, '')",
+            (cluster_id, topic, now, now, now, now),
+        )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO cluster_chunks "
+            "(cluster_id, chunk_id, added_at) VALUES (?, ?, ?)",
+            (cluster_id, chunk_id, now),
+        )
+        self._conn.commit()
+        return cluster_id
+
+    # -- archival + compaction ---------------------------------------------
+
+    def recompute_decay_scores(self, half_life_days: float = 30.0) -> int:
+        """Recompute decay_score for all items in access_stats.
+
+        Uses exponential decay based on time since last access:
+          decay = 2^(-days_since_last_access / half_life)
+
+        Returns the number of items updated.
+        """
+        now = datetime.now(timezone.utc)
+        rows = self._conn.execute(
+            "SELECT item_type, item_id, last_accessed FROM access_stats"
+        ).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                last = datetime.fromisoformat(row["last_accessed"])
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                days_since = (now - last).total_seconds() / 86400
+                if half_life_days <= 0:
+                    decay = 1.0
+                else:
+                    decay = min(1.0, 2.0 ** (-days_since / half_life_days))
+            except (ValueError, TypeError, ZeroDivisionError):
+                decay = 1.0
+            self._conn.execute(
+                "UPDATE access_stats SET decay_score = ? "
+                "WHERE item_type = ? AND item_id = ?",
+                (decay, row["item_type"], row["item_id"]),
+            )
+            count += 1
+        self._conn.commit()
+        return count
+
+    def archive_cold_clusters(
+        self, decay_threshold: float = 0.1, min_age_days: int = 90,
+    ) -> list[str]:
+        """Archive clusters with low decay and no recent access.
+
+        Sets status='archived' on clusters whose access_stats show:
+        - decay_score < threshold
+        - last_accessed > min_age_days ago
+
+        Knowledge nodes are never archived.
+        Returns list of archived cluster_ids.
+        """
+        cutoff = datetime.now(timezone.utc)
+        cutoff_iso = (cutoff - timedelta(days=min_age_days)).isoformat()
+
+        rows = self._conn.execute(
+            "SELECT item_id FROM access_stats "
+            "WHERE item_type = 'cluster' "
+            "  AND decay_score < ? "
+            "  AND last_accessed < ?",
+            (decay_threshold, cutoff_iso),
+        ).fetchall()
+        archived = []
+        for row in rows:
+            cluster_id = row["item_id"]
+            self._conn.execute(
+                "UPDATE clusters SET status = 'archived' "
+                "WHERE cluster_id = ? AND status = 'active'",
+                (cluster_id,),
+            )
+            changed = self._conn.execute("SELECT changes()").fetchone()[0]
+            if changed > 0:
+                archived.append(cluster_id)
+        if archived:
+            self._conn.commit()
+        return archived
+
+    def compact_access_log(self, retention_days: int = 90) -> int:
+        """Roll up old access_log entries into daily aggregates.
+
+        Entries older than retention_days are aggregated into
+        access_log_archive (one row per item per day) and then deleted
+        from access_log.
+
+        Returns the number of log entries compacted.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).strftime("%Y-%m-%d")
+
+        # Count entries to compact
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM access_log "
+            "WHERE DATE(created_at) < ?",
+            (cutoff,),
+        ).fetchone()
+        count = row["cnt"] if row else 0
+        if count == 0:
+            return 0
+
+        # Roll up into daily aggregates
+        self._conn.execute(
+            "INSERT OR REPLACE INTO access_log_archive "
+            "(item_type, item_id, date, access_count, avg_score, queries) "
+            "SELECT item_type, item_id, DATE(created_at), COUNT(*), "
+            "       AVG(score), JSON_GROUP_ARRAY(DISTINCT query) "
+            "FROM access_log "
+            "WHERE DATE(created_at) < ? "
+            "GROUP BY item_type, item_id, DATE(created_at)",
+            (cutoff,),
+        )
+        # Delete compacted entries
+        self._conn.execute(
+            "DELETE FROM access_log WHERE DATE(created_at) < ?",
+            (cutoff,),
+        )
+        self._conn.commit()
+        return count
+
+    def decay_distribution(self) -> dict[str, int]:
+        """Return distribution of items across decay score buckets."""
+        buckets = {"fresh": 0, "warm": 0, "cool": 0, "cold": 0}
+        rows = self._conn.execute(
+            "SELECT decay_score FROM access_stats"
+        ).fetchall()
+        for row in rows:
+            score = row["decay_score"]
+            if score > 0.8:
+                buckets["fresh"] += 1
+            elif score > 0.4:
+                buckets["warm"] += 1
+            elif score > 0.1:
+                buckets["cool"] += 1
+            else:
+                buckets["cold"] += 1
+        return buckets
+
+    # -- metadata ----------------------------------------------------------
+
+    def get_metadata(self, key: str) -> str | None:
+        """Read a metadata value by key."""
+        row = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        """Write a metadata value (upsert)."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self._conn.commit()
+
+    def save_manifest(self, manifest: dict) -> None:
+        """Store manifest data as individual metadata keys."""
+        cur = self._conn.cursor()
+        for k, v in manifest.items():
+            cur.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (k, json.dumps(v) if not isinstance(v, str) else v),
+            )
+        self._conn.commit()
+
+    def load_manifest(self) -> dict:
+        """Reconstruct manifest dict from metadata keys."""
+        rows = self._conn.execute("SELECT key, value FROM metadata").fetchall()
+        manifest: dict = {}
+        for r in rows:
+            try:
+                manifest[r["key"]] = json.loads(r["value"])
+            except (json.JSONDecodeError, TypeError):
+                manifest[r["key"]] = r["value"]
+        return manifest

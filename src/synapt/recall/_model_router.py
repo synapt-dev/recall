@@ -1,0 +1,155 @@
+"""Task-aware model routing for the recall system.
+
+Routes each recall task to the best available model architecture:
+- summarize: Prefers encoder-decoder (T5) for parallel input processing
+- consolidate: Uses decoder-only (MLX/Ollama) for JSON schema compliance
+- enrich: Uses decoder-only (MLX/Ollama) for JSON schema compliance
+
+Falls back gracefully: transformers → MLX → Ollama → None.
+
+Override with SYNAPT_SUMMARY_BACKEND=mlx|transformers|ollama for testing.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+# Default models per architecture
+DEFAULT_DECODER_MODEL = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
+DEFAULT_ENCODER_DECODER_MODEL = "google/flan-t5-base"
+
+# Supported encoder-decoder models with their memory footprints
+ENCODER_DECODER_MODELS: dict[str, dict] = {
+    "google/flan-t5-small": {"params": "80M", "memory_fp32": "~0.3 GB"},
+    "google/flan-t5-base": {"params": "250M", "memory_fp32": "~1.0 GB"},
+    "google/flan-t5-large": {"params": "780M", "memory_fp32": "~3.2 GB"},
+}
+
+
+def get_encoder_decoder_model() -> str:
+    """Get the configured encoder-decoder model name.
+
+    Override with SYNAPT_SUMMARY_MODEL env var. Supports any HuggingFace
+    Seq2Seq model, but tested with:
+      - google/flan-t5-small  (80M,  ~0.3 GB) — fastest, lowest quality
+      - google/flan-t5-base   (250M, ~1.0 GB) — default, good balance
+      - google/flan-t5-large  (780M, ~3.2 GB) — best quality, more memory
+    """
+    return os.environ.get("SYNAPT_SUMMARY_MODEL", DEFAULT_ENCODER_DECODER_MODEL)
+
+
+class RecallTask(Enum):
+    """Tasks that require LLM inference in the recall system."""
+    SUMMARIZE = "summarize"
+    CONSOLIDATE = "consolidate"
+    ENRICH = "enrich"
+
+
+# Task → preferred architecture
+_TASK_PREFERENCE: dict[RecallTask, str] = {
+    RecallTask.SUMMARIZE: "encoder-decoder",
+    RecallTask.CONSOLIDATE: "decoder-only",
+    RecallTask.ENRICH: "decoder-only",
+}
+
+# Module-level client cache: (backend, max_tokens) → client instance
+_client_cache: dict[tuple[str, int], object] = {}
+
+
+def get_client(
+    task: RecallTask,
+    max_tokens: int = 300,
+) -> object | None:
+    """Get the best available model client for a recall task.
+
+    Returns a ModelClient instance, or None if no backend is available.
+    The client is cached per (backend, max_tokens) to avoid reloading models.
+    """
+    override = os.environ.get("SYNAPT_SUMMARY_BACKEND", "").lower()
+
+    if override == "mlx":
+        return _get_mlx_client(max_tokens)
+    elif override == "transformers":
+        return _get_transformers_client(max_tokens)
+    elif override == "ollama":
+        return _get_ollama_client(max_tokens)
+
+    preferred = _TASK_PREFERENCE[task]
+
+    if preferred == "encoder-decoder":
+        client = _get_transformers_client(max_tokens)
+        if client is not None:
+            return client
+        # Fall back to decoder-only
+        return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
+    else:
+        return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
+
+
+def _get_transformers_client(max_tokens: int) -> object | None:
+    """Try to create a TransformersClient. Returns None if unavailable."""
+    key = ("transformers", max_tokens)
+    if key in _client_cache:
+        return _client_cache[key]
+
+    try:
+        from synapt._models.transformers_client import TransformersClient
+        client = TransformersClient(max_tokens=max_tokens)
+        _client_cache[key] = client
+        logger.debug("TransformersClient available for encoder-decoder inference")
+        return client
+    except ImportError:
+        logger.debug("transformers not installed, skipping encoder-decoder backend")
+        return None
+
+
+def _get_mlx_client(max_tokens: int) -> object | None:
+    """Try to create an MLXClient. Returns None if unavailable."""
+    key = ("mlx", max_tokens)
+    if key in _client_cache:
+        return _client_cache[key]
+
+    try:
+        from synapt._models.mlx_client import MLXClient, MLXOptions
+        client = MLXClient(MLXOptions(max_tokens=max_tokens))
+        _client_cache[key] = client
+        logger.debug("MLXClient available for decoder-only inference")
+        return client
+    except ImportError:
+        logger.debug("mlx-lm not installed, skipping MLX backend")
+        return None
+
+
+def _get_ollama_client(max_tokens: int) -> object | None:
+    """Try to create an OllamaClient. Returns None if unavailable."""
+    key = ("ollama", max_tokens)
+    if key in _client_cache:
+        return _client_cache[key]
+
+    try:
+        from synapt._models.ollama_client import OllamaClient
+        client = OllamaClient(max_tokens=max_tokens)
+        _client_cache[key] = client
+        logger.debug("OllamaClient available for decoder-only inference")
+        return client
+    except ImportError:
+        logger.debug("OllamaClient not available")
+        return None
+
+
+def clear_cache() -> None:
+    """Clear the client cache. Useful for testing."""
+    _client_cache.clear()
+
+
+def is_encoder_decoder(client: object) -> bool:
+    """Check if a client is an encoder-decoder model (TransformersClient)."""
+    try:
+        from synapt._models.transformers_client import TransformersClient
+        return isinstance(client, TransformersClient)
+    except ImportError:
+        return False

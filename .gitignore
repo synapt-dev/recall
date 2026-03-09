@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.env
+.DS_Store
+.venv/
+*.jsonl
+.synapt/
+.claude/

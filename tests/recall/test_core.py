@@ -1,0 +1,1741 @@
+"""Tests for synapt recall: parser, indexing, retrieval, persistence."""
+
+import json
+import tempfile
+from pathlib import Path
+
+from synapt.recall import (
+    TranscriptChunk,
+    TranscriptIndex,
+    _extract_assistant_content,
+    _extract_user_text,
+    _is_real_user_message,
+    parse_transcript,
+)
+from synapt.recall.core import (
+    _detect_decision_markers,
+    _extract_tool_result_text,
+    _summarize_tool_result,
+    _summarize_tool_input,
+)
+
+from conftest import (
+    assistant_entry,
+    make_test_chunks,
+    progress_entry,
+    system_entry,
+    tool_result_entry,
+    user_text_entry,
+    user_text_list_entry,
+    user_tool_result_entry,
+    write_jsonl,
+)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _is_real_user_message
+# ---------------------------------------------------------------------------
+
+def test_is_real_user_message_string_content():
+    assert _is_real_user_message(user_text_entry("hello")) is True
+
+
+def test_is_real_user_message_text_block():
+    assert _is_real_user_message(user_text_list_entry("hello")) is True
+
+
+def test_is_real_user_message_tool_result_only():
+    assert _is_real_user_message(user_tool_result_entry()) is False
+
+
+def test_is_real_user_message_empty_string():
+    assert _is_real_user_message(user_text_entry("")) is False
+    assert _is_real_user_message(user_text_entry("   ")) is False
+
+
+def test_is_real_user_message_wrong_type():
+    entry = assistant_entry(text="hello")
+    assert _is_real_user_message(entry) is False
+    assert _is_real_user_message(progress_entry()) is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: _extract_user_text
+# ---------------------------------------------------------------------------
+
+def test_extract_user_text_string():
+    entry = user_text_entry("how do we fix the harness?")
+    assert _extract_user_text(entry) == "how do we fix the harness?"
+
+
+def test_extract_user_text_list():
+    entry = user_text_list_entry("what about embeddings?")
+    assert _extract_user_text(entry) == "what about embeddings?"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _extract_assistant_content
+# ---------------------------------------------------------------------------
+
+def test_extract_assistant_text():
+    entry = assistant_entry(text="I'll fix the bug now.")
+    text, tools, files, tool_uses = _extract_assistant_content(entry)
+    assert text == "I'll fix the bug now."
+    assert tools == []
+    assert files == []
+    assert tool_uses == []
+
+
+def test_extract_assistant_tool_use():
+    entry = assistant_entry(
+        text="Let me read the file.",
+        tool_name="Read",
+        file_path="/src/graph/api_index.py",
+    )
+    text, tools, files, tool_uses = _extract_assistant_content(entry)
+    assert "Let me read the file." in text
+    assert "Read" in tools
+    assert "/src/graph/api_index.py" in files
+
+
+def test_extract_assistant_skips_thinking():
+    entry = assistant_entry(text="visible text")
+    text, _, _, _ = _extract_assistant_content(entry)
+    assert "internal reasoning" not in text
+    assert text == "visible text"
+
+
+# ---------------------------------------------------------------------------
+# Tests: parse_transcript
+# ---------------------------------------------------------------------------
+
+def test_parse_transcript_basic():
+    entries = [
+        progress_entry("p1"),
+        user_text_entry("what is the quality curve?", uuid="u1", ts="2026-02-28T10:00:00Z"),
+        assistant_entry(text="The quality curve weights Cat3 examples.", uuid="a1", ts="2026-02-28T10:00:30Z"),
+        progress_entry("p2"),
+        user_text_entry("show me the code", uuid="u2", ts="2026-02-28T10:01:00Z"),
+        assistant_entry(
+            text="Here's the implementation.",
+            tool_name="Read",
+            file_path="/scripts/verify_quality_curve.py",
+            uuid="a2",
+            ts="2026-02-28T10:01:30Z",
+        ),
+    ]
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+        path = Path(f.name)
+
+    try:
+        chunks = parse_transcript(path)
+        assert len(chunks) == 2
+        assert chunks[0].turn_index == 0
+        assert "quality curve" in chunks[0].user_text
+        assert "Cat3" in chunks[0].assistant_text
+        assert chunks[1].turn_index == 1
+        assert "show me the code" in chunks[1].user_text
+        assert "Read" in chunks[1].tools_used
+        assert "/scripts/verify_quality_curve.py" in chunks[1].files_touched
+    finally:
+        path.unlink()
+
+
+def test_parse_transcript_filters_noise():
+    entries = [
+        progress_entry("p1"),
+        system_entry("s1"),
+        {"type": "file-history-snapshot", "uuid": "fh1", "snapshot": {}},
+        {"type": "queue-operation", "uuid": "q1"},
+        user_text_entry("hello", uuid="u1"),
+        assistant_entry(text="hi there", uuid="a1"),
+    ]
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+        path = Path(f.name)
+
+    try:
+        chunks = parse_transcript(path)
+        assert len(chunks) == 1
+        assert chunks[0].user_text == "hello"
+    finally:
+        path.unlink()
+
+
+def test_parse_transcript_tool_result_not_new_turn():
+    entries = [
+        user_text_entry("read the file", uuid="u1", ts="2026-02-28T10:00:00Z"),
+        assistant_entry(tool_name="Read", file_path="/foo.py", uuid="a1"),
+        user_tool_result_entry(uuid="u2"),
+        assistant_entry(text="The file contains...", uuid="a2"),
+    ]
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+        path = Path(f.name)
+
+    try:
+        chunks = parse_transcript(path)
+        assert len(chunks) == 1
+        assert "The file contains" in chunks[0].assistant_text
+        # BUG-2 fix: Read tool_results should NOT get "User selected:" prefix
+        assert "User selected" not in chunks[0].assistant_text
+        assert "Read" in chunks[0].tools_used
+    finally:
+        path.unlink()
+
+
+def test_parse_tool_result_only_captured_for_ask_user_question():
+    """Only AskUserQuestion tool_results get 'User selected:' prefix."""
+    entries = [
+        user_text_entry("which approach?", uuid="u1"),
+        assistant_entry(
+            text="Two options",
+            tool_name="AskUserQuestion",
+            uuid="a1",
+        ),
+        user_tool_result_entry(content="Option A", uuid="u2"),
+        user_text_entry("now read a file", uuid="u3", ts="2026-02-28T10:05:00Z"),
+        assistant_entry(
+            text="Reading the file",
+            tool_name="Read",
+            file_path="/foo.py",
+            uuid="a2",
+            ts="2026-02-28T10:05:30Z",
+        ),
+        user_tool_result_entry(content="file contents here...", uuid="u4", ts="2026-02-28T10:06:00Z"),
+        assistant_entry(text="The file has 100 lines", uuid="a3", ts="2026-02-28T10:06:30Z"),
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "session.jsonl"
+        write_jsonl(path, entries)
+        chunks = parse_transcript(path)
+
+    # First turn: AskUserQuestion → tool_result captured
+    assert "User selected" in chunks[0].assistant_text
+    assert "Option A" in chunks[0].assistant_text
+    # Second turn: Read → tool_result NOT captured
+    assert "User selected" not in chunks[1].assistant_text
+    assert "file contents" not in chunks[1].assistant_text
+
+
+# ---------------------------------------------------------------------------
+# Tests: decision point detection
+# ---------------------------------------------------------------------------
+
+def test_detect_decision_ask_user_question():
+    """AskUserQuestion in tools_used triggers decision markers."""
+    markers = _detect_decision_markers("pick one", ["Read", "AskUserQuestion"])
+    assert "decision point" in markers
+    assert "user choice" in markers
+
+
+def test_detect_decision_exit_plan_mode():
+    """ExitPlanMode in tools_used triggers plan_approved marker."""
+    markers = _detect_decision_markers("", ["ExitPlanMode"])
+    assert "decision point" in markers
+    assert "plan approved" in markers
+
+
+def test_detect_decision_keywords():
+    """Explicit choice phrases in user text trigger decision_point."""
+    markers = _detect_decision_markers("let's do the quality curve training", [])
+    assert "decision point" in markers
+
+    markers = _detect_decision_markers("I'll go with option A", [])
+    assert "decision point" in markers
+
+
+def test_detect_decision_no_duplicate_markers():
+    """Both AskUserQuestion and ExitPlanMode in one turn don't duplicate decision_point."""
+    markers = _detect_decision_markers("approve it", ["AskUserQuestion", "ExitPlanMode"])
+    assert markers.count("decision point") == 1
+    assert "user choice" in markers
+    assert "plan approved" in markers
+
+
+def test_detect_decision_no_false_positives():
+    """Normal messages don't trigger decision markers."""
+    markers = _detect_decision_markers("how does the quality curve work?", [])
+    assert markers == []
+
+    markers = _detect_decision_markers("fix the bug", ["Read", "Edit"])
+    assert markers == []
+
+
+def test_parse_captures_tool_result_text():
+    """AskUserQuestion response text is captured in the chunk."""
+    entries = [
+        user_text_entry("which approach?", uuid="u1"),
+        assistant_entry(
+            text="I suggest two options",
+            tool_name="AskUserQuestion",
+            uuid="a1",
+        ),
+        user_tool_result_entry(content="Option A: use the cache", uuid="u2"),
+        user_text_entry("great, continue", uuid="u3", ts="2026-02-28T10:05:00Z"),
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "session.jsonl"
+        write_jsonl(path, entries)
+        chunks = parse_transcript(path)
+
+    assert len(chunks) == 2
+    # First chunk should have the AskUserQuestion response text
+    assert "Option A" in chunks[0].assistant_text
+    assert "User selected" in chunks[0].assistant_text
+    # First chunk should have decision markers
+    assert "decision point" in chunks[0].tools_used
+    assert "user choice" in chunks[0].tools_used
+
+
+def test_parse_decision_keyword_in_user_text():
+    """User choice keywords inject decision_point into tools_used."""
+    entries = [
+        user_text_entry("let's go with the sqlite approach", uuid="u1"),
+        assistant_entry(text="OK, implementing sqlite.", uuid="a1"),
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "session.jsonl"
+        write_jsonl(path, entries)
+        chunks = parse_transcript(path)
+
+    assert len(chunks) == 1
+    assert "decision point" in chunks[0].tools_used
+
+
+def test_decision_markers_boost_search():
+    """Chunks with decision markers score higher for decision-related queries."""
+    chunks = [
+        TranscriptChunk(
+            id="s1:t0", session_id="session-aaa",
+            timestamp="2026-02-26T10:00:00Z", turn_index=0,
+            user_text="let's use redis for caching",
+            assistant_text="OK, switching to redis.",
+            tools_used=["decision point"],
+        ),
+        TranscriptChunk(
+            id="s1:t1", session_id="session-aaa",
+            timestamp="2026-02-26T10:05:00Z", turn_index=1,
+            user_text="how does caching invalidation work?",
+            assistant_text="Cache invalidation uses TTL-based expiry.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    # "decision" should match the space-separated "decision point" marker
+    # in chunk 0 (not just match via shared terms in both chunks)
+    result = index.lookup("decision", max_chunks=2)
+    assert result != ""
+    assert "redis" in result.lower()
+
+
+def test_decision_phrase_word_boundary():
+    """Decision phrases use word-boundary matching, not substring (#224)."""
+    from synapt.recall.core import _detect_decision_markers
+
+    # Should match: exact phrase at word boundary
+    assert _detect_decision_markers("let's go with sqlite", [])
+    assert _detect_decision_markers("I said option a is best", [])
+    assert _detect_decision_markers("yes, let's do it", [])
+
+    # Should NOT match: substring false positives
+    assert not _detect_decision_markers("the option actually is wrong", [])
+    assert not _detect_decision_markers("we need options and choices", [])
+    assert not _detect_decision_markers("optional feature flag", [])
+
+
+def test_extract_tool_result_text():
+    """_extract_tool_result_text captures content from tool_result blocks."""
+    entry = user_tool_result_entry(content="Selected: Use Redis for caching")
+    text = _extract_tool_result_text(entry)
+    assert "Selected: Use Redis" in text
+
+
+def test_extract_tool_result_text_empty():
+    """Regular user messages have no tool_result text."""
+    entry = user_text_entry("hello world")
+    text = _extract_tool_result_text(entry)
+    assert text == ""
+
+
+def test_extract_tool_result_text_nested_list():
+    """_extract_tool_result_text handles nested list content format."""
+    entry = {
+        "type": "user",
+        "uuid": "u99",
+        "timestamp": "2026-02-28T10:00:00Z",
+        "sessionId": "test-session-001",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool_456",
+                    "content": [
+                        {"type": "text", "text": "Option B: use PostgreSQL"},
+                        {"type": "text", "text": "with connection pooling"},
+                    ],
+                }
+            ],
+        },
+    }
+    text = _extract_tool_result_text(entry)
+    assert "Option B" in text
+    assert "connection pooling" in text
+
+
+# ---------------------------------------------------------------------------
+# Tests: deduplication
+# ---------------------------------------------------------------------------
+
+def test_parse_transcript_deduplication():
+    entries = [
+        user_text_entry("first question", uuid="u1", ts="2026-02-28T10:00:00Z"),
+        assistant_entry(text="first answer", uuid="a1", ts="2026-02-28T10:00:30Z"),
+        user_text_entry("second question", uuid="u2", ts="2026-02-28T10:01:00Z"),
+        assistant_entry(text="second answer", uuid="a2", ts="2026-02-28T10:01:30Z"),
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        path = tmpdir / "test-session.jsonl"
+
+        write_jsonl(path, entries[:2])
+        seen = set()
+        chunks1 = parse_transcript(path, seen_uuids=seen)
+        assert len(chunks1) == 1
+
+        write_jsonl(path, entries)
+        chunks2 = parse_transcript(path, seen_uuids=seen)
+        assert len(chunks2) == 1
+        assert "second question" in chunks2[0].user_text
+
+
+# ---------------------------------------------------------------------------
+# Tests: TranscriptIndex.lookup
+# ---------------------------------------------------------------------------
+
+def test_lookup_global_bm25():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve", max_chunks=3)
+    assert "quality curve" in result.lower() or "hermite" in result.lower()
+    assert "Past session context:" in result
+
+
+def test_lookup_progressive():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("harness bug", max_chunks=2, max_sessions=1)
+    assert "harness" in result.lower() or "XCTAssertNil" in result
+
+
+def test_lookup_no_results():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("kubernetes deployment yaml")
+    assert result == ""
+
+
+def test_lookup_token_budget():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve", max_chunks=10, max_tokens=50)
+    assert len(result) < 400
+
+
+def test_lookup_empty_index():
+    index = TranscriptIndex([])
+    assert index.lookup("anything") == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: search diagnostics
+# ---------------------------------------------------------------------------
+
+def test_diagnostics_empty_index():
+    """Empty index sets diagnostics with reason 'empty_index'."""
+    index = TranscriptIndex([])
+    index.lookup("anything")
+    diag = index._last_diagnostics
+    assert diag is not None
+    assert diag.reason == "empty_index"
+    assert "empty" in diag.format_message().lower()
+
+
+def test_diagnostics_no_matches():
+    """Query with no keyword overlap sets 'no_matches' diagnostics."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    index.lookup("kubernetes deployment yaml")
+    diag = index._last_diagnostics
+    assert diag is not None
+    assert diag.reason == "no_matches"
+    assert diag.total_chunks == len(chunks)
+    assert diag.total_sessions > 0
+    msg = diag.format_message()
+    assert "no chunks matched" in msg.lower()
+    assert "recall_stats" in msg
+
+
+def test_diagnostics_threshold_still_returns_top():
+    """Threshold filtering keeps the top scorer (cutoff is relative to top score)."""
+    chunks = [
+        TranscriptChunk(
+            id="s1:t0", session_id="session-aaa",
+            timestamp="2026-02-26T10:00:00Z", turn_index=0,
+            user_text="zebra migration patterns in africa",
+            assistant_text="Zebra herds migrate seasonally. Zebra zebra zebra.",
+        ),
+        TranscriptChunk(
+            id="s1:t1", session_id="session-aaa",
+            timestamp="2026-02-26T10:05:00Z", turn_index=1,
+            user_text="what about the zebra library?",
+            assistant_text="It handles HTTP routing.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    # Even with threshold_ratio=0.99, the top scorer always survives
+    # because cutoff = top_score * 0.99 <= top_score.
+    result = index.lookup("zebra", max_chunks=5, threshold_ratio=0.99)
+    assert result != ""
+    # Diagnostics should be None (search succeeded)
+    assert index._last_diagnostics is None
+
+
+def test_diagnostics_cleared_on_success():
+    """Successful search clears diagnostics to None."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # First: trigger diagnostics
+    index.lookup("kubernetes yaml")
+    assert index._last_diagnostics is not None
+    # Second: successful search should clear them
+    result = index.lookup("quality curve")
+    assert result != ""
+    assert index._last_diagnostics is None
+
+
+def test_diagnostics_date_filter_noted():
+    """When date filter is active and no results, diagnostics note it."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # Search for something that exists but filter to a date range where it doesn't
+    result = index.lookup("quality curve", after="2030-01-01")
+    assert result == ""
+    diag = index._last_diagnostics
+    assert diag is not None
+    assert diag.date_filter_active
+
+
+def test_diagnostics_progressive_sessions_searched():
+    """Progressive mode records how many sessions were searched."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    index.lookup("nonexistent term xyz", max_sessions=2)
+    diag = index._last_diagnostics
+    assert diag is not None
+    assert diag.reason == "no_matches"
+    assert "progressive" in diag.search_mode
+
+
+# ---------------------------------------------------------------------------
+# Tests: date filtering
+# ---------------------------------------------------------------------------
+
+def test_lookup_after_excludes_old():
+    """after='2026-02-28' should exclude Feb 26 chunks."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve", after="2026-02-28")
+    # "quality curve" only appears in session-aaa (Feb 26) — should be excluded
+    assert result == ""
+
+
+def test_lookup_before_excludes_new():
+    """before='2026-02-27' should exclude Feb 28 chunks."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("harness bug", before="2026-02-27")
+    # "harness bug" only appears in session-bbb (Feb 28) — should be excluded
+    assert result == ""
+
+
+def test_lookup_date_range():
+    """after + before together scopes to a date range."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # Range covers only Feb 28
+    result = index.lookup("harness", after="2026-02-28", before="2026-03-01")
+    assert "harness" in result.lower()
+
+
+def test_lookup_date_filter_with_datetime():
+    """Full datetime strings work for filtering."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # After 14:03 on Feb 28 — should only get the t1 chunk (14:05), not t0 (14:00)
+    result = index.lookup("eval", after="2026-02-28T14:03:00Z")
+    assert "eval" in result.lower()
+    # The harness bug chunk (14:00) should be excluded
+    assert "XCTAssertNil" not in result
+
+
+def test_lookup_no_date_filter_returns_all():
+    """Without date params, all chunks are searchable (backwards compat)."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve")
+    assert result != ""
+    result2 = index.lookup("harness bug")
+    assert result2 != ""
+
+
+def test_lookup_progressive_with_date_filter():
+    """Date filtering works in progressive (max_sessions) mode."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # "harness bug" is in session-bbb (Feb 28) — should be excluded by before
+    result = index.lookup("harness bug", max_sessions=5, before="2026-02-27")
+    assert result == ""
+    # Same query without date filter should find it
+    result2 = index.lookup("harness bug", max_sessions=5)
+    assert result2 != ""
+
+
+def test_lookup_empty_date_range_returns_nothing():
+    """An inverted date range (after > before) returns no results."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve", after="2026-03-01", before="2026-02-01")
+    assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: persistence (save/load round-trip)
+# ---------------------------------------------------------------------------
+
+def test_save_load_roundtrip():
+    """Legacy save (no DB) + load triggers auto-migration to SQLite."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir) / "test-index"
+        index.save(save_dir)
+
+        # Legacy save writes JSONL + manifest
+        assert (save_dir / "chunks.jsonl").exists()
+        assert (save_dir / "manifest.json").exists()
+
+        # load() auto-migrates to SQLite
+        loaded = TranscriptIndex.load(save_dir)
+        assert len(loaded.chunks) == len(chunks)
+
+        # After migration: recall.db exists, legacy files cleaned up
+        assert (save_dir / "recall.db").exists()
+        assert not (save_dir / "chunks.jsonl").exists()
+        assert not (save_dir / "manifest.json").exists()
+
+        # Search still works (now via FTS5)
+        result = loaded.lookup("quality curve")
+        assert "quality curve" in result.lower() or "hermite" in result.lower()
+
+
+def test_save_load_manifest():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir) / "test-index"
+        index.save(save_dir)
+
+        with open(save_dir / "manifest.json") as f:
+            manifest = json.load(f)
+
+        assert manifest["chunk_count"] == 4
+        assert manifest["session_count"] == 2
+        assert "build_timestamp" in manifest
+        assert "chunks_hash" in manifest
+
+
+def test_save_load_sqlite_roundtrip():
+    """Save with RecallDB, load from recall.db — no legacy files involved."""
+    from synapt.recall.storage import RecallDB
+
+    chunks = make_test_chunks()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir) / "test-index"
+        save_dir.mkdir(parents=True)
+        db = RecallDB(save_dir / "recall.db")
+        index = TranscriptIndex(chunks, db=db)
+        index.save(save_dir)
+
+        # Only recall.db, no legacy files
+        assert (save_dir / "recall.db").exists()
+        assert not (save_dir / "chunks.jsonl").exists()
+        assert not (save_dir / "manifest.json").exists()
+
+        loaded = TranscriptIndex.load(save_dir)
+        assert len(loaded.chunks) == len(chunks)
+
+        result = loaded.lookup("quality curve")
+        assert "quality curve" in result.lower() or "hermite" in result.lower()
+        db.close()
+
+
+def test_lookup_via_fts5():
+    """TranscriptIndex with a RecallDB uses FTS5, not BM25 fallback."""
+    from synapt.recall.storage import RecallDB
+
+    chunks = make_test_chunks()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "recall.db"
+        db = RecallDB(db_path)
+        db.save_chunks(chunks)
+
+        index = TranscriptIndex(chunks, db=db)
+
+        # Verify FTS5 is active (BM25 should be None)
+        assert index._bm25 is None
+
+        # Global search
+        result = index.lookup("quality curve", max_chunks=3)
+        assert "quality curve" in result.lower() or "hermite" in result.lower()
+
+        # Progressive search (max_sessions limits)
+        result2 = index.lookup("harness bug", max_chunks=2, max_sessions=1)
+        assert "harness" in result2.lower()
+
+        # File search
+        result3 = index.lookup_files("verify_quality_curve.py")
+        assert result3 != ""
+
+        # Date filtering
+        result4 = index.lookup("quality curve", after="2026-02-28")
+        assert result4 == ""  # quality curve is in Feb 26 session
+
+        db.close()
+
+
+def test_save_preserves_embeddings():
+    """save_chunks preserves existing embeddings by matching chunk IDs."""
+    from synapt.recall.storage import RecallDB
+
+    chunks = make_test_chunks()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = RecallDB(Path(tmpdir) / "recall.db")
+        db.save_chunks(chunks)
+
+        # Store a fake embedding for the first chunk
+        rowids = list(db.get_chunk_id_rowid_map().values())
+        fake_emb = [0.1] * 384
+        db.save_embeddings({rowids[0]: fake_emb})
+        assert db.has_embeddings()
+
+        # Re-save the same chunks — embeddings should survive
+        db.save_chunks(chunks)
+        assert db.has_embeddings()
+
+        new_rowids = list(db.get_chunk_id_rowid_map().values())
+        embs = db.get_embeddings(new_rowids)
+        assert len(embs) == 1  # Only the one we stored
+        # Verify the actual embedding values survived (float32 precision)
+        preserved = list(embs.values())[0]
+        assert len(preserved) == 384
+        for i in range(384):
+            assert abs(preserved[i] - fake_emb[i]) < 1e-6
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: stats
+# ---------------------------------------------------------------------------
+
+def test_stats():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    stats = index.stats()
+
+    assert stats["chunk_count"] == 4
+    assert stats["session_count"] == 2
+    assert stats["date_range"]["earliest"] == "2026-02-26T10:00:00Z"
+    assert stats["date_range"]["latest"] == "2026-02-28T14:05:00Z"
+    assert stats["total_tools_used"] >= 2
+    assert stats["total_files_touched"] >= 1
+
+
+def test_stats_empty():
+    index = TranscriptIndex([])
+    stats = index.stats()
+    assert stats["chunk_count"] == 0
+    assert stats["session_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: embedding visibility (Improvement 5)
+# ---------------------------------------------------------------------------
+
+def test_stats_includes_embedding_status():
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    stats = index.stats()
+    assert "embeddings_active" in stats
+    assert stats["embeddings_active"] is False
+    assert stats["embedding_provider"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: recency decay (Improvement 1)
+# ---------------------------------------------------------------------------
+
+def test_recency_decay_favors_newer():
+    """Chunks with the same BM25 relevance should rank newer-first with decay."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    old_ts = (now - timedelta(days=60)).isoformat()
+    new_ts = (now - timedelta(days=1)).isoformat()
+
+    chunks = [
+        TranscriptChunk(
+            id="old:t0", session_id="session-old",
+            timestamp=old_ts, turn_index=0,
+            user_text="quality curve hermite spline zones",
+            assistant_text="The quality curve uses zones.",
+        ),
+        TranscriptChunk(
+            id="new:t0", session_id="session-new",
+            timestamp=new_ts, turn_index=0,
+            user_text="quality curve hermite spline zones",
+            assistant_text="Updated quality curve uses zones.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    # Use a fixed "now" via internal method to verify ordering
+    scores = index._bm25.score(
+        __import__("synapt.recall.bm25", fromlist=["_tokenize"])._tokenize("quality curve")
+    )
+    decayed = index._apply_recency_decay(scores, half_life=30.0, now=now)
+    # Find which index corresponds to the newer chunk
+    new_idx = next(i for i, c in enumerate(index.chunks) if c.id == "new:t0")
+    old_idx = next(i for i, c in enumerate(index.chunks) if c.id == "old:t0")
+    assert decayed[new_idx] > decayed[old_idx]
+
+
+def test_recency_decay_zero_disables():
+    """half_life=0 returns scores unchanged."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    scores = [1.0, 2.0, 3.0, 4.0]
+    result = index._apply_recency_decay(scores, half_life=0)
+    assert result == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_recency_decay_backwards_compatible():
+    """Default half_life=30 doesn't break existing lookups that find results."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve")
+    assert result != ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: relevance threshold (Improvement 3)
+# ---------------------------------------------------------------------------
+
+def test_threshold_filters_low_scores():
+    """Results with scores far below the top score should be filtered."""
+    chunks = [
+        TranscriptChunk(
+            id="strong:t0", session_id="sess-strong-aaa",
+            timestamp="2026-02-28T10:00:00Z", turn_index=0,
+            user_text="quality curve hermite spline zone weighting",
+            assistant_text="The quality curve uses hermite spline with three zones and weighting.",
+        ),
+        TranscriptChunk(
+            id="weak:t0", session_id="sess-weak-bbb000",
+            timestamp="2026-02-28T11:00:00Z", turn_index=0,
+            user_text="the weather is nice today",
+            assistant_text="Indeed the weather is pleasant.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+
+    # With high threshold, weak match gets filtered
+    result_strict = index.lookup(
+        "quality curve hermite spline", max_chunks=10, threshold_ratio=0.5
+    )
+    assert "sess-str" in result_strict
+    assert "sess-wea" not in result_strict
+
+
+def test_threshold_zero_disables():
+    """threshold_ratio=0 disables filtering."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve", threshold_ratio=0.0)
+    assert result != ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: chunk context window (Improvement 2)
+# ---------------------------------------------------------------------------
+
+def test_format_includes_preceding_context():
+    """Results for non-first turns include preceding turn's user text."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # "Cat3 weighting" is in session-aaa:t1 (turn_index=1)
+    result = index.lookup("Cat3 weighting", max_chunks=5, max_tokens=2000)
+    assert "previously asked" in result.lower()
+
+
+def test_format_no_context_for_first_turn():
+    """First turns (turn_index=0) should not have preceding context."""
+    # Create a single turn-0 chunk so it's the only result
+    chunks = [
+        TranscriptChunk(
+            id="solo:t0", session_id="session-solo",
+            timestamp="2026-02-28T10:00:00Z", turn_index=0,
+            user_text="quality curve hermite spline",
+            assistant_text="The quality curve uses a Hermite spline.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("quality curve hermite", max_chunks=1)
+    assert "previously asked" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: file lookup (Improvement 4)
+# ---------------------------------------------------------------------------
+
+def test_lookup_files_partial_match():
+    """lookup_files matches partial file paths."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup_files("verify_quality_curve.py")
+    assert result != ""
+    assert "quality" in result.lower() or "cat3" in result.lower()
+
+
+def test_lookup_files_substring_match():
+    """lookup_files matches substring within full path."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup_files("swift_errors")
+    assert result != ""
+    assert "harness" in result.lower() or "swift" in result.lower()
+
+
+def test_lookup_files_no_match():
+    """lookup_files returns empty string when no files match."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    result = index.lookup_files("nonexistent_file.rs")
+    assert result == ""
+
+
+def test_lookup_files_with_date_filter():
+    """lookup_files respects date filtering."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    # swift_errors.py is in session-bbb (Feb 28)
+    result = index.lookup_files("swift_errors", before="2026-02-27")
+    assert result == ""
+    result2 = index.lookup_files("swift_errors", after="2026-02-28")
+    assert result2 != ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: session browsing (Improvement 6)
+# ---------------------------------------------------------------------------
+
+def test_list_sessions_returns_all():
+    """list_sessions returns session summaries ordered newest-first."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    sessions = index.list_sessions()
+    assert len(sessions) == 2
+    # Newest first: session-bbb (Feb 28) before session-aaa (Feb 26)
+    assert sessions[0]["session_id"] == "session-bbb"
+    assert sessions[1]["session_id"] == "session-aaa"
+    assert sessions[0]["turn_count"] == 2
+    assert sessions[0]["date"] == "2026-02-28"
+
+
+def test_list_sessions_with_max():
+    """list_sessions respects max_sessions limit."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    sessions = index.list_sessions(max_sessions=1)
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == "session-bbb"
+
+
+def test_list_sessions_with_date_filter():
+    """list_sessions respects date filtering."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    sessions = index.list_sessions(after="2026-02-28")
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == "session-bbb"
+
+
+def test_list_sessions_includes_first_message():
+    """list_sessions includes the first user message as summary."""
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+    sessions = index.list_sessions()
+    # session-bbb first msg: "fix the harness bug in swift tests"
+    assert "harness" in sessions[0]["first_message"].lower()
+
+
+def test_list_sessions_empty_index():
+    """list_sessions returns empty list for empty index."""
+    index = TranscriptIndex([])
+    assert index.list_sessions() == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: build_index incremental change detection
+# ---------------------------------------------------------------------------
+
+def test_build_index_reparses_changed_files():
+    """Incremental build re-parses files whose mtime or size changed."""
+    import os
+    import time
+    from synapt.recall.core import build_index
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        # Write a transcript with 2 turns
+        entries = [
+            user_text_entry("first question", uuid="u1", ts="2026-03-01T10:00:00Z"),
+            assistant_entry(text="first answer", uuid="a1", ts="2026-03-01T10:00:30Z"),
+            user_text_entry("second question", uuid="u2", ts="2026-03-01T10:01:00Z"),
+            assistant_entry(text="second answer", uuid="a2", ts="2026-03-01T10:01:30Z"),
+        ]
+        transcript = tmpdir / "test-session.jsonl"
+        write_jsonl(transcript, entries)
+
+        # First build — no manifest, should parse everything
+        index1 = build_index(transcript.parent)
+        assert len(index1.chunks) == 2
+
+        # Capture manifest-style source_files (simulates what cli.py saves)
+        old_manifest = {
+            "source_files": [{
+                "name": transcript.name,
+                "mtime": os.path.getmtime(transcript),
+                "size": transcript.stat().st_size,
+            }]
+        }
+
+        # Ensure mtime changes (HFS+ has 1s granularity)
+        time.sleep(1.1)
+
+        # Append a third turn
+        with open(transcript, "a", encoding="utf-8") as f:
+            f.write(json.dumps(user_text_entry(
+                "third question", uuid="u3", ts="2026-03-01T10:02:00Z",
+            )) + "\n")
+            f.write(json.dumps(assistant_entry(
+                text="third answer", uuid="a3", ts="2026-03-01T10:02:30Z",
+            )) + "\n")
+
+        # Incremental build with old manifest — should detect change and re-parse
+        index2 = build_index(transcript.parent, incremental_manifest=old_manifest)
+        assert len(index2.chunks) == 3, (
+            f"Expected 3 chunks (file grew), got {len(index2.chunks)}"
+        )
+
+
+def test_build_index_skips_unchanged_files():
+    """Incremental build skips files whose mtime and size match the manifest."""
+    import os
+    from synapt.recall.core import build_index
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        entries = [
+            user_text_entry("hello", uuid="u1", ts="2026-03-01T10:00:00Z"),
+            assistant_entry(text="hi", uuid="a1", ts="2026-03-01T10:00:30Z"),
+        ]
+        transcript = tmpdir / "test-session.jsonl"
+        write_jsonl(transcript, entries)
+
+        # Build once to get the manifest data
+        index1 = build_index(transcript.parent)
+        assert len(index1.chunks) == 1
+
+        manifest = {
+            "source_files": [{
+                "name": transcript.name,
+                "mtime": os.path.getmtime(transcript),
+                "size": transcript.stat().st_size,
+            }]
+        }
+
+        # Incremental build with matching manifest — should skip, return 0 chunks
+        index2 = build_index(transcript.parent, incremental_manifest=manifest)
+        assert len(index2.chunks) == 0, (
+            f"Expected 0 chunks (file unchanged), got {len(index2.chunks)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: _summarize_tool_result
+# ---------------------------------------------------------------------------
+
+def test_summarize_bash_command_and_output():
+    summary = _summarize_tool_result(
+        "Bash", {"command": "pytest tests/"}, "12 passed, 3 failed\n"
+    )
+    assert summary.startswith("$ pytest tests/")
+    assert "12 passed" in summary
+
+
+def test_summarize_bash_error_gets_more_budget():
+    long_error = "Traceback (most recent call last):\n" + "x" * 2000
+    summary = _summarize_tool_result(
+        "Bash", {"command": "python run.py"}, long_error
+    )
+    # Error output should get 1200 char budget instead of 600
+    assert len(summary) > 600
+    assert "Traceback" in summary
+
+
+def test_summarize_read_is_compact():
+    content = "\n".join(f"line {i}" for i in range(100))
+    summary = _summarize_tool_result(
+        "Read", {"file_path": "/src/auth.py"}, content
+    )
+    assert "Read /src/auth.py" in summary
+    assert "100 lines" in summary
+    assert len(summary) < 100  # Very compact
+
+
+def test_summarize_write_is_compact():
+    summary = _summarize_tool_result(
+        "Write", {"file_path": "/src/new_file.py"}, "success"
+    )
+    assert summary == "Wrote /src/new_file.py"
+
+
+def test_summarize_edit_shows_changes():
+    summary = _summarize_tool_result(
+        "Edit",
+        {"file_path": "/src/auth.py", "old_string": "def login():", "new_string": "def login(user):"},
+        "success",
+    )
+    assert "Edited /src/auth.py" in summary
+    assert "login()" in summary or "login" in summary
+
+
+def test_summarize_grep_shows_pattern_and_results():
+    summary = _summarize_tool_result(
+        "Grep", {"pattern": "TODO"}, "src/main.py:10: # TODO fix this"
+    )
+    assert 'Grep "TODO"' in summary
+    assert "src/main.py" in summary
+
+
+def test_summarize_glob_shows_count():
+    summary = _summarize_tool_result(
+        "Glob", {"pattern": "**/*.py"}, "a.py\nb.py\nc.py"
+    )
+    assert 'Glob "**/*.py"' in summary
+    assert "3 files" in summary
+
+
+def test_summarize_agent_truncates():
+    summary = _summarize_tool_result(
+        "Agent", {}, "The agent found that the file uses a factory pattern."
+    )
+    assert summary.startswith("Agent:")
+    assert "factory pattern" in summary
+
+
+def test_summarize_default_truncates():
+    summary = _summarize_tool_result(
+        "CustomTool", {}, "x" * 500
+    )
+    assert summary.startswith("CustomTool:")
+    assert len(summary) <= 220  # tool name + ": " + 200 chars
+
+
+def test_summarize_empty_result():
+    assert _summarize_tool_result("Bash", {"command": "ls"}, "") == ""
+
+
+def test_summarize_mcp_tool_strips_prefix():
+    summary = _summarize_tool_result(
+        "mcp__synapt__recall_search", {}, "some results"
+    )
+    assert summary.startswith("recall_search:")
+
+
+# ---------------------------------------------------------------------------
+# Tests: _summarize_tool_input
+# ---------------------------------------------------------------------------
+
+def test_summarize_input_bash():
+    summary = _summarize_tool_input("Bash", {"command": "git status", "description": "Show status"})
+    assert "$ git status" in summary
+    assert "Show status" in summary
+
+
+def test_summarize_input_edit():
+    summary = _summarize_tool_input("Edit", {
+        "file_path": "/x.py", "old_string": "old code", "new_string": "new code",
+    })
+    assert "Edit /x.py" in summary
+
+
+def test_summarize_input_grep():
+    summary = _summarize_tool_input("Grep", {"pattern": "import os"})
+    assert 'Grep "import os"' in summary
+
+
+def test_summarize_input_websearch():
+    summary = _summarize_tool_input("WebSearch", {"query": "python async best practices"})
+    assert "Search: python async" in summary
+
+
+def test_summarize_input_unknown_returns_empty():
+    assert _summarize_tool_input("Read", {"file_path": "/x.py"}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: tool_content in parser
+# ---------------------------------------------------------------------------
+
+def test_parse_captures_tool_content():
+    """Parser captures summarized tool results in tool_content."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        entries = [
+            user_text_entry("Run the tests"),
+            assistant_entry(
+                text="Running tests now.",
+                tool_name="Bash",
+                tool_input={"command": "pytest tests/", "description": "Run tests"},
+                tool_use_id="toolu_001",
+            ),
+            tool_result_entry(
+                tool_use_id="toolu_001",
+                result="FAILED tests/test_auth.py::test_login - AssertionError",
+            ),
+        ]
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 1
+        chunk = chunks[0]
+        # tool_content should contain the command and error output
+        assert "$ pytest tests/" in chunk.tool_content
+        assert "FAILED" in chunk.tool_content or "AssertionError" in chunk.tool_content
+        # tool_content should also be in the combined searchable text
+        assert "pytest" in chunk.text
+
+
+def test_parse_tool_content_cap():
+    """tool_content is capped at 3000 chars."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        # Generate many tool results to exceed cap
+        entries = [user_text_entry("Do everything")]
+        for i in range(20):
+            entries.append(assistant_entry(
+                text="",
+                tool_name="Bash",
+                tool_input={"command": f"echo {'x' * 200}"},
+                tool_use_id=f"toolu_{i:03d}",
+                uuid=f"a{i}",
+            ))
+            entries.append(tool_result_entry(
+                tool_use_id=f"toolu_{i:03d}",
+                result="x" * 300,
+                uuid=f"tr{i}",
+            ))
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 1
+        assert len(chunks[0].tool_content) <= 3004  # 3000 + "..."
+        assert chunks[0].tool_content.endswith("...")
+
+
+def test_parse_records_byte_offsets():
+    """Parser records byte offsets into the transcript file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        entries = [
+            user_text_entry("first question"),
+            assistant_entry(text="first answer"),
+            user_text_entry("second question", uuid="u2"),
+            assistant_entry(text="second answer", uuid="a2"),
+        ]
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 2
+        # First chunk should start at offset 0
+        assert chunks[0].byte_offset == 0
+        assert chunks[0].byte_length > 0
+        # Second chunk should start after the first
+        assert chunks[1].byte_offset > chunks[0].byte_offset
+        assert chunks[1].byte_length > 0
+        # Transcript path should be set
+        assert chunks[0].transcript_path == str(transcript)
+        # Offsets should not overlap
+        assert chunks[1].byte_offset >= chunks[0].byte_offset + chunks[0].byte_length
+
+
+def test_parse_raised_caps():
+    """user_text cap is 1500, assistant_text cap is 5000."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        long_user = "x" * 2000
+        long_assistant = "y" * 6000
+        entries = [
+            user_text_entry(long_user),
+            assistant_entry(text=long_assistant),
+        ]
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 1
+        assert len(chunks[0].user_text) == 1503  # 1500 + "..."
+        assert chunks[0].user_text.endswith("...")
+        assert len(chunks[0].assistant_text) == 5003  # 5000 + "..."
+        assert chunks[0].assistant_text.endswith("...")
+
+
+# ---------------------------------------------------------------------------
+# Tests: drill-down (read_turn_context)
+# ---------------------------------------------------------------------------
+
+def test_read_turn_context():
+    """read_turn_context reads raw transcript content for a chunk."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        entries = [
+            user_text_entry("How do I fix the auth bug?"),
+            assistant_entry(
+                text="Let me check the code.",
+                tool_name="Read",
+                tool_input={"file_path": "/src/auth.py"},
+                tool_use_id="toolu_read1",
+            ),
+            tool_result_entry(
+                tool_use_id="toolu_read1",
+                result="def login():\n    pass",
+            ),
+        ]
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 1
+
+        index = TranscriptIndex(chunks)
+        context = index.read_turn_context(chunks[0].id)
+        assert "auth bug" in context
+        assert "Let me check the code" in context
+        assert "def login():" in context  # Full tool result content
+
+
+def test_read_turn_context_missing_chunk():
+    """read_turn_context returns error for unknown chunk ID."""
+    index = TranscriptIndex([])
+    result = index.read_turn_context("nonexistent:t0")
+    assert "not found" in result
+
+
+def test_read_turn_context_multibyte_utf8():
+    """Drill-down reads exact bytes, not characters, so multi-byte UTF-8 stays within turn bounds."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        # Write entries with ensure_ascii=False so emoji stay as raw UTF-8
+        entries = [
+            {"type": "user", "uuid": "u1", "timestamp": "2026-01-01",
+             "sessionId": "test-session-001",
+             "message": {"role": "user", "content": "Fix the bug \U0001f41b\U0001f41b\U0001f41b"}},
+            {"type": "assistant", "uuid": "a1", "timestamp": "2026-01-01",
+             "sessionId": "test-session-001",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "Done \u2705"}]}},
+            {"type": "user", "uuid": "u2", "timestamp": "2026-01-02",
+             "sessionId": "test-session-001",
+             "message": {"role": "user", "content": "NEXT TURN sentinel"}},
+            {"type": "assistant", "uuid": "a2", "timestamp": "2026-01-02",
+             "sessionId": "test-session-001",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "second answer"}]}},
+        ]
+        with open(transcript, "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 2
+
+        index = TranscriptIndex(chunks)
+        context = index.read_turn_context(chunks[0].id)
+        # First turn should contain the emoji but NOT the sentinel from turn 2
+        assert "\U0001f41b" in context
+        assert "NEXT TURN sentinel" not in context
+
+
+def test_read_turn_context_deleted_file():
+    """Drill-down returns friendly error when transcript file has been deleted."""
+    chunk = TranscriptChunk(
+        id="abc:t0", session_id="abc", timestamp="2026-01-01",
+        turn_index=0, user_text="hi", assistant_text="hello",
+        transcript_path="/nonexistent/path/to/deleted.jsonl",
+        byte_offset=0, byte_length=100,
+    )
+    index = TranscriptIndex([chunk])
+    result = index.read_turn_context("abc:t0")
+    assert "not found" in result.lower()
+
+
+def test_read_turn_context_no_offset():
+    """Drill-down returns friendly error for legacy chunks with no byte offset."""
+    chunk = TranscriptChunk(
+        id="old:t0", session_id="old", timestamp="2026-01-01",
+        turn_index=0, user_text="hi", assistant_text="hello",
+        byte_offset=-1,
+    )
+    index = TranscriptIndex([chunk])
+    result = index.read_turn_context("old:t0")
+    assert "no transcript offset" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: TranscriptChunk new fields
+# ---------------------------------------------------------------------------
+
+def test_chunk_to_dict_includes_new_fields():
+    chunk = TranscriptChunk(
+        id="abc:t0", session_id="abc", timestamp="2026-01-01",
+        turn_index=0, user_text="hi", assistant_text="hello",
+        tool_content="$ ls\nfile1.py",
+        transcript_path="/tmp/abc.jsonl",
+        byte_offset=100, byte_length=500,
+    )
+    d = chunk.to_dict()
+    assert d["tool_content"] == "$ ls\nfile1.py"
+    assert d["transcript_path"] == "/tmp/abc.jsonl"
+    assert d["byte_offset"] == 100
+    assert d["byte_length"] == 500
+
+
+def test_chunk_from_dict_handles_missing_new_fields():
+    """Old serialized chunks without new fields get defaults."""
+    d = {
+        "id": "abc:t0", "session_id": "abc", "timestamp": "2026-01-01",
+        "turn_index": 0, "user_text": "hi", "assistant_text": "hello",
+        "tools_used": [], "files_touched": [],
+    }
+    chunk = TranscriptChunk.from_dict(d)
+    assert chunk.tool_content == ""
+    assert chunk.transcript_path == ""
+    assert chunk.byte_offset == -1
+    assert chunk.byte_length == 0
+
+
+def test_chunk_build_text_includes_tool_content():
+    chunk = TranscriptChunk(
+        id="abc:t0", session_id="abc", timestamp="2026-01-01",
+        turn_index=0, user_text="hi", assistant_text="hello",
+        tool_content="$ pytest\n5 passed",
+    )
+    assert "pytest" in chunk.text
+    assert "5 passed" in chunk.text
+
+
+# ---------------------------------------------------------------------------
+# Tests: tool_use_error filtering (#274)
+# ---------------------------------------------------------------------------
+
+def test_parse_filters_tool_use_error_from_tool_content():
+    """tool_use_error messages are not stored in tool_content — they are noise."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        entries = [
+            user_text_entry("create a task"),
+            assistant_entry(
+                text="Creating task now.",
+                tool_name="TaskCreate",
+                tool_input={"title": "My task"},
+                tool_use_id="toolu_001",
+            ),
+            tool_result_entry(
+                tool_use_id="toolu_001",
+                result="<tool_use_error>Sibling tool call errored</tool_use_error>",
+            ),
+        ]
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 1
+        assert "<tool_use_error>" not in chunks[0].tool_content
+        assert "Sibling tool call errored" not in chunks[0].tool_content
+
+
+def test_parse_keeps_successful_tool_result_alongside_error():
+    """Filtering errors does not drop successful tool results in the same turn."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        transcript = Path(tmpdir) / "test-session-001.jsonl"
+
+        entries = [
+            user_text_entry("run tests and check status"),
+            assistant_entry(
+                text="Running.",
+                tool_name="Bash",
+                tool_input={"command": "pytest tests/"},
+                tool_use_id="toolu_bash",
+            ),
+            # Successful result — should be kept
+            tool_result_entry(
+                tool_use_id="toolu_bash",
+                result="5 passed in 0.3s",
+                uuid="tr_bash",
+            ),
+            assistant_entry(
+                text="",
+                tool_name="TaskCreate",
+                tool_input={"title": "Follow-up"},
+                tool_use_id="toolu_task",
+                uuid="a2",
+            ),
+            # Error result — should be filtered
+            tool_result_entry(
+                tool_use_id="toolu_task",
+                result="<tool_use_error>Sibling tool call errored</tool_use_error>",
+                uuid="tr_task",
+            ),
+        ]
+        write_jsonl(transcript, entries)
+
+        chunks = parse_transcript(transcript)
+        assert len(chunks) == 1
+        tc = chunks[0].tool_content
+        assert "5 passed" in tc
+        assert "<tool_use_error>" not in tc
+
+
+# ---------------------------------------------------------------------------
+# Tests: knowledge node coverage gate (#284)
+# ---------------------------------------------------------------------------
+
+def test_search_knowledge_filters_weak_single_token_matches():
+    """Knowledge nodes matching only one query token are filtered out."""
+    from synapt.recall.core import TranscriptIndex
+
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    # Patch _search_knowledge to exercise the coverage filter logic.
+    # Simulate two knowledge nodes: one with strong coverage, one weak.
+    strong_node = {
+        "content": "compact journal flock lock race TOCTOU",  # 5 query tokens present
+        "category": "debugging",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+    weak_node = {
+        "content": "always fix bugs promptly",  # only "fix" matches query
+        "category": "workflow",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+
+    from unittest.mock import patch, MagicMock
+    mock_db = MagicMock()
+    mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 2.8)]
+    mock_db.knowledge_by_rowid.return_value = {1: strong_node, 2: weak_node}
+    index._db = mock_db
+
+    # Query: "compact journal flock TOCTOU race fix" — 6 distinctive tokens
+    # min_matches = max(2, round(6 * 0.3)) = max(2, 2) = 2
+    # strong_node matches 5 tokens → kept
+    # weak_node matches 1 token ("fix") → filtered
+    results = index._search_knowledge("compact journal flock TOCTOU race fix")
+    assert len(results) == 1
+    assert results[0]["content"] == strong_node["content"]
+
+
+def test_search_knowledge_short_query_requires_two_matches():
+    """Even for short queries (2-3 tokens), two token matches are required."""
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import patch, MagicMock
+
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    exact_match = {
+        "content": "use swift repair training loops",  # both query tokens present
+        "category": "architecture",
+        "confidence": 0.9,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+    partial_match = {
+        "content": "run swift builds in CI",  # only "swift" present, not "repair"
+        "category": "tooling",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+
+    mock_db = MagicMock()
+    mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 2.9)]
+    mock_db.knowledge_by_rowid.return_value = {1: exact_match, 2: partial_match}
+    index._db = mock_db
+
+    # Query: "swift repair" — 2 tokens, min_matches = max(2, round(2*0.3)) = max(2,1) = 2
+    results = index._search_knowledge("swift repair")
+    assert len(results) == 1
+    assert results[0]["content"] == exact_match["content"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: date format in search results (#268, #275)
+# ---------------------------------------------------------------------------
+
+def test_format_results_shows_more_assistant_content():
+    """Search results show up to 1500 chars of assistant text, not 500."""
+    from synapt.recall.core import TranscriptIndex
+
+    long_answer = "A" * 1200 + " CONCLUSION HERE"
+    chunks = [TranscriptChunk(
+        id="abc:t0", session_id="abcdef12-0000-0000-0000-000000000000",
+        timestamp="2026-03-05T14:23:47Z", turn_index=0,
+        user_text="what is the answer",
+        assistant_text=long_answer,
+    )]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("answer conclusion", max_chunks=1, max_tokens=2000)
+
+    assert "CONCLUSION HERE" in result  # visible under new 1500-char cap, not old 500
+
+
+def test_format_results_shows_more_tool_content():
+    """Search results show up to 400 chars of tool content, not 200."""
+    from synapt.recall.core import TranscriptIndex
+
+    long_tool = "$ pytest\n" + "RESULT_LINE\n" * 30  # well over 200 chars
+    chunks = [TranscriptChunk(
+        id="abc:t0", session_id="abcdef12-0000-0000-0000-000000000000",
+        timestamp="2026-03-05T14:23:47Z", turn_index=0,
+        user_text="run tests",
+        assistant_text="Running.",
+        tool_content=long_tool,
+    )]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("run tests pytest", max_chunks=1, max_tokens=2000)
+
+    # Count how many RESULT_LINEs appear — old cap (200) shows ~17, new cap (400) ~35
+    shown_lines = result.count("RESULT_LINE")
+    assert shown_lines > 20  # meaningfully more than the old 200-char cap allowed
+
+
+def test_format_results_shows_more_user_text():
+    """Search results show up to 500 chars of user text, not 300."""
+    from synapt.recall.core import TranscriptIndex
+
+    long_question = "Q" * 400 + " IMPORTANT DETAIL"
+    chunks = [TranscriptChunk(
+        id="abc:t0", session_id="abcdef12-0000-0000-0000-000000000000",
+        timestamp="2026-03-05T14:23:47Z", turn_index=0,
+        user_text=long_question,
+        assistant_text="The answer.",
+    )]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("important detail question", max_chunks=1, max_tokens=2000)
+
+    assert "IMPORTANT DETAIL" in result  # visible under new 500-char cap, not old 300
+
+
+def test_format_results_shows_wider_context_preview():
+    """Context preview shows up to 120 chars, not 80."""
+    from synapt.recall.core import TranscriptIndex
+
+    prev_question = "A" * 100 + " CONTEXT END"
+    chunks = [
+        TranscriptChunk(
+            id="abc:t0", session_id="abcdef12-0000-0000-0000-000000000000",
+            timestamp="2026-03-05T14:00:00Z", turn_index=0,
+            user_text=prev_question,
+            assistant_text="First answer.",
+        ),
+        TranscriptChunk(
+            id="abc:t1", session_id="abcdef12-0000-0000-0000-000000000000",
+            timestamp="2026-03-05T14:05:00Z", turn_index=1,
+            user_text="follow up question here",
+            assistant_text="Second answer with details.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("follow up question", max_chunks=1, max_tokens=2000)
+
+    assert "CONTEXT END" in result  # visible in context preview at 112 chars, past old 80
+
+
+def test_format_results_date_drops_T_and_seconds():
+    """Search result headers show 'YYYY-MM-DD HH:MM' not ISO 'YYYY-MM-DDTHH:MM:SS'."""
+    from synapt.recall.core import TranscriptIndex
+
+    chunks = [TranscriptChunk(
+        id="abc:t0", session_id="abcdef12-0000-0000-0000-000000000000",
+        timestamp="2026-03-05T14:23:47Z", turn_index=0,
+        user_text="test query content here",
+        assistant_text="The answer is here.",
+    )]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("test query content", max_chunks=1, max_tokens=500)
+
+    assert "T14:23:47" not in result   # old ISO format gone
+    assert "2026-03-05 14:23" in result  # new readable format present
+
+
+def test_format_results_journal_chunk_uses_readable_date():
+    """Journal chunks also use the readable date format."""
+    from synapt.recall.core import TranscriptIndex, TranscriptChunk
+
+    journal_chunk = TranscriptChunk(
+        id="abc:journal:deadbeef", session_id="abcdef12-0000-0000-0000-000000000000",
+        timestamp="2026-03-04T09:05:30Z", turn_index=-1,
+        user_text="Session focus: add live search",
+        assistant_text="Done: implemented live.py",
+    )
+    index = TranscriptIndex([journal_chunk])
+    result = index.lookup("live search session focus", max_chunks=1, max_tokens=500)
+
+    assert "T09:05:30" not in result
+    assert "2026-03-04 09:05" in result
+    assert "journal" in result
