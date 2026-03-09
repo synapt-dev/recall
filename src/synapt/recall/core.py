@@ -2299,17 +2299,34 @@ def _git_main_worktree_root(path: Path) -> Path | None:
         return None
 
 
+_gripspace_cache: dict[str, Path | None] = {}
+
+
 def _find_gripspace_root(path: Path) -> Path | None:
     """Walk up from *path* to find a ``.gitgrip/`` directory (GitGrip gripspace root).
 
     Returns the gripspace root path, or *None* if not inside a gripspace.
     Analogous to ``_git_main_worktree_root`` but for multi-repo gripspaces.
+
+    Stops at ``$HOME`` to avoid matching stray ``.gitgrip/`` directories
+    above the user's project hierarchy.  Results are cached per resolved path.
     """
     current = path.resolve()
+    cache_key = str(current)
+    if cache_key in _gripspace_cache:
+        return _gripspace_cache[cache_key]
+
+    home = Path.home().resolve()
+    start = current
     while current != current.parent:
         if (current / ".gitgrip").is_dir():
+            _gripspace_cache[cache_key] = current
             return current
+        # Don't walk above $HOME
+        if current == home:
+            break
         current = current.parent
+    _gripspace_cache[cache_key] = None
     return None
 
 
@@ -2336,13 +2353,19 @@ def _worktree_name(project_dir: Path | None = None) -> str:
 
 
 def project_data_dir(project_dir: Path | None = None) -> Path:
-    """Return the root synapt recall data directory (always on the main worktree).
+    """Return the root synapt recall data directory.
 
-    ALL recall data lives under ``<main-worktree>/.synapt/recall/``:
+    ALL recall data lives under ``<root>/.synapt/recall/``:
     shared data (index, knowledge) at the root, and per-worktree data
     (transcripts, journal) under ``worktrees/<name>/``.
 
-    Auto-migrates from two legacy locations on the main worktree:
+    Root resolution priority:
+      1. Git worktree → main worktree root
+      2. GitGrip gripspace → gripspace root (all constituent repos share
+         one index; each sub-repo gets its own ``worktrees/<name>/`` subdir)
+      3. CWD as fallback
+
+    Auto-migrates from two legacy locations:
       1. ``.synapse/recall/``  → ``.synapt/recall/``
       2. ``.synapse-recall/``  → ``.synapt/recall/``
     """
@@ -2458,6 +2481,9 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
     a slug derived from the *worktree* path.  This function returns transcript
     directories for both the main worktree and the current worktree (if
     different), so that ``recall build`` archives sessions from all worktrees.
+
+    In a gripspace, also discovers transcripts from all *direct child*
+    repos (directories with ``.git``).  Nested repos are not discovered.
     """
     actual_dir = (project_dir or Path.cwd()).resolve()
     dirs: list[Path] = []

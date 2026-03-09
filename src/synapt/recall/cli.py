@@ -566,7 +566,7 @@ def cmd_build(args: argparse.Namespace) -> None:
             source_dirs = auto_dirs
             for td in auto_dirs:
                 print(f"[build] Found project transcripts at {td}")
-        elif not all_worktree_archive_dirs():
+        elif not all_worktree_archive_dirs(project):
             # No live transcripts AND no archived transcripts — nothing to build
             print("Error: no transcripts found for current project.", file=sys.stderr)
             print("Specify --source, --hf, or --chatgpt-archive explicitly.", file=sys.stderr)
