@@ -2299,6 +2299,20 @@ def _git_main_worktree_root(path: Path) -> Path | None:
         return None
 
 
+def _find_gripspace_root(path: Path) -> Path | None:
+    """Walk up from *path* to find a ``.gitgrip/`` directory (GitGrip gripspace root).
+
+    Returns the gripspace root path, or *None* if not inside a gripspace.
+    Analogous to ``_git_main_worktree_root`` but for multi-repo gripspaces.
+    """
+    current = path.resolve()
+    while current != current.parent:
+        if (current / ".gitgrip").is_dir():
+            return current
+        current = current.parent
+    return None
+
+
 def project_slug(project_dir: Path | None = None) -> str:
     """Convert a project path to Claude Code's directory slug format.
 
@@ -2333,9 +2347,19 @@ def project_data_dir(project_dir: Path | None = None) -> Path:
       2. ``.synapse-recall/``  → ``.synapt/recall/``
     """
     root = (project_dir or Path.cwd()).resolve()
+
+    # Priority 1: git worktree → resolve to main worktree root
     main_root = _git_main_worktree_root(root)
     if main_root is not None:
         root = main_root
+
+    # Priority 2: GitGrip gripspace → resolve to gripspace root
+    # If CWD (or resolved root) is inside a gripspace, prefer the gripspace
+    # root so all constituent repos share one recall index.
+    grip_root = _find_gripspace_root(root)
+    if grip_root is not None:
+        root = grip_root
+
     new_dir = root / ".synapt" / "recall"
 
     if not new_dir.exists():
@@ -2455,6 +2479,18 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
             main_d = Path.home() / ".claude" / "projects" / main_slug
             if main_d.is_dir() and any(main_d.glob("*.jsonl")):
                 dirs.append(main_d)
+
+    # If in a gripspace, discover transcripts from all constituent repos
+    grip_root = _find_gripspace_root(actual_dir)
+    if grip_root is not None:
+        for child in sorted(grip_root.iterdir()):
+            if child.is_dir() and (child / ".git").exists():
+                child_slug = project_slug(child)
+                if child_slug not in seen_slugs:
+                    seen_slugs.add(child_slug)
+                    child_d = Path.home() / ".claude" / "projects" / child_slug
+                    if child_d.is_dir() and any(child_d.glob("*.jsonl")):
+                        dirs.append(child_d)
 
     return dirs
 
