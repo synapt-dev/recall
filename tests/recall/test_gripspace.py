@@ -1,12 +1,13 @@
 """Tests for GitGrip gripspace detection in recall path resolution."""
 
-import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 from synapt.recall.core import (
     _find_gripspace_root,
     _gripspace_cache,
+    _GRIPSPACE_CACHE_TTL,
     project_data_dir,
     project_slug,
     project_transcript_dirs,
@@ -115,9 +116,29 @@ class TestFindGripspaceRoot:
 
         result = _find_gripspace_root(plain)
         assert result is None
-        # Verify None is cached too
+        # Verify None is cached too (stored as (value, timestamp) tuple)
         assert str(plain) in _gripspace_cache
-        assert _gripspace_cache[str(plain)] is None
+        value, ts = _gripspace_cache[str(plain)]
+        assert value is None
+
+    def test_cache_expires_after_ttl(self, tmp_path):
+        """Cache entries expire after TTL, picking up new gripspaces."""
+        plain = tmp_path / "workspace"
+        plain.mkdir()
+
+        # First call: no gripspace → caches None
+        result1 = _find_gripspace_root(plain)
+        assert result1 is None
+
+        # Simulate TTL expiry by backdating the cache entry
+        cache_key = str(plain.resolve())
+        value, _ = _gripspace_cache[cache_key]
+        _gripspace_cache[cache_key] = (value, time.monotonic() - _GRIPSPACE_CACHE_TTL - 1)
+
+        # Now add .gitgrip/ and call again — should find it
+        (plain / ".gitgrip").mkdir()
+        result2 = _find_gripspace_root(plain)
+        assert result2 == plain
 
 
 class TestProjectDataDirGripspace:
@@ -217,6 +238,30 @@ class TestProjectTranscriptDirsGripspace:
         # Should work without errors; only real-repo would be checked
         assert isinstance(dirs, list)
 
+    def test_includes_gripspace_root_own_transcripts(self, tmp_path):
+        """Gripspace root's own transcript dir is included via the CWD slug."""
+        grip = _make_gripspace(tmp_path)
+        repo = _make_git_repo(grip, "repo-a")
+
+        fake_home = tmp_path / "home"
+        # Create transcript dir for the gripspace root itself
+        slug_root = str(grip).replace("/", "-")
+        td_root = fake_home / ".claude" / "projects" / slug_root
+        td_root.mkdir(parents=True)
+        (td_root / "session-root.jsonl").write_text("{}")
+
+        # And for the sub-repo
+        slug_repo = str(repo).replace("/", "-")
+        td_repo = fake_home / ".claude" / "projects" / slug_repo
+        td_repo.mkdir(parents=True)
+        (td_repo / "session-repo.jsonl").write_text("{}")
+
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            dirs = project_transcript_dirs(grip)
+
+        assert td_root in dirs
+        assert td_repo in dirs
+
     def test_standalone_repo_returns_empty_when_no_transcripts(self, tmp_path):
         """Standalone git repo outside any gripspace."""
         repo = tmp_path / "standalone"
@@ -230,3 +275,40 @@ class TestProjectTranscriptDirsGripspace:
             dirs = project_transcript_dirs(repo)
 
         assert dirs == []
+
+
+class TestGripspaceEdgeCases:
+    """Edge cases for gripspace detection."""
+
+    def setup_method(self):
+        _gripspace_cache.clear()
+
+    def test_path_outside_home_does_not_crash(self, tmp_path):
+        """Paths outside $HOME don't walk to filesystem root."""
+        # tmp_path is typically /tmp/... which is outside $HOME
+        project = tmp_path / "outside-home"
+        project.mkdir()
+
+        # Fake $HOME that is NOT a parent of tmp_path
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            result = _find_gripspace_root(project)
+        # Should return None without errors — walks up to / but finds nothing
+        assert result is None
+
+    def test_iterdir_permission_error_handled(self, tmp_path):
+        """OSError during iterdir() in gripspace doesn't crash discovery."""
+        grip = _make_gripspace(tmp_path)
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir(parents=True)
+
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            # Mock iterdir to raise PermissionError
+            with patch.object(type(grip), "iterdir", side_effect=PermissionError("denied")):
+                dirs = project_transcript_dirs(grip)
+
+        # Should return empty list, not crash
+        assert isinstance(dirs, list)

@@ -2299,7 +2299,8 @@ def _git_main_worktree_root(path: Path) -> Path | None:
         return None
 
 
-_gripspace_cache: dict[str, Path | None] = {}
+_gripspace_cache: dict[str, tuple[Path | None, float]] = {}
+_GRIPSPACE_CACHE_TTL = 60.0  # seconds
 
 
 def _find_gripspace_root(path: Path) -> Path | None:
@@ -2309,24 +2310,30 @@ def _find_gripspace_root(path: Path) -> Path | None:
     Analogous to ``_git_main_worktree_root`` but for multi-repo gripspaces.
 
     Stops at ``$HOME`` to avoid matching stray ``.gitgrip/`` directories
-    above the user's project hierarchy.  Results are cached per resolved path.
+    above the user's project hierarchy.  Results are cached per resolved path
+    with a 60-second TTL so long-running processes (MCP server) pick up
+    gripspace changes without restart.
     """
+    import time
+
     current = path.resolve()
     cache_key = str(current)
-    if cache_key in _gripspace_cache:
-        return _gripspace_cache[cache_key]
+    cached = _gripspace_cache.get(cache_key)
+    if cached is not None:
+        value, ts = cached
+        if time.monotonic() - ts < _GRIPSPACE_CACHE_TTL:
+            return value
 
     home = Path.home().resolve()
-    start = current
     while current != current.parent:
         if (current / ".gitgrip").is_dir():
-            _gripspace_cache[cache_key] = current
+            _gripspace_cache[cache_key] = (current, time.monotonic())
             return current
         # Don't walk above $HOME
         if current == home:
             break
         current = current.parent
-    _gripspace_cache[cache_key] = None
+    _gripspace_cache[cache_key] = (None, time.monotonic())
     return None
 
 
@@ -2509,7 +2516,11 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
     # If in a gripspace, discover transcripts from all constituent repos
     grip_root = _find_gripspace_root(actual_dir)
     if grip_root is not None:
-        for child in sorted(grip_root.iterdir()):
+        try:
+            children = sorted(grip_root.iterdir())
+        except OSError:
+            children = []
+        for child in children:
             if child.is_dir() and (child / ".git").exists():
                 child_slug = project_slug(child)
                 if child_slug not in seen_slugs:
