@@ -1082,6 +1082,7 @@ class TranscriptIndex:
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
             half_life, threshold_ratio, depth,
+            emb_weight=emb_weight,
         )
 
     def _global_lookup_fts(
@@ -1102,7 +1103,7 @@ class TranscriptIndex:
         # Search knowledge nodes first (ranked higher via boost)
         knowledge_results = self._search_knowledge(
             query, max_chunks, include_historical=include_historical,
-            knowledge_boost=knowledge_boost,
+            knowledge_boost=knowledge_boost, emb_weight=emb_weight,
         )
 
         # Concise mode: search clusters directly, return only summaries
@@ -1314,6 +1315,7 @@ class TranscriptIndex:
         half_life: float,
         threshold_ratio: float,
         depth: str = "full",
+        emb_weight: float = 1.0,
     ) -> str:
         """Global lookup using in-memory BM25 (legacy fallback)."""
         # BM25 path has no cluster FTS — concise mode requires FTS5
@@ -1363,7 +1365,9 @@ class TranscriptIndex:
                         if self.chunks[i].turn_index < 0
                     ]
 
-                merged = weighted_rrf_merge(bm25_ranked, emb_ranked)
+                merged = weighted_rrf_merge(
+                    bm25_ranked, emb_ranked, emb_weight=emb_weight,
+                )
                 top = [(i, s) for i, s in merged[:max_chunks * 2] if s > 0]
             except Exception as e:
                 logger.warning("Hybrid search failed, using BM25 only: %s", e)
@@ -1400,7 +1404,7 @@ class TranscriptIndex:
         knowledge_results = (
             self._search_knowledge(
                 query, max_chunks, include_historical=include_historical,
-                knowledge_boost=knowledge_boost,
+                knowledge_boost=knowledge_boost, emb_weight=emb_weight,
             )
             if self._db else []
         )
@@ -1600,6 +1604,7 @@ class TranscriptIndex:
         max_results: int = 5,
         include_historical: bool = False,
         knowledge_boost: float = 2.0,
+        emb_weight: float = 1.0,
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
@@ -1631,7 +1636,9 @@ class TranscriptIndex:
             # Merge FTS and embedding results via RRF
             if fts_hits and emb_hits:
                 from synapt.recall.hybrid import weighted_rrf_merge
-                merged = weighted_rrf_merge(fts_hits, emb_hits)
+                merged = weighted_rrf_merge(
+                    fts_hits, emb_hits, emb_weight=emb_weight,
+                )
             elif fts_hits:
                 merged = fts_hits
             elif emb_hits:
