@@ -1740,7 +1740,7 @@ class RecallDB:
         count = 0
         for row in rows:
             try:
-                last = datetime.fromisoformat(row["last_accessed"])
+                last = datetime.fromisoformat(row["last_accessed"].replace("Z", "+00:00"))
                 if last.tzinfo is None:
                     last = last.replace(tzinfo=timezone.utc)
                 days_since = (now - last).total_seconds() / 86400

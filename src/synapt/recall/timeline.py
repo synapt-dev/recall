@@ -60,8 +60,8 @@ def _hours_between(ts1: str, ts2: str) -> float:
     Handles mixed timezone-aware/naive timestamps by stripping tzinfo
     when they don't match (treats both as UTC).
     """
-    t1 = datetime.fromisoformat(ts1)
-    t2 = datetime.fromisoformat(ts2)
+    t1 = datetime.fromisoformat(ts1.replace("Z", "+00:00"))
+    t2 = datetime.fromisoformat(ts2.replace("Z", "+00:00"))
     # Prevent TypeError on mixed aware/naive comparison
     if (t1.tzinfo is None) != (t2.tzinfo is None):
         t1 = t1.replace(tzinfo=None)
