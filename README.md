@@ -113,18 +113,37 @@ Results are merged via **Reciprocal Rank Fusion** (RRF), which combines rankings
 
 Query intent classification then adjusts parameters — debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes, exploratory queries boost semantic matching.
 
-## Optional backends
+## Models and dependencies
 
-Synapt uses local LLMs for enrichment and summarization. Install a backend if you want LLM-powered features (`recall_enrich`, `recall_consolidate`):
+Synapt uses **two types of models** for different purposes. All models are fetched from HuggingFace on first use and cached locally. No API token is required — all default models are public.
 
-```bash
-# Ollama (recommended)
-# Install from https://ollama.com, then:
-ollama pull ministral:3b
+### Search (included by default)
 
-# MLX (Apple Silicon)
-pip install mlx-lm
-```
+`pip install synapt` installs everything needed for hybrid search:
+
+| Model | Purpose | Size | Library |
+|-------|---------|------|---------|
+| [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | Embedding vectors for semantic search | ~90 MB | sentence-transformers |
+| [flan-t5-base](https://huggingface.co/google/flan-t5-base) | Encoder-decoder summarization | ~1 GB | transformers |
+
+These are **encoder models** (not chat LLMs). They run locally on CPU, require no server, and are downloaded to `~/.cache/huggingface/` on first use.
+
+`sentence-transformers` is a default dependency. It transitively installs `transformers` and `torch`, which makes flan-t5-base available for summarization tasks automatically.
+
+### Enrichment (optional LLM backend)
+
+The `recall_enrich` and `recall_consolidate` tools use a **decoder-only chat LLM** to generate journal summaries and extract knowledge nodes. These are optional — core search works without them.
+
+Synapt auto-selects the best available backend:
+
+| Priority | Backend | Model | Install |
+|----------|---------|-------|---------|
+| 1st | **MLX** (Apple Silicon) | [Ministral-3B-4bit](https://huggingface.co/mlx-community/Ministral-3-3B-Instruct-2512-4bit) (~1.7 GB) | `pip install mlx-lm` |
+| 2nd | **Ollama** | ministral:3b (~1.7 GB) | [ollama.com](https://ollama.com), then `ollama pull ministral:3b` |
+
+MLX is preferred over Ollama when both are available — it runs in-process with no server dependency. Ollama is the cross-platform fallback for Linux/Windows.
+
+If neither is installed, enrichment tools return a message explaining what to install. Search, journal, reminders, and all other features work normally without an LLM backend.
 
 ## Plugins
 
