@@ -2084,7 +2084,11 @@ class TranscriptIndex:
     def _format_chunk_block(self, idx: int) -> str:
         """Format a single chunk as a display block."""
         chunk = self.chunks[idx]
-        raw_ts = chunk.timestamp[:16] if chunk.timestamp else "unknown"
+        raw_ts = chunk.timestamp if chunk.timestamp else "unknown"
+        # For ISO 8601 timestamps, show date + HH:MM (drop seconds/tz).
+        # For free-text timestamps (e.g. "1:56 pm on 8 May, 2023"), keep as-is.
+        if len(raw_ts) > 16 and raw_ts[4:5] == "-" and raw_ts[10:11] == "T":
+            raw_ts = raw_ts[:16]
         ts_display = raw_ts.replace("T", " ")
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
         header = f"--- [{ts_display} session {chunk.session_id[:8]}] {turn_label} ---"
