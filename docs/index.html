@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synapt - Persistent Memory for AI Coding Assistants</title>
+  <meta name="description" content="Synapt indexes your past AI coding sessions and makes them searchable. Hybrid BM25 + semantic search with Reciprocal Rank Fusion.">
+  <meta property="og:title" content="Synapt">
+  <meta property="og:description" content="Persistent conversational memory for AI coding assistants">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://synapt.dev">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --purple: #7c5cbf;
+      --purple-light: #9b7fd4;
+      --teal: #00e5cc;
+      --teal-dim: #00c4ae;
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2129;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --border: #30363d;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      overflow-x: auto;
+    }
+    code {
+      background: var(--bg-code);
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+    }
+    pre code { background: none; padding: 0; }
+
+    /* Layout */
+    .container { max-width: 960px; margin: 0 auto; padding: 0 1.5rem; }
+    section { padding: 5rem 0; }
+
+    /* Nav */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(13, 17, 23, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 0;
+    }
+    nav .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    nav .logo {
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    nav .logo img { height: 28px; }
+    nav ul { list-style: none; display: flex; gap: 1.5rem; }
+    nav ul a { color: var(--text-dim); font-size: 0.9rem; font-weight: 500; }
+    nav ul a:hover { color: var(--text); text-decoration: none; }
+
+    /* Hero */
+    .hero {
+      text-align: center;
+      padding: 6rem 0 4rem;
+    }
+    .hero h1 {
+      font-size: 3.2rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 1.25rem;
+      background: linear-gradient(135deg, var(--text) 0%, var(--purple-light) 50%, var(--teal) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero p {
+      font-size: 1.2rem;
+      color: var(--text-dim);
+      max-width: 600px;
+      margin: 0 auto 2rem;
+    }
+    .hero-actions {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1.5rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      transition: all 0.2s;
+    }
+    .btn-primary {
+      background: var(--purple);
+      color: white;
+    }
+    .btn-primary:hover { background: var(--purple-light); text-decoration: none; }
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { border-color: var(--text-dim); text-decoration: none; }
+    .install-cmd {
+      display: inline-flex;
+      align-items: center;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.7rem 1.25rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem;
+      color: var(--teal);
+      margin-top: 1.5rem;
+    }
+    .install-cmd .dollar { color: var(--text-dim); margin-right: 0.5rem; }
+
+    /* Features */
+    .features { border-top: 1px solid var(--border); }
+    .features h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 3rem;
+    }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+    }
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+    .feature-card h3 {
+      font-size: 1.05rem;
+      margin-bottom: 0.5rem;
+      color: var(--text);
+    }
+    .feature-card p {
+      font-size: 0.9rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+    .feature-card .tag {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.2em 0.6em;
+      border-radius: 4px;
+      margin-bottom: 0.75rem;
+    }
+    .tag-search { background: rgba(124, 92, 191, 0.2); color: var(--purple-light); }
+    .tag-memory { background: rgba(0, 229, 204, 0.15); color: var(--teal); }
+    .tag-tools { background: rgba(139, 148, 158, 0.2); color: var(--text-dim); }
+
+    /* Architecture */
+    .architecture { border-top: 1px solid var(--border); }
+    .architecture h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
+    .architecture > .container > p {
+      text-align: center;
+      color: var(--text-dim);
+      margin-bottom: 2.5rem;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .arch-diagram {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      line-height: 1.7;
+      overflow-x: auto;
+      white-space: pre;
+      color: var(--text-dim);
+    }
+    .arch-diagram .hl { color: var(--teal); }
+    .arch-diagram .hl2 { color: var(--purple-light); }
+    .arch-diagram .dim { color: #484f58; }
+
+    /* Tools table */
+    .tools { border-top: 1px solid var(--border); }
+    .tools h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 2.5rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      font-weight: 600;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    td code { font-size: 0.85rem; color: var(--teal); }
+
+    /* Quick start */
+    .quickstart { border-top: 1px solid var(--border); }
+    .quickstart h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 2.5rem;
+    }
+    .steps {
+      display: grid;
+      gap: 2rem;
+      max-width: 700px;
+      margin: 0 auto;
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 2.5rem 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+    .step-num {
+      width: 2.5rem;
+      height: 2.5rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.9rem;
+      color: var(--purple-light);
+      flex-shrink: 0;
+    }
+    .step h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .step p { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.75rem; }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2.5rem 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+    footer a { color: var(--text-dim); }
+    footer a:hover { color: var(--text); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .hero h1 { font-size: 2.2rem; }
+      .hero p { font-size: 1rem; }
+      section { padding: 3rem 0; }
+      .arch-diagram { font-size: 0.7rem; padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container">
+      <a href="/" class="logo">
+        <img src="https://raw.githubusercontent.com/laynepenney/synapt/main/assets/logo.png" alt="">
+        synapt
+      </a>
+      <ul>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#quickstart">Quick start</a></li>
+        <li><a href="#tools">Tools</a></li>
+        <li><a href="https://github.com/laynepenney/synapt">GitHub</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <h1>Memory for AI coding assistants</h1>
+      <p>
+        Synapt indexes your past sessions and makes them searchable &mdash;
+        so your AI assistant remembers what you worked on, decisions you made,
+        and patterns you established.
+      </p>
+      <div class="hero-actions">
+        <a href="#quickstart" class="btn btn-primary">Get started</a>
+        <a href="https://github.com/laynepenney/synapt" class="btn btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <div class="install-cmd">
+        <span class="dollar">$</span> pip install synapt
+      </div>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <div class="container">
+      <h2>Features</h2>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="tag tag-search">Search</div>
+          <h3>Hybrid RRF search</h3>
+          <p>BM25 full-text search fused with 384-dim semantic embeddings via Reciprocal Rank Fusion. Surfaces results that keyword search alone would miss.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-search">Search</div>
+          <h3>Query intent routing</h3>
+          <p>Classifies queries as factual, debug, exploratory, or procedural. Adjusts recency decay, knowledge boost, and embedding weight automatically.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-memory">Memory</div>
+          <h3>Knowledge consolidation</h3>
+          <p>Extracts durable facts from session journals into a knowledge base with lineage tracking, contradiction detection, and confidence scoring.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-memory">Memory</div>
+          <h3>Session journal</h3>
+          <p>Rich entries with focus, decisions, accomplishments, and next steps. Auto-extracted at session end, searchable across all sessions.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-memory">Memory</div>
+          <h3>Topic clustering</h3>
+          <p>Groups related chunks across sessions via Jaccard token-overlap. LLM-generated summaries for fast context retrieval in concise mode.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-tools">Tools</div>
+          <h3>13 MCP tools</h3>
+          <p>Search, journal, reminders, timeline, enrichment, knowledge management. Works with Claude Code and any MCP-compatible assistant.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-tools">Local-first</div>
+          <h3>Zero cloud dependencies</h3>
+          <p>SQLite + local embeddings. No API keys, no external services. All data stays on your machine. Works offline.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-search">Search</div>
+          <h3>Adaptive working memory</h3>
+          <p>Access tracking boosts frequently-retrieved chunks. Active topics surface naturally without manual curation.</p>
+        </div>
+        <div class="feature-card">
+          <div class="tag tag-tools">Tools</div>
+          <h3>Plugin system</h3>
+          <p>Extend with additional MCP tools via Python entry points. Plugins are auto-discovered and loaded at server startup.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="architecture" id="architecture">
+    <div class="container">
+      <h2>How search works</h2>
+      <p>Two retrieval paths run in parallel and merge at the rank level &mdash; no score normalization needed.</p>
+      <div class="arch-diagram"><span class="dim">                         query</span>
+<span class="dim">                           |</span>
+<span class="dim">                    +--------------+</span>
+<span class="dim">                    |</span> <span class="hl2">intent classify</span> <span class="dim">|</span>
+<span class="dim">                    +--------------+</span>
+<span class="dim">                     /     |       \</span>
+<span class="dim">              half_life  emb_wt  know_boost</span>
+<span class="dim">                   /       |         \</span>
+<span class="dim">        +---------+    +----------+   +-------------+</span>
+<span class="dim">        |</span> <span class="hl">BM25/FTS5</span> <span class="dim">|    |</span> <span class="hl">Embedding</span>  <span class="dim">|   |</span> <span class="hl2">Knowledge</span>     <span class="dim">|</span>
+<span class="dim">        |</span> <span class="hl">+ decay</span>   <span class="dim">|    |</span> <span class="hl">384-dim</span>    <span class="dim">|   |</span> <span class="hl2">FTS + embed</span>   <span class="dim">|</span>
+<span class="dim">        +---------+    +----------+   +-------------+</span>
+<span class="dim">              \             /                |</span>
+<span class="dim">          +------------------+               |</span>
+<span class="dim">          |</span> <span class="hl">Reciprocal Rank</span>  <span class="dim">|               |</span>
+<span class="dim">          |</span> <span class="hl">Fusion (k=60)</span>    <span class="dim">|               |</span>
+<span class="dim">          +------------------+               |</span>
+<span class="dim">                    \                        /</span>
+<span class="dim">                 +---------------------------+</span>
+<span class="dim">                 |</span>  <span class="hl2">ranked results + knowledge</span>  <span class="dim">|</span>
+<span class="dim">                 +---------------------------+</span></div>
+    </div>
+  </section>
+
+  <section class="quickstart" id="quickstart">
+    <div class="container">
+      <h2>Quick start</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div>
+            <h3>Install</h3>
+            <pre><code>pip install synapt</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div>
+            <h3>Build the index</h3>
+            <p>Discovers Claude Code transcripts automatically.</p>
+            <pre><code>synapt recall build</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div>
+            <h3>Add the MCP server</h3>
+            <p>Add to <code>~/.claude/mcp.json</code> for all projects:</p>
+            <pre><code>{
+  "mcpServers": {
+    "synapt": {
+      "type": "stdio",
+      "command": "synapt",
+      "args": ["server"]
+    }
+  }
+}</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div>
+            <h3>Set up hooks</h3>
+            <p>Auto-archives transcripts and writes journal entries.</p>
+            <pre><code>synapt recall setup</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tools" id="tools">
+    <div class="container">
+      <h2>MCP tools</h2>
+      <table>
+        <thead>
+          <tr><th>Tool</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>recall_search</code></td><td>Search past sessions by query with hybrid BM25 + semantic ranking</td></tr>
+          <tr><td><code>recall_context</code></td><td>Get context summary for the current session</td></tr>
+          <tr><td><code>recall_files</code></td><td>Find sessions that touched specific files</td></tr>
+          <tr><td><code>recall_sessions</code></td><td>List indexed sessions with metadata</td></tr>
+          <tr><td><code>recall_timeline</code></td><td>View chronological work arcs</td></tr>
+          <tr><td><code>recall_journal</code></td><td>Read or write rich session journal entries</td></tr>
+          <tr><td><code>recall_remind</code></td><td>Set cross-session sticky reminders</td></tr>
+          <tr><td><code>recall_build</code></td><td>Build or rebuild the transcript index</td></tr>
+          <tr><td><code>recall_setup</code></td><td>Auto-configure hooks and MCP integration</td></tr>
+          <tr><td><code>recall_stats</code></td><td>Index statistics and embedding status</td></tr>
+          <tr><td><code>recall_enrich</code></td><td>LLM-powered chunk and cluster summarization</td></tr>
+          <tr><td><code>recall_consolidate</code></td><td>Extract durable knowledge from journals</td></tr>
+          <tr><td><code>recall_contradict</code></td><td>Flag and resolve contradictions in knowledge</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>
+        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://pypi.org/project/synapt/">PyPI</a>
+        &nbsp;&middot;&nbsp;
+        MIT License
+      </p>
+    </div>
+  </footer>
+</body>
+</html>
