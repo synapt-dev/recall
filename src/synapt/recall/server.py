@@ -135,6 +135,8 @@ def recall_search(
         half_life: Days for recency decay to reach ~50%. 0 disables decay.
                    Default 60: a session from 2 months ago scores ~50% of today's,
                    making work from past quarters still discoverable.
+                   Passed as None to lookup() so intent classification can
+                   override when the caller uses the MCP default.
         threshold_ratio: Drop results scoring below this fraction of the top score. 0 disables.
         depth: "full" returns knowledge + journal + transcript results.
                "summary" returns only knowledge nodes + journal entries.
@@ -183,6 +185,10 @@ def recall_search(
         return f"No index found at {index_dir}. Run `synapt recall setup` first."
 
     try:
+        # Pass half_life=None when caller used the MCP default (60.0) so
+        # intent classification can override it. When the user explicitly
+        # sets a value, pass it through as-is to honour their choice.
+        effective_hl: float | None = None if half_life == 60.0 else half_life
         result = index.lookup(
             query,
             max_chunks=max_chunks,
@@ -190,7 +196,7 @@ def recall_search(
             max_sessions=max_sessions,
             after=after,
             before=before,
-            half_life=half_life,
+            half_life=effective_hl,
             threshold_ratio=threshold_ratio,
             depth=depth,
             include_archived=include_archived,

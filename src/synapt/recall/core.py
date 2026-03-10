@@ -973,7 +973,7 @@ class TranscriptIndex:
         max_sessions: int | None = None,
         after: str | None = None,
         before: str | None = None,
-        half_life: float = 30.0,
+        half_life: float | None = None,
         threshold_ratio: float = 0.2,
         depth: str = "full",
         include_archived: bool = False,
@@ -990,6 +990,7 @@ class TranscriptIndex:
             after: Only include chunks with timestamp >= this ISO 8601 string.
             before: Only include chunks with timestamp < this ISO 8601 string.
             half_life: Days for recency decay to reach ~50%. 0 disables.
+                None = use intent-based default (or 30.0 as fallback).
             threshold_ratio: Drop results below this fraction of top score. 0 disables.
             depth: "full" (default) = knowledge + journal + transcript.
                    "summary" = knowledge + journal only (no raw transcripts).
@@ -1009,18 +1010,24 @@ class TranscriptIndex:
             return ""
 
         # Query intent classification — adjusts search parameters based on
-        # the type of information being sought. Only applies when caller
-        # uses default half_life (not explicitly overridden).
+        # the type of information being sought (recency, embedding weight,
+        # knowledge boost). Only overrides half_life when caller didn't
+        # provide an explicit value (half_life is None).
+        emb_weight = 1.0
+        knowledge_boost = 2.0
+        caller_set_half_life = half_life is not None
+        if half_life is None:
+            half_life = 60.0
         try:
             from synapt.recall.hybrid import (
                 classify_query_intent, intent_search_params,
             )
             intent = classify_query_intent(query)
-            if intent != "general":
-                params = intent_search_params(intent)
-                # Only override half_life if caller used the default
-                if half_life == 30.0:
-                    half_life = params.get("half_life", half_life)
+            params = intent_search_params(intent)
+            emb_weight = params.get("emb_weight", emb_weight)
+            knowledge_boost = params.get("knowledge_boost", knowledge_boost)
+            if not caller_set_half_life:
+                half_life = params.get("half_life", half_life)
         except Exception:
             pass
 
@@ -1040,11 +1047,13 @@ class TranscriptIndex:
                 query, query_tokens, max_chunks, max_tokens, max_sessions,
                 date_filter, half_life, threshold_ratio, depth,
                 include_historical,
+                emb_weight=emb_weight, knowledge_boost=knowledge_boost,
             )
         return self._global_lookup(
             query, query_tokens, max_chunks, max_tokens, date_filter,
             half_life, threshold_ratio, depth, include_archived,
             include_historical,
+            emb_weight=emb_weight, knowledge_boost=knowledge_boost,
         )
 
     def _global_lookup(
@@ -1059,6 +1068,8 @@ class TranscriptIndex:
         depth: str = "full",
         include_archived: bool = False,
         include_historical: bool = False,
+        emb_weight: float = 1.0,
+        knowledge_boost: float = 2.0,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and self._rowid_to_idx:
@@ -1066,6 +1077,7 @@ class TranscriptIndex:
                 query, max_chunks, max_tokens, date_filter,
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
+                emb_weight=emb_weight, knowledge_boost=knowledge_boost,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -1083,11 +1095,14 @@ class TranscriptIndex:
         depth: str = "full",
         include_archived: bool = False,
         include_historical: bool = False,
+        emb_weight: float = 1.0,
+        knowledge_boost: float = 2.0,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Search knowledge nodes first (ranked higher via boost)
         knowledge_results = self._search_knowledge(
             query, max_chunks, include_historical=include_historical,
+            knowledge_boost=knowledge_boost,
         )
 
         # Concise mode: search clusters directly, return only summaries
@@ -1177,8 +1192,10 @@ class TranscriptIndex:
                                 pass
                     emb_ranked.append((idx, sim))
 
-                # Weighted RRF merge — auto-boosts embeddings when BM25 sparse
-                merged = weighted_rrf_merge(bm25_ranked, emb_ranked)
+                # Weighted RRF merge — emb_weight from intent classification
+                merged = weighted_rrf_merge(
+                    bm25_ranked, emb_ranked, emb_weight=emb_weight,
+                )
                 candidates = merged
             except Exception as e:
                 logger.warning("Hybrid search failed, using BM25 only: %s", e)
@@ -1375,11 +1392,16 @@ class TranscriptIndex:
         threshold_ratio: float = 0.2,
         depth: str = "full",
         include_historical: bool = False,
+        emb_weight: float = 1.0,
+        knowledge_boost: float = 2.0,
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
         knowledge_results = (
-            self._search_knowledge(query, max_chunks, include_historical=include_historical)
+            self._search_knowledge(
+                query, max_chunks, include_historical=include_historical,
+                knowledge_boost=knowledge_boost,
+            )
             if self._db else []
         )
 
@@ -1388,6 +1410,7 @@ class TranscriptIndex:
                 query, max_chunks, max_tokens, max_sessions,
                 date_filter, half_life, threshold_ratio,
                 knowledge_results=knowledge_results,
+                emb_weight=emb_weight,
                 depth=depth,
             )
         return self._progressive_lookup_bm25(
@@ -1407,6 +1430,7 @@ class TranscriptIndex:
         threshold_ratio: float,
         knowledge_results: list[dict] | None = None,
         depth: str = "full",
+        emb_weight: float = 1.0,
     ) -> str:
         """Progressive session search using FTS5 (SQLite backend)."""
         hits: list[tuple[int, float]] = []
@@ -1462,8 +1486,10 @@ class TranscriptIndex:
                     pass
 
         # Hybrid: merge FTS progressive hits with global embedding search.
-        # Progressive FTS is session-scoped, but embeddings search globally
-        # to catch semantically similar chunks from any session.
+        # Progressive FTS is session-scoped, but embeddings intentionally
+        # search globally — semantic recall should be broader than keyword
+        # recall, surfacing paraphrased matches from any session even when
+        # max_sessions limits the BM25 search window.
         if self._embed_provider and self._all_embeddings:
             try:
                 from synapt.recall.hybrid import (
@@ -1485,7 +1511,9 @@ class TranscriptIndex:
                     emb_ranked.append((idx, sim))
 
                 bm25_ranked = sorted(hits, key=lambda x: x[1], reverse=True)
-                merged = weighted_rrf_merge(bm25_ranked, emb_ranked)
+                merged = weighted_rrf_merge(
+                    bm25_ranked, emb_ranked, emb_weight=emb_weight,
+                )
                 hits = merged
             except Exception as e:
                 logger.warning("Progressive hybrid failed: %s", e)
@@ -1571,11 +1599,12 @@ class TranscriptIndex:
         query: str,
         max_results: int = 5,
         include_historical: bool = False,
+        knowledge_boost: float = 2.0,
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
         Returns a list of knowledge node dicts with an added 'score' key.
-        Knowledge nodes are boosted 2.0x vs chunk scores.
+        Knowledge nodes are boosted by ``knowledge_boost`` vs chunk scores.
         If include_historical is True, also returns contradicted/superseded nodes.
         """
         if not self._db:
@@ -1599,17 +1628,20 @@ class TranscriptIndex:
                 except Exception:
                     pass
 
-            # Merge FTS and embedding results
+            # Merge FTS and embedding results via RRF
             if fts_hits and emb_hits:
                 from synapt.recall.hybrid import weighted_rrf_merge
                 merged = weighted_rrf_merge(fts_hits, emb_hits)
-                all_rowids = [r for r, _ in merged]
             elif fts_hits:
-                all_rowids = [r for r, _ in fts_hits]
+                merged = fts_hits
             elif emb_hits:
-                all_rowids = [r for r, _ in emb_hits]
+                merged = emb_hits
             else:
                 return []
+
+            all_rowids = [r for r, _ in merged]
+            # Use RRF-fused scores (not raw FTS/embedding scores) for ranking
+            score_map = dict(merged)
 
             nodes_by_rowid = self._db.knowledge_by_rowid(all_rowids)
             # Coverage gate: require ≥2 distinct query tokens to appear in the
@@ -1620,8 +1652,6 @@ class TranscriptIndex:
             emb_rowids = {r for r, s in emb_hits if s > 0.4}
             results = []
             seen_ids: set[str] = set()
-            # Build a score map from the merged ranking
-            score_map = {r: s for r, s in (fts_hits + emb_hits)}
             for rowid in all_rowids:
                 node = nodes_by_rowid.get(rowid)
                 if not node:
@@ -1633,7 +1663,7 @@ class TranscriptIndex:
                 token_overlap = len(query_tokens & node_tokens) >= min_matches
                 strong_emb = rowid in emb_rowids
                 if token_overlap or strong_emb:
-                    node["score"] = score_map.get(rowid, 0.0) * 2.0
+                    node["score"] = score_map.get(rowid, 0.0) * knowledge_boost
                     results.append(node)
                     seen_ids.add(node_id)
 
