@@ -1,6 +1,20 @@
-# synapt
+<p align="center">
+  <img src="assets/banner.png" alt="Synapt" width="100%">
+</p>
 
-Persistent conversational memory for AI coding assistants. Synapt indexes your past coding sessions and makes them searchable — so your AI assistant remembers what you worked on, decisions you made, and patterns you established.
+<p align="center">
+  <a href="https://pypi.org/project/synapt/"><img src="https://img.shields.io/pypi/v/synapt?color=7c5cbf" alt="PyPI"></a>
+  <a href="https://pypi.org/project/synapt/"><img src="https://img.shields.io/pypi/pyversions/synapt?color=00e5cc" alt="Python"></a>
+  <a href="https://github.com/laynepenney/synapt/blob/main/LICENSE"><img src="https://img.shields.io/github/license/laynepenney/synapt" alt="License"></a>
+</p>
+
+<p align="center">
+  Persistent conversational memory for AI coding assistants.<br>
+  Indexes your past sessions and makes them searchable — so your AI assistant<br>
+  remembers what you worked on, decisions you made, and patterns you established.
+</p>
+
+---
 
 Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code and other MCP-compatible tools.
 
