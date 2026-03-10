@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS knowledge (
     valid_from TEXT,            -- ISO 8601: when this became true (NULL = since first observation)
     valid_until TEXT,           -- ISO 8601: when this stopped being true (NULL = still current)
     version INTEGER NOT NULL DEFAULT 1,
-    lineage_id TEXT NOT NULL DEFAULT ''  -- shared ID across versions of the same fact
+    lineage_id TEXT NOT NULL DEFAULT '',  -- shared ID across versions of the same fact
+    embedding BLOB
 );
 
 CREATE TABLE IF NOT EXISTS pending_contradictions (
@@ -474,6 +475,7 @@ class RecallDB:
             ("valid_until", "TEXT"),
             ("version", "INTEGER NOT NULL DEFAULT 1"),
             ("lineage_id", "TEXT NOT NULL DEFAULT ''"),
+            ("embedding", "BLOB"),
         ]
         for col_name, col_def in migrations:
             if col_name not in cols:
@@ -836,6 +838,23 @@ class RecallDB:
         ).fetchone()
         return row is not None
 
+    def get_all_embeddings(self) -> dict[int, list[float]]:
+        """Load ALL chunk embeddings into memory for embedding-only search.
+
+        Returns {rowid: [float, ...]} for every chunk with a stored embedding.
+        For ~3500 chunks × 384 dims this is ~5MB — perfectly fine in memory.
+        """
+        result: dict[int, list[float]] = {}
+        rows = self._conn.execute(
+            "SELECT rowid, embedding FROM chunks WHERE embedding IS NOT NULL"
+        ).fetchall()
+        for r in rows:
+            try:
+                result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+            except struct.error:
+                continue
+        return result
+
     def get_chunk_id_rowid_map(self) -> dict[str, int]:
         """Return ``{chunk_id: rowid}`` for all chunks.
 
@@ -965,6 +984,44 @@ class RecallDB:
             (lineage_id,),
         ).fetchall()
         return [self._knowledge_dict_from_row(r) for r in rows]
+
+    # -- knowledge embeddings ----------------------------------------------
+
+    def get_knowledge_embeddings(self) -> dict[int, list[float]]:
+        """Load all knowledge node embeddings into memory.
+
+        Returns {rowid: [float, ...]} for nodes with stored embeddings.
+        """
+        result: dict[int, list[float]] = {}
+        rows = self._conn.execute(
+            "SELECT rowid, embedding FROM knowledge "
+            "WHERE embedding IS NOT NULL AND status = 'active'"
+        ).fetchall()
+        for r in rows:
+            try:
+                result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+            except struct.error:
+                continue
+        return result
+
+    def save_knowledge_embeddings(self, embeddings: dict[int, list[float]]) -> None:
+        """Store embedding BLOBs for knowledge nodes by rowid."""
+        cur = self._conn.cursor()
+        for rowid, emb in embeddings.items():
+            blob = struct.pack(_EMBEDDING_FMT, *emb)
+            cur.execute(
+                "UPDATE knowledge SET embedding = ? WHERE rowid = ?",
+                (blob, rowid),
+            )
+        self._conn.commit()
+
+    def get_knowledge_rowids_without_embeddings(self) -> list[tuple[int, str]]:
+        """Return (rowid, content) for active knowledge nodes missing embeddings."""
+        rows = self._conn.execute(
+            "SELECT rowid, content FROM knowledge "
+            "WHERE embedding IS NULL AND status = 'active'"
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     # -- pending contradictions --------------------------------------------
 

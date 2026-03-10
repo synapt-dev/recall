@@ -711,6 +711,9 @@ class TranscriptIndex:
         # Optional embedding index
         self._embeddings: list[list[float]] | None = None
         self._embed_provider = None
+        # Pre-loaded embeddings for hybrid search (rowid -> vector)
+        self._all_embeddings: dict[int, list[float]] = {}
+        self._knowledge_embeddings: dict[int, list[float]] = {}
         if use_embeddings:
             try:
                 from synapt.recall.embeddings import get_embedding_provider
@@ -720,6 +723,12 @@ class TranscriptIndex:
                     # Only build embeddings if storage is available
                     if self._db is None or self._idx_to_rowid:
                         self._load_or_build_embeddings(cache_dir)
+                    # Load all embeddings into memory for hybrid search
+                    if self._db is not None:
+                        self._all_embeddings = self._db.get_all_embeddings()
+                        self._knowledge_embeddings = (
+                            self._db.get_knowledge_embeddings()
+                        )
             except Exception as e:
                 logger.warning("Embeddings unavailable: %s", e)
 
@@ -797,8 +806,34 @@ class TranscriptIndex:
             if emb_mapping:
                 self._db.save_embeddings(emb_mapping)
             self._db.set_metadata("embedding_hash", content_hash)
+
+            # Also build embeddings for knowledge nodes
+            self._build_knowledge_embeddings()
         except Exception as e:
             logger.warning("Embedding build failed: %s", e)
+
+    def _build_knowledge_embeddings(self) -> None:
+        """Build embeddings for knowledge nodes that don't have them yet."""
+        if not self._db or not self._embed_provider:
+            return
+        try:
+            missing = self._db.get_knowledge_rowids_without_embeddings()
+            if not missing:
+                return
+            texts = [content[:500] for _, content in missing]
+            rowids = [rowid for rowid, _ in missing]
+            all_embs: list[list[float]] = []
+            for i in range(0, len(texts), 64):
+                batch = texts[i:i + 64]
+                all_embs.extend(self._embed_provider.embed(batch))
+            emb_mapping = dict(zip(rowids, all_embs))
+            if emb_mapping:
+                self._db.save_knowledge_embeddings(emb_mapping)
+                logger.info(
+                    "Built embeddings for %d knowledge nodes", len(emb_mapping),
+                )
+        except Exception as e:
+            logger.warning("Knowledge embedding build failed: %s", e)
 
     def _content_hash(self) -> str:
         """Hash of chunk IDs + text content for embedding cache invalidation.
@@ -960,6 +995,22 @@ class TranscriptIndex:
             self._last_diagnostics = SearchDiagnostics(reason="empty_index")
             return ""
 
+        # Query intent classification — adjusts search parameters based on
+        # the type of information being sought. Only applies when caller
+        # uses default half_life (not explicitly overridden).
+        try:
+            from synapt.recall.hybrid import (
+                classify_query_intent, intent_search_params,
+            )
+            intent = classify_query_intent(query)
+            if intent != "general":
+                params = intent_search_params(intent)
+                # Only override half_life if caller used the default
+                if half_life == 30.0:
+                    half_life = params.get("half_life", half_life)
+        except Exception:
+            pass
+
         query_tokens = _tokenize(query)
         if not query_tokens:
             self._last_diagnostics = SearchDiagnostics(
@@ -1067,28 +1118,61 @@ class TranscriptIndex:
                 except (ValueError, TypeError):
                     pass
 
-        # Blend with embeddings (fetch only candidate rows from DB)
-        if self._embed_provider and candidates:
+        # Hybrid search: RRF fusion between BM25/FTS and embedding similarity.
+        # Unlike the old additive boost (score + sim * 3.0), RRF can surface
+        # results that BM25 missed entirely — critical for paraphrased queries.
+        if self._embed_provider and self._all_embeddings:
             try:
-                from synapt.recall.embeddings import cosine_similarity
-                candidate_rowids = [
-                    self._idx_to_rowid[idx]
-                    for idx, _ in candidates
-                    if idx in self._idx_to_rowid
-                ]
-                embs = self._db.get_embeddings(candidate_rowids)
-                if embs:
-                    q_emb = self._embed_provider.embed_single(query)
-                    for j, (idx, score) in enumerate(candidates):
-                        rowid = self._idx_to_rowid.get(idx)
-                        if rowid and rowid in embs:
-                            sim = cosine_similarity(q_emb, embs[rowid])
-                            if sim > 0.3:
-                                candidates[j] = (idx, score + sim * 3.0)
-            except Exception as e:
-                logger.warning("Embedding query failed: %s", e)
+                from synapt.recall.hybrid import (
+                    embedding_search, weighted_rrf_merge,
+                )
+                q_emb = self._embed_provider.embed_single(query)
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
+                # BM25/FTS ranked list (idx, score)
+                bm25_ranked = sorted(candidates, key=lambda x: x[1], reverse=True)
+
+                # Embedding ranked list (rowid, sim) → convert to (idx, sim)
+                emb_raw = embedding_search(
+                    q_emb, self._all_embeddings, limit=max_chunks * 10,
+                )
+                emb_ranked = []
+                for rowid, sim in emb_raw:
+                    idx = self._rowid_to_idx.get(rowid)
+                    if idx is None:
+                        continue
+                    if date_filter is not None and idx not in date_filter:
+                        continue
+                    if depth == "summary" and self.chunks[idx].turn_index >= 0:
+                        continue
+                    # Apply same recency decay to embedding results
+                    if half_life > 0:
+                        chunk = self.chunks[idx]
+                        if chunk.timestamp:
+                            try:
+                                ts = datetime.fromisoformat(
+                                    chunk.timestamp.replace("Z", "+00:00")
+                                )
+                                if ts.tzinfo is None:
+                                    ts = ts.replace(tzinfo=timezone.utc)
+                                now = datetime.now(timezone.utc)
+                                age_days = max(
+                                    (now - ts).total_seconds() / 86400.0, 0.0,
+                                )
+                                decay_rate = math.log(2) / half_life
+                                sim *= math.exp(-decay_rate * age_days)
+                            except (ValueError, TypeError):
+                                pass
+                    emb_ranked.append((idx, sim))
+
+                # Weighted RRF merge — auto-boosts embeddings when BM25 sparse
+                merged = weighted_rrf_merge(bm25_ranked, emb_ranked)
+                candidates = merged
+            except Exception as e:
+                logger.warning("Hybrid search failed, using BM25 only: %s", e)
+                candidates.sort(key=lambda x: x[1], reverse=True)
+        else:
+            candidates.sort(key=lambda x: x[1], reverse=True)
+
         top = [(i, s) for i, s in candidates[:max_chunks * 2] if s > 0]
 
         top = self._apply_threshold_with_diagnostics(
@@ -1222,21 +1306,42 @@ class TranscriptIndex:
         if half_life > 0:
             scores = self._apply_recency_decay(scores, half_life=half_life)
 
+        # Hybrid search: RRF fusion (same as FTS path but using in-memory BM25)
         if self._embeddings and self._embed_provider:
             try:
-                from synapt.recall.embeddings import cosine_similarity
+                from synapt.recall.hybrid import (
+                    embedding_search, weighted_rrf_merge,
+                )
                 q_emb = self._embed_provider.embed_single(query)
-                for i, emb in enumerate(self._embeddings):
-                    if date_filter is not None and i not in date_filter:
-                        continue
-                    sim = cosine_similarity(q_emb, emb)
-                    if sim > 0.3:
-                        scores[i] += sim * 3.0
-            except Exception as e:
-                logger.warning("Embedding query failed, falling back to BM25-only: %s", e)
 
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-        top = [(i, s) for i, s in ranked[:max_chunks * 2] if s > 0]
+                # BM25 ranked list
+                bm25_ranked = sorted(
+                    [(i, s) for i, s in enumerate(scores) if s > 0],
+                    key=lambda x: x[1], reverse=True,
+                )
+
+                # Embedding ranked list (using in-memory embeddings)
+                emb_dict = {i: emb for i, emb in enumerate(self._embeddings)}
+                emb_raw = embedding_search(q_emb, emb_dict, limit=max_chunks * 10)
+                emb_ranked = [
+                    (i, s) for i, s in emb_raw
+                    if date_filter is None or i in date_filter
+                ]
+                if depth == "summary":
+                    emb_ranked = [
+                        (i, s) for i, s in emb_ranked
+                        if self.chunks[i].turn_index < 0
+                    ]
+
+                merged = weighted_rrf_merge(bm25_ranked, emb_ranked)
+                top = [(i, s) for i, s in merged[:max_chunks * 2] if s > 0]
+            except Exception as e:
+                logger.warning("Hybrid search failed, using BM25 only: %s", e)
+                ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+                top = [(i, s) for i, s in ranked[:max_chunks * 2] if s > 0]
+        else:
+            ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+            top = [(i, s) for i, s in ranked[:max_chunks * 2] if s > 0]
 
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "bm25_global",
@@ -1343,7 +1448,37 @@ class TranscriptIndex:
                 except (ValueError, TypeError):
                     pass
 
-        hits.sort(key=lambda x: x[1], reverse=True)
+        # Hybrid: merge FTS progressive hits with global embedding search.
+        # Progressive FTS is session-scoped, but embeddings search globally
+        # to catch semantically similar chunks from any session.
+        if self._embed_provider and self._all_embeddings:
+            try:
+                from synapt.recall.hybrid import (
+                    embedding_search, weighted_rrf_merge,
+                )
+                q_emb = self._embed_provider.embed_single(query)
+                emb_raw = embedding_search(
+                    q_emb, self._all_embeddings, limit=max_chunks * 5,
+                )
+                emb_ranked = []
+                for rowid, sim in emb_raw:
+                    idx = self._rowid_to_idx.get(rowid)
+                    if idx is None:
+                        continue
+                    if date_filter is not None and idx not in date_filter:
+                        continue
+                    if depth == "summary" and self.chunks[idx].turn_index >= 0:
+                        continue
+                    emb_ranked.append((idx, sim))
+
+                bm25_ranked = sorted(hits, key=lambda x: x[1], reverse=True)
+                merged = weighted_rrf_merge(bm25_ranked, emb_ranked)
+                hits = merged
+            except Exception as e:
+                logger.warning("Progressive hybrid failed: %s", e)
+                hits.sort(key=lambda x: x[1], reverse=True)
+        else:
+            hits.sort(key=lambda x: x[1], reverse=True)
 
         hits = self._apply_threshold_with_diagnostics(
             hits, threshold_ratio, "fts_progressive",
@@ -1424,7 +1559,7 @@ class TranscriptIndex:
         max_results: int = 5,
         include_historical: bool = False,
     ) -> list[dict]:
-        """Search knowledge nodes via FTS5 and return formatted results.
+        """Search knowledge nodes via FTS5 + embedding hybrid.
 
         Returns a list of knowledge node dicts with an added 'score' key.
         Knowledge nodes are boosted 2.0x vs chunk scores.
@@ -1434,27 +1569,60 @@ class TranscriptIndex:
             return []
         try:
             fts_hits = self._db.knowledge_fts_search(
-                query, limit=max_results, include_historical=include_historical,
+                query, limit=max_results * 2,
+                include_historical=include_historical,
             )
-            if not fts_hits:
+
+            # Hybrid: also search knowledge embeddings
+            emb_hits: list[tuple[int, float]] = []
+            if self._embed_provider and self._knowledge_embeddings:
+                try:
+                    from synapt.recall.hybrid import embedding_search
+                    q_emb = self._embed_provider.embed_single(query)
+                    emb_hits = embedding_search(
+                        q_emb, self._knowledge_embeddings,
+                        limit=max_results * 2,
+                    )
+                except Exception:
+                    pass
+
+            # Merge FTS and embedding results
+            if fts_hits and emb_hits:
+                from synapt.recall.hybrid import weighted_rrf_merge
+                merged = weighted_rrf_merge(fts_hits, emb_hits)
+                all_rowids = [r for r, _ in merged]
+            elif fts_hits:
+                all_rowids = [r for r, _ in fts_hits]
+            elif emb_hits:
+                all_rowids = [r for r, _ in emb_hits]
+            else:
                 return []
-            rowids = [r for r, _ in fts_hits]
-            nodes_by_rowid = self._db.knowledge_by_rowid(rowids)
-            # Coverage gate: require ≥2 distinct query tokens to appear in the node
-            # content. FTS5 scores alone can't distinguish signal from noise because
-            # knowledge nodes contain many common engineering words ("fix", "loop",
-            # "config") that match nearly any query. A single-token match is not
-            # evidence of relevance.
+
+            nodes_by_rowid = self._db.knowledge_by_rowid(all_rowids)
+            # Coverage gate: require ≥2 distinct query tokens to appear in the
+            # node content, OR a strong embedding match (sim > 0.4). This lets
+            # semantic matches through even when BM25 tokens don't overlap.
             query_tokens = set(_tokenize(query))
             min_matches = max(2, round(len(query_tokens) * 0.3))
+            emb_rowids = {r for r, s in emb_hits if s > 0.4}
             results = []
-            for rowid, score in fts_hits:
+            seen_ids: set[str] = set()
+            # Build a score map from the merged ranking
+            score_map = {r: s for r, s in (fts_hits + emb_hits)}
+            for rowid in all_rowids:
                 node = nodes_by_rowid.get(rowid)
-                if node:
-                    node_tokens = set(_tokenize(node.get("content", "")))
-                    if len(query_tokens & node_tokens) >= min_matches:
-                        node["score"] = score * 2.0  # Knowledge boost
-                        results.append(node)
+                if not node:
+                    continue
+                node_id = node.get("id", str(rowid))
+                if node_id in seen_ids:
+                    continue
+                node_tokens = set(_tokenize(node.get("content", "")))
+                token_overlap = len(query_tokens & node_tokens) >= min_matches
+                strong_emb = rowid in emb_rowids
+                if token_overlap or strong_emb:
+                    node["score"] = score_map.get(rowid, 0.0) * 2.0
+                    results.append(node)
+                    seen_ids.add(node_id)
 
             # Confidence-based dedup: when multiple nodes share a lineage
             # (i.e. one superseded another), keep the highest-confidence one

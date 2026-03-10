@@ -1,0 +1,210 @@
+"""Tests for hybrid search: RRF fusion, embedding search, query intent."""
+
+import pytest
+from synapt.recall.hybrid import (
+    rrf_merge,
+    weighted_rrf_merge,
+    embedding_search,
+    classify_query_intent,
+    intent_search_params,
+    RRF_K,
+    SPARSE_RESULT_THRESHOLD,
+)
+
+
+# ---------------------------------------------------------------------------
+# RRF merge
+# ---------------------------------------------------------------------------
+
+class TestRRFMerge:
+    def test_single_list(self):
+        """RRF with one list is just reciprocal rank scoring."""
+        ranked = [(10, 5.0), (20, 3.0), (30, 1.0)]
+        merged = rrf_merge(ranked)
+        assert len(merged) == 3
+        # First item should have highest RRF score
+        assert merged[0][0] == 10
+        assert merged[1][0] == 20
+        assert merged[2][0] == 30
+
+    def test_two_lists_agreement(self):
+        """When both lists agree on top item, it should rank first."""
+        list1 = [(10, 5.0), (20, 3.0), (30, 1.0)]
+        list2 = [(10, 0.9), (30, 0.7), (20, 0.5)]
+        merged = rrf_merge(list1, list2)
+        # Item 10 is top in both lists
+        assert merged[0][0] == 10
+
+    def test_two_lists_different_items(self):
+        """Items from only one list still appear in merged results."""
+        list1 = [(10, 5.0), (20, 3.0)]
+        list2 = [(30, 0.9), (40, 0.7)]
+        merged = rrf_merge(list1, list2)
+        ids = {item_id for item_id, _ in merged}
+        assert ids == {10, 20, 30, 40}
+
+    def test_empty_lists(self):
+        """Empty input produces empty output."""
+        assert rrf_merge() == []
+        assert rrf_merge([]) == []
+        assert rrf_merge([], []) == []
+
+    def test_rrf_scores_are_positive(self):
+        """All RRF scores should be positive."""
+        ranked = [(1, 10.0), (2, 5.0), (3, 1.0)]
+        merged = rrf_merge(ranked)
+        for _, score in merged:
+            assert score > 0
+
+    def test_rrf_score_formula(self):
+        """Verify exact RRF score for a single list."""
+        ranked = [(10, 5.0)]
+        merged = rrf_merge(ranked, k=60)
+        # Score should be 1/(60+1) = 1/61
+        assert abs(merged[0][1] - 1.0 / 61) < 1e-10
+
+    def test_rrf_two_lists_exact(self):
+        """Item appearing first in both lists gets sum of reciprocal ranks."""
+        list1 = [(10, 5.0)]
+        list2 = [(10, 0.9)]
+        merged = rrf_merge(list1, list2, k=60)
+        expected = 1.0 / 61 + 1.0 / 61  # Rank 0 in both
+        assert abs(merged[0][1] - expected) < 1e-10
+
+
+class TestWeightedRRFMerge:
+    def test_balanced_weights(self):
+        """With equal weights, same as regular RRF."""
+        bm25 = [(10, 5.0), (20, 3.0)]
+        emb = [(20, 0.9), (10, 0.7)]
+        merged = weighted_rrf_merge(bm25, emb, bm25_weight=1.0, emb_weight=1.0)
+        assert len(merged) == 2
+
+    def test_bm25_weight_dominates(self):
+        """Higher BM25 weight preserves BM25 ranking."""
+        bm25 = [(10, 5.0), (20, 3.0)]
+        emb = [(20, 0.9), (10, 0.7)]
+        merged = weighted_rrf_merge(bm25, emb, bm25_weight=10.0, emb_weight=0.1)
+        # BM25 has item 10 first with much higher weight
+        assert merged[0][0] == 10
+
+    def test_sparse_bm25_boosts_embeddings(self):
+        """When BM25 returns few results, embedding weight auto-increases."""
+        bm25 = [(10, 5.0)]  # Only 1 result < SPARSE_RESULT_THRESHOLD
+        emb = [(20, 0.9), (30, 0.8), (10, 0.7)]
+        merged = weighted_rrf_merge(bm25, emb, bm25_weight=1.0, emb_weight=1.0)
+        # Item 20 (embedding-only) should appear thanks to auto-boost
+        ids = [item_id for item_id, _ in merged]
+        assert 20 in ids
+
+    def test_empty_embedding_list(self):
+        """Graceful handling when no embedding results."""
+        bm25 = [(10, 5.0), (20, 3.0)]
+        merged = weighted_rrf_merge(bm25, [], bm25_weight=1.0, emb_weight=1.0)
+        assert len(merged) == 2
+        assert merged[0][0] == 10
+
+
+# ---------------------------------------------------------------------------
+# Embedding search
+# ---------------------------------------------------------------------------
+
+class TestEmbeddingSearch:
+    def _make_embeddings(self):
+        """Create simple test embeddings."""
+        # Unit vectors along different axes
+        emb_a = [1.0] + [0.0] * 383  # Points along dim 0
+        emb_b = [0.0, 1.0] + [0.0] * 382  # Points along dim 1
+        emb_c = [0.7, 0.7] + [0.0] * 382  # Between a and b
+        return {1: emb_a, 2: emb_b, 3: emb_c}
+
+    def test_exact_match(self):
+        """Query vector identical to stored vector returns similarity ~1.0."""
+        all_embs = self._make_embeddings()
+        query = [1.0] + [0.0] * 383
+        results = embedding_search(query, all_embs, limit=10, threshold=0.0)
+        assert results[0][0] == 1  # Exact match
+        assert results[0][1] > 0.99
+
+    def test_threshold_filters(self):
+        """Results below threshold are excluded."""
+        all_embs = self._make_embeddings()
+        query = [1.0] + [0.0] * 383
+        # With high threshold, only exact/near matches survive
+        results = embedding_search(query, all_embs, limit=10, threshold=0.9)
+        assert all(sim >= 0.9 for _, sim in results)
+
+    def test_limit_respected(self):
+        """Limit parameter caps result count."""
+        all_embs = {i: [float(i == j) for j in range(384)] for i in range(100)}
+        query = [1.0 / 384**0.5] * 384  # Roughly equidistant from all
+        results = embedding_search(query, all_embs, limit=5, threshold=0.0)
+        assert len(results) <= 5
+
+    def test_empty_embeddings(self):
+        """Empty embedding dict returns empty results."""
+        query = [1.0] + [0.0] * 383
+        assert embedding_search(query, {}) == []
+
+    def test_empty_query(self):
+        """Empty query vector returns empty results."""
+        all_embs = self._make_embeddings()
+        assert embedding_search([], all_embs) == []
+
+    def test_sorted_descending(self):
+        """Results are sorted by similarity descending."""
+        all_embs = self._make_embeddings()
+        query = [0.8, 0.6] + [0.0] * 382  # Closer to a than b
+        results = embedding_search(query, all_embs, limit=10, threshold=0.0)
+        sims = [s for _, s in results]
+        assert sims == sorted(sims, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Query intent classification
+# ---------------------------------------------------------------------------
+
+class TestQueryIntentClassification:
+    def test_factual(self):
+        assert classify_query_intent("what is the database port") == "factual"
+        assert classify_query_intent("which API endpoint handles auth") == "factual"
+        assert classify_query_intent("what does the config setting do") == "factual"
+
+    def test_debug(self):
+        assert classify_query_intent("why did the build fail") == "debug"
+        assert classify_query_intent("error in the deployment") == "debug"
+        assert classify_query_intent("crash when loading the model") == "debug"
+
+    def test_exploratory(self):
+        assert classify_query_intent("how did we solve the auth problem") == "exploratory"
+        assert classify_query_intent("what did we try for caching") == "exploratory"
+        assert classify_query_intent("tell me about the migration history") == "exploratory"
+
+    def test_procedural(self):
+        assert classify_query_intent("how to deploy the service") == "procedural"
+        assert classify_query_intent("steps to configure the database") == "procedural"
+        assert classify_query_intent("how should we run the tests") == "procedural"
+
+    def test_general(self):
+        assert classify_query_intent("latent critic pipeline") == "general"
+        assert classify_query_intent("quality curve weighting") == "general"
+
+    def test_intent_params_keys(self):
+        """All intents return the expected parameter keys."""
+        for intent in ["factual", "debug", "exploratory", "procedural", "general"]:
+            params = intent_search_params(intent)
+            assert "knowledge_boost" in params
+            assert "half_life" in params
+            assert "emb_weight" in params
+
+    def test_debug_has_short_half_life(self):
+        """Debug queries should have shorter half_life (recency matters)."""
+        debug_params = intent_search_params("debug")
+        general_params = intent_search_params("general")
+        assert debug_params["half_life"] < general_params["half_life"]
+
+    def test_factual_has_high_knowledge_boost(self):
+        """Factual queries should prioritize knowledge nodes."""
+        factual_params = intent_search_params("factual")
+        general_params = intent_search_params("general")
+        assert factual_params["knowledge_boost"] >= general_params["knowledge_boost"]
