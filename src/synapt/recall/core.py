@@ -714,12 +714,16 @@ class TranscriptIndex:
         # Pre-loaded embeddings for hybrid search (rowid -> vector)
         self._all_embeddings: dict[int, list[float]] = {}
         self._knowledge_embeddings: dict[int, list[float]] = {}
+        # Track embedding status for user-facing messages
+        self._embedding_status: str = "disabled"  # disabled | active | unavailable
+        self._embedding_reason: str = ""
         if use_embeddings:
             try:
                 from synapt.recall.embeddings import get_embedding_provider
                 provider = get_embedding_provider()
                 if provider:
                     self._embed_provider = provider
+                    self._embedding_status = "active"
                     # Only build embeddings if storage is available
                     if self._db is None or self._idx_to_rowid:
                         self._load_or_build_embeddings(cache_dir)
@@ -729,8 +733,17 @@ class TranscriptIndex:
                         self._knowledge_embeddings = (
                             self._db.get_knowledge_embeddings()
                         )
+                else:
+                    self._embedding_status = "unavailable"
+                    self._embedding_reason = (
+                        "No embedding provider found. "
+                        "Install sentence-transformers for semantic search: "
+                        "pip install sentence-transformers"
+                    )
             except Exception as e:
                 logger.warning("Embeddings unavailable: %s", e)
+                self._embedding_status = "unavailable"
+                self._embedding_reason = str(e)
 
     def _refresh_rowid_map(self) -> None:
         """Build rowid <-> chunk-index mappings from the database."""

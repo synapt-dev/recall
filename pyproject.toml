@@ -9,7 +9,10 @@ description = "Persistent conversational memory for AI coding assistants"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "mcp[cli]>=1.0",
+    "sentence-transformers>=2.0",
+]
 authors = [
     {name = "Layne Penney"},
 ]
@@ -19,11 +22,7 @@ Homepage = "https://synapt.dev"
 Repository = "https://github.com/laynepenney/synapt"
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]>=1.0"]
-embeddings = ["sentence-transformers>=2.0"]
 hf = ["huggingface_hub>=0.20"]
-transformers = ["transformers>=4.30", "torch>=2.0"]
-all = ["mcp[cli]>=1.0", "sentence-transformers>=2.0", "huggingface_hub>=0.20", "transformers>=4.30", "torch>=2.0"]
 test = ["pytest>=7.0", "numpy", "pytest-benchmark>=4.0"]
 
 [project.scripts]

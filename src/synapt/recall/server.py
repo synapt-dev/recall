@@ -197,16 +197,31 @@ def recall_search(
             include_historical=include_historical,
         )
         # Combine live (current session) + indexed (past sessions) results
-        if live_result and result:
-            return live_result + "\n\n" + result
+        parts = []
         if live_result:
-            return live_result
+            parts.append(live_result)
         if result:
-            return result
+            parts.append(result)
+
+        # Surface embedding status when search is degraded
+        if index._embedding_status == "unavailable":
+            parts.append(
+                f"\n[Note: Search is using keyword matching only (BM25). "
+                f"{index._embedding_reason}]"
+            )
+
+        if parts:
+            return "\n\n".join(parts)
         # Surface diagnostics explaining why search returned nothing
         diag = index._last_diagnostics
         if diag:
-            return diag.format_message()
+            msg = diag.format_message()
+            if index._embedding_status == "unavailable":
+                msg += (
+                    f"\n[Note: Embeddings unavailable — semantic search disabled. "
+                    f"{index._embedding_reason}]"
+                )
+            return msg
         return "No results found."
     except Exception as exc:
         return f"Search failed: {exc}"
@@ -422,10 +437,15 @@ def recall_stats() -> str:
         lines.append(f"Unique files: {stats.get('total_files_touched', 0)}")
 
         # Embedding status
-        emb_status = "active" if stats.get("embeddings_active") else "inactive (BM25-only)"
-        lines.append(f"Embeddings: {emb_status}")
-        if stats.get("embedding_provider"):
-            lines.append(f"Embedding provider: {stats['embedding_provider']}")
+        if stats.get("embeddings_active"):
+            lines.append(f"Embeddings: active ({stats.get('embedding_provider', 'unknown')})")
+        elif index._embedding_status == "unavailable":
+            lines.append(
+                f"Embeddings: unavailable — using BM25 keyword search only. "
+                f"{index._embedding_reason}"
+            )
+        else:
+            lines.append("Embeddings: inactive (not requested)")
 
         # Knowledge nodes
         kn_count = stats.get("knowledge_count", 0)

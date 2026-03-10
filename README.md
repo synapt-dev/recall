@@ -22,9 +22,6 @@ Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code and o
 
 ```bash
 pip install synapt
-
-# With MCP server support (recommended)
-pip install 'synapt[mcp]'
 ```
 
 ## Quick start
@@ -63,15 +60,17 @@ This gives your AI assistant 13 tools for searching past sessions, managing a jo
 
 ## Features
 
-- **Transcript indexing** — BM25 full-text search over past coding sessions
-- **Topic clustering** — Jaccard token-overlap clustering groups related chunks
-- **Knowledge consolidation** — Extracts durable knowledge from session journals
-- **Session journal** — Rich entries with focus, decisions, done items, and next steps
-- **Reminders** — Cross-session sticky reminders that surface at session start
-- **Timeline** — Chronological work arcs showing project narrative
-- **LLM enrichment** — Optional LLM-powered summaries and cluster upgrades
-- **Working memory** — Frequency-boosted search results for active topics
-- **Plugin system** — Extend with additional tools via entry-point discovery
+- **Hybrid search** — BM25 full-text search fused with semantic embeddings via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf). Surfaces results that keyword search alone would miss.
+- **Query intent routing** — Classifies queries as factual, debug, exploratory, or procedural and adjusts search parameters (recency decay, knowledge boost, embedding weight) automatically.
+- **Knowledge embeddings** — Durable knowledge nodes get 384-dim embeddings for semantic retrieval, built at index time.
+- **Topic clustering** — Jaccard token-overlap clustering groups related chunks across sessions.
+- **Session journal** — Rich entries with focus, decisions, done items, and next steps.
+- **Reminders** — Cross-session sticky reminders that surface at session start.
+- **Timeline** — Chronological work arcs showing project narrative.
+- **Working memory** — Frequency-boosted search results for active topics.
+- **LLM enrichment** — Optional LLM-powered summaries and cluster upgrades.
+- **Knowledge consolidation** — Extracts durable knowledge from session journals.
+- **Plugin system** — Extend with additional tools via entry-point discovery.
 
 ## MCP tools
 
@@ -103,20 +102,28 @@ synapt recall setup              # Auto-configure hooks
 synapt server                    # Start MCP server
 ```
 
+## How search works
+
+Synapt runs two retrieval paths in parallel and merges them:
+
+1. **BM25** — Full-text search with recency decay over session chunks
+2. **Embeddings** — Cosine similarity over 384-dim vectors ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2))
+
+Results are merged via **Reciprocal Rank Fusion** (RRF), which combines rankings rather than raw scores. This means a result that BM25 missed entirely can still surface if it's semantically similar to the query.
+
+Query intent classification then adjusts parameters — debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes, exploratory queries boost semantic matching.
+
 ## Optional backends
 
-Synapt uses local LLMs for enrichment and summarization. Install optional backends:
+Synapt uses local LLMs for enrichment and summarization. Install a backend if you want LLM-powered features (`recall_enrich`, `recall_consolidate`):
 
 ```bash
+# Ollama (recommended)
+# Install from https://ollama.com, then:
+ollama pull ministral:3b
+
 # MLX (Apple Silicon)
 pip install mlx-lm
-
-# Ollama
-# Install from https://ollama.com, then:
-ollama pull qwen2.5:3b
-
-# Transformers (GPU/CPU)
-pip install 'synapt[transformers]'
 ```
 
 ## Plugins
