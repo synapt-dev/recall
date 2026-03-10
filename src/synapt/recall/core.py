@@ -647,7 +647,6 @@ class TranscriptIndex:
         use_embeddings: bool = False,
         cache_dir: Path | None = None,
         db: RecallDB | None = None,
-        use_reranker: bool = False,
     ):
         # Sort by timestamp descending (most recent first)
         self.chunks = sorted(chunks, key=lambda c: c.timestamp, reverse=True)
@@ -748,7 +747,7 @@ class TranscriptIndex:
 
         # Cross-encoder reranking (Phase 2)
         from synapt.recall.reranker import is_reranker_enabled
-        self._use_reranker = use_reranker or is_reranker_enabled()
+        self._use_reranker = is_reranker_enabled()
         if self._use_reranker:
             logger.info("Cross-encoder reranking enabled")
 
@@ -2316,10 +2315,7 @@ class TranscriptIndex:
         atomic_json_write(manifest, directory / "manifest.json")
 
     @classmethod
-    def load(
-        cls, directory: Path, use_embeddings: bool = False,
-        use_reranker: bool = False,
-    ) -> TranscriptIndex:
+    def load(cls, directory: Path, use_embeddings: bool = False) -> TranscriptIndex:
         """Load a saved index from disk.
 
         Prefers recall.db (SQLite) if present.  Falls back to chunks.jsonl
@@ -2335,10 +2331,7 @@ class TranscriptIndex:
             try:
                 db = RecallDB(db_path)
                 chunks = db.load_chunks()
-                return cls(
-                    chunks, use_embeddings=use_embeddings, cache_dir=directory,
-                    db=db, use_reranker=use_reranker,
-                )
+                return cls(chunks, use_embeddings=use_embeddings, cache_dir=directory, db=db)
             except (sqlite3.DatabaseError, OSError) as exc:
                 logger.warning("Corrupt recall.db, rebuilding: %s", exc)
                 if db is not None:
@@ -2363,10 +2356,7 @@ class TranscriptIndex:
 
             # Migrate to SQLite
             db = RecallDB(db_path)
-            index = cls(
-                chunks, use_embeddings=use_embeddings, cache_dir=directory,
-                db=db, use_reranker=use_reranker,
-            )
+            index = cls(chunks, use_embeddings=use_embeddings, cache_dir=directory, db=db)
             index.save(directory)
 
             # Migrate embeddings from legacy JSON if present
@@ -2934,7 +2924,6 @@ def build_index(
     cache_dir: Path | None = None,
     incremental_manifest: dict | None = None,
     db: RecallDB | None = None,
-    use_reranker: bool = False,
 ) -> TranscriptIndex:
     """Build a TranscriptIndex from a directory of .jsonl transcript files.
 
@@ -2981,7 +2970,4 @@ def build_index(
         print(f"[synapt] Skipped {skipped} already-indexed files")
     print(f"[synapt] Total: {len(all_chunks)} chunks from {len(jsonl_files) - skipped} files")
 
-    return TranscriptIndex(
-        all_chunks, use_embeddings=use_embeddings, cache_dir=cache_dir,
-        db=db, use_reranker=use_reranker,
-    )
+    return TranscriptIndex(all_chunks, use_embeddings=use_embeddings, cache_dir=cache_dir, db=db)
