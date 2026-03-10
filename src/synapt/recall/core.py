@@ -2299,6 +2299,44 @@ def _git_main_worktree_root(path: Path) -> Path | None:
         return None
 
 
+_gripspace_cache: dict[str, tuple[Path | None, float]] = {}
+_GRIPSPACE_CACHE_TTL = 60.0  # seconds
+
+
+def _find_gripspace_root(path: Path) -> Path | None:
+    """Walk up from *path* to find a ``.gitgrip/`` directory (GitGrip gripspace root).
+
+    Returns the gripspace root path, or *None* if not inside a gripspace.
+    Analogous to ``_git_main_worktree_root`` but for multi-repo gripspaces.
+
+    Stops at ``$HOME`` to avoid matching stray ``.gitgrip/`` directories
+    above the user's project hierarchy.  Results are cached per resolved path
+    with a 60-second TTL so long-running processes (MCP server) pick up
+    gripspace changes without restart.
+    """
+    import time
+
+    current = path.resolve()
+    cache_key = str(current)
+    cached = _gripspace_cache.get(cache_key)
+    if cached is not None:
+        value, ts = cached
+        if time.monotonic() - ts < _GRIPSPACE_CACHE_TTL:
+            return value
+
+    home = Path.home().resolve()
+    while current != current.parent:
+        if (current / ".gitgrip").is_dir():
+            _gripspace_cache[cache_key] = (current, time.monotonic())
+            return current
+        # Don't walk above $HOME
+        if current == home:
+            break
+        current = current.parent
+    _gripspace_cache[cache_key] = (None, time.monotonic())
+    return None
+
+
 def project_slug(project_dir: Path | None = None) -> str:
     """Convert a project path to Claude Code's directory slug format.
 
@@ -2322,20 +2360,36 @@ def _worktree_name(project_dir: Path | None = None) -> str:
 
 
 def project_data_dir(project_dir: Path | None = None) -> Path:
-    """Return the root synapt recall data directory (always on the main worktree).
+    """Return the root synapt recall data directory.
 
-    ALL recall data lives under ``<main-worktree>/.synapt/recall/``:
+    ALL recall data lives under ``<root>/.synapt/recall/``:
     shared data (index, knowledge) at the root, and per-worktree data
     (transcripts, journal) under ``worktrees/<name>/``.
 
-    Auto-migrates from two legacy locations on the main worktree:
+    Root resolution priority:
+      1. Git worktree → main worktree root
+      2. GitGrip gripspace → gripspace root (all constituent repos share
+         one index; each sub-repo gets its own ``worktrees/<name>/`` subdir)
+      3. CWD as fallback
+
+    Auto-migrates from two legacy locations:
       1. ``.synapse/recall/``  → ``.synapt/recall/``
       2. ``.synapse-recall/``  → ``.synapt/recall/``
     """
     root = (project_dir or Path.cwd()).resolve()
+
+    # Priority 1: git worktree → resolve to main worktree root
     main_root = _git_main_worktree_root(root)
     if main_root is not None:
         root = main_root
+
+    # Priority 2: GitGrip gripspace → resolve to gripspace root
+    # If CWD (or resolved root) is inside a gripspace, prefer the gripspace
+    # root so all constituent repos share one recall index.
+    grip_root = _find_gripspace_root(root)
+    if grip_root is not None:
+        root = grip_root
+
     new_dir = root / ".synapt" / "recall"
 
     if not new_dir.exists():
@@ -2434,6 +2488,9 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
     a slug derived from the *worktree* path.  This function returns transcript
     directories for both the main worktree and the current worktree (if
     different), so that ``recall build`` archives sessions from all worktrees.
+
+    In a gripspace, also discovers transcripts from all *direct child*
+    repos (directories with ``.git``).  Nested repos are not discovered.
     """
     actual_dir = (project_dir or Path.cwd()).resolve()
     dirs: list[Path] = []
@@ -2455,6 +2512,22 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
             main_d = Path.home() / ".claude" / "projects" / main_slug
             if main_d.is_dir() and any(main_d.glob("*.jsonl")):
                 dirs.append(main_d)
+
+    # If in a gripspace, discover transcripts from all constituent repos
+    grip_root = _find_gripspace_root(actual_dir)
+    if grip_root is not None:
+        try:
+            children = sorted(grip_root.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir() and (child / ".git").exists():
+                child_slug = project_slug(child)
+                if child_slug not in seen_slugs:
+                    seen_slugs.add(child_slug)
+                    child_d = Path.home() / ".claude" / "projects" / child_slug
+                    if child_d.is_dir() and any(child_d.glob("*.jsonl")):
+                        dirs.append(child_d)
 
     return dirs
 
