@@ -2,12 +2,13 @@
 
 Routes each recall task to the best available model architecture:
 - summarize: Prefers encoder-decoder (T5) for parallel input processing
-- consolidate: Uses decoder-only (MLX/Ollama) for JSON schema compliance
-- enrich: Uses decoder-only (MLX/Ollama) for JSON schema compliance
+- enrich: Prefers encoder-decoder (T5 fine-tuned for enrichment JSON)
+- consolidate: Uses decoder-only (MLX/Ollama) for complex reasoning
 
 Falls back gracefully: transformers → MLX → Ollama → None.
 
 Override with SYNAPT_SUMMARY_BACKEND=mlx|transformers|ollama for testing.
+Override enrichment model with SYNAPT_ENRICHMENT_MODEL env var.
 """
 
 from __future__ import annotations
@@ -50,14 +51,27 @@ class RecallTask(Enum):
 
 
 # Task → preferred architecture
+# Summarize: encoder-decoder (parallel input, plain text output).
+# Enrich: encoder-decoder (T5 fine-tuned for enrichment JSON output).
+# Consolidate: decoder-only (complex multi-entry reasoning).
 _TASK_PREFERENCE: dict[RecallTask, str] = {
     RecallTask.SUMMARIZE: "encoder-decoder",
     RecallTask.CONSOLIDATE: "decoder-only",
-    RecallTask.ENRICH: "decoder-only",
+    RecallTask.ENRICH: "encoder-decoder",
 }
 
-# Module-level client cache: (backend, max_tokens) → client instance
-_client_cache: dict[tuple[str, int], object] = {}
+# Task → encoder-decoder model override (when not using the default).
+# Enrichment uses a fine-tuned T5 that produces structured JSON.
+# Override with SYNAPT_ENRICHMENT_MODEL env var or set the HF model ID below.
+_ENRICHMENT_MODEL_DEFAULT = "laynepro/t5-enrichment-v2"
+
+_TASK_ENCODER_DECODER_MODEL: dict[RecallTask, str | None] = {
+    RecallTask.SUMMARIZE: None,  # Use DEFAULT_ENCODER_DECODER_MODEL
+    RecallTask.ENRICH: os.environ.get("SYNAPT_ENRICHMENT_MODEL", _ENRICHMENT_MODEL_DEFAULT),
+}
+
+# Module-level client cache: (backend, max_tokens, model) → client instance
+_client_cache: dict[tuple, object] = {}
 
 
 def get_client(
@@ -81,7 +95,8 @@ def get_client(
     preferred = _TASK_PREFERENCE[task]
 
     if preferred == "encoder-decoder":
-        client = _get_transformers_client(max_tokens)
+        model_override = _TASK_ENCODER_DECODER_MODEL.get(task)
+        client = _get_transformers_client(max_tokens, model_name=model_override)
         if client is not None:
             return client
         # Fall back to decoder-only
@@ -90,15 +105,18 @@ def get_client(
         return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
 
 
-def _get_transformers_client(max_tokens: int) -> object | None:
+def _get_transformers_client(
+    max_tokens: int,
+    model_name: str | None = None,
+) -> object | None:
     """Try to create a TransformersClient. Returns None if unavailable."""
-    key = ("transformers", max_tokens)
+    key = ("transformers", max_tokens, model_name)
     if key in _client_cache:
         return _client_cache[key]
 
     try:
         from synapt._models.transformers_client import TransformersClient
-        client = TransformersClient(max_tokens=max_tokens)
+        client = TransformersClient(max_tokens=max_tokens, model_name=model_name)
         _client_cache[key] = client
         logger.debug("TransformersClient available for encoder-decoder inference")
         return client
