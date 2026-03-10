@@ -110,14 +110,22 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
 
     Priority: local sentence-transformers -> Ollama -> None (BM25-only).
     """
+    import logging
+    log = logging.getLogger(__name__)
+
     if prefer_local:
         try:
             provider = LocalEmbeddings()
             # Verify it works
             provider.embed(["test"])
             return provider
-        except (ImportError, Exception):
-            pass
+        except ImportError:
+            log.info(
+                "sentence-transformers not installed. "
+                "Install with: pip install sentence-transformers"
+            )
+        except Exception as e:
+            log.warning("sentence-transformers failed to load: %s", e)
 
     try:
         provider = OllamaEmbeddings()
@@ -125,6 +133,11 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
         provider.embed(["test"])
         return provider
     except Exception:
-        pass
+        log.info("Ollama embeddings unavailable (server not running or model not pulled)")
 
+    log.warning(
+        "No embedding provider found — search will use BM25 only (keyword matching). "
+        "Install sentence-transformers for hybrid semantic search: "
+        "pip install sentence-transformers"
+    )
     return None

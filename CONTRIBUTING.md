@@ -20,7 +20,7 @@ pytest tests/ -v
 
 - Python 3.10+ with type annotations
 - Use `from __future__ import annotations` in all modules
-- Keep dependencies minimal — core synapt has zero required dependencies
+- Keep dependencies minimal
 
 ## Testing
 
