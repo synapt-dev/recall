@@ -138,10 +138,10 @@ Synapt auto-selects the best available backend:
 
 | Priority | Backend | Model | Install |
 |----------|---------|-------|---------|
-| 1st | **MLX** (Apple Silicon) | [Ministral-3B-4bit](https://huggingface.co/mlx-community/Ministral-3-3B-Instruct-2512-4bit) (~1.7 GB) | `pip install mlx-lm` |
+| 1st | **MLX** (Apple Silicon) | [Ministral-3B-4bit](https://huggingface.co/mlx-community/Ministral-3-3B-Instruct-2512-4bit) (~1.7 GB) | Automatic on Apple Silicon |
 | 2nd | **Ollama** | ministral:3b (~1.7 GB) | [ollama.com](https://ollama.com), then `ollama pull ministral:3b` |
 
-MLX is preferred over Ollama when both are available — it runs in-process with no server dependency. Ollama is the cross-platform fallback for Linux/Windows.
+On Apple Silicon Macs, `mlx-lm` is installed automatically as a default dependency. It runs in-process with no server — just works. On Linux/Windows, install Ollama as the backend.
 
 If neither is installed, enrichment tools return a message explaining what to install. Search, journal, reminders, and all other features work normally without an LLM backend.
 
