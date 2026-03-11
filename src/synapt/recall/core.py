@@ -673,6 +673,11 @@ class TranscriptIndex:
         # Search diagnostics (populated on empty results for caller inspection)
         self._last_diagnostics: SearchDiagnostics | None = None
 
+        # Query result cache — avoids re-computing BM25/embedding/RRF for
+        # identical queries within the same index lifetime. LRU with max 32 entries.
+        self._query_cache: dict[tuple, str] = {}
+        self._query_cache_max = 32
+
         # Working memory (session-scoped, in-memory LRU)
         from synapt.recall.working_memory import WorkingMemory
         self._working_memory = WorkingMemory()
@@ -1063,6 +1068,16 @@ class TranscriptIndex:
             self._last_diagnostics = SearchDiagnostics(reason="empty_index")
             return ""
 
+        # Check query cache — skip if max_tokens=0 (diagnostics-only mode)
+        cache_key = (
+            query, max_chunks, max_sessions, after, before,
+            half_life, threshold_ratio, depth, include_archived,
+            include_historical,
+        )
+        cached = self._query_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # Query intent classification — adjusts search parameters based on
         # the type of information being sought (recency, embedding weight,
         # knowledge boost). Only overrides half_life when caller didn't
@@ -1097,18 +1112,27 @@ class TranscriptIndex:
         date_filter = self._filter_by_date(after, before)
 
         if max_sessions is not None:
-            return self._progressive_lookup(
+            result = self._progressive_lookup(
                 query, query_tokens, max_chunks, max_tokens, max_sessions,
                 date_filter, half_life, threshold_ratio, depth,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
             )
-        return self._global_lookup(
-            query, query_tokens, max_chunks, max_tokens, date_filter,
-            half_life, threshold_ratio, depth, include_archived,
-            include_historical,
-            emb_weight=emb_weight, knowledge_boost=knowledge_boost,
-        )
+        else:
+            result = self._global_lookup(
+                query, query_tokens, max_chunks, max_tokens, date_filter,
+                half_life, threshold_ratio, depth, include_archived,
+                include_historical,
+                emb_weight=emb_weight, knowledge_boost=knowledge_boost,
+            )
+
+        # Cache the result (LRU eviction when full)
+        if len(self._query_cache) >= self._query_cache_max:
+            # Evict oldest entry
+            oldest = next(iter(self._query_cache))
+            del self._query_cache[oldest]
+        self._query_cache[cache_key] = result
+        return result
 
     def _global_lookup(
         self,
