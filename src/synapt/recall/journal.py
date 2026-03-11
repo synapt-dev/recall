@@ -21,13 +21,13 @@ _NOISE_PATH_SEGMENTS = ("/.claude/", "/private/tmp/")
 
 def _filter_project_files(
     files: list[str] | set[str],
-    project_root: str = "",
+    project_root: str | None = None,
 ) -> list[str]:
     """Filter file paths to only include project-relevant files.
 
     Removes:
     - ~/.claude/ internals (plans, tool results, hooks, settings)
-    - /private/tmp/ and /private/var/ temp files
+    - /private/tmp/ temp files
     - Absolute paths outside the project root (other projects)
 
     Relative paths are kept as-is (already project-scoped).
@@ -38,22 +38,22 @@ def _filter_project_files(
     # Normalize: ensure trailing slash for prefix matching
     prefix = project_root.rstrip("/") + "/"
 
-    result: list[str] = []
+    result: set[str] = set()
     for fp in files:
-        if not fp or not fp.strip():
+        if not fp or fp.isspace():
             continue
         # Skip known noise paths
         if any(seg in fp for seg in _NOISE_PATH_SEGMENTS):
             continue
         # Relative paths are already project-scoped
         if not fp.startswith("/"):
-            result.append(fp)
+            result.add(fp)
             continue
         # Absolute paths: keep only if under project root
         if fp.startswith(prefix):
-            result.append(fp[len(prefix):])
+            result.add(fp[len(prefix):])
         # else: absolute path outside project — skip
-    return sorted(set(result))
+    return sorted(result)
 
 
 def _journal_path(project_dir: Path | None = None) -> Path:
@@ -453,6 +453,7 @@ def _read_all_session_ids(journal_path: Path) -> set[str]:
 def synthesize_journal_stubs(
     sessions: dict,
     journal_path: Path | None = None,
+    project_root: str | None = None,
 ) -> int:
     """Synthesize lightweight journal entries for sessions without one.
 
@@ -465,6 +466,7 @@ def synthesize_journal_stubs(
     Args:
         sessions: dict mapping session_id → list of TranscriptChunks.
         journal_path: Path to journal.jsonl. Default: project journal path.
+        project_root: Project root for filtering file paths. Default: cwd.
 
     Returns:
         Number of stubs synthesized.
@@ -497,7 +499,7 @@ def synthesize_journal_stubs(
         files_set: set[str] = set()
         for c in transcript_chunks:
             files_set.update(c.files_touched)
-        files_modified = _filter_project_files(files_set)
+        files_modified = _filter_project_files(files_set, project_root=project_root)
 
         # Use earliest timestamp
         timestamp = min(

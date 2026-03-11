@@ -314,7 +314,7 @@ def _archive_and_build_locked(
         for c in transcript_chunks:
             sessions.setdefault(c.session_id, []).append(c)
         # Only synthesize stubs into the local journal
-        synthesized = synthesize_journal_stubs(sessions, local_journal)
+        synthesized = synthesize_journal_stubs(sessions, local_journal, project_root=str(project_dir))
         if synthesized:
             print(f"  Auto-journal: {synthesized} stub(s) synthesized")
 
