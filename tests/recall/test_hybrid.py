@@ -196,7 +196,7 @@ class TestQueryIntentClassification:
     def test_temporal(self):
         assert classify_query_intent("when did we discuss the migration") == "temporal"
         assert classify_query_intent("when was the last deployment") == "temporal"
-        assert classify_query_intent("what happened after the release") == "temporal"
+        assert classify_query_intent("what happened last week") == "temporal"
         assert classify_query_intent("how recently was the config changed") == "temporal"
 
     def test_temporal_beats_factual_for_when(self):
@@ -336,6 +336,13 @@ class TestExtractEntities:
         assert "caroline" in entities
         # Should not include the possessive form
         assert "caroline's" not in entities
+
+    def test_possessive_name_ending_in_s(self):
+        """Possessive stripping must not corrupt names ending in 's'."""
+        entities = extract_entities("What are James's plans?")
+        assert "james" in entities
+        # rstrip("'s") would produce "jame" — verify full name preserved
+        assert "jame" not in entities
 
     def test_location_names(self):
         entities = extract_entities("Where did Caroline move from Sweden?")

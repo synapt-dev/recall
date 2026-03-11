@@ -198,7 +198,6 @@ _FACTUAL_PATTERNS = re.compile(
 
 _TEMPORAL_PATTERNS = re.compile(
     r"\b(when\s+(is|was|did|does|were|will|has|have)|"
-    r"before|after|during|since|until|"
     r"how\s+(long|recently)|how\s+many\s+(days|weeks|months|years)|"
     r"first\s+time|last\s+time|most\s+recent|"
     r"ago|yesterday|today|recently|lately|"
@@ -445,7 +444,7 @@ def extract_entities(query: str) -> set[str]:
     entities: set[str] = set()
     for m in matches:
         # Strip possessive suffix for matching
-        clean = m.rstrip("'s").lower() if m.endswith("'s") else m.lower()
+        clean = m[:-2].lower() if m.endswith("'s") else m.lower()
         if clean not in _NON_ENTITY_WORDS and len(clean) > 1:
             entities.add(clean)
     return entities
