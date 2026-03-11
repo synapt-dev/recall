@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Why Synapt? — Local-First Memory That Beats Cloud Systems</title>
+  <meta name="description" content="Synapt scores 69.35% on LOCOMO running entirely locally on a 3B model — beating Mem0+Graph (68.44%), Zep (65.99%), and every other system that requires cloud GPT-4.">
+  <meta property="og:title" content="Why Synapt?">
+  <meta property="og:description" content="Local-first agent memory that beats cloud-dependent systems on standardized benchmarks.">
+  <meta property="og:type" content="article">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --purple: #7c5cbf;
+      --purple-light: #9b7fd4;
+      --teal: #00e5cc;
+      --teal-dim: #00c4ae;
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2129;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --border: #30363d;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: 'JetBrains Mono', monospace; background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+
+    .container { max-width: 720px; margin: 0 auto; padding: 0 1.5rem; }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 0;
+    }
+    header .container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header .logo { font-weight: 700; font-size: 1.2rem; color: var(--purple-light); }
+    header nav a { margin-left: 1.5rem; color: var(--text-dim); font-size: 0.9rem; }
+
+    article { padding: 3rem 0 4rem; }
+    article h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      line-height: 1.2;
+    }
+    article .subtitle {
+      color: var(--text-dim);
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+    }
+    article .meta {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin-bottom: 2.5rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    article h2 {
+      font-size: 1.5rem;
+      margin: 2.5rem 0 1rem;
+      color: var(--purple-light);
+    }
+    article p { margin-bottom: 1.2rem; }
+    article ul, article ol { margin-bottom: 1.2rem; padding-left: 1.5rem; }
+    article li { margin-bottom: 0.5rem; }
+    article strong { color: var(--teal); font-weight: 600; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.5rem 0;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--text-dim); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    td.best { color: var(--teal); font-weight: 600; }
+    tr.highlight td { background: rgba(124, 92, 191, 0.08); }
+
+    .callout {
+      background: var(--bg-card);
+      border-left: 3px solid var(--purple);
+      padding: 1rem 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    .callout p { margin-bottom: 0; }
+
+    .cta {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2rem;
+      margin: 2.5rem 0;
+      text-align: center;
+    }
+    .cta code {
+      display: block;
+      font-size: 1.1rem;
+      margin: 1rem 0;
+      padding: 0.8rem;
+      background: var(--bg-code);
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <a href="../" class="logo">synapt</a>
+      <nav>
+        <a href="../#features">Features</a>
+        <a href="../#benchmarks">Benchmarks</a>
+        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <article>
+    <div class="container">
+      <h1>Why Synapt?</h1>
+      <p class="subtitle">Local-first memory that beats cloud-dependent systems.</p>
+      <p class="meta">March 2026</p>
+
+      <p>
+        AI coding assistants forget everything between sessions. You debug a tricky issue on Monday, and by Wednesday your assistant has no memory it ever happened. Every agent memory system tries to solve this. Most of them require cloud APIs, send your code context to external servers, and still don't beat a well-configured local search.
+      </p>
+      <p>
+        Synapt is different. It runs entirely on your machine, requires no API keys, and scores higher on standardized benchmarks than systems that depend on GPT-4.
+      </p>
+
+      <h2>The benchmark landscape is misleading</h2>
+
+      <p>
+        Memory systems love publishing impressive-sounding numbers. The problem is that everyone uses different metrics, making direct comparisons impossible. Some report <strong>Jaccard similarity</strong> (token-level overlap between predicted and gold answers). Others report <strong>binary accuracy</strong> (an LLM judge says "correct" or "wrong"). Binary accuracy always produces higher numbers for the same underlying performance.
+      </p>
+
+      <p>
+        The <a href="https://snap-research.github.io/locomo/">LOCOMO benchmark</a> (Long Conversational Memory) has become the standard evaluation for memory systems. It was introduced in the <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a> using J-score (Jaccard similarity via LLM-as-Judge) as the primary metric. Here's how systems compare when using the same metric and methodology:
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>System</th>
+            <th>Multi-Hop</th>
+            <th>Temporal</th>
+            <th>Single-Hop</th>
+            <th>Open-Domain</th>
+            <th>Overall</th>
+            <th>Infra</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="color: var(--text-dim);">
+            <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
+          </tr>
+          <tr class="highlight">
+            <td><strong>synapt</strong></td>
+            <td class="best">60.99</td>
+            <td>57.32</td>
+            <td>57.29</td>
+            <td class="best">78.12</td>
+            <td class="best">69.35</td>
+            <td>local 3B model</td>
+          </tr>
+          <tr>
+            <td>Mem0+Graph</td><td>47.19</td><td>58.13</td><td>65.71</td><td>75.71</td><td>68.44</td><td>cloud GPT-4</td>
+          </tr>
+          <tr>
+            <td>Mem0</td><td>51.15</td><td>55.51</td><td>67.13</td><td>72.93</td><td>66.88</td><td>cloud GPT-4</td>
+          </tr>
+          <tr>
+            <td>Zep</td><td>41.35</td><td>49.31</td><td>61.70</td><td>76.60</td><td>65.99</td><td>cloud service</td>
+          </tr>
+          <tr>
+            <td>LangMem</td><td>47.92</td><td>23.43</td><td>62.23</td><td>71.12</td><td>58.10</td><td>cloud</td>
+          </tr>
+          <tr>
+            <td>OpenAI Memory</td><td>42.92</td><td>21.71</td><td>63.79</td><td>62.29</td><td>52.90</td><td>cloud</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        Synapt scores <strong>69.35% overall</strong> &mdash; the highest of any system using the Mem0 paper's J-score methodology. And it does this running entirely locally on a 3B parameter model with no cloud API calls.
+      </p>
+
+      <div class="callout">
+        <p>
+          Other systems report higher headline numbers using different metrics. For example, Hindsight reports 89.61% using binary LLM-judge accuracy (not Jaccard), and MemU claims 92% without publishing evaluation code or specifying their metric. When comparing benchmarks, check the methodology &mdash; the metric matters more than the number.
+        </p>
+      </div>
+
+      <h2>What makes synapt different</h2>
+
+      <p><strong>Local-first, no API keys.</strong> Synapt runs on your laptop. Embeddings come from <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2">all-MiniLM-L6-v2</a> (90MB). Optional enrichment uses a 3B model via MLX on Apple Silicon or Ollama on Linux. Your code context never leaves your machine.</p>
+
+      <p><strong>Hybrid search that catches what embeddings miss.</strong> Most memory systems rely on pure embedding similarity. That works for semantic matches but fails when you search for a specific config value, error message, or file path. Synapt fuses FTS5 full-text search with 384-dim embeddings via <a href="https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf">Reciprocal Rank Fusion</a>. A result that keyword search misses can still surface if it's semantically similar &mdash; and vice versa.</p>
+
+      <p><strong>Built for coding, not chat.</strong> LOCOMO tests personal conversation memory ("what's Maria's cat's name?"). Synapt is designed for coding sessions. It indexes tool results, file paths, error traces, and decision markers alongside conversation text. The query intent classifier routes debug queries differently from factual lookups, with tuned recency decay and embedding weights per intent.</p>
+
+      <p><strong>Dynamic knowledge discovery.</strong> Some systems predefine fixed memory categories (e.g., 10 buckets like "preferences", "relationships"). Synapt discovers knowledge clusters from your actual data through temporal and semantic similarity, then consolidates them into durable knowledge nodes with confidence scores and source attribution.</p>
+
+      <p><strong>Zero infrastructure.</strong> No Docker, no PostgreSQL, no cloud service. One SQLite file per project. Install with <code>pip install synapt</code> and you're running in seconds.</p>
+
+      <h2>Architecture</h2>
+
+      <p>Three retrieval paths run in parallel:</p>
+
+      <ol>
+        <li><strong>BM25/FTS5</strong> &mdash; Full-text search with configurable recency decay</li>
+        <li><strong>Embeddings</strong> &mdash; Cosine similarity over 384-dim vectors</li>
+        <li><strong>Knowledge</strong> &mdash; Durable facts extracted from session journals, searched via FTS5 + embeddings with confidence-weighted boosting</li>
+      </ol>
+
+      <p>
+        Results are merged via RRF (rank-based fusion, no score normalization needed), then interleaved with knowledge nodes and deduplicated. Query intent classification adjusts parameters automatically &mdash; debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes.
+      </p>
+
+      <h2>The metric problem in memory benchmarks</h2>
+
+      <p>
+        If you're evaluating memory systems, here's what to watch for:
+      </p>
+
+      <ul>
+        <li><strong>J-score vs accuracy</strong> &mdash; Jaccard token overlap is strict. LLM binary accuracy is lenient. A system scoring 70% Jaccard might score 85%+ accuracy. They are not comparable.</li>
+        <li><strong>Judge model</strong> &mdash; GPT-4 as judge is more generous than gpt-4o-mini. Same system, different judge, different score.</li>
+        <li><strong>Answer model</strong> &mdash; Hindsight's best score uses Gemini-3 Pro for answer generation. Their open-source 20B model drops ~6 points. The memory system gets credit for the answer model's strength.</li>
+        <li><strong>Dataset version</strong> &mdash; LOCOMO has different versions. Some systems evaluate on subsets.</li>
+        <li><strong>Reproducibility</strong> &mdash; If the evaluation code isn't published, treat the numbers with skepticism.</li>
+      </ul>
+
+      <p>
+        Synapt's evaluation follows the Mem0 paper's methodology exactly: 10 LOCOMO conversations, 1540 QA pairs (categories 1-4), J-score via gpt-4o-mini judge. The evaluation code is in the repository.
+      </p>
+
+      <h2>Get started</h2>
+
+      <div class="cta">
+        <p>Install synapt and build your first index in under a minute.</p>
+        <code>pip install synapt && synapt recall build && synapt server</code>
+        <p style="margin-top: 1rem;">
+          <a href="https://github.com/laynepenney/synapt">GitHub</a> &nbsp;&middot;&nbsp;
+          <a href="https://pypi.org/project/synapt/">PyPI</a> &nbsp;&middot;&nbsp;
+          <a href="../">Docs</a>
+        </p>
+      </div>
+
+    </div>
+  </article>
+</body>
+</html>
