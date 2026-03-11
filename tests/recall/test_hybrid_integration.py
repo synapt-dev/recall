@@ -288,3 +288,36 @@ class TestEmbeddingSearchEdgeCases:
         index = TranscriptIndex([], db=db, use_embeddings=False)
         result = index.lookup("anything", max_chunks=5)
         assert result == ""
+
+
+class TestQueryCache:
+    """Test that identical queries return cached results."""
+
+    def test_cache_hit_returns_same_result(self, tmp_path):
+        """Second identical lookup should return cached result."""
+        index = _build_index(tmp_path)
+        result1 = index.lookup("database schema", max_chunks=5)
+        result2 = index.lookup("database schema", max_chunks=5)
+        assert result1 == result2
+        assert result1  # Non-empty
+
+    def test_different_params_different_cache(self, tmp_path):
+        """Different max_chunks should not hit cache."""
+        index = _build_index(tmp_path)
+        result1 = index.lookup("database schema", max_chunks=2)
+        result2 = index.lookup("database schema", max_chunks=5)
+        # Different params → different results (or at least different cache entries)
+        assert len(index._query_cache) == 2
+
+    def test_cache_eviction(self, tmp_path):
+        """Cache should evict oldest when full."""
+        index = _build_index(tmp_path)
+        index._query_cache_max = 3
+        # Fill cache with 3 different queries
+        index.lookup("database schema", max_chunks=5)
+        index.lookup("authentication token", max_chunks=5)
+        index.lookup("deployment pipeline", max_chunks=5)
+        assert len(index._query_cache) == 3
+        # Fourth query should evict the oldest
+        index.lookup("rollback procedure", max_chunks=5)
+        assert len(index._query_cache) == 3
