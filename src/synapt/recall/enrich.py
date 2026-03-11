@@ -95,17 +95,17 @@ def _build_transcript_summary(session_id: str, project_dir: Path) -> str:
 
 
 ENRICHMENT_PROMPT = """\
-You are summarizing a Claude Code programming session transcript. Extract structured information about what happened.
+You are summarizing a session transcript. Extract structured information about what happened.
 
 Given the following transcript, produce a JSON object with these fields:
-- "focus": A one-sentence description of the session's main goal (max 200 chars)
-- "done": A list of 1-5 concrete accomplishments (each max 100 chars)
-- "decisions": A list of 0-3 key technical decisions made (each max 100 chars)
-- "next_steps": A list of 0-3 items to follow up on (each max 100 chars)
+- "focus": A one-sentence description of the session's main topic or goal (max 200 chars)
+- "done": A list of 1-5 concrete things accomplished, discussed, or learned (each max 100 chars)
+- "decisions": A list of 0-3 key decisions made or preferences stated (each max 100 chars)
+- "next_steps": A list of 0-3 items to follow up on or remember (each max 100 chars)
 
 Rules:
-- Be specific and concrete, not vague
-- Focus on what changed, not what was discussed
+- Be specific and concrete — include names, dates, places, and key details
+- Capture important facts, preferences, and relationship details mentioned
 - If the session was short or trivial, use fewer items
 - Output ONLY valid JSON, no markdown fences, no explanation
 
