@@ -165,29 +165,43 @@ def enrich_entry(
     adapter_path: str = "",
     transcript_text: str = "",
 ) -> JournalEntry | None:
-    """Enrich a single auto-journal stub using MLX.
+    """Enrich a single auto-journal stub using LLM inference.
+
+    Uses the model router to select the best backend: encoder-decoder
+    (FLAN-T5, ~10x faster) when available, falling back to MLX decoder.
 
     Args:
-        client: Reusable MLXClient instance. Created if not provided.
-        adapter_path: Optional LoRA adapter for enrichment.
+        client: Reusable model client instance. Created via router if not provided.
+        adapter_path: Optional LoRA adapter (MLX decoder-only).
         transcript_text: Pre-built transcript summary. If provided, skips
             transcript lookup (used by segment enrichment).
 
     Returns the enriched entry, or None if enrichment failed.
     """
-    if not _MLX_AVAILABLE:
-        return None
-
     if not transcript_text:
         transcript_text = _build_transcript_summary(entry.session_id, project_dir)
     if not transcript_text:
         logger.warning("No transcript found for session %s", entry.session_id)
         return None
 
-    prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text)
-
     if client is None:
-        client = MLXClient(MLXOptions(max_tokens=800))
+        # Try router first (prefers encoder-decoder for speed)
+        from synapt.recall._model_router import get_client, RecallTask
+        client = get_client(RecallTask.ENRICH, max_tokens=800)
+        if client is None:
+            # All backends unavailable
+            if not _MLX_AVAILABLE:
+                return None
+            client = MLXClient(MLXOptions(max_tokens=800))
+
+    # Use simplified prompt for encoder-decoder models (T5 fine-tuned
+    # on "summarize session: <transcript>" → JSON output pairs).
+    from synapt.recall._model_router import is_encoder_decoder
+    if is_encoder_decoder(client):
+        prompt = "summarize session: " + transcript_text
+    else:
+        prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text)
+
     try:
         response = client.chat(
             model=model,
@@ -196,7 +210,7 @@ def enrich_entry(
             adapter_path=adapter_path or None,
         )
     except Exception as exc:
-        logger.warning("MLX inference failed: %s", exc)
+        logger.warning("LLM inference failed: %s", exc)
         return None
 
     parsed = _parse_llm_response(response)
@@ -442,7 +456,12 @@ def enrich_transcript_segments(
         if not summary:
             continue
 
-        ts_short = seg.start_timestamp[:16]
+        ts_raw = seg.start_timestamp
+        # Truncate ISO 8601 to date+HH:MM; keep free-text timestamps intact.
+        if len(ts_raw) > 16 and ts_raw[4:5] == "-" and ts_raw[10:11] == "T":
+            ts_short = ts_raw[:16]
+        else:
+            ts_short = ts_raw
 
         if dry_run:
             n_turns = len(seg.chunks)
@@ -501,9 +520,14 @@ def enrich_all(
     Returns:
         Number of entries enriched.
     """
-    if not _MLX_AVAILABLE:
-        print(_INSTALL_MSG)
-        return 0
+    # Use router to find best available backend
+    from synapt.recall._model_router import get_client, RecallTask
+    client = get_client(RecallTask.ENRICH, max_tokens=800)
+    if client is None:
+        if not _MLX_AVAILABLE:
+            print(_INSTALL_MSG)
+            return 0
+        client = MLXClient(MLXOptions(max_tokens=800))
 
     project_dir = (project_dir or Path.cwd()).resolve()
     journal_path = _journal_path(project_dir)
@@ -529,9 +553,6 @@ def enrich_all(
 
     # Backfill: create auto-stubs for archived transcripts with no journal entry
     _backfill_stubs(project_dir, journal_path, all_journaled)
-
-    # Create client once for the entire batch
-    client = MLXClient(MLXOptions(max_tokens=800))
 
     count = 0
     for entry in iter_enrichable_entries(journal_path):

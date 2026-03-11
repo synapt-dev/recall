@@ -39,11 +39,11 @@ class TestGetClient:
         if client is not None:
             assert not is_encoder_decoder(client)
 
-    def test_enrich_returns_decoder_only(self):
-        """ENRICH should prefer decoder-only, not encoder-decoder."""
+    def test_enrich_returns_encoder_decoder(self):
+        """ENRICH should prefer encoder-decoder (T5 fine-tuned for JSON)."""
         client = get_client(RecallTask.ENRICH)
         if client is not None:
-            assert not is_encoder_decoder(client)
+            assert is_encoder_decoder(client)
 
     def test_client_caching(self):
         """Same task + max_tokens should return cached client."""
@@ -112,7 +112,7 @@ class TestFallbackChain:
         """When transformers unavailable, SUMMARIZE falls back to MLX."""
         import synapt.recall._model_router as router
 
-        def _no_transformers(max_tokens):
+        def _no_transformers(max_tokens, model_name=None):
             return None
 
         monkeypatch.setattr(router, "_get_transformers_client", _no_transformers)
@@ -124,7 +124,7 @@ class TestFallbackChain:
         """When all backends unavailable, returns None."""
         import synapt.recall._model_router as router
 
-        monkeypatch.setattr(router, "_get_transformers_client", lambda mt: None)
+        monkeypatch.setattr(router, "_get_transformers_client", lambda mt, model_name=None: None)
         monkeypatch.setattr(router, "_get_mlx_client", lambda mt: None)
         monkeypatch.setattr(router, "_get_ollama_client", lambda mt: None)
         client = get_client(RecallTask.SUMMARIZE)

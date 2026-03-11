@@ -745,6 +745,27 @@ class TranscriptIndex:
                 self._embedding_status = "unavailable"
                 self._embedding_reason = str(e)
 
+        # Cross-encoder reranking (Phase 2)
+        from synapt.recall.reranker import is_reranker_enabled
+        self._use_reranker = is_reranker_enabled()
+        if self._use_reranker:
+            logger.info("Cross-encoder reranking enabled")
+
+    def _rerank_candidates(
+        self,
+        query: str,
+        candidates: list[tuple[int, float]],
+    ) -> list[tuple[int, float]]:
+        """Apply cross-encoder reranking if enabled."""
+        if not self._use_reranker:
+            return candidates
+        try:
+            from synapt.recall.reranker import rerank
+            return rerank(query, candidates, self.chunks)
+        except Exception as e:
+            logger.warning("Reranking failed, using original order: %s", e)
+            return candidates
+
     def _refresh_rowid_map(self) -> None:
         """Build rowid <-> chunk-index mappings from the database."""
         if not self._db:
@@ -1211,6 +1232,11 @@ class TranscriptIndex:
             date_filter_active=date_filter is not None,
         )
 
+        # Cross-encoder reranking (Phase 2): rerank after threshold so
+        # threshold operates on RRF scores (correct domain), not cross-encoder
+        # logits which can be negative and break ratio-based filtering.
+        top = self._rerank_candidates(query, top)
+
         return self._format_results(
             top[:max_chunks], max_tokens,
             knowledge_results=knowledge_results,
@@ -1382,6 +1408,9 @@ class TranscriptIndex:
             date_filter_active=date_filter is not None,
         )
 
+        # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
+        top = self._rerank_candidates(query, top)
+
         return self._format_results(top[:max_chunks], max_tokens, query=query)
 
     def _progressive_lookup(
@@ -1418,7 +1447,7 @@ class TranscriptIndex:
                 depth=depth,
             )
         return self._progressive_lookup_bm25(
-            query_tokens, max_chunks, max_tokens, max_sessions,
+            query, query_tokens, max_chunks, max_tokens, max_sessions,
             date_filter, half_life, threshold_ratio,
             depth=depth,
         )
@@ -1525,11 +1554,17 @@ class TranscriptIndex:
         else:
             hits.sort(key=lambda x: x[1], reverse=True)
 
+        # Bound candidates before expensive operations
+        hits = hits[:max_chunks * 2]
+
         hits = self._apply_threshold_with_diagnostics(
             hits, threshold_ratio, "fts_progressive",
             date_filter_active=date_filter is not None,
             sessions_searched=sessions_searched,
         )
+
+        # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
+        hits = self._rerank_candidates(query, hits)
 
         return self._format_results(
             hits[:max_chunks], max_tokens,
@@ -1539,6 +1574,7 @@ class TranscriptIndex:
 
     def _progressive_lookup_bm25(
         self,
+        query: str,
         query_tokens: list[str],
         max_chunks: int,
         max_tokens: int,
@@ -1587,15 +1623,21 @@ class TranscriptIndex:
 
         hits.sort(key=lambda x: x[1], reverse=True)
 
+        # Bound candidates before expensive operations
+        hits = hits[:max_chunks * 2]
+
         hits = self._apply_threshold_with_diagnostics(
             hits, threshold_ratio, "bm25_progressive",
             date_filter_active=date_filter is not None,
             sessions_searched=sessions_searched,
         )
 
+        # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
+        hits = self._rerank_candidates(query, hits)
+
         return self._format_results(
             hits[:max_chunks], max_tokens,
-            query=" ".join(query_tokens),
+            query=query,
         )
 
     def _search_knowledge(
