@@ -115,7 +115,9 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
 
     if prefer_local:
         try:
-            provider = LocalEmbeddings()
+            from synapt.recall.config import load_config
+            model_name = load_config().get_model("embedding")
+            provider = LocalEmbeddings(model_name=model_name)
             # Verify it works
             provider.embed(["test"])
             return provider

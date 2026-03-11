@@ -676,6 +676,21 @@ def cmd_stats(args: argparse.Namespace) -> None:
         if n_clusters > 0:
             print(f"  Clusters:         {n_clusters}")
 
+    # Active model configuration
+    try:
+        from synapt.recall.config import load_config
+        cfg = load_config()
+        models = cfg.active_models()
+        print()
+        print("Active Models")
+        print("-" * 40)
+        for key, model in models.items():
+            print(f"  {key:16s}  {model}")
+        if cfg.backend != "auto":
+            print(f"  {'backend':16s}  {cfg.backend}")
+    except Exception as e:
+        logger.debug("Failed to load model config: %s", e)
+
 
 def cmd_sessions(args: argparse.Namespace) -> None:
     """List recent sessions with date, turn count, and first message."""

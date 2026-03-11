@@ -39,7 +39,8 @@ _reranker_cache: dict[str, object] = {}
 
 def get_reranker_model() -> str:
     """Get the configured cross-encoder model name."""
-    return os.environ.get("SYNAPT_RERANKER_MODEL", DEFAULT_RERANKER_MODEL)
+    from synapt.recall.config import load_config
+    return load_config().get_model("reranker")
 
 
 def is_reranker_enabled() -> bool:
