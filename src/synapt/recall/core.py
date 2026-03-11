@@ -501,7 +501,7 @@ def parse_transcript(
             try:
                 tool_content = scrub_text(tool_content)
             except Exception:
-                pass  # scrub_text failure shouldn't block indexing
+                logger.debug("scrub_text failed on tool content, using raw", exc_info=True)
         if len(tool_content) > 3000:
             tool_content = tool_content[:3000] + "..."
         short_id = session_id[:8]
@@ -1083,7 +1083,7 @@ class TranscriptIndex:
             if not caller_set_half_life:
                 half_life = params.get("half_life", half_life)
         except Exception:
-            pass
+            logger.debug("Intent classification failed, using defaults", exc_info=True)
 
         query_tokens = _tokenize(query)
         if not query_tokens:

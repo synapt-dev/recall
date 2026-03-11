@@ -41,20 +41,10 @@ from synapt.recall.core import project_data_dir, project_index_dir
 
 logger = logging.getLogger("synapt.recall.consolidate")
 
-# Guard MLX import — consolidation is optional
-_MLX_AVAILABLE = False
-try:
+from synapt.recall._mlx import MLX_AVAILABLE as _MLX_AVAILABLE, INSTALL_MSG as _INSTALL_MSG  # noqa: F401
+if _MLX_AVAILABLE:
     from synapt._models.mlx_client import MLXClient, MLXOptions
     from synapt._models.base import Message
-    _MLX_AVAILABLE = True
-except ImportError:
-    pass
-
-_INSTALL_MSG = (
-    "MLX is required for memory consolidation.\n"
-    "Install with: pip install mlx-lm\n"
-    "Then re-run this command."
-)
 
 from synapt.recall._model_router import DEFAULT_DECODER_MODEL as DEFAULT_MODEL
 MAX_EXISTING_KNOWLEDGE_CHARS = 4000
