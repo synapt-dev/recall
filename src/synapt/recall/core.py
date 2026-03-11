@@ -57,6 +57,15 @@ def atomic_json_write(data: dict | list, path: Path, indent: int = 2) -> None:
         raise
 
 
+# Near-duplicate Jaccard threshold for result deduplication
+_DEDUP_JACCARD_THRESHOLD = 0.6
+
+
+def _dedup_limit(max_chunks: int) -> int:
+    """Extra candidates to pass through formatting to compensate for dedup."""
+    return max_chunks + max(5, max_chunks // 3)
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -1279,8 +1288,11 @@ class TranscriptIndex:
         # logits which can be negative and break ratio-based filtering.
         top = self._rerank_candidates(query, top)
 
+        # Pass extra candidates to _format_results to compensate for
+        # near-duplicate filtering — the token budget is the real limiter.
+        dedup_headroom = _dedup_limit(max_chunks)
         return self._format_results(
-            top[:max_chunks], max_tokens,
+            top[:dedup_headroom], max_tokens,
             knowledge_results=knowledge_results,
             query=query,
         )
@@ -1453,7 +1465,8 @@ class TranscriptIndex:
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
         top = self._rerank_candidates(query, top)
 
-        return self._format_results(top[:max_chunks], max_tokens, query=query)
+        dedup_headroom = _dedup_limit(max_chunks)
+        return self._format_results(top[:dedup_headroom], max_tokens, query=query)
 
     def _progressive_lookup(
         self,
@@ -1741,7 +1754,14 @@ class TranscriptIndex:
                 token_overlap = len(query_tokens & node_tokens) >= min_matches
                 strong_emb = rowid in emb_rowids
                 if token_overlap or strong_emb:
-                    node["score"] = score_map.get(rowid, 0.0) * knowledge_boost
+                    conf = node.get("confidence", 0.5)
+                    if not isinstance(conf, (int, float)):
+                        conf = 0.5
+                    # Confidence-weighted boost: well-corroborated facts
+                    # (conf=0.9 → 2.8x) rank above single-session
+                    # observations (conf=0.45 → 1.9x).
+                    effective_boost = 1.0 + conf * knowledge_boost
+                    node["score"] = score_map.get(rowid, 0.0) * effective_boost
                     results.append(node)
                     seen_ids.add(node_id)
 
@@ -1953,13 +1973,26 @@ class TranscriptIndex:
         # Sort by score descending (highest relevance first)
         emit_items.sort(key=lambda x: x[0], reverse=True)
 
+        # Deduplication: skip chunks that are near-duplicates of already-
+        # emitted items (Jaccard similarity > 0.6 on token sets). This frees
+        # token budget for diverse results, especially on multi-hop queries.
+        from synapt.recall.clustering import _jaccard
+
+        emitted_token_sets: list[set[str]] = []
+
         emitted_access: list[dict] = []
         for score, block, item_type, item_id in emit_items:
+            block_tokens_set = set(_tokenize(block))
+            if block_tokens_set and emitted_token_sets:
+                if any(_jaccard(block_tokens_set, prev) > _DEDUP_JACCARD_THRESHOLD
+                       for prev in emitted_token_sets):
+                    continue  # Skip near-duplicate
             block_tokens = len(block) // 4
             if token_count + block_tokens > max_tokens and len(lines) > 1:
                 break
             lines.append(block)
             token_count += block_tokens
+            emitted_token_sets.append(block_tokens_set)
             access_entry: dict = {
                 "item_type": item_type,
                 "item_id": item_id,
@@ -2168,8 +2201,8 @@ class TranscriptIndex:
         parts = [header]
         prev = self._get_preceding_turn(chunk)
         if prev and prev.user_text:
-            ctx = prev.user_text[:120]
-            if len(prev.user_text) > 120:
+            ctx = prev.user_text[:200]
+            if len(prev.user_text) > 200:
                 ctx += "..."
             parts.append(f"  (context: User previously asked: {ctx})")
         if chunk.user_text:

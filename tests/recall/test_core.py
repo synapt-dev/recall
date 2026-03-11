@@ -1682,7 +1682,7 @@ def test_format_results_shows_more_user_text():
 
 
 def test_format_results_shows_wider_context_preview():
-    """Context preview shows up to 120 chars, not 80."""
+    """Context preview shows up to 200 chars, not 80."""
     from synapt.recall.core import TranscriptIndex
 
     prev_question = "A" * 100 + " CONTEXT END"
@@ -1739,3 +1739,51 @@ def test_format_results_journal_chunk_uses_readable_date():
     assert "T09:05:30" not in result
     assert "2026-03-04 09:05" in result
     assert "journal" in result
+
+
+def test_format_results_deduplicates_near_identical_chunks():
+    """Near-duplicate chunks are filtered out to save token budget."""
+    from synapt.recall.core import TranscriptIndex
+
+    # Three chunks with nearly identical content — only the first should appear
+    chunks = [
+        TranscriptChunk(
+            id=f"abc:t{i}", session_id="abcdef12-0000-0000-0000-000000000000",
+            timestamp=f"2026-03-05T14:0{i}:00Z", turn_index=i,
+            user_text="How do I deploy the app?",
+            assistant_text=f"To deploy, run deploy.sh then verify. Variant {i}.",
+        )
+        for i in range(3)
+    ]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("deploy app", max_chunks=10, max_tokens=5000)
+
+    # Only 1 of the 3 near-duplicates should appear
+    deploy_count = result.count("To deploy, run deploy.sh")
+    assert deploy_count == 1, f"Expected 1 unique chunk, got {deploy_count}"
+
+
+def test_format_results_keeps_diverse_chunks():
+    """Chunks with different content are all kept despite sharing a query match."""
+    from synapt.recall.core import TranscriptIndex
+
+    chunks = [
+        TranscriptChunk(
+            id="abc:t0", session_id="abcdef12-0000-0000-0000-000000000000",
+            timestamp="2026-03-05T14:00:00Z", turn_index=0,
+            user_text="How do I deploy?",
+            assistant_text="Run deploy.sh with the production flag.",
+        ),
+        TranscriptChunk(
+            id="abc:t1", session_id="abcdef12-0000-0000-0000-000000000000",
+            timestamp="2026-03-05T14:05:00Z", turn_index=1,
+            user_text="What about rollback?",
+            assistant_text="Use rollback.sh to revert to the previous version.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    result = index.lookup("deploy rollback", max_chunks=10, max_tokens=5000)
+
+    # Both diverse chunks should appear
+    assert "deploy.sh" in result
+    assert "rollback.sh" in result
