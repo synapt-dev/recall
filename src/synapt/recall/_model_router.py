@@ -9,8 +9,8 @@ Falls back gracefully: ONNX → transformers → MLX → Ollama → None.
 ONNX Runtime is 5-7x faster than PyTorch CPU via graph optimization.
 Run 'synapt-convert' to create ONNX models.
 
-Override with SYNAPT_SUMMARY_BACKEND=onnx|mlx|transformers|ollama for testing.
-Override enrichment model with SYNAPT_ENRICHMENT_MODEL env var.
+Configure models via ~/.synapt/config.json or .synapt/recall/config.json.
+Override with SYNAPT_SUMMARY_BACKEND=onnx|mlx|transformers|ollama env var.
 """
 
 from __future__ import annotations
@@ -36,13 +36,10 @@ ENCODER_DECODER_MODELS: dict[str, dict] = {
 def get_encoder_decoder_model() -> str:
     """Get the configured encoder-decoder model name.
 
-    Override with SYNAPT_SUMMARY_MODEL env var. Supports any HuggingFace
-    Seq2Seq model, but tested with:
-      - google/flan-t5-small  (80M,  ~0.3 GB) — fastest, lowest quality
-      - google/flan-t5-base   (250M, ~1.0 GB) — default, good balance
-      - google/flan-t5-large  (780M, ~3.2 GB) — best quality, more memory
+    Resolved from config files or SYNAPT_SUMMARY_MODEL env var.
     """
-    return os.environ.get("SYNAPT_SUMMARY_MODEL", DEFAULT_ENCODER_DECODER_MODEL)
+    from synapt.recall.config import load_config
+    return load_config().get_model("summarization")
 
 
 class RecallTask(Enum):
@@ -62,14 +59,11 @@ _TASK_PREFERENCE: dict[RecallTask, str] = {
     RecallTask.ENRICH: "encoder-decoder",
 }
 
-# Task → encoder-decoder model override (when not using the default).
-# Enrichment uses a fine-tuned T5 that produces structured JSON.
-# Override with SYNAPT_ENRICHMENT_MODEL env var or set the HF model ID below.
-_ENRICHMENT_MODEL_DEFAULT = "laynepro/t5-enrichment-v2"
-
-_TASK_ENCODER_DECODER_MODEL: dict[RecallTask, str | None] = {
-    RecallTask.SUMMARIZE: None,  # Use DEFAULT_ENCODER_DECODER_MODEL
-    RecallTask.ENRICH: os.environ.get("SYNAPT_ENRICHMENT_MODEL", _ENRICHMENT_MODEL_DEFAULT),
+# Task → config key for model lookup.
+_TASK_MODEL_KEY: dict[RecallTask, str] = {
+    RecallTask.SUMMARIZE: "summarization",
+    RecallTask.ENRICH: "enrichment",
+    RecallTask.CONSOLIDATE: "consolidation",
 }
 
 # Module-level client cache: (backend, max_tokens, model) → client instance
@@ -84,9 +78,12 @@ def get_client(
 
     Returns a ModelClient instance, or None if no backend is available.
     The client is cached per (backend, max_tokens) to avoid reloading models.
+    Model names are resolved from config files and env vars.
     """
-    override = os.environ.get("SYNAPT_SUMMARY_BACKEND", "").lower()
+    from synapt.recall.config import load_config
+    cfg = load_config()
 
+    override = cfg.backend
     if override == "onnx":
         return _get_onnx_client(max_tokens)
     elif override == "mlx":
@@ -97,13 +94,14 @@ def get_client(
         return _get_ollama_client(max_tokens)
 
     preferred = _TASK_PREFERENCE[task]
+    model_key = _TASK_MODEL_KEY.get(task)
+    model_name = cfg.get_model(model_key) if model_key else None
 
     if preferred == "encoder-decoder":
-        model_override = _TASK_ENCODER_DECODER_MODEL.get(task)
         # Prefer ONNX (5-7x faster), fall back to PyTorch transformers
-        client = _get_onnx_client(max_tokens, model_name=model_override)
+        client = _get_onnx_client(max_tokens, model_name=model_name)
         if client is None:
-            client = _get_transformers_client(max_tokens, model_name=model_override)
+            client = _get_transformers_client(max_tokens, model_name=model_name)
         if client is not None:
             return client
         # Fall back to decoder-only

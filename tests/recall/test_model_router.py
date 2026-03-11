@@ -12,14 +12,17 @@ from synapt.recall._model_router import (
     get_encoder_decoder_model,
     is_encoder_decoder,
 )
+from synapt.recall.config import clear_config_cache
 
 
 @pytest.fixture(autouse=True)
 def _clear_router_cache():
-    """Clear the router cache before each test."""
+    """Clear the router and config caches before each test."""
     clear_cache()
+    clear_config_cache()
     yield
     clear_cache()
+    clear_config_cache()
 
 
 class TestGetClient:
