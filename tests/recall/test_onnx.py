@@ -107,19 +107,22 @@ class TestConvertModule:
         assert not is_converted("nonexistent/model")
 
     def test_is_converted_true_for_cached(self, tmp_path, monkeypatch):
-        from synapt._models.convert import is_converted, _get_cache_dir
+        from synapt._models.convert import is_converted
 
         with patch(
-            "synapt._models.convert._get_cache_dir",
+            "synapt._models._utils.get_onnx_cache_dir",
+            return_value=str(tmp_path),
+        ), patch(
+            "synapt._models.onnx_client.get_onnx_cache_dir",
             return_value=str(tmp_path),
         ):
             (tmp_path / "encoder_model.onnx").write_text("")
             assert is_converted("any-model")
 
     def test_get_cache_dir_format(self):
-        from synapt._models.convert import _get_cache_dir
+        from synapt._models._utils import get_onnx_cache_dir
 
-        result = _get_cache_dir("laynepro/t5-enrichment-v2")
+        result = get_onnx_cache_dir("laynepro/t5-enrichment-v2")
         assert "laynepro--t5-enrichment-v2" in result
         assert ".synapt/models/onnx" in result
 

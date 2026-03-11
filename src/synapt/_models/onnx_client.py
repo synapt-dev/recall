@@ -1,13 +1,12 @@
 """ONNX Runtime inference client for encoder-decoder models.
 
-Provides 5-7x faster inference than PyTorch by using ONNX Runtime with
-INT8 quantization and optimized thread configuration. Particularly
-effective for T5 models where autoregressive decoding dominates latency.
+Provides 5-7x faster inference than PyTorch via ONNX Runtime with
+graph optimization and KV cache management. Particularly effective
+for T5 models where autoregressive decoding dominates latency.
 
 Benchmarks (T5-base enrichment, M2 Air, ~125 output tokens):
   - PyTorch CPU:       5011ms (baseline)
-  - ONNX FP32:         1857ms (2.7x)
-  - ONNX INT8 4T OPT:   784ms (6.4x)
+  - ONNX FP32 4T OPT:  760ms (6.6x)
 
 Requires: pip install 'synapt[onnx]'
 """
@@ -16,14 +15,14 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, Tuple
 
 from .base import Message, ModelClient
+from ._utils import fix_bare_json, get_onnx_cache_dir
 
 logger = logging.getLogger(__name__)
 
 # Module-level cache: model_path → (model, tokenizer)
-_ONNX_CACHE: Dict[str, Tuple[object, object]] = {}
+_ONNX_CACHE: dict[str, tuple[object, object]] = {}
 
 # Default thread count — 4 threads works best on Apple Silicon
 # (matches performance core count on M1/M2 Air)
@@ -35,8 +34,7 @@ def _find_onnx_model(model_name: str) -> str | None:
 
     Checks (in order):
     1. Local directory if model_name is a path with ONNX files
-    2. HuggingFace cache for a converted ONNX variant
-    3. Standard cache location ~/.synapt/models/onnx/<model_hash>/
+    2. Standard cache location ~/.synapt/models/onnx/<model>/
     """
     # Direct local path
     if os.path.isdir(model_name):
@@ -44,9 +42,7 @@ def _find_onnx_model(model_name: str) -> str | None:
             return model_name
 
     # Check synapt cache
-    cache_dir = os.path.expanduser("~/.synapt/models/onnx")
-    safe_name = model_name.replace("/", "--")
-    cached = os.path.join(cache_dir, safe_name)
+    cached = get_onnx_cache_dir(model_name)
     if os.path.isdir(cached) and any(f.endswith(".onnx") for f in os.listdir(cached)):
         return cached
 
@@ -57,8 +53,7 @@ class OnnxClient(ModelClient):
     """Encoder-decoder model client via ONNX Runtime.
 
     Uses optimum's ORTModelForSeq2SeqLM for proper KV cache handling
-    during autoregressive decoding. INT8 quantized models are preferred
-    for best throughput.
+    during autoregressive decoding.
     """
 
     def __init__(
@@ -73,7 +68,12 @@ class OnnxClient(ModelClient):
             os.environ.get("SYNAPT_ONNX_THREADS", str(_DEFAULT_THREADS))
         )
 
-    def _load(self, model: str) -> Tuple[object, object]:
+    @staticmethod
+    def is_available(model_name: str) -> bool:
+        """Check if a converted ONNX model exists for the given name."""
+        return _find_onnx_model(model_name) is not None
+
+    def _load(self, model: str) -> tuple[object, object]:
         """Load or retrieve cached ONNX model and tokenizer."""
         if model in _ONNX_CACHE:
             return _ONNX_CACHE[model]
@@ -86,7 +86,7 @@ class OnnxClient(ModelClient):
         if onnx_dir is None:
             raise FileNotFoundError(
                 f"No ONNX model found for {model}. "
-                "Run 'synapt-recall convert' to create one."
+                "Run 'synapt-convert' to create one."
             )
 
         sess_opts = onnxruntime.SessionOptions()
@@ -110,7 +110,7 @@ class OnnxClient(ModelClient):
     def chat(
         self,
         model: str,
-        messages: List[Message],
+        messages: list[Message],
         temperature: float = 0.2,
         **kwargs,
     ) -> str:
@@ -137,15 +137,4 @@ class OnnxClient(ModelClient):
 
         outputs = model_obj.generate(**inputs, **gen_kwargs)
         result = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-
-        # T5 fine-tuned for JSON output often drops outer braces.
-        if result and not result.startswith("{") and result.startswith('"'):
-            import json
-
-            try:
-                json.loads("{" + result + "}")
-                result = "{" + result + "}"
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        return result
+        return fix_bare_json(result)

@@ -6,8 +6,8 @@ Routes each recall task to the best available model architecture:
 - consolidate: Uses decoder-only (MLX/Ollama) for complex reasoning
 
 Falls back gracefully: ONNX → transformers → MLX → Ollama → None.
-ONNX Runtime with INT8 quantization is 5-7x faster than PyTorch CPU.
-Run 'synapt-recall convert' to create ONNX models.
+ONNX Runtime is 5-7x faster than PyTorch CPU via graph optimization.
+Run 'synapt-convert' to create ONNX models.
 
 Override with SYNAPT_SUMMARY_BACKEND=onnx|mlx|transformers|ollama for testing.
 Override enrichment model with SYNAPT_ENRICHMENT_MODEL env var.
@@ -112,22 +112,27 @@ def get_client(
         return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
 
 
+_NOT_FOUND = object()  # Sentinel for cached negative lookups
+
+
 def _get_onnx_client(
     max_tokens: int,
     model_name: str | None = None,
 ) -> object | None:
     """Try to create an OnnxClient. Returns None if unavailable."""
     key = ("onnx", max_tokens, model_name)
-    if key in _client_cache:
-        return _client_cache[key]
+    cached = _client_cache.get(key, _NOT_FOUND)
+    if cached is not _NOT_FOUND:
+        return cached
 
     try:
-        from synapt._models.onnx_client import OnnxClient, _find_onnx_model
+        from synapt._models.onnx_client import OnnxClient
 
         # Only return ONNX client if a converted model exists
         check_model = model_name or get_encoder_decoder_model()
-        if _find_onnx_model(check_model) is None:
+        if not OnnxClient.is_available(check_model):
             logger.debug("No ONNX model found for %s, skipping", check_model)
+            _client_cache[key] = None  # Cache negative result
             return None
 
         client = OnnxClient(max_tokens=max_tokens, model_name=model_name)
@@ -136,6 +141,7 @@ def _get_onnx_client(
         return client
     except ImportError:
         logger.debug("onnxruntime not installed, skipping ONNX backend")
+        _client_cache[key] = None  # Cache negative result
         return None
 
 
