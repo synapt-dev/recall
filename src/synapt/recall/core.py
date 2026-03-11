@@ -946,6 +946,39 @@ class TranscriptIndex:
                 pass
         return result
 
+    def _decay_candidates(
+        self,
+        candidates: list[tuple[int, float]],
+        half_life: float,
+        now: datetime | None = None,
+    ) -> list[tuple[int, float]]:
+        """Apply recency decay to (chunk_idx, score) candidate pairs.
+
+        Same formula as _apply_recency_decay but for sparse candidate lists.
+        """
+        if half_life <= 0 or not candidates:
+            return candidates
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        decay_rate = math.log(2) / half_life
+        for j, (idx, score) in enumerate(candidates):
+            chunk = self.chunks[idx]
+            if not chunk.timestamp:
+                continue
+            try:
+                ts = datetime.fromisoformat(
+                    chunk.timestamp.replace("Z", "+00:00")
+                )
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_days = max((now - ts).total_seconds() / 86400.0, 0.0)
+                candidates[j] = (idx, score * math.exp(-decay_rate * age_days))
+            except (ValueError, TypeError):
+                pass
+        return candidates
+
     def _apply_threshold_with_diagnostics(
         self,
         candidates: list[tuple[int, float]],
@@ -1150,23 +1183,7 @@ class TranscriptIndex:
             candidates.append((idx, score))
 
         # Recency decay
-        if half_life > 0 and candidates:
-            now = datetime.now(timezone.utc)
-            decay_rate = math.log(2) / half_life
-            for j, (idx, score) in enumerate(candidates):
-                chunk = self.chunks[idx]
-                if not chunk.timestamp:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(
-                        chunk.timestamp.replace("Z", "+00:00")
-                    )
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    age_days = max((now - ts).total_seconds() / 86400.0, 0.0)
-                    candidates[j] = (idx, score * math.exp(-decay_rate * age_days))
-                except (ValueError, TypeError):
-                    pass
+        candidates = self._decay_candidates(candidates, half_life)
 
         # Hybrid search: RRF fusion between BM25/FTS and embedding similarity.
         # Unlike the old additive boost (score + sim * 3.0), RRF can surface
@@ -1194,25 +1211,8 @@ class TranscriptIndex:
                         continue
                     if depth == "summary" and self.chunks[idx].turn_index >= 0:
                         continue
-                    # Apply same recency decay to embedding results
-                    if half_life > 0:
-                        chunk = self.chunks[idx]
-                        if chunk.timestamp:
-                            try:
-                                ts = datetime.fromisoformat(
-                                    chunk.timestamp.replace("Z", "+00:00")
-                                )
-                                if ts.tzinfo is None:
-                                    ts = ts.replace(tzinfo=timezone.utc)
-                                now = datetime.now(timezone.utc)
-                                age_days = max(
-                                    (now - ts).total_seconds() / 86400.0, 0.0,
-                                )
-                                decay_rate = math.log(2) / half_life
-                                sim *= math.exp(-decay_rate * age_days)
-                            except (ValueError, TypeError):
-                                pass
                     emb_ranked.append((idx, sim))
+                emb_ranked = self._decay_candidates(emb_ranked, half_life)
 
                 # Weighted RRF merge — emb_weight from intent classification
                 merged = weighted_rrf_merge(
@@ -1500,23 +1500,7 @@ class TranscriptIndex:
                 break
 
         # Recency decay
-        if half_life > 0 and hits:
-            now = datetime.now(timezone.utc)
-            decay_rate = math.log(2) / half_life
-            for j, (idx, score) in enumerate(hits):
-                chunk = self.chunks[idx]
-                if not chunk.timestamp:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(
-                        chunk.timestamp.replace("Z", "+00:00")
-                    )
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    age_days = max((now - ts).total_seconds() / 86400.0, 0.0)
-                    hits[j] = (idx, score * math.exp(-decay_rate * age_days))
-                except (ValueError, TypeError):
-                    pass
+        hits = self._decay_candidates(hits, half_life)
 
         # Hybrid: merge FTS progressive hits with global embedding search.
         # Progressive FTS is session-scoped, but embeddings intentionally
