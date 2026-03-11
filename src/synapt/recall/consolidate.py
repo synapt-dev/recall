@@ -92,7 +92,7 @@ _STOPWORDS = frozenset({
 
 
 CONSOLIDATION_PROMPT = """\
-You are analyzing coding session summaries to extract durable, project-specific knowledge.
+You are analyzing session summaries to extract durable, specific knowledge.
 
 ## Project Context
 {project_context}
@@ -103,7 +103,7 @@ You are analyzing coding session summaries to extract durable, project-specific 
 ## Recent Sessions
 {journal_cluster}
 
-## Examples of GOOD knowledge nodes (project-specific, concrete):
+## Examples of GOOD knowledge nodes (specific, concrete):
 {good_examples}
 
 ## Examples of BAD knowledge nodes (generic — NEVER produce these):
@@ -114,19 +114,19 @@ You are analyzing coding session summaries to extract durable, project-specific 
 - "Document your code thoroughly"
 
 ## Task
-Extract patterns that represent durable knowledge — things true across 2+ sessions, not one-off experiments.
+Extract patterns that represent durable knowledge — things true across sessions, not one-off observations.
 
-Categories: workflow, architecture, infrastructure, debugging, convention, tooling, lesson-learned, decision
+Categories: workflow, architecture, infrastructure, debugging, convention, tooling, lesson-learned, decision, preference, fact
 
 Rules:
-1. Only extract patterns mentioned in 2+ sessions. Single-session observations are too volatile.
+1. Extract patterns that appear across sessions OR strongly-stated specific facts (names, preferences, relationships, config values).
 2. If a newer session REVERSES a decision from an older session, mark it as a contradiction. Produce the NEW fact with "action": "contradict" and reference the old node's ID.
 3. If a pattern matches an existing knowledge node, use "action": "corroborate" with the existing node's ID.
 4. Keep each fact concise (1-2 sentences, max 200 chars).
-5. Be concrete and specific — "always use A100 for training" not "use appropriate GPU".
-6. Do NOT extract generic programming advice. Every node MUST reference a specific tool, file, config, model, CLI flag, or workflow from the sessions above.
-7. Prefer extracting: specific model names, file paths, CLI flags, config values, error patterns, and workflow steps repeated across sessions.
-8. If no project-specific patterns emerge, output {{"nodes": []}}. Empty is better than generic.
+5. Be concrete and specific — include specific names, values, paths, or details from the sessions.
+6. Do NOT extract generic advice that could apply to any project. Every node must be grounded in the sessions above.
+7. Prefer extracting: specific names, config values, stated preferences, key decisions, recurring patterns, and important facts that would be useful to recall later.
+8. If no specific patterns emerge, output {{"nodes": []}}. Empty is better than generic.
 
 Output ONLY valid JSON, no markdown fences, no explanation:
 {{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": ""}}]}}
@@ -144,7 +144,7 @@ CONSOLIDATION_PROMPT_MINIMAL = """\
 ## Recent Sessions
 {journal_cluster}
 
-Categories: workflow, architecture, infrastructure, debugging, convention, tooling, lesson-learned, decision
+Categories: workflow, architecture, infrastructure, debugging, convention, tooling, lesson-learned, decision, preference, fact
 
 Extract durable knowledge as JSON. Output ONLY valid JSON:
 {{"nodes": [{{"action": "create|corroborate|contradict", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": ""}}]}}
@@ -366,6 +366,10 @@ def cluster_journal_entries(
     Uses union-find: two entries are related if Jaccard(files) > 0.3
     OR they share 2+ non-trivial keywords. Connected components become
     clusters. Singletons (no overlap) are discarded.
+
+    When file/keyword clustering produces no clusters (common for
+    conversational data without code changes), falls back to temporal
+    windowing — groups entries into consecutive pairs by timestamp.
     """
     n = len(entries)
     if n < 2:
@@ -413,6 +417,40 @@ def cluster_journal_entries(
             continue
         group = [entries[i] for i in indices]
         clusters.extend(_split_large_cluster(group))
+
+    # Fallback: when no file/keyword clusters found, use temporal windows.
+    # This handles conversational data (no code, no files) where entries
+    # still contain useful knowledge that should be consolidated.
+    if not clusters and n >= 2:
+        logger.info(
+            "No file/keyword clusters found among %d entries; "
+            "falling back to temporal windowing",
+            n,
+        )
+        clusters = _temporal_window_clusters(entries)
+
+    return clusters
+
+
+def _temporal_window_clusters(
+    entries: list[JournalEntry],
+    window_size: int = 3,
+) -> list[list[JournalEntry]]:
+    """Group entries into overlapping temporal windows.
+
+    Sorts entries by timestamp and produces sliding windows of
+    ``window_size`` entries with 1-entry overlap. This ensures every
+    entry participates in at least one cluster.
+    """
+    ordered = sorted(entries, key=lambda e: e.timestamp or "")
+    if len(ordered) < 2:
+        return []
+    step = max(window_size - 1, 1)
+    clusters = []
+    for start in range(0, len(ordered), step):
+        window = ordered[start : start + window_size]
+        if len(window) >= 2:
+            clusters.append(window)
     return clusters
 
 
@@ -989,9 +1027,13 @@ def consolidate(
                     len(cluster),
                 )
 
-        # Only update timestamp and sync if actual work was done
+        # Update timestamp and sync if clusters were processed
         if result.nodes_created or result.nodes_corroborated or result.nodes_contradicted:
             _set_last_consolidation_ts(project_dir)
+        # Always sync knowledge.jsonl → SQLite when clusters were processed,
+        # even if this run produced 0 new nodes (previous runs may have
+        # written nodes that haven't been synced yet).
+        if clusters:
             _sync_knowledge_to_db(project_dir, kn_path)
     finally:
         if db is not None:

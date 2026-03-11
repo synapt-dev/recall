@@ -29,6 +29,7 @@ from synapt.recall.consolidate import (
     _log_dedup_decision,
     _parse_llm_response,
     _split_large_cluster,
+    _temporal_window_clusters,
     cluster_journal_entries,
 )
 
@@ -122,20 +123,23 @@ class TestClusterJournalEntries(unittest.TestCase):
         clusters = cluster_journal_entries([e1, e2])
         self.assertEqual(len(clusters), 1)
 
-    def test_singleton_entries_not_clustered(self):
+    def test_no_overlap_falls_back_to_temporal(self):
         e1 = _make_entry(
             session_id="s1",
+            timestamp="2026-03-01T10:00:00",
             focus="Database migration",
             files_modified=["src/db.py"],
         )
         e2 = _make_entry(
             session_id="s2",
+            timestamp="2026-03-01T11:00:00",
             focus="Frontend styling",
             files_modified=["src/ui.css"],
         )
         clusters = cluster_journal_entries([e1, e2])
-        # No file overlap, no keyword overlap → no clusters
-        self.assertEqual(len(clusters), 0)
+        # No file overlap, no keyword overlap → temporal fallback
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(len(clusters[0]), 2)
 
     def test_fewer_than_two_entries(self):
         e1 = _make_entry(session_id="s1", focus="Solo session")
@@ -160,6 +164,77 @@ class TestClusterJournalEntries(unittest.TestCase):
         clusters = cluster_journal_entries([e1, e2, e3])
         self.assertEqual(len(clusters), 1)
         self.assertEqual(len(clusters[0]), 3)
+
+
+class TestTemporalWindowClusters(unittest.TestCase):
+    """Tests for the temporal fallback clustering."""
+
+    def test_basic_windowing(self):
+        entries = [
+            _make_entry(session_id=f"s{i}", timestamp=f"2026-03-0{i+1}T10:00:00")
+            for i in range(5)
+        ]
+        clusters = _temporal_window_clusters(entries, window_size=3)
+        # 5 entries, window=3, step=2 → windows at [0:3], [2:5]
+        self.assertEqual(len(clusters), 2)
+        self.assertEqual(len(clusters[0]), 3)
+        self.assertEqual(len(clusters[1]), 3)
+
+    def test_two_entries(self):
+        entries = [
+            _make_entry(session_id="s1", timestamp="2026-03-01T10:00:00"),
+            _make_entry(session_id="s2", timestamp="2026-03-02T10:00:00"),
+        ]
+        clusters = _temporal_window_clusters(entries, window_size=3)
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(len(clusters[0]), 2)
+
+    def test_single_entry_returns_empty(self):
+        entries = [_make_entry(session_id="s1")]
+        self.assertEqual(_temporal_window_clusters(entries), [])
+
+    def test_sorted_by_timestamp(self):
+        """Entries should be time-ordered within each window."""
+        e1 = _make_entry(session_id="s1", timestamp="2026-03-03T10:00:00")
+        e2 = _make_entry(session_id="s2", timestamp="2026-03-01T10:00:00")
+        e3 = _make_entry(session_id="s3", timestamp="2026-03-02T10:00:00")
+        clusters = _temporal_window_clusters([e1, e2, e3], window_size=3)
+        self.assertEqual(len(clusters), 1)
+        timestamps = [e.timestamp for e in clusters[0]]
+        self.assertEqual(timestamps, sorted(timestamps))
+
+    def test_all_entries_covered(self):
+        """Every entry must appear in at least one cluster."""
+        entries = [
+            _make_entry(session_id=f"s{i}", timestamp=f"2026-03-{i+1:02d}T10:00:00")
+            for i in range(7)
+        ]
+        clusters = _temporal_window_clusters(entries, window_size=3)
+        covered = set()
+        for cluster in clusters:
+            for e in cluster:
+                covered.add(e.session_id)
+        self.assertEqual(covered, {f"s{i}" for i in range(7)})
+
+    def test_cluster_journal_entries_temporal_fallback(self):
+        """cluster_journal_entries uses temporal fallback when no file/keyword overlap."""
+        entries = [
+            _make_entry(
+                session_id=f"s{i}",
+                timestamp=f"2026-03-{i+1:02d}T10:00:00",
+                focus=f"Unique topic number {i}",
+            )
+            for i in range(4)
+        ]
+        clusters = cluster_journal_entries(entries)
+        # No file or keyword overlap → temporal fallback
+        self.assertGreater(len(clusters), 0)
+        # All entries covered
+        covered = set()
+        for cluster in clusters:
+            for e in cluster:
+                covered.add(e.session_id)
+        self.assertEqual(covered, {f"s{i}" for i in range(4)})
 
 
 class TestFormatting(unittest.TestCase):
@@ -647,7 +722,7 @@ class TestProjectContext(unittest.TestCase):
     def test_prompt_includes_strong_rules(self):
         entry = _make_entry(focus="Working on recall search")
         prompt = _build_consolidation_prompt([entry], [])
-        self.assertIn("Do NOT extract generic programming advice", prompt)
+        self.assertIn("Do NOT extract generic advice", prompt)
         self.assertIn("Empty is better than generic", prompt)
 
 
