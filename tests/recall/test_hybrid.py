@@ -1,4 +1,6 @@
-"""Tests for hybrid search: RRF fusion, embedding search, query intent."""
+"""Tests for hybrid search: RRF fusion, embedding search, query intent, temporal."""
+
+from datetime import datetime, timezone
 
 import pytest
 from synapt.recall.hybrid import (
@@ -7,6 +9,7 @@ from synapt.recall.hybrid import (
     embedding_search,
     classify_query_intent,
     intent_search_params,
+    extract_temporal_range,
     RRF_K,
     SPARSE_RESULT_THRESHOLD,
 )
@@ -208,3 +211,75 @@ class TestQueryIntentClassification:
         factual_params = intent_search_params("factual")
         general_params = intent_search_params("general")
         assert factual_params["knowledge_boost"] >= general_params["knowledge_boost"]
+
+
+# ---------------------------------------------------------------------------
+# Temporal date extraction
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalExtraction:
+    """Test extract_temporal_range from query strings."""
+
+    # Fixed reference time for deterministic tests
+    NOW = datetime(2026, 3, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_yesterday(self):
+        after, before = extract_temporal_range("what happened yesterday", now=self.NOW)
+        assert after == "2026-03-09"
+        assert before == "2026-03-10"
+
+    def test_today(self):
+        after, before = extract_temporal_range("what are we doing today", now=self.NOW)
+        assert after == "2026-03-10"
+        assert before == "2026-03-11"
+
+    def test_last_week(self):
+        after, before = extract_temporal_range("what did we discuss last week", now=self.NOW)
+        assert after == "2026-03-03"
+        assert before == "2026-03-10"
+
+    def test_last_month(self):
+        after, before = extract_temporal_range("changes from last month", now=self.NOW)
+        assert after == "2026-02-08"
+        assert before == "2026-03-10"
+
+    def test_n_days_ago(self):
+        after, before = extract_temporal_range("what happened 3 days ago", now=self.NOW)
+        assert after == "2026-03-07"
+        assert before == "2026-03-10"
+
+    def test_n_weeks_ago(self):
+        after, before = extract_temporal_range("from 2 weeks ago", now=self.NOW)
+        assert after == "2026-02-24"
+        assert before == "2026-03-10"
+
+    def test_month_day(self):
+        after, before = extract_temporal_range("on March 5th", now=self.NOW)
+        assert after == "2026-03-05"
+        assert before == "2026-03-06"
+
+    def test_month_day_year(self):
+        after, before = extract_temporal_range("on February 28, 2025", now=self.NOW)
+        assert after == "2025-02-28"
+        assert before == "2025-03-01"
+
+    def test_iso_date(self):
+        after, before = extract_temporal_range("changes from 2026-03-01", now=self.NOW)
+        assert after == "2026-03-01"
+        assert before == "2026-03-02"
+
+    def test_no_temporal_expression(self):
+        after, before = extract_temporal_range("how does authentication work", now=self.NOW)
+        assert after is None
+        assert before is None
+
+    def test_this_week(self):
+        after, before = extract_temporal_range("what happened this week", now=self.NOW)
+        assert after == "2026-03-09"  # Monday (weekday=0)
+        assert before == "2026-03-11"
+
+    def test_abbreviated_month(self):
+        after, before = extract_temporal_range("on Feb 14", now=self.NOW)
+        assert after == "2026-02-14"
+        assert before == "2026-02-15"

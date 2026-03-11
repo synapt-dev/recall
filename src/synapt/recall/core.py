@@ -1090,6 +1090,7 @@ class TranscriptIndex:
         try:
             from synapt.recall.hybrid import (
                 classify_query_intent, intent_search_params,
+                extract_temporal_range,
             )
             intent = classify_query_intent(query)
             params = intent_search_params(intent)
@@ -1097,6 +1098,18 @@ class TranscriptIndex:
             knowledge_boost = params.get("knowledge_boost", knowledge_boost)
             if not caller_set_half_life:
                 half_life = params.get("half_life", half_life)
+
+            # Auto-extract date range from temporal expressions in query
+            # (only when caller didn't provide explicit date filters)
+            if after is None and before is None:
+                extracted_after, extracted_before = extract_temporal_range(query)
+                if extracted_after is not None:
+                    after = extracted_after
+                    before = extracted_before
+                    logger.debug(
+                        "Auto-extracted date range: after=%s, before=%s",
+                        after, before,
+                    )
         except Exception:
             logger.debug("Intent classification failed, using defaults", exc_info=True)
 

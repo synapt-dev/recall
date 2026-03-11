@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -287,3 +288,101 @@ def intent_search_params(intent: str) -> dict:
             "half_life": 60.0,         # Default recency
             "emb_weight": 1.0,         # Balanced
         }
+
+
+# ---------------------------------------------------------------------------
+# Temporal date extraction
+# ---------------------------------------------------------------------------
+
+# Relative time expressions
+_RELATIVE_TIME_PATTERNS = [
+    (re.compile(r"\byesterday\b", re.I), lambda now: (now - timedelta(days=1), now)),
+    (re.compile(r"\btoday\b", re.I), lambda now: (now, now + timedelta(days=1))),
+    (re.compile(r"\blast\s+week\b", re.I), lambda now: (now - timedelta(weeks=1), now)),
+    (re.compile(r"\blast\s+month\b", re.I), lambda now: (now - timedelta(days=30), now)),
+    (re.compile(r"\b(\d+)\s+days?\s+ago\b", re.I), None),  # handled specially
+    (re.compile(r"\b(\d+)\s+weeks?\s+ago\b", re.I), None),
+    (re.compile(r"\bthis\s+week\b", re.I), lambda now: (now - timedelta(days=now.weekday()), now + timedelta(days=1))),
+]
+
+# Absolute date pattern: "March 5th", "2026-03-05", "March 5, 2026"
+_MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_MONTH_DAY_PATTERN = re.compile(
+    r"\b(" + "|".join(_MONTH_NAMES.keys()) + r")\s+(\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:\s*,?\s*(\d{4}))?\b",
+    re.I,
+)
+_ISO_DATE_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+
+def extract_temporal_range(
+    query: str,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Extract a date range from temporal expressions in a query.
+
+    Returns (after, before) as ISO 8601 date strings, or (None, None)
+    if no temporal expression is detected.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    # Check relative time patterns
+    for pattern, handler in _RELATIVE_TIME_PATTERNS:
+        match = pattern.search(query)
+        if not match:
+            continue
+
+        if handler is not None:
+            start, end = handler(now)
+            return (
+                start.strftime("%Y-%m-%d"),
+                end.strftime("%Y-%m-%d"),
+            )
+
+        # N days/weeks ago
+        n = int(match.group(1))
+        if "week" in match.group(0).lower():
+            start = now - timedelta(weeks=n)
+        else:
+            start = now - timedelta(days=n)
+        return (start.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
+
+    # Check "Month Day[, Year]" pattern
+    match = _MONTH_DAY_PATTERN.search(query)
+    if match:
+        month_name = match.group(1).lower()
+        day = int(match.group(2))
+        year = int(match.group(3)) if match.group(3) else now.year
+        month = _MONTH_NAMES.get(month_name)
+        if month and 1 <= day <= 31:
+            try:
+                dt = datetime(year, month, day, tzinfo=timezone.utc)
+                return (
+                    dt.strftime("%Y-%m-%d"),
+                    (dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                )
+            except ValueError:
+                pass  # Invalid date (e.g., Feb 30)
+
+    # Check ISO date pattern
+    match = _ISO_DATE_PATTERN.search(query)
+    if match:
+        date_str = match.group(1)
+        try:
+            dt = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+            return (
+                dt.strftime("%Y-%m-%d"),
+                (dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+            )
+        except ValueError:
+            pass
+
+    return (None, None)
