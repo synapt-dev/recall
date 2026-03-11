@@ -13,6 +13,7 @@ from synapt.recall.enrich import (
     _build_summary_from_chunks,
     _build_transcript_summary,
     _has_conversation,
+    _parse_enrichment_text,
     _parse_llm_response,
     _segment_transcript,
     enrich_entry,
@@ -65,6 +66,140 @@ class TestParseLlmResponse(unittest.TestCase):
     def test_garbage_returns_none(self):
         result = _parse_llm_response("not valid json at all")
         self.assertIsNone(result)
+
+
+class TestParseEnrichmentText(unittest.TestCase):
+    """Test fallback structured-text parser for enrichment responses."""
+
+    def test_focus_only(self):
+        text = "Focus: Discussed authentication setup\n"
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "Discussed authentication setup")
+
+    def test_focus_and_done(self):
+        text = (
+            "Focus: Set up the auth pipeline\n"
+            "Done:\n"
+            "- Configured OAuth provider\n"
+            "- Added login endpoint\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "Set up the auth pipeline")
+        self.assertEqual(result["done"], ["Configured OAuth provider", "Added login endpoint"])
+
+    def test_all_fields(self):
+        text = (
+            "Focus: Refactored database layer\n"
+            "Done:\n"
+            "- Migrated to SQLAlchemy 2.0\n"
+            "- Updated all queries\n"
+            "Decisions:\n"
+            "- Use async sessions everywhere\n"
+            "Next steps:\n"
+            "- Add connection pooling\n"
+            "- Write migration tests\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "Refactored database layer")
+        self.assertEqual(len(result["done"]), 2)
+        self.assertEqual(result["decisions"], ["Use async sessions everywhere"])
+        self.assertEqual(len(result["next_steps"]), 2)
+
+    def test_bullet_star_format(self):
+        text = (
+            "Focus: Bug fixes\n"
+            "Done:\n"
+            "* Fixed login crash\n"
+            "* Patched XSS vulnerability\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["done"], ["Fixed login crash", "Patched XSS vulnerability"])
+
+    def test_strips_quotes_from_values(self):
+        text = 'Focus: "Worked on the API"\n'
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "Worked on the API")
+
+    def test_no_matching_fields_returns_none(self):
+        text = "This is just random text with no structure."
+        result = _parse_enrichment_text(text)
+        self.assertIsNone(result)
+
+    def test_case_insensitive_focus(self):
+        text = "focus: lowercase focus line\n"
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "lowercase focus line")
+
+    def test_done_only_no_focus(self):
+        text = (
+            "Done:\n"
+            "- Completed the task\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["done"], ["Completed the task"])
+
+    def test_llm_response_fallback_to_text(self):
+        """_parse_llm_response falls back to text parser when JSON fails."""
+        text = (
+            "Focus: Discussed project architecture\n"
+            "Done:\n"
+            "- Designed the API schema\n"
+        )
+        result = _parse_llm_response(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "Discussed project architecture")
+        self.assertEqual(result["done"], ["Designed the API schema"])
+
+    def test_all_caps_headers(self):
+        """FOCUS:, DONE: etc should work."""
+        text = (
+            "FOCUS: Set up authentication\n"
+            "DONE:\n"
+            "- Configured OAuth\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["focus"], "Set up authentication")
+        self.assertEqual(result["done"], ["Configured OAuth"])
+
+    def test_numbered_list_items(self):
+        """Numbered lists (1. 2.) should be parsed like bullets."""
+        text = (
+            "Focus: Database migration\n"
+            "Done:\n"
+            "1. Migrated schema\n"
+            "2. Updated queries\n"
+            "3. Ran integration tests\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result["done"]), 3)
+        self.assertEqual(result["done"][0], "Migrated schema")
+
+    def test_inline_items(self):
+        """Items on same line as header (no bullets)."""
+        text = "Focus: Quick fix\nDone: Fixed the redirect, Updated config\n"
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["done"], ["Fixed the redirect", "Updated config"])
+
+    def test_decisions_only_sufficient(self):
+        """Decisions alone (no focus or done) should return a result."""
+        text = (
+            "Decisions:\n"
+            "- Use async everywhere\n"
+            "- Switch to PostgreSQL\n"
+        )
+        result = _parse_enrichment_text(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result["decisions"]), 2)
 
 
 class TestEnrichmentPrompt(unittest.TestCase):

@@ -285,15 +285,35 @@ END;
 
 _FTS5_KEYWORDS = frozenset({"and", "or", "not", "near"})
 
+# Common stop words to strip from FTS queries. These are too frequent
+# to be useful in full-text search and cause AND queries to fail when
+# they don't co-occur with content words in the same chunk.
+_FTS_STOP_WORDS = frozenset({
+    "the", "is", "are", "was", "were", "be", "been", "am",
+    "do", "does", "did", "has", "have", "had", "having",
+    "an", "in", "on", "at", "to", "of", "for", "by", "it",
+    "he", "she", "we", "my", "me", "no", "so", "if", "up",
+    "go", "its", "but",
+    "her", "him", "his", "our", "your", "you", "they", "them", "their",
+    "can", "could", "would", "should", "will", "may", "might",
+    "also", "just", "very", "much", "some", "any", "all", "than",
+    # Question words — useful as intent signals but noisy in FTS
+    "what", "when", "where", "which", "who", "whom", "whose",
+    "why", "how", "that", "this", "with", "from", "about",
+})
+
 
 def _escape_fts_tokens(query: str) -> list[str]:
     """Tokenize and escape a user query for FTS5.
 
     Returns a list of escaped tokens.  Tokens containing dots are quoted
     (e.g. ``api_index.py`` → ``"api_index.py"``), as are FTS5 keywords.
-    Single-character tokens are dropped to reduce noise.
+    Single-character tokens and stop words are dropped to reduce noise.
     """
-    tokens = [t for t in re.sub(r"[^a-zA-Z0-9_.]", " ", query.lower()).split() if len(t) > 1]
+    tokens = [
+        t for t in re.sub(r"[^a-zA-Z0-9_.]", " ", query.lower()).split()
+        if len(t) > 1 and t not in _FTS_STOP_WORDS
+    ]
     escaped = []
     for tok in tokens:
         if "." in tok or tok in _FTS5_KEYWORDS:

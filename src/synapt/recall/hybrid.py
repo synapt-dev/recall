@@ -188,9 +188,22 @@ def _embedding_search_numpy(
 
 # Patterns for each intent type
 _FACTUAL_PATTERNS = re.compile(
-    r"\b(what\s+(is|are|was|were|does)|which|where\s+(is|are|does)|"
-    r"how\s+(many|much)|port|version|url|endpoint|config|setting|"
-    r"api\s+key|database|schema|table)\b",
+    r"\b(what\s+(is|are|was|were|does|did)|which|who\s+(is|are|was|were|does|did)|"
+    r"where\s+(is|are|does|did)|"
+    r"how\s+(many|much|old|long|often)|port|version|url|endpoint|config|setting|"
+    r"api\s+key|database|schema|table|"
+    r"favou?rite|prefer|name[ds]?)\b",
+    re.IGNORECASE,
+)
+
+_TEMPORAL_PATTERNS = re.compile(
+    r"\b(when\s+(is|was|did|does|were|will|has|have)|"
+    r"how\s+(long|recently)|how\s+many\s+(days|weeks|months|years)|"
+    r"first\s+time|last\s+time|most\s+recent|"
+    r"ago|yesterday|today|recently|lately|"
+    r"last\s+(week|month|year|time)|next\s+(week|month)|this\s+(week|month|year)|"
+    r"what\s+(date|day|month|year|time)|"
+    r"chronolog|timeline|at\s+what\s+point)\b",
     re.IGNORECASE,
 )
 
@@ -219,6 +232,7 @@ def classify_query_intent(query: str) -> str:
     """Classify a search query into an intent category.
 
     Returns one of:
+        "temporal"    — When something happened, time-based queries
         "factual"     — Looking up a specific fact (config value, version, etc.)
         "debug"       — Investigating an error or failure
         "exploratory" — Understanding what was tried, decisions made
@@ -226,6 +240,7 @@ def classify_query_intent(query: str) -> str:
         "general"     — Default when no clear intent detected
 
     The classification is used to weight search strategies:
+    - temporal → raw transcript evidence, low knowledge boost
     - factual → knowledge nodes first, then FTS
     - debug → recent sessions weighted heavily
     - exploratory → clusters and timeline, broad search
@@ -233,16 +248,16 @@ def classify_query_intent(query: str) -> str:
     - general → balanced hybrid search
     """
     scores = {
+        "temporal": len(_TEMPORAL_PATTERNS.findall(query)),
         "factual": len(_FACTUAL_PATTERNS.findall(query)),
         "debug": len(_DEBUG_PATTERNS.findall(query)),
         "exploratory": len(_EXPLORATORY_PATTERNS.findall(query)),
         "procedural": len(_PROCEDURAL_PATTERNS.findall(query)),
     }
 
-    # Tiebreak priority: exploratory > procedural > debug > factual.
-    # Exploratory/procedural patterns are more specific and should win
-    # when a query contains both e.g. "how did we fix the database".
-    priority = ["exploratory", "procedural", "debug", "factual"]
+    # Tiebreak priority: temporal > exploratory > procedural > debug > factual.
+    # Temporal wins ties since temporal signals are usually unambiguous.
+    priority = ["temporal", "exploratory", "procedural", "debug", "factual"]
     best_score = max(scores.values())
     if best_score == 0:
         return "general"
@@ -258,7 +273,13 @@ def intent_search_params(intent: str) -> dict:
     These override/adjust the default search parameters to better match
     the type of information being sought.
     """
-    if intent == "factual":
+    if intent == "temporal":
+        return {
+            "knowledge_boost": 0.5,    # De-prioritize knowledge — temporal needs sequences
+            "half_life": 0.0,          # No recency decay — all timeframes matter
+            "emb_weight": 1.0,         # Balanced
+        }
+    elif intent == "factual":
         return {
             "knowledge_boost": 3.0,    # Heavily weight knowledge nodes
             "half_life": 90.0,         # Older facts still relevant
@@ -386,3 +407,44 @@ def extract_temporal_range(
             pass
 
     return (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Entity extraction
+# ---------------------------------------------------------------------------
+
+# Common question words and stop words that look like proper nouns at
+# sentence start but aren't entities.
+_NON_ENTITY_WORDS = frozenset({
+    "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
+    "is", "are", "was", "were", "do", "does", "did", "has", "have", "had",
+    "the", "a", "an", "and", "or", "but", "not", "no", "so", "if",
+    "would", "could", "should", "will", "can", "may", "might",
+    "likely", "still", "also", "yet", "ever", "never",
+    "in", "on", "at", "to", "for", "of", "with", "from", "by", "about",
+})
+
+# Match capitalized words and possessives (e.g., "Caroline's", "Dr. Seuss")
+_ENTITY_PATTERN = re.compile(r"\b([A-Z][a-z]+(?:'s)?)\b")
+
+
+def extract_entities(query: str) -> set[str]:
+    """Extract likely entity names (proper nouns) from a query.
+
+    Returns a set of lowercased entity strings. Uses capitalization as the
+    primary signal — words starting with uppercase that aren't common
+    question/stop words are treated as entities.
+
+    Examples:
+        "What is Caroline's identity?" → {"caroline"}
+        "Where has Melanie camped?" → {"melanie"}
+        "What books has Dr. Seuss written?" → {"seuss"}
+    """
+    matches = _ENTITY_PATTERN.findall(query)
+    entities: set[str] = set()
+    for m in matches:
+        # Strip possessive suffix for matching
+        clean = m[:-2].lower() if m.endswith("'s") else m.lower()
+        if clean not in _NON_ENTITY_WORDS and len(clean) > 1:
+            entities.add(clean)
+    return entities

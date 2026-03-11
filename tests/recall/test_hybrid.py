@@ -10,6 +10,7 @@ from synapt.recall.hybrid import (
     classify_query_intent,
     intent_search_params,
     extract_temporal_range,
+    extract_entities,
     RRF_K,
     SPARSE_RESULT_THRESHOLD,
 )
@@ -192,9 +193,20 @@ class TestQueryIntentClassification:
         assert classify_query_intent("latent critic pipeline") == "general"
         assert classify_query_intent("quality curve weighting") == "general"
 
+    def test_temporal(self):
+        assert classify_query_intent("when did we discuss the migration") == "temporal"
+        assert classify_query_intent("when was the last deployment") == "temporal"
+        assert classify_query_intent("what happened last week") == "temporal"
+        assert classify_query_intent("how recently was the config changed") == "temporal"
+
+    def test_temporal_beats_factual_for_when(self):
+        """'When did X' should classify as temporal, not factual."""
+        assert classify_query_intent("when did we add the cache") == "temporal"
+        assert classify_query_intent("when was the API key rotated") == "temporal"
+
     def test_intent_params_keys(self):
         """All intents return the expected parameter keys."""
-        for intent in ["factual", "debug", "exploratory", "procedural", "general"]:
+        for intent in ["temporal", "factual", "debug", "exploratory", "procedural", "general"]:
             params = intent_search_params(intent)
             assert "knowledge_boost" in params
             assert "half_life" in params
@@ -211,6 +223,12 @@ class TestQueryIntentClassification:
         factual_params = intent_search_params("factual")
         general_params = intent_search_params("general")
         assert factual_params["knowledge_boost"] >= general_params["knowledge_boost"]
+
+    def test_temporal_has_low_knowledge_boost(self):
+        """Temporal queries need conversation sequences, not knowledge summaries."""
+        temporal_params = intent_search_params("temporal")
+        general_params = intent_search_params("general")
+        assert temporal_params["knowledge_boost"] < general_params["knowledge_boost"]
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +301,55 @@ class TestTemporalExtraction:
         after, before = extract_temporal_range("on Feb 14", now=self.NOW)
         assert after == "2026-02-14"
         assert before == "2026-02-15"
+
+
+# ---------------------------------------------------------------------------
+# Entity extraction
+# ---------------------------------------------------------------------------
+
+class TestExtractEntities:
+    def test_single_name(self):
+        entities = extract_entities("What is Caroline's identity?")
+        assert "caroline" in entities
+
+    def test_multiple_names(self):
+        entities = extract_entities("Did Caroline visit Melanie last week?")
+        assert "caroline" in entities
+        assert "melanie" in entities
+
+    def test_no_entities(self):
+        entities = extract_entities("how does authentication work?")
+        assert len(entities) == 0
+
+    def test_filters_question_words(self):
+        """Question words at start of sentence (capitalized) should not be entities."""
+        entities = extract_entities("What is the configuration?")
+        assert "what" not in entities
+
+    def test_filters_stop_words(self):
+        entities = extract_entities("Would Caroline still want to pursue counseling?")
+        assert "would" not in entities
+        assert "caroline" in entities
+
+    def test_possessive_form(self):
+        entities = extract_entities("What are Caroline's hobbies?")
+        assert "caroline" in entities
+        # Should not include the possessive form
+        assert "caroline's" not in entities
+
+    def test_possessive_name_ending_in_s(self):
+        """Possessive stripping must not corrupt names ending in 's'."""
+        entities = extract_entities("What are James's plans?")
+        assert "james" in entities
+        # rstrip("'s") would produce "jame" — verify full name preserved
+        assert "jame" not in entities
+
+    def test_location_names(self):
+        entities = extract_entities("Where did Caroline move from Sweden?")
+        assert "caroline" in entities
+        assert "sweden" in entities
+
+    def test_short_words_filtered(self):
+        """Single-character capitalized words should be filtered."""
+        entities = extract_entities("Is A the right choice?")
+        assert len(entities) == 0

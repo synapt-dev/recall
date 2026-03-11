@@ -57,25 +57,33 @@ def _stem(word: str) -> str:
         if word.endswith(suffix) and len(word) - len(suffix) >= 3:
             return word[: -len(suffix)]
 
-    # Inflectional suffixes — order matters (check longer first)
+    # Inflectional suffixes — order matters.
+    # Step 1: strip plural -s/-es FIRST, then re-apply rules to the
+    # de-pluralized form. This ensures "prefers" and "prefer" stem to
+    # the same root ("pref"), fixing inconsistency where only one rule
+    # fires and different inflections produce different stems.
+    depluralized = word
     if word.endswith("sses"):
-        return word[:-2]  # caresses → caress
-    if word.endswith("ies") and len(word) > 4:
-        return word[:-2]  # ponies → poni
-    if word.endswith("ing") and len(word) > 5:
-        return word[:-3]  # orphaning → orphan, fixing → fix
-    if word.endswith("ed") and len(word) > 4:
-        return word[:-2]  # orphaned → orphan, fixed → fix
-    if word.endswith("ly") and len(word) > 4:
-        return word[:-2]  # actually → actual
-    if word.endswith("er") and len(word) > 5:
-        return word[:-2]  # higher → high
-    if word.endswith("es") and len(word) > 4:
-        return word[:-2]  # fixes → fix
-    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
-        return word[:-1]  # decisions → decision
+        depluralized = word[:-2]  # caresses → caress
+    elif word.endswith("ies") and len(word) > 4:
+        depluralized = word[:-2]  # ponies → poni
+    elif word.endswith("es") and len(word) > 4:
+        depluralized = word[:-2]  # fixes → fix
+    elif word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        depluralized = word[:-1]  # decisions → decision
 
-    return word
+    # Step 2: apply derivational/other inflectional rules to the
+    # (possibly de-pluralized) form.
+    w = depluralized
+    if w.endswith("ing") and len(w) > 5:
+        return w[:-3]  # orphaning → orphan, fixing → fix
+    if w.endswith("ed") and len(w) > 4:
+        return w[:-2]  # orphaned → orphan, fixed → fix
+    if w.endswith("ly") and len(w) > 4:
+        return w[:-2]  # actually → actual
+    if w.endswith("er") and len(w) > 5:
+        return w[:-2]  # higher → high, prefer → pref, prefers → pref
+    return depluralized
 
 
 # ---------------------------------------------------------------------------

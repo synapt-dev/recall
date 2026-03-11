@@ -43,6 +43,12 @@ class TestKnowledgeNode(unittest.TestCase):
         node = KnowledgeNode.create(content="test", category="invalid-cat")
         self.assertEqual(node.category, "workflow")  # Falls back to default
 
+    def test_create_accepts_preference_and_fact_categories(self):
+        pref = KnowledgeNode.create(content="prefers dark roast", category="preference")
+        self.assertEqual(pref.category, "preference")
+        fact = KnowledgeNode.create(content="sister is Elena", category="fact")
+        self.assertEqual(fact.category, "fact")
+
     def test_roundtrip_dict(self):
         node = KnowledgeNode.create(
             content="Test fact",

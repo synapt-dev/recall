@@ -36,7 +36,7 @@ from synapt.recall.knowledge import (
     compute_confidence,
     update_node,
 )
-from synapt.recall.scrub import scrub_text
+from synapt.recall.scrub import scrub_text, strip_markdown_formatting
 from synapt.recall.core import project_data_dir, project_index_dir
 
 logger = logging.getLogger("synapt.recall.consolidate")
@@ -105,6 +105,7 @@ You are analyzing session summaries to extract durable, specific knowledge.
 
 ## Examples of GOOD knowledge nodes (specific, concrete):
 {good_examples}
+(These are examples of the FORMAT only — do NOT copy them into your output.)
 
 ## Examples of BAD knowledge nodes (generic — NEVER produce these):
 - "Always use Docker for containerization"
@@ -116,7 +117,17 @@ You are analyzing session summaries to extract durable, specific knowledge.
 ## Task
 Extract patterns that represent durable knowledge — things true across sessions, not one-off observations.
 
-Categories: workflow, architecture, infrastructure, debugging, convention, tooling, lesson-learned, decision, preference, fact
+Categories (use the best fit):
+- fact: specific names, dates, relationships, numbers, details ("Maria's sister is Elena")
+- preference: stated likes, dislikes, choices ("prefers dark roast coffee")
+- decision: explicit choices made ("chose PostgreSQL over MySQL for the API")
+- convention: agreed-upon patterns or rules ("always run lint before committing")
+- workflow: recurring processes or routines ("deploys every Tuesday via CI")
+- architecture: system structure or design choices ("API uses REST with JWT auth")
+- infrastructure: hosting, hardware, config values ("production runs on port 8443")
+- tooling: specific tools, versions, or setup ("uses Python 3.12 with ruff linter")
+- debugging: diagnosed root causes or fixes ("OOM caused by unbounded cache in worker")
+- lesson-learned: insights from mistakes or surprises ("batch size >32 causes A10G OOM")
 
 Rules:
 1. Extract patterns that appear across sessions OR strongly-stated specific facts (names, preferences, relationships, config values).
@@ -125,8 +136,9 @@ Rules:
 4. Keep each fact concise (1-2 sentences, max 200 chars).
 5. Be concrete and specific — include specific names, values, paths, or details from the sessions.
 6. Do NOT extract generic advice that could apply to any project. Every node must be grounded in the sessions above.
-7. Prefer extracting: specific names, config values, stated preferences, key decisions, recurring patterns, and important facts that would be useful to recall later.
-8. If no specific patterns emerge, output {{"nodes": []}}. Empty is better than generic.
+7. Prefer extracting granular personal details that would be hard to find later: nicknames, specific possessions, hobbies, places visited, family members, physical descriptions, stated opinions, specific dates/events.
+8. Confidence guide: 0.7-0.9 = verified across 2+ sessions or very explicitly stated; 0.4-0.6 = from a single session with reasonable certainty; below 0.4 = inferred or speculative.
+9. If no specific patterns emerge, output {{"nodes": []}}. Empty is better than generic.
 
 Output ONLY valid JSON, no markdown fences, no explanation:
 {{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": ""}}]}}
@@ -144,9 +156,9 @@ CONSOLIDATION_PROMPT_MINIMAL = """\
 ## Recent Sessions
 {journal_cluster}
 
-Categories: workflow, architecture, infrastructure, debugging, convention, tooling, lesson-learned, decision, preference, fact
+Categories: fact (names/dates/details), preference, decision, convention, workflow, architecture, infrastructure, tooling, debugging, lesson-learned
 
-Extract durable knowledge as JSON. Output ONLY valid JSON:
+Extract durable knowledge as JSON. Be specific — include names, values, dates. Output ONLY valid JSON:
 {{"nodes": [{{"action": "create|corroborate|contradict", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": ""}}]}}
 """
 
@@ -171,11 +183,15 @@ def _is_generic_node(content: str) -> bool:
 
 # Default GOOD examples used when no existing knowledge nodes are available.
 # These are replaced dynamically by the project's own nodes when they exist.
+# IMPORTANT: These must be clearly generic/hypothetical so small models don't
+# parrot them as actual knowledge. Each is prefixed with "Example:" and uses
+# deliberately vague hypothetical phrasing.
 _DEFAULT_GOOD_EXAMPLES = [
-    '- "Always use A100 GPU for training — A10G OOMs on 8B models" (infrastructure)',
-    '- "Train on Alfred eval set, test on Batman — never train and test on same benchmark" (convention)',
-    '- "Use --iters 500 minimum for cloud training to avoid premature truncation" (lesson-learned)',
-    '- "Run scripts/verify_quality_curve.py before any training run" (workflow)',
+    '- Example: "John prefers dark roast coffee from the cafe on 5th Street" (preference)',
+    '- Example: "Weekly team standup moved from Monday 9am to Tuesday 10am" (decision)',
+    '- Example: "Maria adopted a rescue cat named Whiskers in March 2024" (fact)',
+    '- Example: "Nate calls Joanna by the nickname Jo" (fact)',
+    '- Example: "Caroline moved from Stockholm, Sweden to attend grad school in Boston" (fact)',
 ]
 
 
@@ -631,6 +647,8 @@ def _apply_consolidation_result(
 
         action = raw_node.get("action", "create")
         content = scrub_text(str(raw_node.get("content", ""))[:300])
+        # Strip markdown formatting (bold/italic) that small models inject
+        content = strip_markdown_formatting(content)
         category = scrub_text(str(raw_node.get("category", "workflow")))
         tags = raw_node.get("tags", [])
         if not isinstance(tags, list):

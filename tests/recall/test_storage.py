@@ -458,6 +458,25 @@ class TestFTSEscaping:
         assert "fix" in tokens
         assert "bug" in tokens
         assert '"api_index.py"' in tokens
+        # "in" is a stop word and should be filtered
+        assert "in" not in tokens
+
+    def test_stop_words_filtered(self):
+        """Stop words are removed from FTS queries to improve AND precision."""
+        tokens = _escape_fts_tokens(
+            "When did Caroline go to the LGBTQ support group?"
+        )
+        # Content words preserved
+        assert "caroline" in tokens
+        assert "lgbtq" in tokens
+        assert "support" in tokens
+        assert "group" in tokens
+        # Stop/question words removed
+        assert "when" not in tokens
+        assert "did" not in tokens
+        assert "the" not in tokens
+        assert "to" not in tokens
+        assert "go" not in tokens
 
 
 class TestFTSOrFallback:

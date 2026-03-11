@@ -34,7 +34,11 @@ from synapt.recall.scrub import scrub_text
 logger = logging.getLogger("synapt.recall")
 
 from synapt.recall.bm25 import BM25, _tokenize
+from synapt.recall.hybrid import extract_entities
 from synapt.recall.storage import RecallDB
+
+# Multiplier for knowledge nodes whose content matches query entities
+ENTITY_BOOST = 1.5
 
 
 def format_size(size_bytes: int) -> str:
@@ -1215,6 +1219,20 @@ class TranscriptIndex:
 
         fts_results = self._db.fts_search(query, limit=max_chunks * 10)
 
+        # Entity-focused supplementary search: when the main FTS finds few
+        # results and the query mentions specific entities (person names, etc.),
+        # run a second search for just entity terms. This catches chunks where
+        # entities co-occur but content words (e.g. "nickname") don't appear.
+        query_entities = extract_entities(query)
+        if query_entities and len(fts_results) < max_chunks:
+            entity_query = " ".join(query_entities)
+            entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
+            seen_rowids = {r for r, _ in fts_results}
+            for rowid, score in entity_fts:
+                if rowid not in seen_rowids:
+                    fts_results.append((rowid, score * 0.7))  # Slight discount
+                    seen_rowids.add(rowid)
+
         # Convert rowids to chunk indices, applying date and depth filters
         candidates: list[tuple[int, float]] = []
         for rowid, score in fts_results:
@@ -1735,12 +1753,18 @@ class TranscriptIndex:
             score_map = dict(merged)
 
             nodes_by_rowid = self._db.knowledge_by_rowid(all_rowids)
-            # Coverage gate: require ≥2 distinct query tokens to appear in the
+            # Coverage gate: require ≥1 distinct query token to appear in the
             # node content, OR a strong embedding match (sim > 0.4). This lets
             # semantic matches through even when BM25 tokens don't overlap.
+            # Knowledge nodes are already distilled facts, so a single token
+            # overlap (e.g. a person's name) is a meaningful signal.
             query_tokens = set(_tokenize(query))
-            min_matches = max(2, round(len(query_tokens) * 0.3))
+            min_matches = max(1, round(len(query_tokens) * 0.2))
             emb_rowids = {r for r, s in emb_hits if s > 0.4}
+
+            # Entity extraction: boost knowledge nodes mentioning query entities
+            query_entities = extract_entities(query)
+
             results = []
             seen_ids: set[str] = set()
             for rowid in all_rowids:
@@ -1750,7 +1774,8 @@ class TranscriptIndex:
                 node_id = node.get("id", str(rowid))
                 if node_id in seen_ids:
                     continue
-                node_tokens = set(_tokenize(node.get("content", "")))
+                node_content = node.get("content", "")
+                node_tokens = set(_tokenize(node_content))
                 token_overlap = len(query_tokens & node_tokens) >= min_matches
                 strong_emb = rowid in emb_rowids
                 if token_overlap or strong_emb:
@@ -1761,6 +1786,11 @@ class TranscriptIndex:
                     # (conf=0.9 → 2.8x) rank above single-session
                     # observations (conf=0.45 → 1.9x).
                     effective_boost = 1.0 + conf * knowledge_boost
+                    # Entity boost: prefer knowledge about the specific
+                    # entities mentioned in the query (e.g. person names).
+                    if query_entities:
+                        if any(e in node_content.lower() for e in query_entities):
+                            effective_boost *= ENTITY_BOOST
                     node["score"] = score_map.get(rowid, 0.0) * effective_boost
                     results.append(node)
                     seen_ids.add(node_id)
