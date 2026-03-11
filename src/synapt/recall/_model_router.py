@@ -5,9 +5,11 @@ Routes each recall task to the best available model architecture:
 - enrich: Prefers encoder-decoder (T5 fine-tuned for enrichment JSON)
 - consolidate: Uses decoder-only (MLX/Ollama) for complex reasoning
 
-Falls back gracefully: transformers → MLX → Ollama → None.
+Falls back gracefully: ONNX → transformers → MLX → Ollama → None.
+ONNX Runtime is 5-7x faster than PyTorch CPU via graph optimization.
+Run 'synapt-convert' to create ONNX models.
 
-Override with SYNAPT_SUMMARY_BACKEND=mlx|transformers|ollama for testing.
+Override with SYNAPT_SUMMARY_BACKEND=onnx|mlx|transformers|ollama for testing.
 Override enrichment model with SYNAPT_ENRICHMENT_MODEL env var.
 """
 
@@ -85,7 +87,9 @@ def get_client(
     """
     override = os.environ.get("SYNAPT_SUMMARY_BACKEND", "").lower()
 
-    if override == "mlx":
+    if override == "onnx":
+        return _get_onnx_client(max_tokens)
+    elif override == "mlx":
         return _get_mlx_client(max_tokens)
     elif override == "transformers":
         return _get_transformers_client(max_tokens)
@@ -96,13 +100,49 @@ def get_client(
 
     if preferred == "encoder-decoder":
         model_override = _TASK_ENCODER_DECODER_MODEL.get(task)
-        client = _get_transformers_client(max_tokens, model_name=model_override)
+        # Prefer ONNX (5-7x faster), fall back to PyTorch transformers
+        client = _get_onnx_client(max_tokens, model_name=model_override)
+        if client is None:
+            client = _get_transformers_client(max_tokens, model_name=model_override)
         if client is not None:
             return client
         # Fall back to decoder-only
         return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
     else:
         return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
+
+
+_NOT_FOUND = object()  # Sentinel for cached negative lookups
+
+
+def _get_onnx_client(
+    max_tokens: int,
+    model_name: str | None = None,
+) -> object | None:
+    """Try to create an OnnxClient. Returns None if unavailable."""
+    key = ("onnx", max_tokens, model_name)
+    cached = _client_cache.get(key, _NOT_FOUND)
+    if cached is not _NOT_FOUND:
+        return cached
+
+    try:
+        from synapt._models.onnx_client import OnnxClient
+
+        # Only return ONNX client if a converted model exists
+        check_model = model_name or get_encoder_decoder_model()
+        if not OnnxClient.is_available(check_model):
+            logger.debug("No ONNX model found for %s, skipping", check_model)
+            _client_cache[key] = None  # Cache negative result
+            return None
+
+        client = OnnxClient(max_tokens=max_tokens, model_name=model_name)
+        _client_cache[key] = client
+        logger.debug("OnnxClient available for accelerated encoder-decoder inference")
+        return client
+    except ImportError:
+        logger.debug("onnxruntime not installed, skipping ONNX backend")
+        _client_cache[key] = None  # Cache negative result
+        return None
 
 
 def _get_transformers_client(
@@ -165,9 +205,17 @@ def clear_cache() -> None:
 
 
 def is_encoder_decoder(client: object) -> bool:
-    """Check if a client is an encoder-decoder model (TransformersClient)."""
+    """Check if a client is an encoder-decoder model (TransformersClient or OnnxClient)."""
     try:
         from synapt._models.transformers_client import TransformersClient
-        return isinstance(client, TransformersClient)
+        if isinstance(client, TransformersClient):
+            return True
     except ImportError:
-        return False
+        pass
+    try:
+        from synapt._models.onnx_client import OnnxClient
+        if isinstance(client, OnnxClient):
+            return True
+    except ImportError:
+        pass
+    return False

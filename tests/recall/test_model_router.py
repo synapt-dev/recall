@@ -109,13 +109,11 @@ class TestFallbackChain:
     """Test fallback when preferred backend is unavailable."""
 
     def test_summarize_falls_back_to_mlx(self, monkeypatch):
-        """When transformers unavailable, SUMMARIZE falls back to MLX."""
+        """When encoder-decoder backends unavailable, SUMMARIZE falls back to MLX."""
         import synapt.recall._model_router as router
 
-        def _no_transformers(max_tokens, model_name=None):
-            return None
-
-        monkeypatch.setattr(router, "_get_transformers_client", _no_transformers)
+        monkeypatch.setattr(router, "_get_onnx_client", lambda mt, model_name=None: None)
+        monkeypatch.setattr(router, "_get_transformers_client", lambda mt, model_name=None: None)
         client = get_client(RecallTask.SUMMARIZE)
         if client is not None:
             assert not is_encoder_decoder(client)
@@ -124,6 +122,7 @@ class TestFallbackChain:
         """When all backends unavailable, returns None."""
         import synapt.recall._model_router as router
 
+        monkeypatch.setattr(router, "_get_onnx_client", lambda mt, model_name=None: None)
         monkeypatch.setattr(router, "_get_transformers_client", lambda mt, model_name=None: None)
         monkeypatch.setattr(router, "_get_mlx_client", lambda mt: None)
         monkeypatch.setattr(router, "_get_ollama_client", lambda mt: None)

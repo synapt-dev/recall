@@ -16,14 +16,14 @@ Models: flan-t5-base (250M, ~1GB FP32), flan-t5-large (780M, ~3.2GB FP32)
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
 
 from .base import Message, ModelClient
+from ._utils import fix_bare_json, read_adapter_config
 
 logger = logging.getLogger(__name__)
 
 # Class-level cache: model_name → (model, tokenizer, device)
-_MODEL_CACHE: Dict[str, Tuple[object, object, str]] = {}
+_MODEL_CACHE: dict[str, tuple[object, object, str]] = {}
 
 
 def _resolve_device(preference: str = "auto") -> str:
@@ -58,7 +58,7 @@ class TransformersClient(ModelClient):
         self._device = device
         self._model_name = model_name  # Override: always use this model
 
-    def _load(self, model: str) -> Tuple[object, object, str]:
+    def _load(self, model: str) -> tuple[object, object, str]:
         """Load or retrieve cached model and tokenizer.
 
         Detects PEFT adapters (local dir or HuggingFace repo) by looking for
@@ -74,7 +74,7 @@ class TransformersClient(ModelClient):
         device = _resolve_device(self._device)
 
         # Detect PEFT adapter: local directory or HuggingFace repo
-        adapter_cfg = self._read_adapter_config(model)
+        adapter_cfg = read_adapter_config(model)
         if adapter_cfg is not None:
             base_model_name = adapter_cfg.get("base_model_name_or_path", "google/flan-t5-base")
             logger.info("Loading %s + LoRA adapter %s on %s", base_model_name, model, device)
@@ -94,36 +94,10 @@ class TransformersClient(ModelClient):
         _MODEL_CACHE[model] = (model_obj, tokenizer, device)
         return model_obj, tokenizer, device
 
-    @staticmethod
-    def _read_adapter_config(model: str) -> dict | None:
-        """Read adapter_config.json from a local path or HuggingFace repo.
-
-        Returns the parsed config dict, or None if not a PEFT adapter.
-        """
-        import os
-        import json as _json
-
-        # Local directory
-        if os.path.isdir(model):
-            cfg_path = os.path.join(model, "adapter_config.json")
-            if os.path.exists(cfg_path):
-                with open(cfg_path) as f:
-                    return _json.load(f)
-            return None
-
-        # HuggingFace repo — try downloading adapter_config.json
-        try:
-            from huggingface_hub import hf_hub_download
-            path = hf_hub_download(model, "adapter_config.json")
-            with open(path) as f:
-                return _json.load(f)
-        except Exception:
-            return None
-
     def chat(
         self,
         model: str,
-        messages: List[Message],
+        messages: list[Message],
         temperature: float = 0.2,
         **kwargs,
     ) -> str:
@@ -175,15 +149,4 @@ class TransformersClient(ModelClient):
                 )
 
         result = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-
-        # T5 fine-tuned for JSON output often drops outer braces.
-        # Wrap in {} if the output looks like bare JSON fields.
-        if result and not result.startswith("{") and result.startswith('"'):
-            import json
-            try:
-                json.loads("{" + result + "}")
-                result = "{" + result + "}"
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        return result
+        return fix_bare_json(result)
