@@ -438,20 +438,12 @@ def _temporal_window_clusters(
 ) -> list[list[JournalEntry]]:
     """Group entries into overlapping temporal windows.
 
-    Sorts entries by timestamp and produces sliding windows of
-    ``window_size`` entries with 1-entry overlap. This ensures every
-    entry participates in at least one cluster.
+    Reuses ``_split_large_cluster`` which implements the same sliding-
+    window algorithm with 1-entry overlap.
     """
-    ordered = sorted(entries, key=lambda e: e.timestamp or "")
-    if len(ordered) < 2:
+    if len(entries) < 2:
         return []
-    step = max(window_size - 1, 1)
-    clusters = []
-    for start in range(0, len(ordered), step):
-        window = ordered[start : start + window_size]
-        if len(window) >= 2:
-            clusters.append(window)
-    return clusters
+    return _split_large_cluster(entries, max_size=window_size)
 
 
 def _split_large_cluster(
@@ -1027,13 +1019,13 @@ def consolidate(
                     len(cluster),
                 )
 
-        # Update timestamp and sync if clusters were processed
+        # Sync knowledge.jsonl → SQLite when nodes were modified OR when
+        # the knowledge file has nodes that may not be in SQLite yet
+        # (e.g. from a prior run that wrote to JSONL but crashed before sync).
         if result.nodes_created or result.nodes_corroborated or result.nodes_contradicted:
             _set_last_consolidation_ts(project_dir)
-        # Always sync knowledge.jsonl → SQLite when clusters were processed,
-        # even if this run produced 0 new nodes (previous runs may have
-        # written nodes that haven't been synced yet).
-        if clusters:
+            _sync_knowledge_to_db(project_dir, kn_path)
+        elif clusters and kn_path.exists() and kn_path.stat().st_size > 0:
             _sync_knowledge_to_db(project_dir, kn_path)
     finally:
         if db is not None:
