@@ -36,6 +36,29 @@ from synapt.recall.core import (
 )
 
 # ---------------------------------------------------------------------------
+# MCP instructions — shared with the unified server (synapt.server)
+# ---------------------------------------------------------------------------
+
+MCP_INSTRUCTIONS = (
+    "You have access to synapt recall — persistent memory across sessions. "
+    "USE IT PROACTIVELY without being asked:\n"
+    "- At session start: search for recent work on the current project/branch\n"
+    "- Before making architectural decisions: check if past sessions discussed this\n"
+    "- When debugging: search for similar errors or past fixes\n"
+    "- When the user references past work: search for it immediately\n"
+    "- Before implementing features: check if prior sessions attempted this\n"
+    "\n"
+    "Key tools:\n"
+    "- recall_search: Search past sessions by topic/keyword\n"
+    "- recall_files: Find sessions that touched specific files\n"
+    "- recall_journal: Read/write session journal entries\n"
+    "- recall_remind: Set cross-session reminders\n"
+    "\n"
+    "Do NOT wait for the user to say 'use recall' — if context from past "
+    "sessions would help, search for it automatically."
+)
+
+# ---------------------------------------------------------------------------
 # Cached index singleton — avoids reloading on every tool call.
 # Invalidated when recall.db mtime changes (e.g., after a rebuild).
 # ---------------------------------------------------------------------------
@@ -119,11 +142,16 @@ def recall_search(
     include_archived: bool = False,
     include_historical: bool = False,
 ) -> str:
-    """Search past Claude Code and ChatGPT session transcripts.
+    """Search past coding sessions for relevant context. USE PROACTIVELY.
 
-    Returns relevant conversation chunks from previous sessions, sorted by
-    relevance. Use this to recall decisions, bugs fixed, approaches tried,
-    or any context from past conversations.
+    Call this BEFORE starting work to check for prior decisions, bugs, or
+    approaches. Returns relevant conversation chunks sorted by relevance.
+
+    When to use (without being asked):
+    - User mentions past work → search for it
+    - Debugging an error → search for similar past errors
+    - Making a design decision → check if it was discussed before
+    - Starting a new feature → check for prior attempts or related work
 
     Args:
         query: Natural language query or keywords to search for.
@@ -1172,7 +1200,10 @@ def main():
     """Entry point for standalone synapt-recall-server."""
     from mcp.server.fastmcp import FastMCP
 
-    server = FastMCP("synapt-recall")
+    server = FastMCP(
+        "synapt-recall",
+        instructions=MCP_INSTRUCTIONS,
+    )
     register_tools(server)
     server.run()
 

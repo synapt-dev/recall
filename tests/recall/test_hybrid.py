@@ -174,6 +174,12 @@ class TestQueryIntentClassification:
         assert classify_query_intent("which API endpoint handles auth") == "factual"
         assert classify_query_intent("what does the config setting do") == "factual"
 
+    def test_factual_indirect_what(self):
+        """'What [noun] did/is X' should classify as factual."""
+        assert classify_query_intent("What state did Nate visit") == "factual"
+        assert classify_query_intent("What book did Tim recommend") == "factual"
+        assert classify_query_intent("What color is Caroline's car") == "factual"
+
     def test_debug(self):
         assert classify_query_intent("why did the build fail") == "debug"
         assert classify_query_intent("error in the deployment") == "debug"

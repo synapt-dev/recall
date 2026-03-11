@@ -496,6 +496,7 @@ class RecallDB:
             ("version", "INTEGER NOT NULL DEFAULT 1"),
             ("lineage_id", "TEXT NOT NULL DEFAULT ''"),
             ("embedding", "BLOB"),
+            ("source_turns", "TEXT NOT NULL DEFAULT '[]'"),
         ]
         for col_name, col_def in migrations:
             if col_name not in cols:
@@ -895,8 +896,8 @@ class RecallDB:
                 "(id, content, category, confidence, source_sessions, "
                 " created_at, updated_at, status, superseded_by, "
                 " contradiction_note, tags, "
-                " valid_from, valid_until, version, lineage_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " valid_from, valid_until, version, lineage_id, source_turns) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node["id"],
                     node["content"],
@@ -913,6 +914,7 @@ class RecallDB:
                     node.get("valid_until"),
                     node.get("version", 1),
                     node.get("lineage_id", ""),
+                    json.dumps(node.get("source_turns", [])),
                 ),
             )
         self._conn.commit()
@@ -937,7 +939,7 @@ class RecallDB:
             "contradiction_note": r["contradiction_note"],
             "tags": json.loads(r["tags"]),
         }
-        # Phase 8 columns — graceful fallback for old DBs mid-migration
+        # Phase 8+ columns — graceful fallback for old DBs mid-migration
         for col, default in [
             ("valid_from", None), ("valid_until", None),
             ("version", 1), ("lineage_id", ""),
@@ -946,6 +948,11 @@ class RecallDB:
                 d[col] = r[col]
             except (IndexError, KeyError):
                 d[col] = default
+        # source_turns — added after initial schema
+        try:
+            d["source_turns"] = json.loads(r["source_turns"])
+        except (IndexError, KeyError):
+            d["source_turns"] = []
         return d
 
     def load_knowledge_nodes(self, status: str | None = None) -> list[dict]:

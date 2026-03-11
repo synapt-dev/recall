@@ -113,8 +113,10 @@ Given the following transcript, produce a JSON object with these fields:
 - "next_steps": A list of 0-3 items to follow up on or remember (each max 100 chars)
 
 Rules:
-- Be specific and concrete — include names, dates, places, and key details
-- Capture important facts, preferences, and relationship details mentioned
+- Include specific names, dates, places, numbers, and details — NOT general themes
+- Capture people's names, their relationships, possessions, hobbies, and stated preferences
+- BAD: "discussed travel plans" — GOOD: "plans trip to Florida in June with sister Elena"
+- BAD: "talked about hobbies" — GOOD: "signed up for pottery class on July 2nd"
 - If the session was short or trivial, use fewer items
 - Output ONLY valid JSON, no markdown fences, no explanation
 

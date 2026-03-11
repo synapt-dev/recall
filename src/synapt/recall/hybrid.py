@@ -188,7 +188,8 @@ def _embedding_search_numpy(
 
 # Patterns for each intent type
 _FACTUAL_PATTERNS = re.compile(
-    r"\b(what\s+(is|are|was|were|does|did)|which|who\s+(is|are|was|were|does|did)|"
+    r"\b(what\s+(is|are|was|were|does|did)|what\s+\w+\s+(is|are|was|were|did|does|has|have)|"
+    r"which|who\s+(is|are|was|were|does|did)|"
     r"where\s+(is|are|does|did)|"
     r"how\s+(many|much|old|long|often)|port|version|url|endpoint|config|setting|"
     r"api\s+key|database|schema|table|"

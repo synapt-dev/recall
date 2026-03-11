@@ -1050,6 +1050,8 @@ class TranscriptIndex:
         depth: str = "full",
         include_archived: bool = False,
         include_historical: bool = False,
+        now: datetime | None = None,
+        knowledge_boost: float | None = None,
     ) -> str:
         """Search transcripts and return formatted context string.
 
@@ -1070,6 +1072,11 @@ class TranscriptIndex:
                 In full mode, individual chunks are always searchable regardless.
             include_historical: If True, include superseded/contradicted knowledge
                 nodes in results, clearly labeled as historical.
+            now: Reference time for recency decay. Defaults to UTC now.
+                Set to a conversation's last timestamp to enable meaningful
+                recency bias on historical data.
+            knowledge_boost: Override for knowledge node boost multiplier.
+                None = use intent-classified default (typically 2.0).
 
         Returns:
             Formatted string ready for prompt injection, or empty string.
@@ -1085,7 +1092,7 @@ class TranscriptIndex:
         cache_key = (
             query, max_chunks, max_sessions, after, before,
             half_life, threshold_ratio, depth, include_archived,
-            include_historical,
+            include_historical, now, knowledge_boost,
         )
         cached = self._query_cache.get(cache_key)
         if cached is not None:
@@ -1096,7 +1103,7 @@ class TranscriptIndex:
         # knowledge boost). Only overrides half_life when caller didn't
         # provide an explicit value (half_life is None).
         emb_weight = 1.0
-        knowledge_boost = 2.0
+        kb_default = 2.0
         caller_set_half_life = half_life is not None
         if half_life is None:
             half_life = 60.0
@@ -1108,7 +1115,7 @@ class TranscriptIndex:
             intent = classify_query_intent(query)
             params = intent_search_params(intent)
             emb_weight = params.get("emb_weight", emb_weight)
-            knowledge_boost = params.get("knowledge_boost", knowledge_boost)
+            kb_default = params.get("knowledge_boost", kb_default)
             if not caller_set_half_life:
                 half_life = params.get("half_life", half_life)
 
@@ -1126,6 +1133,9 @@ class TranscriptIndex:
         except Exception:
             logger.debug("Intent classification failed, using defaults", exc_info=True)
 
+        # Apply caller override for knowledge boost (after intent classification)
+        _knowledge_boost = knowledge_boost if knowledge_boost is not None else kb_default
+
         query_tokens = _tokenize(query)
         if not query_tokens:
             self._last_diagnostics = SearchDiagnostics(
@@ -1142,14 +1152,16 @@ class TranscriptIndex:
                 query, query_tokens, max_chunks, max_tokens, max_sessions,
                 date_filter, half_life, threshold_ratio, depth,
                 include_historical,
-                emb_weight=emb_weight, knowledge_boost=knowledge_boost,
+                emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
+                now=now,
             )
         else:
             result = self._global_lookup(
                 query, query_tokens, max_chunks, max_tokens, date_filter,
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
-                emb_weight=emb_weight, knowledge_boost=knowledge_boost,
+                emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
+                now=now,
             )
 
         # Cache the result (LRU eviction when full)
@@ -1174,6 +1186,7 @@ class TranscriptIndex:
         include_historical: bool = False,
         emb_weight: float = 1.0,
         knowledge_boost: float = 2.0,
+        now: datetime | None = None,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and self._rowid_to_idx:
@@ -1182,11 +1195,12 @@ class TranscriptIndex:
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
+                now=now,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
             half_life, threshold_ratio, depth,
-            emb_weight=emb_weight,
+            emb_weight=emb_weight, now=now,
         )
 
     def _global_lookup_fts(
@@ -1202,6 +1216,7 @@ class TranscriptIndex:
         include_historical: bool = False,
         emb_weight: float = 1.0,
         knowledge_boost: float = 2.0,
+        now: datetime | None = None,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Search knowledge nodes first (ranked higher via boost)
@@ -1219,18 +1234,18 @@ class TranscriptIndex:
 
         fts_results = self._db.fts_search(query, limit=max_chunks * 10)
 
-        # Entity-focused supplementary search: when the main FTS finds few
-        # results and the query mentions specific entities (person names, etc.),
-        # run a second search for just entity terms. This catches chunks where
-        # entities co-occur but content words (e.g. "nickname") don't appear.
+        # Entity-focused supplementary search: when the query mentions
+        # specific entities (person names, etc.), run a second search for
+        # just entity terms. This catches chunks where entities co-occur
+        # but content words (e.g. "nickname") don't appear in the text.
         query_entities = extract_entities(query)
-        if query_entities and len(fts_results) < max_chunks:
+        if query_entities:
             entity_query = " ".join(query_entities)
             entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
             seen_rowids = {r for r, _ in fts_results}
             for rowid, score in entity_fts:
                 if rowid not in seen_rowids:
-                    fts_results.append((rowid, score * 0.7))  # Slight discount
+                    fts_results.append((rowid, score * 0.85))  # Slight discount
                     seen_rowids.add(rowid)
 
         # Convert rowids to chunk indices, applying date and depth filters
@@ -1252,7 +1267,7 @@ class TranscriptIndex:
         # symmetrically, so recent results rank higher in both lists and RRF
         # naturally promotes them. This differs from pure RRF (score-agnostic)
         # but produces better results for session recall where recency matters.
-        candidates = self._decay_candidates(candidates, half_life)
+        candidates = self._decay_candidates(candidates, half_life, now=now)
 
         # Hybrid search: RRF fusion between BM25/FTS and embedding similarity.
         # Unlike the old additive boost (score + sim * 3.0), RRF can surface
@@ -1281,7 +1296,7 @@ class TranscriptIndex:
                     if depth == "summary" and self.chunks[idx].turn_index >= 0:
                         continue
                     emb_ranked.append((idx, sim))
-                emb_ranked = self._decay_candidates(emb_ranked, half_life)
+                emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
 
                 # Weighted RRF merge — emb_weight from intent classification
                 merged = weighted_rrf_merge(
@@ -1414,6 +1429,7 @@ class TranscriptIndex:
         threshold_ratio: float,
         depth: str = "full",
         emb_weight: float = 1.0,
+        now: datetime | None = None,
     ) -> str:
         """Global lookup using in-memory BM25 (legacy fallback)."""
         # BM25 path has no cluster FTS — concise mode requires FTS5
@@ -1434,7 +1450,7 @@ class TranscriptIndex:
                     scores[i] = 0.0
 
         if half_life > 0:
-            scores = self._apply_recency_decay(scores, half_life=half_life)
+            scores = self._apply_recency_decay(scores, half_life=half_life, now=now)
 
         # Hybrid search: RRF fusion (same as FTS path but using in-memory BM25)
         if self._embeddings and self._embed_provider:
@@ -1500,6 +1516,7 @@ class TranscriptIndex:
         include_historical: bool = False,
         emb_weight: float = 1.0,
         knowledge_boost: float = 2.0,
+        now: datetime | None = None,
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
@@ -1518,11 +1535,13 @@ class TranscriptIndex:
                 knowledge_results=knowledge_results,
                 emb_weight=emb_weight,
                 depth=depth,
+                now=now,
             )
         return self._progressive_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, max_sessions,
             date_filter, half_life, threshold_ratio,
             depth=depth,
+            now=now,
         )
 
     def _progressive_lookup_fts(
@@ -1537,6 +1556,7 @@ class TranscriptIndex:
         knowledge_results: list[dict] | None = None,
         depth: str = "full",
         emb_weight: float = 1.0,
+        now: datetime | None = None,
     ) -> str:
         """Progressive session search using FTS5 (SQLite backend)."""
         hits: list[tuple[int, float]] = []
@@ -1575,7 +1595,7 @@ class TranscriptIndex:
         # Recency decay — applied BEFORE RRF intentionally (see _global_lookup_fts
         # for rationale). Both BM25 and embedding lists are decayed symmetrically
         # so RRF ranks reflect recency bias consistently.
-        hits = self._decay_candidates(hits, half_life)
+        hits = self._decay_candidates(hits, half_life, now=now)
 
         # Hybrid: merge FTS progressive hits with global embedding search.
         # Progressive FTS is session-scoped, but embeddings intentionally
@@ -1601,7 +1621,7 @@ class TranscriptIndex:
                     if depth == "summary" and self.chunks[idx].turn_index >= 0:
                         continue
                     emb_ranked.append((idx, sim))
-                emb_ranked = self._decay_candidates(emb_ranked, half_life)
+                emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
 
                 bm25_ranked = sorted(hits, key=lambda x: x[1], reverse=True)
                 merged = weighted_rrf_merge(
@@ -1643,6 +1663,7 @@ class TranscriptIndex:
         half_life: float,
         threshold_ratio: float,
         depth: str = "full",
+        now: datetime | None = None,
     ) -> str:
         """Progressive session search using in-memory BM25 (legacy fallback)."""
         bm25_scores = self._bm25.score(query_tokens)
@@ -1654,7 +1675,9 @@ class TranscriptIndex:
                     bm25_scores[i] = 0.0
 
         if half_life > 0:
-            bm25_scores = self._apply_recency_decay(bm25_scores, half_life=half_life)
+            bm25_scores = self._apply_recency_decay(
+                bm25_scores, half_life=half_life, now=now,
+            )
 
         session_chunk_indices: dict[str, list[int]] = {}
         for i, chunk in enumerate(self.chunks):
@@ -1782,10 +1805,14 @@ class TranscriptIndex:
                     conf = node.get("confidence", 0.5)
                     if not isinstance(conf, (int, float)):
                         conf = 0.5
-                    # Confidence-weighted boost: well-corroborated facts
-                    # (conf=0.9 → 2.8x) rank above single-session
-                    # observations (conf=0.45 → 1.9x).
-                    effective_boost = 1.0 + conf * knowledge_boost
+                    # Confidence gate: low-confidence knowledge (<0.4) gets
+                    # no boost to avoid polluting results with weak facts.
+                    # Above the gate, scale linearly: conf=0.5 → 2.0x,
+                    # conf=0.9 → 2.8x.
+                    if conf < 0.4:
+                        effective_boost = 1.0
+                    else:
+                        effective_boost = 1.0 + conf * knowledge_boost
                     # Entity boost: prefer knowledge about the specific
                     # entities mentioned in the query (e.g. person names).
                     if query_entities:
@@ -1977,10 +2004,69 @@ class TranscriptIndex:
         # unconditionally prepending them (#284). They compete fairly
         # with chunks/clusters — irrelevant knowledge nodes drop below
         # high-quality transcript chunks.
+        # Track which chunk indices are already in ranked results
+        ranked_indices = {idx for idx, _ in ranked}
+
+        # Pre-build chunk lookup indices for O(1) source expansion
+        _chunk_by_turn: dict[tuple[str, int], list[int]] = {}
+        _chunks_by_session: dict[str, list[int]] = {}
+        for i, chunk in enumerate(self.chunks):
+            key = (chunk.session_id, chunk.turn_index)
+            _chunk_by_turn.setdefault(key, []).append(i)
+            _chunks_by_session.setdefault(chunk.session_id, []).append(i)
+
         for node in (knowledge_results or []):
             block = self._format_knowledge_block(node)
             node_score = node.get("score", 0.0)
             emit_items.append((node_score, block, "knowledge", node.get("id", "")))
+
+            # Source expansion: add raw chunks referenced by the knowledge
+            # node's source_turns (exact session:turn pairs from consolidation)
+            # or fall back to keyword matching against source sessions.
+            source_turns = node.get("source_turns", [])
+            source_sessions = node.get("source_sessions", [])
+            if node_score > 0 and (source_turns or source_sessions):
+                # Build a set of (session_id, turn_index) from source_turns
+                turn_refs: set[tuple[str, int]] = set()
+                for ref in source_turns:
+                    if ":" in ref:
+                        sid, tidx = ref.rsplit(":", 1)
+                        try:
+                            turn_refs.add((sid, int(tidx)))
+                        except ValueError:
+                            pass
+
+                source_candidates: list[tuple[int, float]] = []
+                if turn_refs:
+                    # Exact turn matching via index (O(1) per ref)
+                    for ref_key in turn_refs:
+                        for i in _chunk_by_turn.get(ref_key, []):
+                            if i not in ranked_indices:
+                                source_candidates.append((i, 100.0))
+                                ranked_indices.add(i)
+                elif source_sessions and query:
+                    # Fallback: keyword matching against source sessions
+                    query_toks = set(_tokenize(query))
+                    node_toks = set(_tokenize(node.get("content", "")))
+                    match_toks = query_toks | node_toks
+                    for sid in source_sessions:
+                        for i in _chunks_by_session.get(sid, []):
+                            if i in ranked_indices:
+                                continue
+                            if self.chunks[i].turn_index < 0:
+                                continue
+                            chunk_toks = set(_tokenize(self.chunks[i].text))
+                            overlap = len(chunk_toks & match_toks)
+                            if overlap < 2:
+                                continue
+                            source_candidates.append((i, overlap))
+                # Take top 3 most relevant source chunks per node
+                source_candidates.sort(key=lambda x: x[1], reverse=True)
+                for i, overlap in source_candidates[:3]:
+                    source_score = node_score * 0.6
+                    cblock = self._format_chunk_block(i)
+                    emit_items.append((source_score, cblock, "chunk", self.chunks[i].id))
+                    ranked_indices.add(i)
 
         for cluster_id, (cluster_info, member_indices, max_score) in cluster_groups.items():
             block = self._format_cluster_block(cluster_id, cluster_info)

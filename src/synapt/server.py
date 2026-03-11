@@ -44,9 +44,12 @@ def main():
     from mcp.server.fastmcp import FastMCP
 
     from synapt.plugins import register_plugins
-    from synapt.recall.server import register_tools as recall_register
+    from synapt.recall.server import MCP_INSTRUCTIONS, register_tools as recall_register
 
-    mcp = FastMCP("synapt")
+    mcp = FastMCP(
+        "synapt",
+        instructions=MCP_INSTRUCTIONS,
+    )
 
     # Core: always available
     recall_register(mcp)

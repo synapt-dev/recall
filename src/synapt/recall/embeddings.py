@@ -43,9 +43,10 @@ class EmbeddingProvider:
 class LocalEmbeddings(EmbeddingProvider):
     """Local embeddings via sentence-transformers. No network required."""
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2",
+                 device: str = "cpu"):
         from sentence_transformers import SentenceTransformer
-        self.model = SentenceTransformer(model_name)
+        self.model = SentenceTransformer(model_name, device=device)
         self._dim = self.model.get_sentence_embedding_dimension()
 
     @property
@@ -115,9 +116,7 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
 
     if prefer_local:
         try:
-            from synapt.recall.config import load_config
-            model_name = load_config().get_model("embedding")
-            provider = LocalEmbeddings(model_name=model_name)
+            provider = LocalEmbeddings()
             # Verify it works
             provider.embed(["test"])
             return provider

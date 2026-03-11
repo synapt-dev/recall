@@ -105,7 +105,7 @@ You are analyzing session summaries to extract durable, specific knowledge.
 
 ## Examples of GOOD knowledge nodes (specific, concrete):
 {good_examples}
-(These are examples of the FORMAT only — do NOT copy them into your output.)
+(These show the FORMAT only. Do NOT copy these examples. Extract facts from the sessions above, using the real names and details found there.)
 
 ## Examples of BAD knowledge nodes (generic — NEVER produce these):
 - "Always use Docker for containerization"
@@ -118,16 +118,16 @@ You are analyzing session summaries to extract durable, specific knowledge.
 Extract patterns that represent durable knowledge — things true across sessions, not one-off observations.
 
 Categories (use the best fit):
-- fact: specific names, dates, relationships, numbers, details ("Maria's sister is Elena")
-- preference: stated likes, dislikes, choices ("prefers dark roast coffee")
-- decision: explicit choices made ("chose PostgreSQL over MySQL for the API")
-- convention: agreed-upon patterns or rules ("always run lint before committing")
-- workflow: recurring processes or routines ("deploys every Tuesday via CI")
-- architecture: system structure or design choices ("API uses REST with JWT auth")
-- infrastructure: hosting, hardware, config values ("production runs on port 8443")
-- tooling: specific tools, versions, or setup ("uses Python 3.12 with ruff linter")
-- debugging: diagnosed root causes or fixes ("OOM caused by unbounded cache in worker")
-- lesson-learned: insights from mistakes or surprises ("batch size >32 causes A10G OOM")
+- fact: specific names, dates, relationships, numbers, personal details
+- preference: stated likes, dislikes, choices about food, hobbies, etc.
+- decision: explicit choices made between alternatives
+- convention: agreed-upon patterns or rules
+- workflow: recurring processes or routines
+- architecture: system structure or design choices
+- infrastructure: hosting, hardware, config values
+- tooling: specific tools, versions, or setup
+- debugging: diagnosed root causes or fixes
+- lesson-learned: insights from mistakes or surprises
 
 Rules:
 1. Extract patterns that appear across sessions OR strongly-stated specific facts (names, preferences, relationships, config values).
@@ -141,7 +141,9 @@ Rules:
 9. If no specific patterns emerge, output {{"nodes": []}}. Empty is better than generic.
 
 Output ONLY valid JSON, no markdown fences, no explanation:
-{{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": ""}}]}}
+{{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": "", "source_turns": ["s001c00:5", "s003c00:12"]}}]}}
+
+source_turns: list the session:turn pairs where this fact appears. Format: "session_id:turn_number". Include ALL turns that support the fact — these are used to link back to the original conversation.
 
 If no durable patterns emerge, output: {{"nodes": []}}
 """
@@ -158,8 +160,8 @@ CONSOLIDATION_PROMPT_MINIMAL = """\
 
 Categories: fact (names/dates/details), preference, decision, convention, workflow, architecture, infrastructure, tooling, debugging, lesson-learned
 
-Extract durable knowledge as JSON. Be specific — include names, values, dates. Output ONLY valid JSON:
-{{"nodes": [{{"action": "create|corroborate|contradict", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": ""}}]}}
+Extract durable knowledge as JSON. Be specific — include names, values, dates. Include source_turns citing session:turn pairs. Output ONLY valid JSON:
+{{"nodes": [{{"action": "create|corroborate|contradict", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": "", "source_turns": ["s001c00:5"]}}]}}
 """
 
 
@@ -187,11 +189,11 @@ def _is_generic_node(content: str) -> bool:
 # parrot them as actual knowledge. Each is prefixed with "Example:" and uses
 # deliberately vague hypothetical phrasing.
 _DEFAULT_GOOD_EXAMPLES = [
-    '- Example: "John prefers dark roast coffee from the cafe on 5th Street" (preference)',
-    '- Example: "Weekly team standup moved from Monday 9am to Tuesday 10am" (decision)',
-    '- Example: "Maria adopted a rescue cat named Whiskers in March 2024" (fact)',
-    '- Example: "Nate calls Joanna by the nickname Jo" (fact)',
-    '- Example: "Caroline moved from Stockholm, Sweden to attend grad school in Boston" (fact)',
+    '- FORMAT EXAMPLE: "[PersonA] prefers herbal tea over coffee" (preference)',
+    '- FORMAT EXAMPLE: "[PersonB] adopted a rescue dog named Rex in April 2025" (fact)',
+    '- FORMAT EXAMPLE: "[PersonA] calls [PersonB] by the nickname Zee" (fact)',
+    '- FORMAT EXAMPLE: "[PersonB] grew up in Dublin, Ireland before moving abroad" (fact)',
+    '- FORMAT EXAMPLE: "[PersonA] switched from yoga to pilates for back pain" (decision)',
 ]
 
 
@@ -655,6 +657,12 @@ def _apply_consolidation_result(
             tags = []
         tags = [scrub_text(str(t)) for t in tags if t]
 
+        # Parse source_turns from LLM output (e.g., ["s001c00:5", "s003c00:12"])
+        source_turns = raw_node.get("source_turns", [])
+        if not isinstance(source_turns, list):
+            source_turns = []
+        source_turns = [str(t) for t in source_turns if t]
+
         if not content:
             continue
 
@@ -663,17 +671,24 @@ def _apply_consolidation_result(
             logger.info("Rejected generic node: %s", content[:80])
             continue
 
+        # Reject contamination from few-shot example placeholders
+        if "[PersonA]" in content or "[PersonB]" in content:
+            logger.info("Rejected example-contaminated node: %s", content[:80])
+            continue
+
         if action == "corroborate":
             existing_id = raw_node.get("existing_id", "")
             target = existing_by_id.get(existing_id)
             if target:
-                # Add new source sessions, bump confidence
+                # Add new source sessions + turns, bump confidence
                 new_sources = list(set(target.source_sessions + cluster_sessions))
+                new_source_turns = list(set(target.source_turns + source_turns))
                 new_confidence = compute_confidence(len(new_sources))
                 update_node(
                     target.id,
                     {
                         "source_sessions": new_sources,
+                        "source_turns": new_source_turns,
                         "confidence": new_confidence,
                     },
                     knowledge_path,
@@ -735,6 +750,7 @@ def _apply_consolidation_result(
                     source_sessions=cluster_sessions,
                     confidence=compute_confidence(len(cluster_sessions)),
                     tags=tags,
+                    source_turns=source_turns,
                 )
                 new_node.valid_from = now
                 update_node(target.id, {"superseded_by": new_node.id}, knowledge_path)
@@ -777,10 +793,15 @@ def _apply_consolidation_result(
                     "Auto-corroborate (jaccard=%.2f): %s", best_sim, content[:80],
                 )
                 new_sources = list(set(best_match.source_sessions + cluster_sessions))
+                new_source_turns = list(set(best_match.source_turns + source_turns))
                 new_confidence = compute_confidence(len(new_sources))
                 update_node(
                     best_match.id,
-                    {"source_sessions": new_sources, "confidence": new_confidence},
+                    {
+                        "source_sessions": new_sources,
+                        "source_turns": new_source_turns,
+                        "confidence": new_confidence,
+                    },
                     knowledge_path,
                 )
                 result.nodes_corroborated += 1
@@ -807,6 +828,7 @@ def _apply_consolidation_result(
                 source_sessions=cluster_sessions,
                 confidence=min(1.0, max(0.0, confidence)),
                 tags=tags,
+                source_turns=source_turns,
             )
             new_node.valid_from = datetime.now(timezone.utc).isoformat()
             append_node(new_node, knowledge_path)

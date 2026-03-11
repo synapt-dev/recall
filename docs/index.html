@@ -246,6 +246,31 @@
     }
     td code { font-size: 0.85rem; color: var(--teal); }
 
+    /* Benchmarks */
+    .benchmarks { border-top: 1px solid var(--border); }
+    .benchmarks h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
+    .benchmarks > .container > p {
+      text-align: center;
+      color: var(--text-dim);
+      margin-bottom: 2.5rem;
+      max-width: 650px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .benchmarks table { margin-bottom: 2rem; }
+    .benchmarks td.best { color: var(--teal); font-weight: 600; }
+    .benchmarks .highlight-row td { background: rgba(124, 92, 191, 0.08); }
+    .benchmarks .footnote {
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin-top: 1rem;
+    }
+
     /* Quick start */
     .quickstart { border-top: 1px solid var(--border); }
     .quickstart h2 {
@@ -312,6 +337,7 @@
       <ul>
         <li><a href="#features">Features</a></li>
         <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#benchmarks">Benchmarks</a></li>
         <li><a href="#quickstart">Quick start</a></li>
         <li><a href="#tools">Tools</a></li>
         <li><a href="https://github.com/laynepenney/synapt">GitHub</a></li>
@@ -396,7 +422,7 @@
   <section class="architecture" id="architecture">
     <div class="container">
       <h2>How search works</h2>
-      <p>Two retrieval paths run in parallel and merge at the rank level &mdash; no score normalization needed.</p>
+      <p>Three retrieval paths run in parallel and merge at the rank level &mdash; no score normalization needed.</p>
       <div class="arch-diagram"><span class="dim">                         query</span>
 <span class="dim">                           |</span>
 <span class="dim">                    +--------------+</span>
@@ -416,8 +442,68 @@
 <span class="dim">          +------------------+               |</span>
 <span class="dim">                    \                        /</span>
 <span class="dim">                 +---------------------------+</span>
-<span class="dim">                 |</span>  <span class="hl2">ranked results + knowledge</span>  <span class="dim">|</span>
-<span class="dim">                 +---------------------------+</span></div>
+<span class="dim">                 |</span> <span class="hl2">interleave + dedup + boost</span>  <span class="dim">|</span>
+<span class="dim">                 +---------------------------+</span>
+<span class="dim">                              |</span>
+<span class="dim">                    +-----------------+</span>
+<span class="dim">                    |</span> <span class="hl">ranked context</span>   <span class="dim">|</span>
+<span class="dim">                    +-----------------+</span></div>
+    </div>
+  </section>
+
+  <section class="benchmarks" id="benchmarks">
+    <div class="container">
+      <h2>Benchmarks</h2>
+      <p>
+        Evaluated on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> (Long Conversational Memory) &mdash;
+        10 conversations, 1540 QA pairs &mdash; following
+        <a href="https://arxiv.org/abs/2504.19413">Mem0's methodology</a> (J-score via LLM-as-Judge).
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>System</th>
+            <th>Multi-Hop</th>
+            <th>Temporal</th>
+            <th>Single-Hop</th>
+            <th>Open-Domain</th>
+            <th>Overall</th>
+            <th>Infra</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="color: var(--text-dim);">
+            <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
+          </tr>
+          <tr class="highlight-row">
+            <td><strong>synapt</strong></td>
+            <td class="best">60.99</td>
+            <td>57.32</td>
+            <td>57.29</td>
+            <td class="best">78.12</td>
+            <td class="best"><strong>69.35</strong></td>
+            <td>local 3B model</td>
+          </tr>
+          <tr>
+            <td>Mem0+Graph</td><td>47.19</td><td>58.13</td><td>65.71</td><td>75.71</td><td>68.44</td><td>cloud GPT-4</td>
+          </tr>
+          <tr>
+            <td>Mem0</td><td>51.15</td><td>55.51</td><td>67.13</td><td>72.93</td><td>66.88</td><td>cloud GPT-4</td>
+          </tr>
+          <tr>
+            <td>Zep</td><td>41.35</td><td>49.31</td><td>61.70</td><td>76.60</td><td>65.99</td><td>cloud service</td>
+          </tr>
+          <tr>
+            <td>LangMem</td><td>47.92</td><td>23.43</td><td>62.23</td><td>71.12</td><td>58.10</td><td>cloud</td>
+          </tr>
+          <tr>
+            <td>OpenAI Memory</td><td>42.92</td><td>21.71</td><td>63.79</td><td>62.29</td><td>52.90</td><td>cloud</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="footnote">
+        Competitor data from <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a>. Synapt runs entirely locally on a 3B parameter model with no cloud API calls.
+      </p>
     </div>
   </section>
 

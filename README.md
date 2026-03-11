@@ -102,16 +102,35 @@ synapt recall setup              # Auto-configure hooks
 synapt server                    # Start MCP server
 ```
 
+## Benchmarks
+
+Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversational Memory) — 10 conversations, 1540 QA pairs — following [Mem0's methodology](https://arxiv.org/abs/2504.19413) (J-score via LLM-as-Judge).
+
+| System | Multi-Hop | Temporal | Single-Hop | Open-Domain | **Overall** | Infra |
+|--------|-----------|----------|------------|-------------|-------------|-------|
+| Full-Context | — | — | — | — | **72.90** | upper bound |
+| **synapt** | **60.99** | 57.32 | 57.29 | **78.12** | **69.35** | **local 3B model** |
+| Mem0+Graph | 47.19 | 58.13 | 65.71 | 75.71 | 68.44 | cloud GPT-4 |
+| Mem0 | 51.15 | 55.51 | 67.13 | 72.93 | 66.88 | cloud GPT-4 |
+| Zep | 41.35 | 49.31 | 61.70 | 76.60 | 65.99 | cloud service |
+| LangMem | 47.92 | 23.43 | 62.23 | 71.12 | 58.10 | cloud |
+| OpenAI Memory | 42.92 | 21.71 | 63.79 | 62.29 | 52.90 | cloud |
+
+Synapt scores **69.35% overall** — beating Mem0+Graph (68.44%), Zep (65.99%), and all other tested systems — while running entirely locally on a 3B parameter model with no cloud API calls.
+
+**Best-in-class**: Open-domain (78.12%) and multi-hop (60.99%) — highest of any system tested, including those using GPT-4 for memory extraction.
+
 ## How search works
 
-Synapt runs two retrieval paths in parallel and merges them:
+Synapt runs three retrieval paths and merges them:
 
-1. **BM25** — Full-text search with recency decay over session chunks
+1. **BM25/FTS5** — Full-text search with configurable recency decay
 2. **Embeddings** — Cosine similarity over 384-dim vectors ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2))
+3. **Knowledge** — Durable facts extracted from session journals, searched via FTS5 + embeddings with confidence-weighted boosting
 
-Results are merged via **Reciprocal Rank Fusion** (RRF), which combines rankings rather than raw scores. This means a result that BM25 missed entirely can still surface if it's semantically similar to the query.
+Chunk results are merged via **Reciprocal Rank Fusion** (RRF), which combines rankings rather than raw scores. This means a result that BM25 missed entirely can still surface if it's semantically similar to the query. Knowledge nodes are boosted by confidence and entity overlap, then interleaved with chunk results.
 
-Query intent classification then adjusts parameters — debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes, exploratory queries boost semantic matching.
+Query intent classification adjusts parameters automatically — debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes, temporal queries enable entity-focused search, exploratory queries boost semantic matching.
 
 ## Models and dependencies
 

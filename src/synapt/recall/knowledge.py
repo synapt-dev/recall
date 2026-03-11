@@ -46,6 +46,7 @@ class KnowledgeNode:
     category: str                        # One of VALID_CATEGORIES
     confidence: float                    # 0.0-1.0
     source_sessions: list[str] = field(default_factory=list)
+    source_turns: list[str] = field(default_factory=list)  # "session_id:turn_num"
     created_at: str = ""                 # ISO 8601
     updated_at: str = ""                 # ISO 8601
     status: str = "active"               # active | stale | contradicted
@@ -72,6 +73,7 @@ class KnowledgeNode:
         source_sessions: list[str] | None = None,
         confidence: float = 0.5,
         tags: list[str] | None = None,
+        source_turns: list[str] | None = None,
     ) -> KnowledgeNode:
         """Create a new knowledge node with auto-generated ID and timestamps."""
         now = datetime.now(timezone.utc).isoformat()
@@ -81,6 +83,7 @@ class KnowledgeNode:
             category=category if category in VALID_CATEGORIES else "workflow",
             confidence=max(0.0, min(1.0, confidence)),
             source_sessions=source_sessions or [],
+            source_turns=source_turns or [],
             created_at=now,
             updated_at=now,
             tags=tags or [],
