@@ -138,14 +138,21 @@ def _embedding_search_numpy(
     """
     import numpy as np
 
+    if not all_embeddings or limit <= 0:
+        return []
+
     rowids = list(all_embeddings.keys())
     matrix = np.array([all_embeddings[r] for r in rowids], dtype=np.float32)
 
     query = np.array(query_embedding, dtype=np.float32)
 
-    # Handle dimension mismatch gracefully (truncate to shorter dim)
+    # Dimension mismatch usually indicates a model change — warn and truncate
     if query.shape[0] != matrix.shape[1]:
         min_dim = min(query.shape[0], matrix.shape[1])
+        logger.warning(
+            "Embedding dimension mismatch: query=%d, stored=%d; truncating to %d",
+            query.shape[0], matrix.shape[1], min_dim,
+        )
         query = query[:min_dim]
         matrix = matrix[:, :min_dim]
 
