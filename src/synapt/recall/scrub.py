@@ -103,6 +103,16 @@ def strip_system_artifacts(text: str) -> str:
     return text.strip()
 
 
+_MARKDOWN_BOLD_ITALIC_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
+
+
+def strip_markdown_formatting(text: str) -> str:
+    """Remove bold/italic markdown: ``**text**`` → ``text``, ``*text*`` → ``text``."""
+    if not text:
+        return text
+    return _MARKDOWN_BOLD_ITALIC_RE.sub(r"\1", text)
+
+
 def scrub_text(text: str) -> str:
     """Remove secrets from *text*, replacing with deterministic placeholders.
 

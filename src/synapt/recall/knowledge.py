@@ -21,6 +21,7 @@ from synapt.recall.core import project_data_dir
 VALID_CATEGORIES = frozenset({
     "workflow", "architecture", "infrastructure", "debugging",
     "convention", "tooling", "lesson-learned", "decision",
+    "preference", "fact",
 })
 
 VALID_STATUSES = frozenset({"active", "stale", "contradicted"})

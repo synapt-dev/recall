@@ -111,6 +111,23 @@ def test_stem_base_matches_inflected():
     # is only the BM25 fallback path.
 
 
+def test_stem_plural_consistency():
+    """Plural and singular forms must stem to the same root.
+
+    Bug fix: "prefer" stemmed to "pref" (via -er rule) while "prefers"
+    stemmed to "prefer" (via -s rule). The two-pass approach strips
+    plural -s first, then re-applies other rules.
+    """
+    assert _stem("prefer") == _stem("prefers")
+    assert _stem("consider") == _stem("considers")
+    assert _stem("deliver") == _stem("delivers")
+    assert _stem("remember") == _stem("remembers")
+    assert _stem("number") == _stem("numbers")
+    assert _stem("letter") == _stem("letters")
+    assert _stem("fix") == _stem("fixes")
+    assert _stem("match") == _stem("matches")
+
+
 def test_stem_short_words_unchanged():
     """Words <= 3 chars should not be stemmed."""
     assert _stem("go") == "go"

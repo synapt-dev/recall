@@ -6,6 +6,11 @@ import json
 import re
 
 
+def _is_node_array(data: object) -> bool:
+    """Check if data is a non-empty list of dicts (i.e. a knowledge node array)."""
+    return isinstance(data, list) and bool(data) and isinstance(data[0], dict)
+
+
 def parse_llm_json(response: str) -> dict | None:
     """Parse an LLM's JSON response, handling common formatting issues.
 
@@ -31,6 +36,8 @@ def parse_llm_json(response: str) -> dict | None:
         data = json.loads(response)
         if isinstance(data, dict):
             return data
+        if _is_node_array(data):
+            return {"nodes": data}
     except json.JSONDecodeError:
         pass
 
@@ -43,6 +50,30 @@ def parse_llm_json(response: str) -> dict | None:
         except json.JSONDecodeError:
             pass
 
+    # Try to find JSON array in the response
+    arr_start = response.find("[")
+    arr_end = response.rfind("]")
+    if arr_start >= 0 and arr_end > arr_start:
+        try:
+            data = json.loads(response[arr_start : arr_end + 1])
+            if _is_node_array(data):
+                return {"nodes": data}
+        except json.JSONDecodeError:
+            pass
+
+    # Repair truncated JSON — small models often run out of tokens mid-response.
+    # Try to extract complete node objects from a truncated {"nodes": [...]}
+    if start >= 0:
+        repaired = _repair_truncated_json(response[start:])
+        if repaired is not None:
+            return repaired
+
+        # Try to salvage key-value pairs from a truncated dict
+        # (e.g. {"focus": "Did stuff", "done": ["Thing 1"], "deci...)
+        repaired = _repair_truncated_dict(response[start:])
+        if repaired is not None:
+            return repaired
+
     # Fallback: extract nodes from markdown-formatted lists.
     # Small models sometimes output numbered lists instead of JSON:
     #   1. "content here" (category)
@@ -52,6 +83,120 @@ def parse_llm_json(response: str) -> dict | None:
     if nodes:
         return {"nodes": nodes}
 
+    return None
+
+
+def _find_balanced_end(text: str, start: int, open_ch: str, close_ch: str) -> int:
+    """Find the position of the matching close delimiter, respecting strings.
+
+    Returns the index of the closing delimiter, or -1 if the text is truncated.
+    ``start`` should point to the opening delimiter character.
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _repair_truncated_json(text: str) -> dict | None:
+    """Try to salvage nodes from truncated JSON output.
+
+    When a small model runs out of tokens, the JSON is cut mid-response:
+        {"nodes": [{"action": "create", "content": "fact1", ...}, {"action": "cre
+
+    Strategy: find the "nodes" array start, then extract each complete
+    {...} object at array depth (skipping the outer wrapper).
+    """
+    # Find the start of the nodes array
+    nodes_idx = text.find('"nodes"')
+    if nodes_idx < 0:
+        return None
+    arr_start = text.find("[", nodes_idx)
+    if arr_start < 0:
+        return None
+
+    # Walk through the array, extracting complete objects
+    nodes = []
+    i = arr_start + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == '{':
+            end = _find_balanced_end(text, i, '{', '}')
+            if end < 0:
+                break  # Truncated
+            candidate = text[i : end + 1]
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj, dict) and "content" in obj:
+                    nodes.append(obj)
+            except json.JSONDecodeError:
+                pass
+            i = end + 1
+        elif ch == ']':
+            break  # End of array
+        else:
+            i += 1
+
+    if nodes:
+        return {"nodes": nodes}
+    return None
+
+
+def _repair_truncated_dict(text: str) -> dict | None:
+    """Salvage complete key-value pairs from a truncated JSON dict.
+
+    When a small model runs out of tokens, the JSON is cut mid-value::
+
+        {"focus": "Did stuff", "done": ["Thing 1", "Thing 2"], "deci
+
+    Strategy: extract each complete ``"key": value`` pair (string or
+    array values) by walking braces/brackets with string awareness.
+    Returns the dict of all complete pairs, or None if fewer than one
+    useful key was recovered.
+    """
+    if not text.startswith("{"):
+        return None
+
+    result: dict = {}
+
+    # Extract complete "key": "value" string pairs
+    for m in re.finditer(r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.)*)"', text):
+        result[m.group(1)] = m.group(2)
+
+    # Extract complete "key": [...] array pairs via bracket balancing
+    for m in re.finditer(r'"(\w+)"\s*:\s*\[', text):
+        key = m.group(1)
+        arr_start = m.end() - 1  # position of [
+        arr_end = _find_balanced_end(text, arr_start, '[', ']')
+        if arr_end > 0:
+            try:
+                arr = json.loads(text[arr_start : arr_end + 1])
+                result[key] = arr
+            except json.JSONDecodeError:
+                pass
+
+    # Only return if we got at least one useful enrichment key
+    if any(k in result for k in ("focus", "done", "content", "nodes")):
+        return result
     return None
 
 

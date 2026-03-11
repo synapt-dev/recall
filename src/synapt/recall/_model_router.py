@@ -2,7 +2,7 @@
 
 Routes each recall task to the best available model architecture:
 - summarize: Prefers encoder-decoder (T5) for parallel input processing
-- enrich: Prefers encoder-decoder (T5 fine-tuned for enrichment JSON)
+- enrich: Uses decoder-only (MLX/Ollama) for JSON schema compliance
 - consolidate: Uses decoder-only (MLX/Ollama) for complex reasoning
 
 Falls back gracefully: ONNX → transformers → MLX → Ollama → None.
@@ -50,12 +50,12 @@ class RecallTask(Enum):
 
 # Task → preferred architecture
 # Summarize: encoder-decoder (parallel input, plain text output).
-# Enrich: encoder-decoder (T5 fine-tuned for enrichment JSON output).
+# Enrich: decoder-only (needs JSON schema compliance; base T5 can't do it).
 # Consolidate: decoder-only (complex multi-entry reasoning).
 _TASK_PREFERENCE: dict[RecallTask, str] = {
     RecallTask.SUMMARIZE: "encoder-decoder",
     RecallTask.CONSOLIDATE: "decoder-only",
-    RecallTask.ENRICH: "encoder-decoder",
+    RecallTask.ENRICH: "decoder-only",
 }
 
 # Task → config key for model lookup.
@@ -153,7 +153,14 @@ def _get_transformers_client(
 
     try:
         from synapt._models.transformers_client import TransformersClient
-        client = TransformersClient(max_tokens=max_tokens, model_name=model_name)
+        kwargs: dict = {"max_tokens": max_tokens}
+        if model_name is not None:
+            kwargs["model_name"] = model_name
+        try:
+            client = TransformersClient(**kwargs)
+        except TypeError:
+            # Older TransformersClient may not accept model_name
+            client = TransformersClient(max_tokens=max_tokens)
         _client_cache[key] = client
         logger.debug("TransformersClient available for encoder-decoder inference")
         return client

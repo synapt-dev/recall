@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -36,6 +37,14 @@ if _MLX_AVAILABLE:
     from synapt._models.base import Message
 
 from synapt.recall._model_router import DEFAULT_DECODER_MODEL as DEFAULT_MODEL
+
+# Mapping of text header labels to enrichment dict keys
+_ENRICHMENT_FIELD_MAP = {
+    "done": "done",
+    "decisions": "decisions",
+    "next_steps": "next_steps",
+    "next steps": "next_steps",
+}
 MAX_TRANSCRIPT_CHARS = 6000  # ~1.5K tokens — fits in 3B context budget
 
 
@@ -116,9 +125,78 @@ JSON:"""
 
 
 def _parse_llm_response(response: str) -> dict | None:
-    """Parse the LLM's JSON response, handling common formatting issues."""
+    """Parse the LLM's JSON response, handling common formatting issues.
+
+    Falls back to extracting structured text (Focus:/Done:/Decisions:)
+    when the model ignores JSON instructions.
+    """
     from synapt.recall._llm_util import parse_llm_json
-    return parse_llm_json(response)
+    result = parse_llm_json(response)
+    if result is not None:
+        return result
+    # Fallback: parse structured text output from small models
+    return _parse_enrichment_text(response)
+
+
+def _parse_enrichment_text(text: str) -> dict | None:
+    """Extract enrichment fields from structured text output.
+
+    Handles patterns like::
+
+        Focus: The session discussed X and Y
+        Done:
+        - Thing 1
+        - Thing 2
+        Decisions:
+        - Decided to do Z
+
+    Also handles: all-caps headers (``FOCUS:``), numbered lists
+    (``1. Thing``), inline items (``Done: Thing 1, Thing 2``),
+    and blank lines between headers and items.
+    """
+    result: dict = {}
+
+    # Extract focus (single line after "Focus:")
+    focus_match = re.search(r"focus:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
+    if focus_match:
+        result["focus"] = focus_match.group(1).strip().strip('"')
+
+    # Extract list fields (done, decisions, next_steps)
+    for label, key in _ENRICHMENT_FIELD_MAP.items():
+        # Block format: header + bulleted/numbered items (optional blank lines)
+        block_pat = (
+            rf"{re.escape(label)}:\s*\n"
+            r"\s*((?:(?:\s*[-*•·]\s*.+|\s*\d+[.)]\s*.+)\n?)+)"
+        )
+        match = re.search(block_pat, text, re.IGNORECASE)
+        if match:
+            items = re.findall(r"(?:[-*•·]|\d+[.)])\s*(.+)", match.group(1))
+            result[key] = [
+                item.strip().strip('"') for item in items if item.strip()
+            ]
+            continue
+
+        # Inline format: "Done: Thing 1, Thing 2" (items on same line)
+        inline_pat = rf"{re.escape(label)}:\s*(.+?)(?:\n\n|\n(?=[A-Z])|$)"
+        inline = re.search(inline_pat, text, re.IGNORECASE)
+        if inline:
+            val = inline.group(1).strip()
+            if not val:
+                continue
+            if "," in val or ";" in val:
+                items = re.split(r"[,;]\s*", val)
+                parsed = [
+                    i.strip().strip('"') for i in items
+                    if i.strip() and len(i.strip()) > 2
+                ]
+                if parsed:
+                    result[key] = parsed
+            elif len(val) > 5:
+                result[key] = [val.strip('"')]
+
+    if result.get("focus") or result.get("done") or result.get("decisions"):
+        return result
+    return None
 
 
 def iter_enrichable_entries(
@@ -157,8 +235,8 @@ def enrich_entry(
 ) -> JournalEntry | None:
     """Enrich a single auto-journal stub using LLM inference.
 
-    Uses the model router to select the best backend: encoder-decoder
-    (FLAN-T5, ~10x faster) when available, falling back to MLX decoder.
+    Uses the model router to select the best backend (decoder-only preferred
+    for JSON schema compliance). Falls back to MLX decoder if router unavailable.
 
     Args:
         client: Reusable model client instance. Created via router if not provided.
@@ -184,13 +262,7 @@ def enrich_entry(
                 return None
             client = MLXClient(MLXOptions(max_tokens=800))
 
-    # Use simplified prompt for encoder-decoder models (T5 fine-tuned
-    # on "summarize session: <transcript>" → JSON output pairs).
-    from synapt.recall._model_router import is_encoder_decoder
-    if is_encoder_decoder(client):
-        prompt = "summarize session: " + transcript_text
-    else:
-        prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text)
+    prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text)
 
     try:
         response = client.chat(
@@ -205,7 +277,10 @@ def enrich_entry(
 
     parsed = _parse_llm_response(response)
     if not parsed:
-        logger.warning("Failed to parse LLM response for session %s", entry.session_id)
+        logger.warning(
+            "Failed to parse LLM response for session %s: %.200s",
+            entry.session_id, response,
+        )
         return None
 
     # Build enriched entry, preserving original metadata.

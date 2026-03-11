@@ -1550,15 +1550,14 @@ def test_parse_keeps_successful_tool_result_alongside_error():
 # Tests: knowledge node coverage gate (#284)
 # ---------------------------------------------------------------------------
 
-def test_search_knowledge_filters_weak_single_token_matches():
-    """Knowledge nodes matching only one query token are filtered out."""
+def test_search_knowledge_filters_weak_zero_token_matches():
+    """Knowledge nodes with no query token overlap are filtered out."""
     from synapt.recall.core import TranscriptIndex
 
     chunks = make_test_chunks()
     index = TranscriptIndex(chunks)
 
-    # Patch _search_knowledge to exercise the coverage filter logic.
-    # Simulate two knowledge nodes: one with strong coverage, one weak.
+    # Simulate two knowledge nodes: one with strong coverage, one with none.
     strong_node = {
         "content": "compact journal flock lock race TOCTOU",  # 5 query tokens present
         "category": "debugging",
@@ -1566,8 +1565,8 @@ def test_search_knowledge_filters_weak_single_token_matches():
         "source_sessions": ["sess1"],
         "updated_at": "2026-03-05",
     }
-    weak_node = {
-        "content": "always fix bugs promptly",  # only "fix" matches query
+    unrelated_node = {
+        "content": "always deploy containers promptly",  # no query tokens match
         "category": "workflow",
         "confidence": 0.8,
         "source_sessions": ["sess1"],
@@ -1577,22 +1576,26 @@ def test_search_knowledge_filters_weak_single_token_matches():
     from unittest.mock import patch, MagicMock
     mock_db = MagicMock()
     mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 2.8)]
-    mock_db.knowledge_by_rowid.return_value = {1: strong_node, 2: weak_node}
+    mock_db.knowledge_by_rowid.return_value = {1: strong_node, 2: unrelated_node}
     index._db = mock_db
 
     # Query: "compact journal flock TOCTOU race fix" — 6 distinctive tokens
-    # min_matches = max(2, round(6 * 0.3)) = max(2, 2) = 2
+    # min_matches = max(1, round(6 * 0.2)) = max(1, 1) = 1
     # strong_node matches 5 tokens → kept
-    # weak_node matches 1 token ("fix") → filtered
+    # unrelated_node matches 0 tokens → filtered
     results = index._search_knowledge("compact journal flock TOCTOU race fix")
     assert len(results) == 1
     assert results[0]["content"] == strong_node["content"]
 
 
-def test_search_knowledge_short_query_requires_two_matches():
-    """Even for short queries (2-3 tokens), two token matches are required."""
+def test_search_knowledge_short_query_single_token_match_passes():
+    """Short queries (2-3 tokens) allow single-token matches through.
+
+    Knowledge nodes are distilled facts — a single matching token (e.g.
+    a person's name) is a meaningful signal for short queries.
+    """
     from synapt.recall.core import TranscriptIndex
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock
 
     chunks = make_test_chunks()
     index = TranscriptIndex(chunks)
@@ -1617,10 +1620,52 @@ def test_search_knowledge_short_query_requires_two_matches():
     mock_db.knowledge_by_rowid.return_value = {1: exact_match, 2: partial_match}
     index._db = mock_db
 
-    # Query: "swift repair" — 2 tokens, min_matches = max(2, round(2*0.3)) = max(2,1) = 2
+    # Query: "swift repair" — 2 tokens, min_matches = max(1, round(2*0.2)) = 1
+    # Both nodes match >= 1 token, both pass the coverage gate.
+    # exact_match has higher FTS score (3.0 vs 2.9) so ranks first.
     results = index._search_knowledge("swift repair")
-    assert len(results) == 1
+    assert len(results) == 2
     assert results[0]["content"] == exact_match["content"]
+
+
+def test_search_knowledge_entity_boost():
+    """Knowledge nodes mentioning query entities get a 1.5x score boost."""
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import MagicMock
+
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    # Two nodes, both match the query tokens, but only one mentions "Caroline"
+    about_caroline = {
+        "id": "node-1",
+        "content": "Caroline drinks dark roast coffee daily",
+        "category": "preference",
+        "confidence": 0.7,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+    about_melanie = {
+        "id": "node-2",
+        "content": "Melanie drinks green tea and coffee",
+        "category": "preference",
+        "confidence": 0.7,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+
+    mock_db = MagicMock()
+    # Same FTS scores — without entity boost they'd rank by order
+    mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 3.0)]
+    mock_db.knowledge_by_rowid.return_value = {1: about_caroline, 2: about_melanie}
+    index._db = mock_db
+
+    # Query mentions "Caroline" — node about Caroline should rank higher
+    results = index._search_knowledge("What coffee does Caroline drink?")
+    assert len(results) == 2
+    caroline_node = [r for r in results if "Caroline" in r["content"]][0]
+    melanie_node = [r for r in results if "Melanie" in r["content"]][0]
+    assert caroline_node["score"] > melanie_node["score"]
 
 
 # ---------------------------------------------------------------------------

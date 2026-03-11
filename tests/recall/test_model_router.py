@@ -42,11 +42,11 @@ class TestGetClient:
         if client is not None:
             assert not is_encoder_decoder(client)
 
-    def test_enrich_returns_encoder_decoder(self):
-        """ENRICH should prefer encoder-decoder (T5 fine-tuned for JSON)."""
+    def test_enrich_returns_decoder_only(self):
+        """ENRICH should prefer decoder-only for JSON schema compliance."""
         client = get_client(RecallTask.ENRICH)
         if client is not None:
-            assert is_encoder_decoder(client)
+            assert not is_encoder_decoder(client)
 
     def test_client_caching(self):
         """Same task + max_tokens should return cached client."""
