@@ -1870,27 +1870,22 @@ class TranscriptIndex:
         lines = ["Past session context:"]
         token_count = 0
 
-        # Knowledge nodes first (highest tier)
-        emitted_knowledge: list[dict] = []
-        for node in (knowledge_results or []):
-            block = self._format_knowledge_block(node)
-            block_tokens = len(block) // 4
-            if token_count + block_tokens > max_tokens and len(lines) > 1:
-                break
-            lines.append(block)
-            token_count += block_tokens
-            emitted_knowledge.append({
-                "item_type": "knowledge",
-                "item_id": node.get("id", ""),
-                "content": node.get("content", ""),
-            })
-
         # Build cluster grouping and interleave by relevance score
         cluster_groups, ungrouped = self._group_by_cluster(ranked)
 
         # Build a unified emit list sorted by relevance.
+        # Knowledge nodes, clusters, and raw chunks all compete on score.
         # Each item: (score, block_text, item_type, item_id) for access tracking.
         emit_items: list[tuple[float, str, str, str]] = []
+
+        # Include knowledge nodes in the unified ranking instead of
+        # unconditionally prepending them (#284). They compete fairly
+        # with chunks/clusters — irrelevant knowledge nodes drop below
+        # high-quality transcript chunks.
+        for node in (knowledge_results or []):
+            block = self._format_knowledge_block(node)
+            node_score = node.get("score", 0.0)
+            emit_items.append((node_score, block, "knowledge", node.get("id", "")))
 
         for cluster_id, (cluster_info, member_indices, max_score) in cluster_groups.items():
             block = self._format_cluster_block(cluster_id, cluster_info)
@@ -1920,14 +1915,15 @@ class TranscriptIndex:
                 break
             lines.append(block)
             token_count += block_tokens
-            emitted_access.append({
+            access_entry: dict = {
                 "item_type": item_type,
                 "item_id": item_id,
                 "score": score,
-            })
+            }
+            emitted_access.append(access_entry)
 
         # Record access for all emitted items (fire-and-forget)
-        all_access = emitted_knowledge + emitted_access
+        all_access = emitted_access
         for item in all_access:
             if query:
                 item["query"] = query
@@ -1957,15 +1953,20 @@ class TranscriptIndex:
                 pass  # Never fail a search due to promotions
 
         # Populate working memory with emitted items
+        # Build a lookup for knowledge node content
+        knowledge_content = {
+            node.get("id", ""): node.get("content", "")
+            for node in (knowledge_results or [])
+        }
         for item in emitted_access:
             content = ""
             if item["item_type"] == "chunk":
                 idx = self._id_to_idx.get(item["item_id"])
                 if idx is not None:
                     content = self.chunks[idx].assistant_text
+            elif item["item_type"] == "knowledge":
+                content = knowledge_content.get(item["item_id"], "")
             wm.record(item["item_type"], item["item_id"], content)
-        for item in emitted_knowledge:
-            wm.record("knowledge", item["item_id"], item.get("content", ""))
 
         if len(lines) <= 1:
             return ""
