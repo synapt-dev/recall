@@ -16,7 +16,6 @@ Override with SYNAPT_SUMMARY_BACKEND=onnx|mlx|transformers|ollama env var.
 from __future__ import annotations
 
 import logging
-import os
 from enum import Enum
 
 logger = logging.getLogger(__name__)

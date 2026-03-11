@@ -30,20 +30,10 @@ from synapt.recall.scrub import scrub_text
 
 logger = logging.getLogger("synapt.recall.enrich")
 
-# Guard MLX import — enrichment is optional
-_MLX_AVAILABLE = False
-try:
+from synapt.recall._mlx import MLX_AVAILABLE as _MLX_AVAILABLE, INSTALL_MSG as _INSTALL_MSG  # noqa: F401
+if _MLX_AVAILABLE:
     from synapt._models.mlx_client import MLXClient, MLXOptions
     from synapt._models.base import Message
-    _MLX_AVAILABLE = True
-except ImportError:
-    pass
-
-_INSTALL_MSG = (
-    "MLX is required for journal enrichment.\n"
-    "Install with: pip install mlx-lm\n"
-    "Then re-run this command."
-)
 
 from synapt.recall._model_router import DEFAULT_DECODER_MODEL as DEFAULT_MODEL
 MAX_TRANSCRIPT_CHARS = 6000  # ~1.5K tokens — fits in 3B context budget
