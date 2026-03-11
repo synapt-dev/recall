@@ -24,12 +24,15 @@ Repository = "https://github.com/laynepenney/synapt"
 
 [project.optional-dependencies]
 hf = ["huggingface_hub>=0.20"]
+onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
+transformers = ["transformers>=4.30", "peft>=0.7"]
 test = ["pytest>=7.0", "numpy", "pytest-benchmark>=4.0"]
 
 [project.scripts]
 synapt = "synapt.cli:main"
 synapt-recall = "synapt.recall.cli:main"
 synapt-recall-server = "synapt.recall.server:main"
+synapt-convert = "synapt._models.convert:main"
 
 [project.entry-points."synapt.plugins"]
 # Plugins register here via their own pyproject.toml. Example:
