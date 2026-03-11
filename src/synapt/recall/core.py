@@ -1182,7 +1182,12 @@ class TranscriptIndex:
                 continue
             candidates.append((idx, score))
 
-        # Recency decay
+        # Recency decay — applied BEFORE RRF intentionally.
+        # RRF is rank-based (not score-based), so decaying scores here biases
+        # the *ranks* that RRF sees. Both BM25 and embedding lists are decayed
+        # symmetrically, so recent results rank higher in both lists and RRF
+        # naturally promotes them. This differs from pure RRF (score-agnostic)
+        # but produces better results for session recall where recency matters.
         candidates = self._decay_candidates(candidates, half_life)
 
         # Hybrid search: RRF fusion between BM25/FTS and embedding similarity.
@@ -1499,7 +1504,9 @@ class TranscriptIndex:
             if high_quality >= 3 and len(hits) >= max_chunks:
                 break
 
-        # Recency decay
+        # Recency decay — applied BEFORE RRF intentionally (see _global_lookup_fts
+        # for rationale). Both BM25 and embedding lists are decayed symmetrically
+        # so RRF ranks reflect recency bias consistently.
         hits = self._decay_candidates(hits, half_life)
 
         # Hybrid: merge FTS progressive hits with global embedding search.
@@ -1526,6 +1533,7 @@ class TranscriptIndex:
                     if depth == "summary" and self.chunks[idx].turn_index >= 0:
                         continue
                     emb_ranked.append((idx, sim))
+                emb_ranked = self._decay_candidates(emb_ranked, half_life)
 
                 bm25_ranked = sorted(hits, key=lambda x: x[1], reverse=True)
                 merged = weighted_rrf_merge(
