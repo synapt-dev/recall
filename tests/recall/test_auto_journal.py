@@ -5,7 +5,9 @@ import json
 from unittest.mock import patch, MagicMock
 
 from synapt.recall.core import TranscriptChunk, TranscriptIndex, parse_journal_entries
-from synapt.recall.journal import JournalEntry, append_entry, synthesize_journal_stubs
+from synapt.recall.journal import (
+    JournalEntry, append_entry, synthesize_journal_stubs, _filter_project_files,
+)
 from synapt.recall.enrich import _parse_llm_response, iter_enrichable_entries
 
 
@@ -198,6 +200,76 @@ class TestSynthesizeJournalStubs:
         count = synthesize_journal_stubs(sessions, journal_path)
 
         assert count == 0
+
+
+# ===========================================================================
+# _filter_project_files
+# ===========================================================================
+
+
+class TestFilterProjectFiles:
+
+    def test_keeps_relative_paths(self):
+        files = ["src/main.py", "tests/test_foo.py"]
+        assert _filter_project_files(files) == ["src/main.py", "tests/test_foo.py"]
+
+    def test_filters_claude_internals(self):
+        files = [
+            "src/main.py",
+            "/Users/me/.claude/plans/plan.md",
+            "/Users/me/.claude/projects/foo/tool-results/abc.txt",
+            "/Users/me/.claude/hooks/pre-commit.sh",
+            "/Users/me/.claude/settings.json",
+        ]
+        assert _filter_project_files(files) == ["src/main.py"]
+
+    def test_filters_tmp_paths(self):
+        files = ["src/main.py", "/private/tmp/something.txt"]
+        assert _filter_project_files(files) == ["src/main.py"]
+
+    def test_converts_absolute_project_paths_to_relative(self):
+        files = ["/home/user/project/src/main.py", "/home/user/project/tests/test.py"]
+        result = _filter_project_files(files, project_root="/home/user/project")
+        assert result == ["src/main.py", "tests/test.py"]
+
+    def test_filters_other_project_paths(self):
+        files = [
+            "/home/user/project/src/main.py",
+            "/home/user/other-project/src/lib.py",
+        ]
+        result = _filter_project_files(files, project_root="/home/user/project")
+        assert result == ["src/main.py"]
+
+    def test_deduplicates(self):
+        files = ["a.py", "b.py", "a.py"]
+        assert _filter_project_files(files) == ["a.py", "b.py"]
+
+    def test_empty_and_blank_strings(self):
+        files = ["", "  ", "a.py"]
+        assert _filter_project_files(files) == ["a.py"]
+
+    def test_accepts_set_input(self):
+        files = {"b.py", "a.py"}
+        assert _filter_project_files(files) == ["a.py", "b.py"]
+
+
+class TestSynthesizeFiltersNoisePaths:
+
+    def test_synthesize_filters_claude_paths(self, tmp_path):
+        sessions = {SESSION_A: [
+            _make_chunk(SESSION_A, 0, "Hello", files_touched=[
+                "src/main.py",
+                "/Users/me/.claude/plans/plan.md",
+                "/private/tmp/result.txt",
+            ]),
+        ]}
+        journal_path = tmp_path / "journal.jsonl"
+
+        synthesize_journal_stubs(sessions, journal_path)
+
+        with open(journal_path) as f:
+            entry = json.loads(f.readline())
+        assert entry["files_modified"] == ["src/main.py"]
 
 
 # ===========================================================================

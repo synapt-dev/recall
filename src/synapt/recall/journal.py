@@ -15,6 +15,46 @@ from pathlib import Path
 
 from synapt.recall.core import project_worktree_dir, project_index_dir, project_transcript_dir
 
+# Paths that are always noise in journal file lists
+_NOISE_PATH_SEGMENTS = ("/.claude/", "/private/tmp/")
+
+
+def _filter_project_files(
+    files: list[str] | set[str],
+    project_root: str = "",
+) -> list[str]:
+    """Filter file paths to only include project-relevant files.
+
+    Removes:
+    - ~/.claude/ internals (plans, tool results, hooks, settings)
+    - /private/tmp/ and /private/var/ temp files
+    - Absolute paths outside the project root (other projects)
+
+    Relative paths are kept as-is (already project-scoped).
+    Absolute paths under project_root are converted to relative.
+    """
+    if not project_root:
+        project_root = str(Path.cwd())
+    # Normalize: ensure trailing slash for prefix matching
+    prefix = project_root.rstrip("/") + "/"
+
+    result: list[str] = []
+    for fp in files:
+        if not fp or not fp.strip():
+            continue
+        # Skip known noise paths
+        if any(seg in fp for seg in _NOISE_PATH_SEGMENTS):
+            continue
+        # Relative paths are already project-scoped
+        if not fp.startswith("/"):
+            result.append(fp)
+            continue
+        # Absolute paths: keep only if under project root
+        if fp.startswith(prefix):
+            result.append(fp[len(prefix):])
+        # else: absolute path outside project — skip
+    return sorted(set(result))
+
 
 def _journal_path(project_dir: Path | None = None) -> Path:
     """Return path to journal.jsonl for this worktree.
@@ -376,10 +416,9 @@ def auto_extract_entry(
                         if not isinstance(block, dict):
                             continue
                         fp = block.get("input", {}).get("file_path", "") if isinstance(block.get("input"), dict) else ""
-                        if fp and "/.claude/" not in fp and not fp.startswith("/private/tmp"):
-                            clean = fp.replace(cwd + "/", "").replace(cwd, "")
-                            files_set.add(clean)
-        files_modified = sorted(files_set)
+                        if fp:
+                            files_set.add(fp)
+        files_modified = _filter_project_files(files_set, project_root=cwd)
 
     return JournalEntry(
         timestamp=now.isoformat(),
@@ -454,11 +493,11 @@ def synthesize_journal_stubs(
                 focus = msg[:200]
                 break
 
-        # Collect all files touched
+        # Collect all files touched, filtering noise paths
         files_set: set[str] = set()
         for c in transcript_chunks:
             files_set.update(c.files_touched)
-        files_modified = sorted(files_set)
+        files_modified = _filter_project_files(files_set)
 
         # Use earliest timestamp
         timestamp = min(
