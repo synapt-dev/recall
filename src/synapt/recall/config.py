@@ -46,6 +46,9 @@ _ENV_MAP = {
     "SYNAPT_EMBEDDING_MODEL": "embedding",
 }
 
+# Reverse lookup: config key → env var name
+_KEY_TO_ENV = {v: k for k, v in _ENV_MAP.items()}
+
 
 @dataclass
 class RecallConfig:
@@ -57,11 +60,11 @@ class RecallConfig:
     def get_model(self, key: str) -> str:
         """Get a model name by key, with env var override."""
         # Check env var first (highest priority)
-        for env_var, config_key in _ENV_MAP.items():
-            if config_key == key:
-                env_val = os.environ.get(env_var)
-                if env_val:
-                    return env_val
+        env_var = _KEY_TO_ENV.get(key)
+        if env_var:
+            env_val = os.environ.get(env_var)
+            if env_val:
+                return env_val
 
         return self.models.get(key, DEFAULTS.get(key, ""))
 
@@ -76,6 +79,7 @@ class RecallConfig:
 # Module-level cache
 _cached_config: RecallConfig | None = None
 _cached_mtime: float = 0.0
+_cached_project_path: str | None = None
 
 
 def _find_project_config() -> str | None:
@@ -107,16 +111,22 @@ def load_config() -> RecallConfig:
     Priority: env vars → project config → global config → defaults.
     Results are cached and reloaded when config files change.
     """
-    global _cached_config, _cached_mtime
+    global _cached_config, _cached_mtime, _cached_project_path
 
     # Check if we need to reload
     global_path = os.path.expanduser("~/.synapt/config.json")
-    project_path = _find_project_config()
+
+    # Reuse cached project path to avoid walking the directory tree every call
+    if _cached_config is not None:
+        project_path = _cached_project_path
+    else:
+        project_path = _find_project_config()
+        _cached_project_path = project_path
 
     # Use max mtime of both config files for cache invalidation
     current_mtime = 0.0
-    for path in [global_path, project_path]:
-        if path and os.path.isfile(path):
+    for path in (global_path, project_path):
+        if path:
             try:
                 current_mtime = max(current_mtime, os.path.getmtime(path))
             except OSError:
@@ -161,6 +171,7 @@ def load_config() -> RecallConfig:
 
 def clear_config_cache() -> None:
     """Clear the config cache. Useful for testing."""
-    global _cached_config, _cached_mtime
+    global _cached_config, _cached_mtime, _cached_project_path
     _cached_config = None
     _cached_mtime = 0.0
+    _cached_project_path = None

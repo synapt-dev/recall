@@ -688,8 +688,8 @@ def cmd_stats(args: argparse.Namespace) -> None:
             print(f"  {key:16s}  {model}")
         if cfg.backend != "auto":
             print(f"  {'backend':16s}  {cfg.backend}")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to load model config: %s", e)
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:
