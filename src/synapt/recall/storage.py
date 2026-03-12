@@ -285,6 +285,13 @@ END;
 
 _FTS5_KEYWORDS = frozenset({"and", "or", "not", "near"})
 
+
+def _escape_fts_token(tok: str) -> str:
+    """Quote a single FTS5 token if it contains dots or is a keyword."""
+    if "." in tok or tok in _FTS5_KEYWORDS:
+        return f'"{tok}"'
+    return tok
+
 # Common stop words to strip from FTS queries. These are too frequent
 # to be useful in full-text search and cause AND queries to fail when
 # they don't co-occur with content words in the same chunk.
@@ -314,13 +321,7 @@ def _escape_fts_tokens(query: str) -> list[str]:
         t for t in re.sub(r"[^a-zA-Z0-9_.]", " ", query.lower()).split()
         if len(t) > 1 and t not in _FTS_STOP_WORDS
     ]
-    escaped = []
-    for tok in tokens:
-        if "." in tok or tok in _FTS5_KEYWORDS:
-            escaped.append(f'"{tok}"')
-        else:
-            escaped.append(tok)
-    return escaped
+    return [_escape_fts_token(tok) for tok in tokens]
 
 
 def _escape_fts_query(query: str, use_or: bool = False) -> str:
@@ -338,6 +339,26 @@ def _escape_fts_query(query: str, use_or: bool = False) -> str:
         return ""
     joiner = " OR " if use_or else " "
     return joiner.join(tokens)
+
+
+def _build_entity_anchored_query(
+    entity_tokens: list[str],
+    content_tokens: list[str],
+) -> str:
+    """Build an FTS5 query that requires entity terms AND any content term.
+
+    Returns e.g. ``caroline AND (lgbtq OR support OR group)`` which finds
+    chunks mentioning the entity with at least one content keyword.
+    Returns empty string if either list is empty.
+    """
+    if not entity_tokens or not content_tokens:
+        return ""
+    entity_part = " ".join(_escape_fts_token(t) for t in entity_tokens)
+    if len(content_tokens) == 1:
+        content_part = _escape_fts_token(content_tokens[0])
+    else:
+        content_part = "(" + " OR ".join(_escape_fts_token(t) for t in content_tokens) + ")"
+    return f"{entity_part} AND {content_part}"
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +795,29 @@ class RecallDB:
                 (fts_or, limit),
             ).fetchall()
 
+        return [(r[0], r[1]) for r in rows]
+
+    def fts_search_raw(
+        self,
+        fts_query: str,
+        limit: int = 100,
+    ) -> list[tuple[int, float]]:
+        """Execute a pre-built FTS5 query (no escaping/tokenization).
+
+        Used for custom query syntax like entity-anchored OR queries.
+        Returns list of (rowid, score) tuples sorted by relevance.
+        """
+        if not fts_query:
+            return []
+        rows = self._conn.execute(
+            f"SELECT chunks_fts.rowid, "
+            f"  -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+            f"FROM chunks_fts "
+            f"WHERE chunks_fts MATCH ? "
+            f"ORDER BY score DESC "
+            f"LIMIT ?",
+            (fts_query, limit),
+        ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
     def fts_search_by_session(

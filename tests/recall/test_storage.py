@@ -479,6 +479,83 @@ class TestFTSEscaping:
         assert "go" not in tokens
 
 
+class TestEntityAnchoredQuery:
+    """Tests for _build_entity_anchored_query (multi-hop retrieval)."""
+
+    def test_basic_entity_anchored(self):
+        from synapt.recall.storage import _build_entity_anchored_query
+        result = _build_entity_anchored_query(
+            ["caroline"], ["lgbtq", "support", "group"],
+        )
+        assert result == "caroline AND (lgbtq OR support OR group)"
+
+    def test_single_content_token(self):
+        from synapt.recall.storage import _build_entity_anchored_query
+        result = _build_entity_anchored_query(["caroline"], ["lgbtq"])
+        assert result == "caroline AND lgbtq"
+
+    def test_empty_entity(self):
+        from synapt.recall.storage import _build_entity_anchored_query
+        assert _build_entity_anchored_query([], ["lgbtq"]) == ""
+
+    def test_empty_content(self):
+        from synapt.recall.storage import _build_entity_anchored_query
+        assert _build_entity_anchored_query(["caroline"], []) == ""
+
+    def test_multiple_entities(self):
+        from synapt.recall.storage import _build_entity_anchored_query
+        result = _build_entity_anchored_query(["john", "smith"], ["drums"])
+        assert result == "john smith AND drums"
+
+    def test_dot_token_quoted(self):
+        from synapt.recall.storage import _build_entity_anchored_query
+        result = _build_entity_anchored_query(["fix"], ["api_index.py"])
+        assert '"api_index.py"' in result
+
+    def test_entity_anchored_finds_partial_match(self, db):
+        """Entity-anchored query finds chunks with entity + any content term."""
+        chunks = [
+            TranscriptChunk(
+                id="s1:t0", session_id="s1", timestamp="2026-03-01T10:00:00Z",
+                turn_index=0,
+                user_text="Caroline went to the queer support group meeting.",
+                assistant_text="Good for her.",
+                tools_used=[], files_touched=[],
+            ),
+            TranscriptChunk(
+                id="s1:t1", session_id="s1", timestamp="2026-03-01T10:05:00Z",
+                turn_index=1,
+                user_text="John likes pizza",
+                assistant_text="Cool.",
+                tools_used=[], files_touched=[],
+            ),
+        ]
+        db.save_chunks(chunks)
+
+        from synapt.recall.storage import _build_entity_anchored_query, _FTS_WEIGHTS
+
+        # AND query "caroline lgbtq support group" would fail because
+        # "lgbtq" isn't in the chunk. Entity-anchored should work:
+        # caroline AND (lgbtq OR support OR group) → matches "support" + "group"
+        q = _build_entity_anchored_query(
+            ["caroline"], ["lgbtq", "support", "group"],
+        )
+        rows = db._conn.execute(
+            f"SELECT chunks_fts.rowid, -bm25(chunks_fts, {_FTS_WEIGHTS}) AS score "
+            f"FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score DESC LIMIT 10",
+            (q,),
+        ).fetchall()
+        assert len(rows) >= 1, "Entity-anchored query should find partial match"
+        # The matching chunk should be about Caroline (not John)
+        matched_rowids = {r[0] for r in rows}
+        # Verify via content
+        for rowid in matched_rowids:
+            row = db._conn.execute(
+                "SELECT user_text FROM chunks WHERE rowid = ?", (rowid,)
+            ).fetchone()
+            assert "caroline" in row[0].lower() or "support" in row[0].lower()
+
+
 class TestFTSOrFallback:
     """Tests for the OR-fallback behavior when AND returns no results."""
 

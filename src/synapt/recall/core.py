@@ -1245,17 +1245,54 @@ class TranscriptIndex:
 
         fts_results = self._db.fts_search(query, limit=max_chunks * 10)
 
-        # Entity-focused supplementary search: when the query mentions
-        # specific entities (person names, etc.), run a second search for
-        # just entity terms. This catches chunks where entities co-occur
-        # but content words (e.g. "nickname") don't appear in the text.
+        # Entity-anchored supplementary search: when the query mentions
+        # entities, run two additional searches:
+        # 1. Entity AND (content1 OR content2 OR ...) — finds entity
+        #    chunks matching any content keyword. This is the key middle
+        #    ground between strict AND (misses synonym/paraphrase) and
+        #    pure entity search (too broad). Critical for multi-hop
+        #    queries like "When did Caroline go to the LGBTQ support group?"
+        #    where the AND query fails if the chunk uses "queer" instead.
+        # 2. Entity-only search — catches chunks where entities co-occur
+        #    but content words don't appear at all.
         if query_entities:
-            entity_query = " ".join(query_entities)
-            entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
+            from synapt.recall.storage import (
+                _build_entity_anchored_query,
+                _escape_fts_tokens,
+                _FTS_WEIGHTS,
+            )
+            entity_tokens = sorted(query_entities)  # deterministic ordering
+            all_tokens = _escape_fts_tokens(query)
+            content_tokens = [t for t in all_tokens if t.lower().strip('"') not in query_entities]
             seen_rowids = {r for r, _ in fts_results}
+
+            # Tier 2: Entity-anchored OR (entity AND (content1 OR content2 ...))
+            # Discount: 0.95 — slightly below tier 1 (full AND) which has
+            # stronger co-occurrence signal.
+            if content_tokens:
+                anchored_q = _build_entity_anchored_query(entity_tokens, content_tokens)
+                if anchored_q:
+                    try:
+                        anchored_rows = self._db.fts_search_raw(
+                            anchored_q, limit=max_chunks * 8,
+                        )
+                        for rowid, score in anchored_rows:
+                            if rowid not in seen_rowids:
+                                fts_results.append((rowid, score * 0.95))
+                                seen_rowids.add(rowid)
+                    except Exception:
+                        logger.debug(
+                            "Entity-anchored FTS query failed: %s",
+                            anchored_q, exc_info=True,
+                        )
+
+            # Tier 3: Entity-only search (broadest)
+            # Discount: 0.85 — weakest signal, just entity mention.
+            entity_query = " ".join(entity_tokens)
+            entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
             for rowid, score in entity_fts:
                 if rowid not in seen_rowids:
-                    fts_results.append((rowid, score * 0.85))  # Slight discount
+                    fts_results.append((rowid, score * 0.85))
                     seen_rowids.add(rowid)
 
         # Convert rowids to chunk indices, applying date and depth filters
