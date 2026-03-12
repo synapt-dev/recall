@@ -324,6 +324,9 @@
       .hero p { font-size: 1rem; }
       section { padding: 3rem 0; }
       .arch-diagram { font-size: 0.7rem; padding: 1rem; }
+      .efficiency [style*="grid-template-columns: 1fr 1fr"] {
+        grid-template-columns: 1fr !important;
+      }
     }
   </style>
 </head>
@@ -338,6 +341,7 @@
         <li><a href="#features">Features</a></li>
         <li><a href="#architecture">Architecture</a></li>
         <li><a href="#benchmarks">Benchmarks</a></li>
+        <li><a href="#efficiency">Efficiency</a></li>
         <li><a href="#quickstart">Quick start</a></li>
         <li><a href="#tools">Tools</a></li>
         <li><a href="#origin">Origin</a></li>
@@ -506,6 +510,50 @@
         Competitor data from <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a>.
         Synapt runs entirely locally &mdash; beating cloud systems that use GPT-4 for memory extraction.
         Don't waste your tokens on memory.
+      </p>
+    </div>
+  </section>
+
+  <section class="efficiency" id="efficiency" style="border-top: 1px solid var(--border);">
+    <div class="container">
+      <h2>Token efficiency</h2>
+      <p style="text-align: center; color: var(--text-dim); margin-bottom: 2.5rem; max-width: 650px; margin-left: auto; margin-right: auto;">
+        Most memory systems inject <em>all</em> memories into every prompt. Synapt lets the LLM decide when to search &mdash;
+        so you only pay for context you actually need.
+      </p>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; max-width: 800px; margin: 0 auto 2.5rem;">
+        <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem;">
+          <h3 style="color: var(--text-dim); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem;">Context stuffing (Mem0, etc.)</h3>
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.8; color: var(--text-dim);">
+            <div>Turn 1: <span style="color: #f47067;">system[memories]</span> + question</div>
+            <div>Turn 2: <span style="color: #f47067;">system[memories]</span> + history + question</div>
+            <div>Turn 3: <span style="color: #f47067;">system[memories]</span> + history + question</div>
+            <div style="color: #484f58;">...</div>
+            <div>Turn N: <span style="color: #f47067;">system[memories]</span> + history + question</div>
+          </div>
+          <p style="color: var(--text-dim); font-size: 0.85rem; margin-top: 1rem; line-height: 1.5;">
+            Memories repeat <strong>every turn</strong>. Cost grows linearly with session length.
+            Memory updates invalidate prompt cache.
+          </p>
+        </div>
+        <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem;">
+          <h3 style="color: var(--teal); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem;">On-demand search (synapt)</h3>
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.8; color: var(--text-dim);">
+            <div>Turn 1: system + question</div>
+            <div>Turn 2: system + history + question</div>
+            <div>Turn 3: system + history + question + <span style="color: var(--teal);">recall_search</span></div>
+            <div style="color: #484f58;">...</div>
+            <div>Turn N: system + history + question</div>
+          </div>
+          <p style="color: var(--text-dim); font-size: 0.85rem; margin-top: 1rem; line-height: 1.5;">
+            The LLM <strong>chooses when to search</strong>. Most turns have zero memory overhead.
+            Tiny stable system prompt always caches.
+          </p>
+        </div>
+      </div>
+      <p class="footnote" style="text-align: center; color: var(--text-dim); font-size: 0.85rem;">
+        Benchmarked on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> conversations with
+        Claude Haiku. synapt v0.6.0, mem0 v1.0.5.
       </p>
     </div>
   </section>
