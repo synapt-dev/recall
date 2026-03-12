@@ -497,6 +497,7 @@ class RecallDB:
             ("lineage_id", "TEXT NOT NULL DEFAULT ''"),
             ("embedding", "BLOB"),
             ("source_turns", "TEXT NOT NULL DEFAULT '[]'"),
+            ("source_offsets", "TEXT NOT NULL DEFAULT '[]'"),
         ]
         for col_name, col_def in migrations:
             if col_name not in cols:
@@ -896,8 +897,9 @@ class RecallDB:
                 "(id, content, category, confidence, source_sessions, "
                 " created_at, updated_at, status, superseded_by, "
                 " contradiction_note, tags, "
-                " valid_from, valid_until, version, lineage_id, source_turns) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " valid_from, valid_until, version, lineage_id, "
+                " source_turns, source_offsets) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node["id"],
                     node["content"],
@@ -915,6 +917,7 @@ class RecallDB:
                     node.get("version", 1),
                     node.get("lineage_id", ""),
                     json.dumps(node.get("source_turns", [])),
+                    json.dumps(node.get("source_offsets", [])),
                 ),
             )
         self._conn.commit()
@@ -948,11 +951,15 @@ class RecallDB:
                 d[col] = r[col]
             except (IndexError, KeyError):
                 d[col] = default
-        # source_turns — added after initial schema
+        # source_turns / source_offsets — added after Phase 8
         try:
             d["source_turns"] = json.loads(r["source_turns"])
         except (IndexError, KeyError):
             d["source_turns"] = []
+        try:
+            d["source_offsets"] = json.loads(r["source_offsets"])
+        except (IndexError, KeyError):
+            d["source_offsets"] = []
         return d
 
     def load_knowledge_nodes(self, status: str | None = None) -> list[dict]:
@@ -1022,6 +1029,23 @@ class RecallDB:
         result: dict[int, list[float]] = {}
         rows = self._conn.execute(
             "SELECT rowid, embedding FROM knowledge "
+            "WHERE embedding IS NOT NULL AND status = 'active'"
+        ).fetchall()
+        for r in rows:
+            try:
+                result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+            except struct.error:
+                continue
+        return result
+
+    def get_knowledge_embeddings_by_id(self) -> dict[str, list[float]]:
+        """Load active knowledge node embeddings keyed by node ID.
+
+        Returns {node_id: [float, ...]} for nodes with stored embeddings.
+        """
+        result: dict[str, list[float]] = {}
+        rows = self._conn.execute(
+            "SELECT id, embedding FROM knowledge "
             "WHERE embedding IS NOT NULL AND status = 'active'"
         ).fetchall()
         for r in rows:

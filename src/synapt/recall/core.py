@@ -1052,6 +1052,7 @@ class TranscriptIndex:
         include_historical: bool = False,
         now: datetime | None = None,
         knowledge_boost: float | None = None,
+        max_knowledge: int | None = None,
     ) -> str:
         """Search transcripts and return formatted context string.
 
@@ -1077,6 +1078,10 @@ class TranscriptIndex:
                 recency bias on historical data.
             knowledge_boost: Override for knowledge node boost multiplier.
                 None = use intent-classified default (typically 2.0).
+            max_knowledge: Maximum number of knowledge blocks to include in
+                the context. None = no cap (all qualifying nodes compete).
+                Set to e.g. 5 to prevent knowledge from crowding out raw
+                conversation chunks.
 
         Returns:
             Formatted string ready for prompt injection, or empty string.
@@ -1092,7 +1097,7 @@ class TranscriptIndex:
         cache_key = (
             query, max_chunks, max_sessions, after, before,
             half_life, threshold_ratio, depth, include_archived,
-            include_historical, now, knowledge_boost,
+            include_historical, now, knowledge_boost, max_knowledge,
         )
         cached = self._query_cache.get(cache_key)
         if cached is not None:
@@ -1153,7 +1158,7 @@ class TranscriptIndex:
                 date_filter, half_life, threshold_ratio, depth,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
-                now=now,
+                now=now, max_knowledge=max_knowledge,
             )
         else:
             result = self._global_lookup(
@@ -1161,7 +1166,7 @@ class TranscriptIndex:
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
-                now=now,
+                now=now, max_knowledge=max_knowledge,
             )
 
         # Cache the result (LRU eviction when full)
@@ -1187,6 +1192,7 @@ class TranscriptIndex:
         emb_weight: float = 1.0,
         knowledge_boost: float = 2.0,
         now: datetime | None = None,
+        max_knowledge: int | None = None,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and self._rowid_to_idx:
@@ -1195,7 +1201,7 @@ class TranscriptIndex:
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
-                now=now,
+                now=now, max_knowledge=max_knowledge,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -1217,12 +1223,17 @@ class TranscriptIndex:
         emb_weight: float = 1.0,
         knowledge_boost: float = 2.0,
         now: datetime | None = None,
+        max_knowledge: int | None = None,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
+        # Extract entities once and share across knowledge + FTS search
+        query_entities = extract_entities(query)
+
         # Search knowledge nodes first (ranked higher via boost)
         knowledge_results = self._search_knowledge(
             query, max_chunks, include_historical=include_historical,
             knowledge_boost=knowledge_boost, emb_weight=emb_weight,
+            query_entities=query_entities,
         )
 
         # Concise mode: search clusters directly, return only summaries
@@ -1238,7 +1249,6 @@ class TranscriptIndex:
         # specific entities (person names, etc.), run a second search for
         # just entity terms. This catches chunks where entities co-occur
         # but content words (e.g. "nickname") don't appear in the text.
-        query_entities = extract_entities(query)
         if query_entities:
             entity_query = " ".join(query_entities)
             entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
@@ -1328,6 +1338,7 @@ class TranscriptIndex:
             top[:dedup_headroom], max_tokens,
             knowledge_results=knowledge_results,
             query=query,
+            max_knowledge=max_knowledge,
         )
 
     def _concise_lookup(
@@ -1517,6 +1528,7 @@ class TranscriptIndex:
         emb_weight: float = 1.0,
         knowledge_boost: float = 2.0,
         now: datetime | None = None,
+        max_knowledge: int | None = None,
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
@@ -1536,6 +1548,7 @@ class TranscriptIndex:
                 emb_weight=emb_weight,
                 depth=depth,
                 now=now,
+                max_knowledge=max_knowledge,
             )
         return self._progressive_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, max_sessions,
@@ -1557,6 +1570,7 @@ class TranscriptIndex:
         depth: str = "full",
         emb_weight: float = 1.0,
         now: datetime | None = None,
+        max_knowledge: int | None = None,
     ) -> str:
         """Progressive session search using FTS5 (SQLite backend)."""
         hits: list[tuple[int, float]] = []
@@ -1650,6 +1664,7 @@ class TranscriptIndex:
             hits[:max_chunks], max_tokens,
             knowledge_results=knowledge_results,
             query=query,
+            max_knowledge=max_knowledge,
         )
 
     def _progressive_lookup_bm25(
@@ -1730,6 +1745,7 @@ class TranscriptIndex:
         include_historical: bool = False,
         knowledge_boost: float = 2.0,
         emb_weight: float = 1.0,
+        query_entities: set[str] | None = None,
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
@@ -1786,7 +1802,8 @@ class TranscriptIndex:
             emb_rowids = {r for r, s in emb_hits if s > 0.4}
 
             # Entity extraction: boost knowledge nodes mentioning query entities
-            query_entities = extract_entities(query)
+            if query_entities is None:
+                query_entities = extract_entities(query)
 
             results = []
             seen_ids: set[str] = set()
@@ -1818,7 +1835,9 @@ class TranscriptIndex:
                     if query_entities:
                         if any(e in node_content.lower() for e in query_entities):
                             effective_boost *= ENTITY_BOOST
-                    node["score"] = score_map.get(rowid, 0.0) * effective_boost
+                    raw_score = score_map.get(rowid, 0.0)
+                    node["base_score"] = raw_score
+                    node["score"] = raw_score * effective_boost
                     results.append(node)
                     seen_ids.add(node_id)
 
@@ -1978,6 +1997,7 @@ class TranscriptIndex:
         max_tokens: int,
         knowledge_results: list[dict] | None = None,
         query: str = "",
+        max_knowledge: int | None = None,
     ) -> str:
         """Format ranked chunk indices into a context string.
 
@@ -2007,7 +2027,38 @@ class TranscriptIndex:
         # Track which chunk indices are already in ranked results
         ranked_indices = {idx for idx, _ in ranked}
 
-        # Pre-build chunk lookup indices for O(1) source expansion
+        # Limit source expansion to prevent knowledge nodes from crowding out
+        # regular ranked chunks. Each expanded knowledge node adds source chunks
+        # that compete in the token budget — too many displace relevant results.
+        # When max_knowledge is set, only expand sources for those top-N nodes.
+        # When uncapped, limit to the top 10 nodes for source expansion.
+        knowledge_to_expand = knowledge_results or []
+        if knowledge_to_expand:
+            sorted_kn = sorted(
+                knowledge_to_expand, key=lambda n: n.get("score", 0.0), reverse=True
+            )
+            expand_limit = max_knowledge if max_knowledge is not None else 10
+            knowledge_to_expand = sorted_kn[:expand_limit]
+
+        # Only format knowledge blocks that could actually be emitted
+        # (avoids wasting _format_knowledge_block calls on nodes past the cap).
+        kn_sorted = sorted(
+            (knowledge_results or []),
+            key=lambda n: n.get("score", 0.0), reverse=True,
+        )
+        for node in kn_sorted:
+            block = self._format_knowledge_block(node)
+            node_score = node.get("score", 0.0)
+            emit_items.append((node_score, block, "knowledge", node.get("id", "")))
+
+        # Source expansion only for the top knowledge nodes that will be emitted.
+        # Use the unboosted base score (from FTS5/embedding) for source chunk
+        # ranking — knowledge_boost should only elevate the knowledge block
+        # itself, not inflate source chunk scores above regular ranked chunks.
+
+        # Pre-build lookup indexes for O(1) source expansion:
+        #   (session_id, turn_index) → [chunk_indices]
+        #   session_id → [chunk_indices]
         _chunk_by_turn: dict[tuple[str, int], list[int]] = {}
         _chunks_by_session: dict[str, list[int]] = {}
         for i, chunk in enumerate(self.chunks):
@@ -2015,55 +2066,70 @@ class TranscriptIndex:
             _chunk_by_turn.setdefault(key, []).append(i)
             _chunks_by_session.setdefault(chunk.session_id, []).append(i)
 
-        for node in (knowledge_results or []):
-            block = self._format_knowledge_block(node)
+        max_per_node = 1 if max_knowledge is not None else 3
+        for node in knowledge_to_expand:
             node_score = node.get("score", 0.0)
-            emit_items.append((node_score, block, "knowledge", node.get("id", "")))
-
-            # Source expansion: add raw chunks referenced by the knowledge
-            # node's source_turns (exact session:turn pairs from consolidation)
-            # or fall back to keyword matching against source sessions.
-            source_turns = node.get("source_turns", [])
+            base_score = node.get("base_score", node_score)
+            source_offsets = node.get("source_offsets", [])
             source_sessions = node.get("source_sessions", [])
-            if node_score > 0 and (source_turns or source_sessions):
-                # Build a set of (session_id, turn_index) from source_turns
-                turn_refs: set[tuple[str, int]] = set()
-                for ref in source_turns:
-                    if ":" in ref:
-                        sid, tidx = ref.rsplit(":", 1)
-                        try:
-                            turn_refs.add((sid, int(tidx)))
-                        except ValueError:
-                            pass
+            if node_score <= 0:
+                continue
+            if not source_offsets and not source_sessions:
+                continue
 
+            # Offset-based source expansion: emit compact snippets
+            if source_offsets:
+                snippets_emitted = 0
+                for offset in source_offsets[:max_per_node]:
+                    sid = offset.get("s", "")
+                    tidx = offset.get("t", -1)
+                    begin = offset.get("b", 0)
+                    end = offset.get("e", 0)
+                    key = (sid, tidx)
+                    indices = _chunk_by_turn.get(key, [])
+                    if not indices:
+                        continue
+                    i = indices[0]
+                    if i in ranked_indices:
+                        continue
+                    chunk = self.chunks[i]
+                    full_text = (chunk.user_text or "") + " " + (chunk.assistant_text or "")
+                    snippet = full_text[begin:end].strip()
+                    if not snippet:
+                        continue
+                    # Compact snippet block with source attribution
+                    block = (
+                        f"--- [source: {sid[:8]} turn {tidx}] ---\n"
+                        f"{snippet}"
+                    )
+                    source_score = base_score * 0.6
+                    emit_items.append((source_score, block, "chunk", chunk.id))
+                    ranked_indices.add(i)
+                    snippets_emitted += 1
+                if snippets_emitted > 0:
+                    continue  # Skip keyword fallback
+
+            # Keyword fallback: query-adaptive matching against source sessions
+            if source_sessions and query:
                 source_candidates: list[tuple[int, float]] = []
-                if turn_refs:
-                    # Exact turn matching via index (O(1) per ref)
-                    for ref_key in turn_refs:
-                        for i in _chunk_by_turn.get(ref_key, []):
-                            if i not in ranked_indices:
-                                source_candidates.append((i, 100.0))
-                                ranked_indices.add(i)
-                elif source_sessions and query:
-                    # Fallback: keyword matching against source sessions
-                    query_toks = set(_tokenize(query))
-                    node_toks = set(_tokenize(node.get("content", "")))
-                    match_toks = query_toks | node_toks
-                    for sid in source_sessions:
-                        for i in _chunks_by_session.get(sid, []):
-                            if i in ranked_indices:
-                                continue
-                            if self.chunks[i].turn_index < 0:
-                                continue
-                            chunk_toks = set(_tokenize(self.chunks[i].text))
-                            overlap = len(chunk_toks & match_toks)
-                            if overlap < 2:
-                                continue
-                            source_candidates.append((i, overlap))
-                # Take top 3 most relevant source chunks per node
+                query_toks = set(_tokenize(query))
+                node_toks = set(_tokenize(node.get("content", "")))
+                match_toks = query_toks | node_toks
+                for sid in source_sessions:
+                    for i in _chunks_by_session.get(sid, []):
+                        if i in ranked_indices:
+                            continue
+                        chunk = self.chunks[i]
+                        if chunk.turn_index < 0:
+                            continue
+                        chunk_toks = set(_tokenize(chunk.text))
+                        overlap = len(chunk_toks & match_toks)
+                        if overlap < 2:
+                            continue
+                        source_candidates.append((i, overlap))
                 source_candidates.sort(key=lambda x: x[1], reverse=True)
-                for i, overlap in source_candidates[:3]:
-                    source_score = node_score * 0.6
+                for i, overlap in source_candidates[:max_per_node]:
+                    source_score = base_score * 0.6
                     cblock = self._format_chunk_block(i)
                     emit_items.append((source_score, cblock, "chunk", self.chunks[i].id))
                     ranked_indices.add(i)
@@ -2095,9 +2161,14 @@ class TranscriptIndex:
         from synapt.recall.clustering import _jaccard
 
         emitted_token_sets: list[set[str]] = []
+        knowledge_emitted = 0
 
         emitted_access: list[dict] = []
         for score, block, item_type, item_id in emit_items:
+            # Cap knowledge blocks to prevent them from crowding out raw chunks
+            if item_type == "knowledge" and max_knowledge is not None:
+                if knowledge_emitted >= max_knowledge:
+                    continue
             block_tokens_set = set(_tokenize(block))
             if block_tokens_set and emitted_token_sets:
                 if any(_jaccard(block_tokens_set, prev) > _DEDUP_JACCARD_THRESHOLD
@@ -2109,6 +2180,8 @@ class TranscriptIndex:
             lines.append(block)
             token_count += block_tokens
             emitted_token_sets.append(block_tokens_set)
+            if item_type == "knowledge":
+                knowledge_emitted += 1
             access_entry: dict = {
                 "item_type": item_type,
                 "item_id": item_id,

@@ -47,6 +47,7 @@ class KnowledgeNode:
     confidence: float                    # 0.0-1.0
     source_sessions: list[str] = field(default_factory=list)
     source_turns: list[str] = field(default_factory=list)  # "session_id:turn_num"
+    source_offsets: list[dict] = field(default_factory=list)  # [{"s": sid, "t": turn, "b": begin, "e": end}]
     created_at: str = ""                 # ISO 8601
     updated_at: str = ""                 # ISO 8601
     status: str = "active"               # active | stale | contradicted
@@ -199,6 +200,44 @@ def update_node(
     return True
 
 
+def batch_update_nodes(
+    updates: dict[str, dict],
+    path: Path | None = None,
+) -> int:
+    """Batch-update multiple knowledge nodes in one read/write pass.
+
+    Args:
+        updates: Mapping of node_id -> dict of field updates.
+        path: Path to knowledge.jsonl.
+
+    Returns the number of nodes actually updated.
+    """
+    path = path or _knowledge_path()
+    if not path.exists() or not updates:
+        return 0
+    nodes = _dedup_nodes(_read_all_nodes(path))
+    by_id = {n.id: n for n in nodes}
+    now = datetime.now(timezone.utc).isoformat()
+    to_append: list[KnowledgeNode] = []
+    for node_id, fields in updates.items():
+        target = by_id.get(node_id)
+        if target is None:
+            continue
+        d = target.to_dict()
+        d.update(fields)
+        d["updated_at"] = now
+        to_append.append(KnowledgeNode.from_dict(d))
+    if not to_append:
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        for node in to_append:
+            f.write(json.dumps(node.to_dict()) + "\n")
+        f.flush()
+    return len(to_append)
+
+
 def compact_knowledge(path: Path | None = None) -> int:
     """Physically dedup knowledge.jsonl.
 
@@ -262,14 +301,21 @@ def format_knowledge_for_session_start(
 def dedup_knowledge_nodes(
     threshold: float = 0.7,
     project_dir: Path | None = None,
+    *,
+    embedding_threshold: float = 0.85,
 ) -> int:
     """Merge near-duplicate active knowledge nodes.
 
-    Compares all active nodes pairwise using Jaccard similarity on
-    extracted keywords. When similarity >= threshold, the older node
-    is marked ``status="contradicted"`` with ``superseded_by`` pointing
-    to the newer survivor. Source sessions from the duplicate are
-    transferred to the survivor.
+    Uses two similarity signals (either can trigger a merge):
+    1. **Keyword Jaccard** >= ``threshold`` (default 0.7) — catches
+       nodes with overlapping terminology.
+    2. **Embedding cosine** >= ``embedding_threshold`` (default 0.85) —
+       catches semantic duplicates with different wording.
+
+    When a pair is flagged by either signal, the older node is marked
+    ``status="contradicted"`` with ``superseded_by`` pointing to the
+    newer survivor.  Source sessions from the duplicate are transferred
+    to the survivor and confidence is recomputed.
 
     Logs every merge decision to ``dedup_decisions.jsonl``.
 
@@ -293,73 +339,144 @@ def dedup_knowledge_nodes(
     # Pre-compute keyword sets
     kw_sets = {n.id: _extract_keywords(n.content) for n in active}
 
+    # Pre-compute embeddings (best-effort — falls back to Jaccard-only).
+    # Try SQLite cache first (cheap), then fresh embedding (expensive).
+    emb_map: dict[str, list[float]] = {}
+    cosine_fn = None
+    try:
+        from synapt.recall.embeddings import (
+            cosine_similarity, get_embedding_provider,
+        )
+        # Try loading cached embeddings from SQLite
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.storage import RecallDB
+        db_path = project_index_dir(project_dir) / "recall.db"
+        try:
+            db = RecallDB(db_path)
+            emb_map = db.get_knowledge_embeddings_by_id()
+            db.close()
+        except Exception:
+            pass  # DB missing or corrupt — will embed fresh below
+
+        # Embed any nodes not yet in the cache
+        missing = [n for n in active if n.id not in emb_map]
+        if missing:
+            provider = get_embedding_provider()
+            if provider:
+                texts = [n.content for n in missing]
+                new_embs = provider.embed(texts)
+                for node, emb in zip(missing, new_embs):
+                    emb_map[node.id] = emb
+
+        if emb_map:
+            cosine_fn = cosine_similarity
+    except Exception:
+        import logging as _log
+        _log.getLogger(__name__).debug(
+            "Embedding pre-compute failed, falling back to Jaccard-only",
+            exc_info=True,
+        )
+
     # Track which node IDs have been absorbed (duplicate → survivor)
     absorbed: set[str] = set()
     merges: list[tuple[str, str]] = []  # (duplicate_id, survivor_id)
+    now = datetime.now(timezone.utc).isoformat()
 
-    # Pairwise comparison — O(n²) but n is small (tens of nodes)
+    # Pairwise comparison — O(n²) but n is small (tens to low hundreds)
     for i in range(len(active)):
         if active[i].id in absorbed:
             continue
         for j in range(i + 1, len(active)):
             if active[j].id in absorbed:
                 continue
-            sim = _jaccard(kw_sets[active[i].id], kw_sets[active[j].id])
-            if sim >= threshold:
-                # Keep the most recently updated node
-                if active[i].updated_at >= active[j].updated_at:
-                    survivor, duplicate = active[i], active[j]
-                else:
-                    survivor, duplicate = active[j], active[i]
-                absorbed.add(duplicate.id)
-                merges.append((duplicate.id, survivor.id))
 
-                # Transfer source sessions (update in-memory too so
-                # subsequent merges accumulate correctly)
-                merged_sessions = list(
-                    set(survivor.source_sessions + duplicate.source_sessions)
-                )
-                survivor.source_sessions = merged_sessions
-                new_confidence = compute_confidence(len(merged_sessions))
-                update_node(
-                    survivor.id,
-                    {
-                        "source_sessions": merged_sessions,
-                        "confidence": new_confidence,
-                    },
-                    kn_path,
-                )
+            jac = _jaccard(kw_sets[active[i].id], kw_sets[active[j].id])
 
-                # Mark duplicate as contradicted
-                update_node(
-                    duplicate.id,
-                    {
-                        "status": "contradicted",
-                        "superseded_by": survivor.id,
-                        "contradiction_note": f"Merged (jaccard={sim:.2f})",
-                    },
-                    kn_path,
-                )
+            cos = 0.0
+            if cosine_fn and active[i].id in emb_map and active[j].id in emb_map:
+                cos = cosine_fn(emb_map[active[i].id], emb_map[active[j].id])
 
-                # Log decision
-                decision_path = _dedup_decisions_path(project_dir)
-                _log_dedup_decision(
-                    decision_path,
-                    action="dedup-merge",
-                    candidate_content=duplicate.content,
-                    candidate_category=duplicate.category,
-                    existing_id=survivor.id,
-                    existing_content=survivor.content,
-                    similarity_score=sim,
-                    source="knowledge-dedup",
-                )
+            jac_triggered = jac >= threshold
+            cos_triggered = cos >= embedding_threshold
+            if not (jac_triggered or cos_triggered):
+                continue
 
-                # If active[i] was the duplicate, stop comparing it
-                # against remaining nodes (prevents triple-merge data loss)
-                if active[i].id in absorbed:
-                    break
+            # Label by which criterion actually triggered the merge
+            if cos_triggered and (not jac_triggered or cos >= jac):
+                method = "cosine"
+                sim = cos
+            else:
+                method = "jaccard"
+                sim = jac
 
+            # Keep the most recently updated node
+            if active[i].updated_at >= active[j].updated_at:
+                survivor, duplicate = active[i], active[j]
+            else:
+                survivor, duplicate = active[j], active[i]
+            absorbed.add(duplicate.id)
+            merges.append((duplicate.id, survivor.id))
+
+            # Transfer source sessions in-memory (subsequent merges accumulate).
+            # Do NOT update survivor.updated_at here — it would change the
+            # comparison for subsequent pairwise merges (triple-merge bug).
+            merged_sessions = list(
+                set(survivor.source_sessions + duplicate.source_sessions)
+            )
+            survivor.source_sessions = merged_sessions
+            survivor.confidence = compute_confidence(len(merged_sessions))
+
+            # Mark duplicate as contradicted in-memory
+            duplicate.status = "contradicted"
+            duplicate.superseded_by = survivor.id
+            duplicate.contradiction_note = (
+                f"Merged ({method}={sim:.2f}, "
+                f"jac={jac:.2f}, cos={cos:.2f})"
+            )
+
+            # Log decision
+            decision_path = _dedup_decisions_path(project_dir)
+            _log_dedup_decision(
+                decision_path,
+                action="dedup-merge",
+                candidate_content=duplicate.content,
+                candidate_category=duplicate.category,
+                existing_id=survivor.id,
+                existing_content=survivor.content,
+                similarity_score=sim,
+                source=f"knowledge-dedup-{method}",
+            )
+
+            # If active[i] was the duplicate, stop comparing it
+            # against remaining nodes (prevents triple-merge data loss)
+            if active[i].id in absorbed:
+                break
+
+    # Batch-write all mutations in a single atomic rewrite.
+    # The `active` list has correct in-memory state for all active nodes.
+    # Merge with any pre-existing non-active nodes from the file.
     if merges:
-        compact_knowledge(kn_path)
+        # Stamp updated_at on all dirty nodes (deferred from the loop
+        # to avoid changing pairwise comparison outcomes).
+        dirty_ids = absorbed.copy()
+        for _, surv_id in merges:
+            dirty_ids.add(surv_id)
+        for n in active:
+            if n.id in dirty_ids:
+                n.updated_at = now
+        active_by_id = {n.id: n for n in active}
+        all_file_nodes = _dedup_nodes(_read_all_nodes(kn_path))
+        final: list[KnowledgeNode] = []
+        for node in all_file_nodes:
+            # Use the mutated in-memory version if available
+            final.append(active_by_id.get(node.id, node))
+        final.sort(key=lambda n: n.created_at)
+        tmp = kn_path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            for node in final:
+                f.write(json.dumps(node.to_dict()) + "\n")
+            f.flush()
+        tmp.replace(kn_path)
 
     return len(merges)

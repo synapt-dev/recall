@@ -594,6 +594,8 @@ def recall_consolidate(
             parts.append(f"{result.nodes_corroborated} corroborated")
         if result.nodes_contradicted:
             parts.append(f"{result.nodes_contradicted} contradicted")
+        if result.nodes_deduped:
+            parts.append(f"{result.nodes_deduped} deduped")
         if not parts:
             return (
                 f"No knowledge extracted ({result.entries_processed} entries, "

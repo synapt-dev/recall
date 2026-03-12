@@ -595,7 +595,10 @@ class TestDedupKnowledgeNodes(unittest.TestCase):
             entries = [json.loads(line) for line in f if line.strip()]
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["action"], "dedup-merge")
-        self.assertEqual(entries[0]["source"], "knowledge-dedup")
+        self.assertTrue(
+            entries[0]["source"].startswith("knowledge-dedup"),
+            f"Expected source starting with 'knowledge-dedup', got {entries[0]['source']}",
+        )
 
 
     def test_dedup_triple_duplicate_no_session_loss(self):

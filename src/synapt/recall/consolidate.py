@@ -32,19 +32,20 @@ from synapt.recall.knowledge import (
     KnowledgeNode,
     _knowledge_path,
     append_node,
+    batch_update_nodes,
+    dedup_knowledge_nodes,
     read_nodes,
     compute_confidence,
     update_node,
 )
+from synapt.recall.clustering import _jaccard
 from synapt.recall.scrub import scrub_text, strip_markdown_formatting
 from synapt.recall.core import project_data_dir, project_index_dir
 
 logger = logging.getLogger("synapt.recall.consolidate")
 
+from synapt._models.base import Message
 from synapt.recall._mlx import MLX_AVAILABLE as _MLX_AVAILABLE, INSTALL_MSG as _INSTALL_MSG  # noqa: F401
-if _MLX_AVAILABLE:
-    from synapt._models.mlx_client import MLXClient, MLXOptions
-    from synapt._models.base import Message
 
 from synapt.recall._model_router import DEFAULT_DECODER_MODEL as DEFAULT_MODEL
 MAX_EXISTING_KNOWLEDGE_CHARS = 4000
@@ -171,6 +172,7 @@ class ConsolidationResult:
     nodes_created: int = 0
     nodes_corroborated: int = 0
     nodes_contradicted: int = 0
+    nodes_deduped: int = 0
     entries_processed: int = 0
     clusters_found: int = 0
 
@@ -246,12 +248,6 @@ def _extract_keywords(text: str) -> set[str]:
     words = re.findall(r"[a-z][a-z0-9_.-]+", text.lower())
     return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
 
-
-def _jaccard(a: set, b: set) -> float:
-    """Jaccard similarity between two sets."""
-    if not a and not b:
-        return 0.0
-    return len(a & b) / len(a | b)
 
 
 def _dedup_decisions_path(project_dir: Path | None = None) -> Path:
@@ -680,15 +676,13 @@ def _apply_consolidation_result(
             existing_id = raw_node.get("existing_id", "")
             target = existing_by_id.get(existing_id)
             if target:
-                # Add new source sessions + turns, bump confidence
+                # Add new source sessions, bump confidence
                 new_sources = list(set(target.source_sessions + cluster_sessions))
-                new_source_turns = list(set(target.source_turns + source_turns))
                 new_confidence = compute_confidence(len(new_sources))
                 update_node(
                     target.id,
                     {
                         "source_sessions": new_sources,
-                        "source_turns": new_source_turns,
                         "confidence": new_confidence,
                     },
                     knowledge_path,
@@ -750,7 +744,6 @@ def _apply_consolidation_result(
                     source_sessions=cluster_sessions,
                     confidence=compute_confidence(len(cluster_sessions)),
                     tags=tags,
-                    source_turns=source_turns,
                 )
                 new_node.valid_from = now
                 update_node(target.id, {"superseded_by": new_node.id}, knowledge_path)
@@ -793,15 +786,10 @@ def _apply_consolidation_result(
                     "Auto-corroborate (jaccard=%.2f): %s", best_sim, content[:80],
                 )
                 new_sources = list(set(best_match.source_sessions + cluster_sessions))
-                new_source_turns = list(set(best_match.source_turns + source_turns))
                 new_confidence = compute_confidence(len(new_sources))
                 update_node(
                     best_match.id,
-                    {
-                        "source_sessions": new_sources,
-                        "source_turns": new_source_turns,
-                        "confidence": new_confidence,
-                    },
+                    {"source_sessions": new_sources, "confidence": new_confidence},
                     knowledge_path,
                 )
                 result.nodes_corroborated += 1
@@ -878,10 +866,6 @@ def consolidate(
     Returns:
         Summary of what was created/corroborated/contradicted.
     """
-    if not _MLX_AVAILABLE:
-        print(_INSTALL_MSG)
-        return ConsolidationResult()
-
     project_dir = (project_dir or Path.cwd()).resolve()
     journal_path = _journal_path(project_dir)
     kn_path = _knowledge_path(project_dir)
@@ -956,7 +940,7 @@ def consolidate(
     failures_path = data_dir / "consolidation_failures.jsonl"
     response_cache = _load_response_cache(cache_path)
 
-    # Create MLX client once for the batch (deferred until needed)
+    # Get model client via router (MLX → Modal → Ollama)
     client = None
 
     def _process_cluster(cluster: list[JournalEntry]) -> bool:
@@ -974,7 +958,14 @@ def consolidate(
             return True
 
         if client is None:
-            client = MLXClient(MLXOptions(max_tokens=MIN_RESPONSE_TOKENS))
+            from synapt.recall._model_router import get_client, RecallTask
+            client = get_client(RecallTask.CONSOLIDATE, max_tokens=MIN_RESPONSE_TOKENS)
+            if client is None:
+                if not _MLX_AVAILABLE:
+                    logger.error("No model backend available for consolidation")
+                    return False
+                from synapt._models.mlx_client import MLXClient, MLXOptions
+                client = MLXClient(MLXOptions(max_tokens=MIN_RESPONSE_TOKENS))
         prompt = _build_consolidation_prompt(
             cluster, existing_nodes, project_dir,
             adapter_path=adapter_path,
@@ -989,7 +980,7 @@ def consolidate(
                 max_tokens=response_budget,
             )
         except Exception as exc:
-            logger.warning("MLX inference failed for cluster: %s", exc)
+            logger.warning("Inference failed for cluster: %s", exc)
             return False
 
         parsed = _parse_llm_response(response)
@@ -1064,7 +1055,31 @@ def consolidate(
         # (e.g. from a prior run that wrote to JSONL but crashed before sync).
         if result.nodes_created or result.nodes_corroborated or result.nodes_contradicted:
             _set_last_consolidation_ts(project_dir)
+
+            # Post-consolidation dedup — merges near-duplicates that the
+            # inline Jaccard check missed (e.g. semantic duplicates with
+            # different wording, or nodes created within the same batch).
+            merged = dedup_knowledge_nodes(
+                threshold=0.5, project_dir=project_dir,
+                embedding_threshold=0.85,
+            )
+            if merged:
+                logger.info(
+                    "Post-consolidation dedup merged %d duplicate(s)", merged,
+                )
+                result.nodes_deduped += merged
+
             _sync_knowledge_to_db(project_dir, kn_path)
+            # Resolve source_turns and source_offsets for any new/updated nodes
+            resolved = resolve_source_turns(project_dir)
+            if resolved:
+                logger.info("Resolved source_turns for %d knowledge nodes", resolved)
+            resolved_offsets = resolve_source_offsets(project_dir)
+            if resolved_offsets:
+                logger.info("Resolved source_offsets for %d knowledge nodes", resolved_offsets)
+            # Single final sync after all resolvers have written their updates
+            if resolved or resolved_offsets:
+                _sync_knowledge_to_db(project_dir, kn_path)
         elif clusters and kn_path.exists() and kn_path.stat().st_size > 0:
             _sync_knowledge_to_db(project_dir, kn_path)
     finally:
@@ -1124,3 +1139,252 @@ def _sync_knowledge_to_db(project_dir: Path, kn_path: Path) -> None:
         db.close()
     except Exception as exc:
         logger.warning("Failed to sync knowledge to DB: %s", exc)
+
+
+def _load_chunks_for_resolve(
+    project_dir: Path | None = None,
+    *,
+    include_text: bool = False,
+) -> tuple[Path, dict, list[KnowledgeNode], "RecallDB"] | None:  # noqa: F821
+    """Load chunks and active nodes for source resolution.
+
+    Returns (kn_path, session_chunks, nodes, db) or None if data unavailable.
+
+    session_chunks maps session_id -> [(turn_index, token_set)] or
+    session_id -> [(turn_index, full_text, token_set)] if include_text=True.
+
+    Only loads chunks from sessions referenced by active nodes.
+    """
+    project_dir = (project_dir or Path.cwd()).resolve()
+    kn_path = _knowledge_path(project_dir)
+    if not kn_path.exists():
+        return None
+
+    index_dir = project_index_dir(project_dir)
+    db_path = index_dir / "recall.db"
+    if not db_path.exists():
+        return None
+
+    from synapt.recall.storage import RecallDB
+
+    db = RecallDB(db_path)
+
+    # Load active knowledge nodes
+    nodes = read_nodes(kn_path, status="active")
+    if not nodes:
+        db.close()
+        return None
+
+    # Collect all source_sessions referenced by active nodes
+    needed_sessions: set[str] = set()
+    for node in nodes:
+        needed_sessions.update(node.source_sessions)
+
+    if not needed_sessions:
+        db.close()
+        return None
+
+    # Filter chunks to only relevant sessions
+    placeholders = ",".join("?" for _ in needed_sessions)
+    rows = db._conn.execute(
+        f"SELECT session_id, turn_index, user_text, assistant_text "
+        f"FROM chunks WHERE session_id IN ({placeholders})",
+        list(needed_sessions),
+    ).fetchall()
+    if not rows:
+        db.close()
+        return None
+
+    # Build session_id → chunk list
+    session_chunks: dict = {}
+    for r in rows:
+        sid = r["session_id"]
+        tidx = r["turn_index"]
+        text = (r["user_text"] or "") + " " + (r["assistant_text"] or "")
+        toks = _extract_keywords(text)
+        if include_text:
+            session_chunks.setdefault(sid, []).append((tidx, text, toks))
+        else:
+            session_chunks.setdefault(sid, []).append((tidx, toks))
+
+    return kn_path, session_chunks, nodes, db
+
+
+def resolve_source_turns(
+    project_dir: Path | None = None,
+    *,
+    max_turns_per_node: int = 3,
+    min_overlap: int = 3,
+) -> int:
+    """Resolve source_turns for knowledge nodes by matching against chunks.
+
+    For each active knowledge node with empty source_turns, find transcript
+    chunks from its source_sessions whose text has high token overlap with
+    the node content.  Stores the top-N turn references as source_turns.
+
+    This enables precise O(1) source expansion in retrieval instead of the
+    broad keyword fallback that scans all chunks in source sessions.
+
+    Returns the number of nodes updated.
+    """
+    loaded = _load_chunks_for_resolve(project_dir, include_text=False)
+    if loaded is None:
+        return 0
+
+    kn_path, session_chunks, nodes, db = loaded
+    pending_updates: dict[str, dict] = {}
+
+    try:
+        for node in nodes:
+            if node.source_turns:
+                continue  # Already has source_turns
+
+            if not node.source_sessions:
+                continue
+
+            node_toks = _extract_keywords(node.content)
+            if len(node_toks) < 2:
+                continue
+
+            # Score every chunk in this node's source sessions
+            candidates: list[tuple[str, int, int]] = []  # (session_id, turn_idx, overlap)
+            for sid in node.source_sessions:
+                for tidx, chunk_toks in session_chunks.get(sid, []):
+                    overlap = len(node_toks & chunk_toks)
+                    if overlap >= min_overlap:
+                        candidates.append((sid, tidx, overlap))
+
+            if not candidates:
+                continue
+
+            # Take top-N by overlap
+            candidates.sort(key=lambda x: x[2], reverse=True)
+            source_turns = [
+                f"{sid}:{tidx}" for sid, tidx, _ in candidates[:max_turns_per_node]
+            ]
+
+            pending_updates[node.id] = {"source_turns": source_turns}
+    finally:
+        db.close()
+
+    if pending_updates:
+        batch_update_nodes(pending_updates, kn_path)
+
+    return len(pending_updates)
+
+
+def _find_best_span(node_text: str, chunk_text: str, margin: int = 30) -> tuple[int, int] | None:
+    """Find the character span in chunk_text that best covers node_text content.
+
+    Splits chunk_text into sentences, scores each by token overlap with
+    node_text, then returns (begin, end) covering the best contiguous
+    sentence window.  Adds ``margin`` chars of context on each side.
+    """
+    if not chunk_text or not node_text:
+        return None
+
+    # Split into sentences (period/question/exclamation followed by space or end)
+    sentence_spans: list[tuple[int, int, str]] = []
+    for m in re.finditer(r'[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$', chunk_text):
+        sentence_spans.append((m.start(), m.end(), m.group()))
+
+    if not sentence_spans:
+        return None
+
+    node_toks = _extract_keywords(node_text)
+    if not node_toks:
+        return None
+
+    # Score each sentence
+    scored: list[tuple[int, int, int]] = []  # (begin, end, overlap)
+    for begin, end, sent in sentence_spans:
+        sent_toks = _extract_keywords(sent)
+        overlap = len(node_toks & sent_toks)
+        scored.append((begin, end, overlap))
+
+    # Find best contiguous window of 1-3 sentences
+    best_score = 0
+    best_begin = 0
+    best_end = 0
+    for window in range(1, min(4, len(scored) + 1)):
+        for i in range(len(scored) - window + 1):
+            total = sum(scored[j][2] for j in range(i, i + window))
+            if total > best_score:
+                best_score = total
+                best_begin = scored[i][0]
+                best_end = scored[i + window - 1][1]
+
+    if best_score < 2:
+        return None
+
+    # Add margin for context
+    begin = max(0, best_begin - margin)
+    end = min(len(chunk_text), best_end + margin)
+    return (begin, end)
+
+
+def resolve_source_offsets(
+    project_dir: Path | None = None,
+    *,
+    max_offsets_per_node: int = 3,
+    min_overlap: int = 3,
+) -> int:
+    """Resolve source_offsets for knowledge nodes by finding sentence spans.
+
+    For each active knowledge node, finds the best-matching sentence spans
+    within transcript chunks from its source_sessions.  Stores character
+    offsets (begin, end) so retrieval can extract precise snippets instead
+    of formatting entire turns.
+
+    Returns the number of nodes updated.
+    """
+    loaded = _load_chunks_for_resolve(project_dir, include_text=True)
+    if loaded is None:
+        return 0
+
+    kn_path, session_chunks, nodes, db = loaded
+    pending_updates: dict[str, dict] = {}
+
+    try:
+        for node in nodes:
+            if node.source_offsets:
+                continue  # Already resolved
+
+            if not node.source_sessions:
+                continue
+
+            node_toks = _extract_keywords(node.content)
+            if len(node_toks) < 2:
+                continue
+
+            # Score chunks by token overlap, keep top candidates
+            candidates: list[tuple[str, int, str, int]] = []
+            for sid in node.source_sessions:
+                for tidx, text, chunk_toks in session_chunks.get(sid, []):
+                    overlap = len(node_toks & chunk_toks)
+                    if overlap >= min_overlap:
+                        candidates.append((sid, tidx, text, overlap))
+
+            if not candidates:
+                continue
+
+            candidates.sort(key=lambda x: x[3], reverse=True)
+
+            offsets: list[dict] = []
+            for sid, tidx, text, _ in candidates[:max_offsets_per_node]:
+                span = _find_best_span(node.content, text)
+                if span:
+                    offsets.append({
+                        "s": sid, "t": tidx,
+                        "b": span[0], "e": span[1],
+                    })
+
+            if offsets:
+                pending_updates[node.id] = {"source_offsets": offsets}
+    finally:
+        db.close()
+
+    if pending_updates:
+        batch_update_nodes(pending_updates, kn_path)
+
+    return len(pending_updates)
