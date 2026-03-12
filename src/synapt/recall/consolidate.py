@@ -292,6 +292,62 @@ def _is_generic_node(content: str) -> bool:
     return False
 
 
+# Patterns that detect garbled content where raw LLM structural metadata
+# leaked into the content field. Common with 3B models that fail to follow
+# the JSON schema and mix formatting/metadata into their output.
+_GARBLED_CONTENT_PATTERNS = [
+    re.compile(p) for p in [
+        # Source turn references stored as content
+        r"^Source turns?:\s",
+        # Raw LLM output with inline metadata (existing_id, contradiction_note)
+        r"\bexisting_id:\s",
+        r"\bcontradiction_note:\s",
+        # Content that's just a quoted duplicate with metadata annotation
+        r'^"[^"]+"\s+\((fact|preference|decision|convention|workflow|lesson-learned),\s+(corroborat|contradict)',
+        # Content that wraps another content string in quotes with category
+        r'^"[^"]+"\s+\([^)]*confidence:\s',
+        # Verified/corroborate annotations stored as content
+        r"\(fact\)\s*-\s*verified",
+    ]
+]
+
+
+def _is_garbled_content(content: str) -> bool:
+    """Return True if content looks like garbled LLM structural metadata."""
+    for pattern in _GARBLED_CONTENT_PATTERNS:
+        if pattern.search(content):
+            return True
+    return False
+
+
+# Pattern for section header prefixes that 3B models inject before content:
+# "LGBTQ+ Support: Caroline received...", "Art as Self-Expression: ..."
+# Only strip when the prefix is short (2-5 words) and the rest is a sentence.
+_SECTION_PREFIX_RE = re.compile(
+    r"^([A-Z][\w\s&+/-]{2,40}):\s+([A-Z])"
+)
+
+
+def _strip_section_prefix(content: str) -> str:
+    """Strip topic-label prefixes that 3B models inject before content.
+
+    Examples:
+        "LGBTQ+ Support: Caroline received support" → "Caroline received support"
+        "Art as Self-Expression: Caroline discussed art" → "Caroline discussed art"
+        "API: Use POST /api/users" → kept as-is (technical content)
+    """
+    m = _SECTION_PREFIX_RE.match(content)
+    if m:
+        prefix = m.group(1).strip()
+        # Only strip if prefix looks like a topic label (no technical terms)
+        # and the remainder is a real sentence (>20 chars)
+        remainder = content[m.end() - 1:]  # Include the capital letter
+        prefix_words = prefix.split()
+        if len(remainder) > 20 and 2 <= len(prefix_words) <= 5:
+            return remainder
+    return content
+
+
 # Default GOOD examples used when no existing knowledge nodes are available.
 # These are replaced dynamically by the project's own nodes when they exist.
 # IMPORTANT: These must be clearly generic/hypothetical so small models don't
@@ -808,6 +864,8 @@ def _apply_consolidation_result(
         content = scrub_text(_tw(str(raw_node.get("content", "")), 300))
         # Strip markdown formatting (bold/italic) that small models inject
         content = strip_markdown_formatting(content)
+        # Strip section header prefixes ("LGBTQ+ Support: ..." → "...")
+        content = _strip_section_prefix(content)
         category = scrub_text(str(raw_node.get("category", "workflow")))
         tags = raw_node.get("tags", [])
         if not isinstance(tags, list):
@@ -834,6 +892,12 @@ def _apply_consolidation_result(
         # Reject contamination from few-shot example placeholders
         if "[PersonA]" in content or "[PersonB]" in content:
             logger.info("Rejected example-contaminated node: %s", content[:80])
+            continue
+
+        # Reject garbled content from 3B parsing failures — raw LLM
+        # structural metadata leaked into content.
+        if action == "create" and _is_garbled_content(content):
+            logger.info("Rejected garbled node: %s", content[:80])
             continue
 
         if action == "corroborate":

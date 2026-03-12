@@ -22,6 +22,7 @@ from synapt.recall.consolidate import (
     _format_existing_knowledge,
     _format_journal_cluster,
     _get_project_context,
+    _is_garbled_content,
     _is_generic_node,
     _lacks_specificity,
     _load_response_cache,
@@ -614,6 +615,59 @@ class TestGenericFilterInApply(unittest.TestCase):
         self.assertEqual(result.nodes_created, 0)
         nodes = read_nodes(self.kn_path)
         self.assertEqual(len(nodes), 0)
+
+    def test_garbled_source_turns_rejected(self):
+        """Content that is just source turn references should be rejected."""
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": "Source turns: s011c00:5, s013c00:12",
+                "category": "fact",
+                "confidence": 0.6,
+                "tags": [],
+            }]
+        }
+        result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
+        self.assertEqual(result.nodes_created, 0)
+
+    def test_garbled_inline_metadata_rejected(self):
+        """Content with inline LLM metadata (existing_id, etc.) should be rejected."""
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": '"Caroline adopted a dog" (fact, corroborates "Caroline got a pet") (existing_id: 05e27ef8ff8e)',
+                "category": "fact",
+                "confidence": 0.6,
+                "tags": [],
+            }]
+        }
+        result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
+        self.assertEqual(result.nodes_created, 0)
+
+    def test_garbled_verified_annotation_rejected(self):
+        """Content with '(fact) - verified' annotation should be rejected."""
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": "Caroline adopted a child in 2025 (fact) - verified across 2+ sessions",
+                "category": "fact",
+                "confidence": 0.6,
+                "tags": [],
+            }]
+        }
+        result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
+        self.assertEqual(result.nodes_created, 0)
+
+    def test_garbled_detection_unit(self):
+        """Unit tests for _is_garbled_content patterns."""
+        assert _is_garbled_content("Source turns: s011c00:5, s013c00:12")
+        assert _is_garbled_content('existing_id: 05e27ef8ff8e')
+        assert _is_garbled_content('"X did Y" (fact, corroborates "X did Z")')
+        assert _is_garbled_content("X adopted a dog (fact) - verified across sessions")
+        # Non-garbled content should pass
+        assert not _is_garbled_content("Caroline adopted a rescue dog named Rex")
+        assert not _is_garbled_content("Melanie prefers hiking over camping")
+        assert not _is_garbled_content("API listens on port 5432")
 
     def test_specific_create_accepted(self):
         parsed = {
