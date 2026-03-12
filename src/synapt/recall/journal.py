@@ -6,7 +6,6 @@ Each entry records what was done, key decisions, and next steps.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import subprocess
 from dataclasses import dataclass, field, asdict
@@ -104,17 +103,18 @@ class JournalEntry:
 def append_entry(entry: JournalEntry, path: Path | None = None) -> Path:
     """Append a journal entry to the JSONL file.
 
-    Uses fcntl.flock for exclusive locking to prevent interleaved writes
+    Uses exclusive file locking to prevent interleaved writes
     when multiple processes append concurrently (e.g., background enrich
     + SessionEnd hook).
     """
     path = path or _journal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         f.write(json.dumps(entry.to_dict()) + "\n")
         f.flush()
-        # flock released on close
+        # lock released on close
     return path
 
 
@@ -216,8 +216,9 @@ def compact_journal(path: Path | None = None) -> int:
     # Open in "r+" (read-write, no truncate) so we can hold LOCK_EX on the
     # exact file descriptor we will rewrite.  All concurrent append_entry
     # callers flock the same path and will block until we close this fd.
+    from synapt.recall._filelock import lock_exclusive
     with open(path, "r+", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         # Check for empty file AFTER acquiring the lock.  stat() before open()
         # is a TOCTOU race: a concurrent append_entry could write between the
         # stat() and the flock(), causing us to miss newly written entries.

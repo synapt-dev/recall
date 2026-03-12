@@ -7,7 +7,6 @@ Nodes are also indexed in SQLite for FTS5 search.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import uuid
@@ -113,12 +112,13 @@ def compute_confidence(source_count: int, age_days: float = 0.0) -> float:
 def append_node(node: KnowledgeNode, path: Path | None = None) -> Path:
     """Append a knowledge node to the JSONL file.
 
-    Uses fcntl.flock for exclusive locking (same pattern as journal.py).
+    Uses exclusive file locking (same pattern as journal.py).
     """
     path = path or _knowledge_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         f.write(json.dumps(node.to_dict()) + "\n")
         f.flush()
     return path
@@ -231,8 +231,9 @@ def batch_update_nodes(
     if not to_append:
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
+    from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         for node in to_append:
             f.write(json.dumps(node.to_dict()) + "\n")
         f.flush()
@@ -256,9 +257,10 @@ def compact_knowledge(path: Path | None = None) -> int:
     if removed == 0:
         return 0
     deduped.sort(key=lambda n: n.created_at)
+    from synapt.recall._filelock import lock_exclusive
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         for node in deduped:
             f.write(json.dumps(node.to_dict()) + "\n")
         f.flush()
@@ -472,9 +474,10 @@ def dedup_knowledge_nodes(
             # Use the mutated in-memory version if available
             final.append(active_by_id.get(node.id, node))
         final.sort(key=lambda n: n.created_at)
+        from synapt.recall._filelock import lock_exclusive
         tmp = kn_path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            lock_exclusive(f)
             for node in final:
                 f.write(json.dumps(node.to_dict()) + "\n")
             f.flush()

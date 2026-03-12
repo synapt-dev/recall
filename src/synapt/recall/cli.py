@@ -146,8 +146,8 @@ def _acquire_build_lock(data_dir: Path, timeout: float = 60.0) -> "int | None":
     be acquired within *timeout* seconds (another build is running).
     """
     import errno
-    import fcntl
     import time
+    from synapt.recall._filelock import lock_exclusive_nb
 
     lock_path = data_dir / "build.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +155,7 @@ def _acquire_build_lock(data_dir: Path, timeout: float = 60.0) -> "int | None":
     deadline = time.monotonic() + timeout
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive_nb(fd)
             return fd
         except OSError as exc:
             # Only retry on lock contention; other errors are fatal
@@ -170,9 +170,9 @@ def _acquire_build_lock(data_dir: Path, timeout: float = 60.0) -> "int | None":
 
 def _release_build_lock(fd: int) -> None:
     """Release the build file lock."""
-    import fcntl
+    from synapt.recall._filelock import unlock
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock(fd)
     finally:
         os.close(fd)
 
