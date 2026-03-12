@@ -40,6 +40,16 @@ from synapt.recall.storage import RecallDB
 # Multiplier for knowledge nodes whose content matches query entities
 ENTITY_BOOST = 1.5
 
+# Category-intent alignment map: which knowledge node categories are most
+# relevant for each query intent. Used to boost aligned nodes by 1.5×.
+_CAT_INTENT_MAP: dict[str, set[str]] = {
+    "decision": {"decision", "lesson-learned"},
+    "debug": {"debugging", "lesson-learned"},
+    "factual": {"fact", "infrastructure", "convention"},
+    "procedural": {"workflow", "convention"},
+    "aggregation": {"fact", "preference"},
+}
+
 
 def format_size(size_bytes: int) -> str:
     """Format a byte count as a human-readable string (KB or MB)."""
@@ -1266,6 +1276,12 @@ class TranscriptIndex:
         #    where the AND query fails if the chunk uses "queer" instead.
         # 2. Entity-only search — catches chunks where entities co-occur
         #    but content words don't appear at all.
+        #
+        # For aggregation intent, entity-only search is the primary signal
+        # since content terms ("activities", "partake") are too abstract to
+        # match concrete answers ("plays guitar", "goes hiking"). Tier
+        # discounts are reduced to near-parity with Tier 1.
+        is_aggregation = intent == "aggregation"
         if query_entities:
             from synapt.recall.storage import (
                 _build_entity_anchored_query,
@@ -1279,7 +1295,8 @@ class TranscriptIndex:
 
             # Tier 2: Entity-anchored OR (entity AND (content1 OR content2 ...))
             # Discount: 0.95 — slightly below tier 1 (full AND) which has
-            # stronger co-occurrence signal.
+            # stronger co-occurrence signal. Aggregation: 0.98 (near-parity).
+            t2_discount = 0.98 if is_aggregation else 0.95
             if content_tokens:
                 anchored_q = _build_entity_anchored_query(entity_tokens, content_tokens)
                 if anchored_q:
@@ -1289,7 +1306,7 @@ class TranscriptIndex:
                         )
                         for rowid, score in anchored_rows:
                             if rowid not in seen_rowids:
-                                fts_results.append((rowid, score * 0.95))
+                                fts_results.append((rowid, score * t2_discount))
                                 seen_rowids.add(rowid)
                     except Exception:
                         logger.debug(
@@ -1303,6 +1320,9 @@ class TranscriptIndex:
             # chunks where both co-occur. But the answer often requires
             # combining facts from individual entity chunks (Jon's hobbies
             # from one session + Gina's hobbies from another).
+            # Aggregation: 0.95 discount (from 0.90) since per-entity is
+            # the primary gathering mechanism.
+            t25_discount = 0.95 if is_aggregation else 0.90
             if len(entity_tokens) >= 2 and content_tokens:
                 for ent in entity_tokens:
                     per_ent_q = _build_entity_anchored_query([ent], content_tokens)
@@ -1313,7 +1333,7 @@ class TranscriptIndex:
                             )
                             for rowid, score in per_ent_rows:
                                 if rowid not in seen_rowids:
-                                    fts_results.append((rowid, score * 0.90))
+                                    fts_results.append((rowid, score * t25_discount))
                                     seen_rowids.add(rowid)
                         except Exception:
                             logger.debug(
@@ -1325,19 +1345,26 @@ class TranscriptIndex:
             # Discount: 0.85 — weakest signal, just entity mention.
             # For multi-entity queries, search each entity individually
             # to avoid requiring co-occurrence.
+            # Aggregation: 0.95 discount and larger limits — entity-only
+            # is the primary retrieval mechanism for gathering scattered
+            # facts about a person/topic across many sessions.
+            t3_discount_multi = 0.95 if is_aggregation else 0.80
+            t3_discount_single = 0.95 if is_aggregation else 0.85
+            t3_limit_multi = max_chunks * 6 if is_aggregation else max_chunks * 3
+            t3_limit_single = max_chunks * 8 if is_aggregation else max_chunks * 5
             if len(entity_tokens) >= 2:
                 for ent in entity_tokens:
-                    ent_fts = self._db.fts_search(ent, limit=max_chunks * 3)
+                    ent_fts = self._db.fts_search(ent, limit=t3_limit_multi)
                     for rowid, score in ent_fts:
                         if rowid not in seen_rowids:
-                            fts_results.append((rowid, score * 0.80))
+                            fts_results.append((rowid, score * t3_discount_multi))
                             seen_rowids.add(rowid)
             else:
                 entity_query = " ".join(entity_tokens)
-                entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
+                entity_fts = self._db.fts_search(entity_query, limit=t3_limit_single)
                 for rowid, score in entity_fts:
                     if rowid not in seen_rowids:
-                        fts_results.append((rowid, score * 0.85))
+                        fts_results.append((rowid, score * t3_discount_single))
                         seen_rowids.add(rowid)
 
         # Convert rowids to chunk indices, applying date and depth filters
@@ -1845,10 +1872,29 @@ class TranscriptIndex:
         if not self._db:
             return []
         try:
+            # Aggregation queries gather facts scattered across many sessions,
+            # so widen the search net to surface more knowledge nodes.
+            search_mult = 4 if intent == "aggregation" else 2
             fts_hits = self._db.knowledge_fts_search(
-                query, limit=max_results * 2,
+                query, limit=max_results * search_mult,
                 include_historical=include_historical,
             )
+
+            # Aggregation entity-only search: for queries like "What activities
+            # does Melanie do?", content words ("activities", "do") are too
+            # abstract to match knowledge nodes ("plays guitar"). Search by
+            # entity name alone to gather all facts about the person/topic.
+            if intent == "aggregation" and query_entities:
+                seen_kn = {r for r, _ in fts_hits}
+                for ent in sorted(query_entities):
+                    ent_hits = self._db.knowledge_fts_search(
+                        ent, limit=max_results * 3,
+                        include_historical=include_historical,
+                    )
+                    for rowid, score in ent_hits:
+                        if rowid not in seen_kn:
+                            fts_hits.append((rowid, score * 0.90))
+                            seen_kn.add(rowid)
 
             # Hybrid: also search knowledge embeddings
             emb_hits: list[tuple[int, float]] = []
@@ -1858,7 +1904,7 @@ class TranscriptIndex:
                     q_emb = self._embed_provider.embed_single(query)
                     emb_hits = embedding_search(
                         q_emb, self._knowledge_embeddings,
-                        limit=max_results * 2,
+                        limit=max_results * search_mult,
                     )
                 except Exception:
                     pass
@@ -1925,10 +1971,13 @@ class TranscriptIndex:
                         if any(e in node_content.lower() for e in query_entities):
                             effective_boost *= ENTITY_BOOST
                     # Category-intent alignment: boost knowledge nodes whose
-                    # category matches the query intent (e.g. decision-category
-                    # nodes rank higher for decision queries).
+                    # category matches the query intent. This ensures that
+                    # decision queries surface decision nodes (not generic
+                    # tooling/architecture), debug queries surface debugging
+                    # nodes, etc.
                     node_cat = node.get("category", "")
-                    if intent == "decision" and node_cat == "decision":
+                    aligned_cats = _CAT_INTENT_MAP.get(intent, set())
+                    if node_cat in aligned_cats:
                         effective_boost *= 1.5
                     raw_score = score_map.get(rowid, 0.0)
                     node["base_score"] = raw_score

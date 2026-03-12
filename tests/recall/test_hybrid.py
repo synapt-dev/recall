@@ -182,8 +182,9 @@ class TestQueryIntentClassification:
 
     def test_factual_inference(self):
         """Inference questions about personality/traits need knowledge nodes."""
-        assert classify_query_intent("Would Caroline be considered religious") == "factual"
-        assert classify_query_intent("Would Melanie likely enjoy classical music") == "factual"
+        # "Would X be considered" → aggregation (needs multiple facts to infer)
+        assert classify_query_intent("Would Caroline be considered religious") == "aggregation"
+        assert classify_query_intent("Would Melanie likely enjoy classical music") == "aggregation"
         assert classify_query_intent("Did James have a girlfriend") == "factual"
         assert classify_query_intent("Is Deborah married") == "factual"
         assert classify_query_intent("Was James feeling lonely") == "factual"
@@ -207,13 +208,13 @@ class TestQueryIntentClassification:
         # "What [adj] [noun] is/was" — 2-word gap
         assert classify_query_intent("What card game is Deborah talking about") == "factual"
         # Modal questions — "What can/could/would [person]"
-        # "be" is a verb not a person → general (correct exclusion)
-        assert classify_query_intent("What would be a good hobby for Tim") == "general"
+        # "What would be" → aggregation (needs person's interests to infer)
+        assert classify_query_intent("What would be a good hobby for Tim") == "aggregation"
         assert classify_query_intent("What can Andrew do to improve his stress") == "factual"
         assert classify_query_intent("What electronic device could Evan gift Sam") == "factual"
         # Context prefix — "Based on" / "Considering"
-        assert classify_query_intent("Based on the conversation, did Calvin meet Dave") == "factual"
-        assert classify_query_intent("Considering their growth, what advice might they give") == "factual"
+        assert classify_query_intent("Based on the conversation, did Calvin meet Dave") == "aggregation"
+        assert classify_query_intent("Considering their growth, what advice might they give") == "aggregation"
         # "What X wouldn't" — negative conditionals
         assert classify_query_intent("What pets wouldn't cause discomfort to Joanna") == "factual"
 

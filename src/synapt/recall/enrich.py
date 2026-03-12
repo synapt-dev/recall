@@ -84,6 +84,10 @@ def _build_summary_from_chunks(
             parts.append(f"{turn} Tools: {', '.join(chunk.tools_used[:10])}")
         if chunk.files_touched:
             parts.append(f"{turn} Files: {', '.join(chunk.files_touched[:10])}")
+        # Include tool result content (truncated) — captures config values,
+        # URLs, command outputs that pure tool names miss.
+        if getattr(chunk, "tool_content", ""):
+            parts.append(f"{turn} Output: {chunk.tool_content[:300]}")
 
     text = "\n".join(parts)
     if len(text) > max_chars:

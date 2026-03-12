@@ -170,12 +170,18 @@ class TestBackendRegistry:
         assert client is sentinel
 
     def test_entry_point_discovery(self):
-        """synapt.backends entry points are discovered (Modal is installed)."""
+        """synapt.backends entry points are discovered when plugins installed."""
         import synapt.recall._model_router as router
-        # Entry point discovery happens lazily on first get_client()
         router._load_extra_backends()
-        # Modal backend should be discovered via synapt-private entry point
-        assert "modal" in router._extra_backends
+        # If synapt-private is editable-installed, modal backend is discovered.
+        # In CI (public repo only), no plugin backends are expected.
+        from importlib.metadata import entry_points
+        eps = entry_points(group="synapt.backends")
+        if any(ep.name == "modal" for ep in eps):
+            assert "modal" in router._extra_backends
+        else:
+            # No plugin backends installed — just verify loading didn't crash
+            assert isinstance(router._extra_backends, dict)
 
 
 class TestIsEncoderDecoder:

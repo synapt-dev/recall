@@ -67,7 +67,7 @@ def _load_extra_backends() -> None:
             )
 
 # Default models per architecture
-DEFAULT_DECODER_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+DEFAULT_DECODER_MODEL = "mlx-community/Ministral-3-3B-Instruct-2512-4bit"
 DEFAULT_ENCODER_DECODER_MODEL = "google/flan-t5-base"
 
 # Supported encoder-decoder models with their memory footprints

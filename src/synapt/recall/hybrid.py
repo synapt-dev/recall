@@ -312,6 +312,25 @@ _AGGREGATION_PATTERNS = re.compile(
     r"|in\s+what\s+ways"
     # "What X has Y" with aggregation verbs
     r"|what\s+\w+\s+(?:has|did|have)\s+\w+\s+(?:participated|attended|visited|done|made|taken|bought|read|seen|played|written|painted|cooked|practiced|adopted)"
+    # Inferential multi-hop: "Would X be/enjoy/prefer/want" — these need
+    # gathering multiple facts about a person to reason about.
+    # Exclude pronouns (you/he/she/they/it/we/I) to avoid false matches.
+    r"|would\s+(?!you\b|he\b|she\b|they\b|it\b|we\b|i\b)\w+\s+(?:be\b|enjoy|prefer|like|want|consider)"
+    r"|would\s+(?!you\b|he\b|she\b|they\b|it\b|we\b|i\b)\w+\s+\w+\s+(?:be\b|enjoy|prefer|like|want)"
+    # "What might X's Y be" / "What could X do"
+    r"|what\s+(?:might|could|would)\s+\w+'?s?\s+\w+"
+    # "What attributes/traits/personality describe X"
+    r"|what\s+(?:attributes?|traits?|personality|characteristics?)\s+(?:describe|of)\s+\w+"
+    # "Is it likely that X" / "Is X likely to"
+    r"|is\s+(?:it\s+)?likely\s+that\s+\w+"
+    # "What advice might X give" / "Considering X, what"
+    r"|considering\s+(?:their|his|her|the)\s+\w+"
+    # "What X could/would Y" (e.g., "What career could Andrew pursue")
+    r"|what\s+\w+\s+(?:could|would|might)\s+\w+\s+\w+"
+    # "Based on X, what/which" (requires gathering facts to infer)
+    r"|based\s+on\s+(?:the\s+)?(?:conversation|their|his|her|\w+'s)"
+    # "Who is X?" when X is a name (needs all mentions)
+    r"|who\s+is\s+[A-Z]\w+"
     r")\b",
     re.IGNORECASE,
 )
@@ -410,7 +429,9 @@ def intent_search_params(intent: str) -> dict:
         }
     elif intent == "aggregation":
         return {
-            "knowledge_boost": 1.5,    # Moderate — knowledge with source_turns helps
+            "knowledge_boost": 2.5,    # High — knowledge nodes contain extracted facts
+                                       # that directly answer inferential questions.
+                                       # A/B test showed 1.5 hurt vs factual's 3.0.
             "half_life": 0.0,          # All timeframes matter for aggregation
             "emb_weight": 2.0,         # Semantic matching finds scattered mentions
         }
