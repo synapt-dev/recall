@@ -109,13 +109,17 @@ def _dev_serve():
 
     Uses threading to proxy stdin/stdout between parent and child
     without blocking the file watcher.
+
+    Note: MCP protocol state is lost on reload — the client must
+    re-initialize after a restart. This is acceptable for dev mode
+    where the developer manually re-invokes tools.
     """
     import subprocess
     import threading
     import time
 
     try:
-        from watchfiles import watch, Change
+        from watchfiles import watch
     except ImportError:
         print(
             "watchfiles is required for --dev mode: pip install watchfiles",
@@ -137,9 +141,12 @@ def _dev_serve():
 
     child: subprocess.Popen | None = None
     stop_event = threading.Event()
+    # Signals proxy threads to stop for the current child cycle
+    child_stop = threading.Event()
 
     def start_child():
         nonlocal child
+        child_stop.clear()
         # Spawn ourselves without --dev to run the actual server
         cmd = [sys.executable, "-m", "synapt.server"]
         child = subprocess.Popen(
@@ -152,9 +159,9 @@ def _dev_serve():
         return child
 
     def proxy_stdin(proc):
-        """Forward parent stdin → child stdin."""
+        """Forward parent stdin -> child stdin."""
         try:
-            while not stop_event.is_set() and proc.poll() is None:
+            while not child_stop.is_set() and proc.poll() is None:
                 data = sys.stdin.buffer.read1(8192)
                 if not data:
                     break
@@ -164,9 +171,9 @@ def _dev_serve():
             pass
 
     def proxy_stdout(proc):
-        """Forward child stdout → parent stdout."""
+        """Forward child stdout -> parent stdout."""
         try:
-            while not stop_event.is_set() and proc.poll() is None:
+            while not child_stop.is_set() and proc.poll() is None:
                 data = proc.stdout.read1(8192)
                 if not data:
                     break
@@ -175,8 +182,16 @@ def _dev_serve():
         except (BrokenPipeError, OSError):
             pass
 
-    def kill_child():
+    def monitor_child(proc, crash_event):
+        """Watch for unexpected child death and signal the watcher."""
+        proc.wait()
+        if not child_stop.is_set():
+            dev_log.warning("Server crashed (pid %d, exit %d)", proc.pid, proc.returncode)
+            crash_event.set()
+
+    def kill_child(stdin_thread=None, stdout_thread=None):
         nonlocal child
+        child_stop.set()
         if child and child.poll() is None:
             child.terminate()
             try:
@@ -185,11 +200,22 @@ def _dev_serve():
                 child.kill()
                 child.wait()
             dev_log.info("Server stopped (pid %d)", child.pid)
+        # Wait for proxy threads to drain before starting new ones
+        if stdin_thread and stdin_thread.is_alive():
+            stdin_thread.join(timeout=2)
+        if stdout_thread and stdout_thread.is_alive():
+            stdout_thread.join(timeout=2)
         child = None
 
     def handle_sigterm(signum, frame):
         stop_event.set()
-        kill_child()
+        child_stop.set()
+        if child and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
         os._exit(0)
 
     signal.signal(signal.SIGTERM, handle_sigterm)
@@ -199,6 +225,9 @@ def _dev_serve():
         while not stop_event.is_set():
             proc = start_child()
 
+            # Event set when the child crashes unexpectedly
+            crash_event = threading.Event()
+
             # Start proxy threads
             stdin_thread = threading.Thread(
                 target=proxy_stdin, args=(proc,), daemon=True,
@@ -206,17 +235,25 @@ def _dev_serve():
             stdout_thread = threading.Thread(
                 target=proxy_stdout, args=(proc,), daemon=True,
             )
+            monitor_thread = threading.Thread(
+                target=monitor_child, args=(proc, crash_event), daemon=True,
+            )
             stdin_thread.start()
             stdout_thread.start()
+            monitor_thread.start()
 
-            # Watch for changes — blocks until a .py file changes
-            # or the child process dies unexpectedly
+            # Watch for changes — blocks until a .py file changes,
+            # the child crashes, or stop_event is set
             restarted = False
             for changes in watch(
                 *watch_paths,
                 watch_filter=lambda change, path: path.endswith(".py"),
                 stop_event=stop_event,
+                raise_interrupt=False,
             ):
+                if crash_event.is_set():
+                    dev_log.info("Child crashed, restarting")
+                    break
                 changed_files = [
                     os.path.basename(p) for _, p in changes
                 ]
@@ -224,18 +261,30 @@ def _dev_serve():
                     "Detected changes: %s — restarting server",
                     ", ".join(changed_files[:5]),
                 )
-                kill_child()
                 restarted = True
-                # Brief pause for filesystem to settle
-                time.sleep(0.2)
                 break  # Exit watch loop to restart
+
+            # Also restart if crash happened while no file changes
+            if crash_event.is_set():
+                restarted = True
+
+            kill_child(stdin_thread, stdout_thread)
 
             if not restarted:
                 # Watch ended without restart (stop_event or error)
                 break
 
+            # Brief pause for filesystem to settle
+            time.sleep(0.3)
+
     finally:
-        kill_child()
+        child_stop.set()
+        if child and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
 
 
 def main():
