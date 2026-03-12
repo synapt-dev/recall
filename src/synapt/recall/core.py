@@ -517,7 +517,10 @@ def parse_transcript(
                 logger.debug("scrub_text failed on tool content, using raw", exc_info=True)
         if len(tool_content) > 3000:
             tool_content = tool_content[:3000] + "..."
-        short_id = session_id[:8]
+        # Short prefix for chunk IDs. UUID session IDs (32+ hex chars)
+        # always have unique 8-char prefixes. For shorter/synthetic IDs
+        # (e.g. "session_001"), use the full ID to avoid collisions.
+        short_id = session_id[:8] if len(session_id) >= 16 else session_id
         chunk = TranscriptChunk(
             id=f"{short_id}:t{turn_index}",
             session_id=session_id,
