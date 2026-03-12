@@ -321,6 +321,22 @@ class TestQueryIntentClassification:
         decision_params = intent_search_params("decision")
         assert "max_knowledge" in decision_params
 
+    def test_decision_intent_classification(self):
+        """Decision queries should be classified correctly."""
+        assert classify_query_intent("what decisions did we make") == "decision"
+        assert classify_query_intent("why did we choose TypeScript") == "decision"
+        assert classify_query_intent("Stripe vs RevenueCat tradeoffs") == "decision"
+        assert classify_query_intent("what did we switch to") == "decision"
+
+    def test_decision_params_prefer_journals(self):
+        """Decision params should de-boost knowledge and boost embeddings."""
+        decision_params = intent_search_params("decision")
+        general_params = intent_search_params("general")
+        # Knowledge boost lower → journal entries rank higher
+        assert decision_params["knowledge_boost"] < general_params["knowledge_boost"]
+        # Embedding weight higher → semantic matching for paraphrased decisions
+        assert decision_params["emb_weight"] > general_params["emb_weight"]
+
 
 # ---------------------------------------------------------------------------
 # Temporal date extraction
