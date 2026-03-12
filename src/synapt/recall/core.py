@@ -1126,6 +1126,9 @@ class TranscriptIndex:
             kb_default = params.get("knowledge_boost", kb_default)
             if not caller_set_half_life:
                 half_life = params.get("half_life", half_life)
+            # Intent-based max_knowledge (only if caller didn't set it)
+            if max_knowledge is None and "max_knowledge" in params:
+                max_knowledge = params["max_knowledge"]
 
             # Auto-extract date range from temporal expressions in query
             # (only when caller didn't provide explicit date filters)

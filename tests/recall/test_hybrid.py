@@ -189,6 +189,34 @@ class TestQueryIntentClassification:
         assert classify_query_intent("Was James feeling lonely") == "factual"
         assert classify_query_intent("Does John live close to a beach") == "factual"
 
+    def test_factual_expanded(self):
+        """Expanded factual patterns: negation, modals, comparisons, possessives."""
+        # "Why didn't X" — causal reasoning
+        assert classify_query_intent("Why didn't John want to go to Starbucks") == "factual"
+        # "Are X and Y [predicate]" — comparison
+        assert classify_query_intent("Are John and James fans of the same football team") == "factual"
+        # "Does X [expanded verbs]" — broader verb coverage
+        assert classify_query_intent("Does Calvin wish to become more popular") == "factual"
+        assert classify_query_intent("Does Calvin love music tours") == "factual"
+        # "Does X's Y [verb]" — possessive subjects
+        assert classify_query_intent("Does Dave's shop employ a lot of people") == "factual"
+        # "Did X and Y [verb]" — compound subjects
+        assert classify_query_intent("Did John and James study together") == "factual"
+        # "Is the [noun] who" — identity questions
+        assert classify_query_intent("Is the friend who wrote Deborah the quote alive") == "factual"
+        # "What [adj] [noun] is/was" — 2-word gap
+        assert classify_query_intent("What card game is Deborah talking about") == "factual"
+        # Modal questions — "What can/could/would [person]"
+        # "be" is a verb not a person → general (correct exclusion)
+        assert classify_query_intent("What would be a good hobby for Tim") == "general"
+        assert classify_query_intent("What can Andrew do to improve his stress") == "factual"
+        assert classify_query_intent("What electronic device could Evan gift Sam") == "factual"
+        # Context prefix — "Based on" / "Considering"
+        assert classify_query_intent("Based on the conversation, did Calvin meet Dave") == "factual"
+        assert classify_query_intent("Considering their growth, what advice might they give") == "factual"
+        # "What X wouldn't" — negative conditionals
+        assert classify_query_intent("What pets wouldn't cause discomfort to Joanna") == "factual"
+
     def test_debug(self):
         assert classify_query_intent("why did the build fail") == "debug"
         assert classify_query_intent("error in the deployment") == "debug"
@@ -276,6 +304,22 @@ class TestQueryIntentClassification:
         temporal_params = intent_search_params("temporal")
         general_params = intent_search_params("general")
         assert temporal_params["knowledge_boost"] < general_params["knowledge_boost"]
+
+    def test_temporal_has_max_knowledge_cap(self):
+        """Temporal queries should cap knowledge to leave room for raw chunks."""
+        temporal_params = intent_search_params("temporal")
+        assert "max_knowledge" in temporal_params
+        assert temporal_params["max_knowledge"] <= 5
+
+    def test_factual_has_no_max_knowledge_cap(self):
+        """Factual queries should NOT cap knowledge — knowledge nodes are primary."""
+        factual_params = intent_search_params("factual")
+        assert "max_knowledge" not in factual_params
+
+    def test_decision_has_max_knowledge_cap(self):
+        """Decision queries prefer journal entries, so knowledge is capped."""
+        decision_params = intent_search_params("decision")
+        assert "max_knowledge" in decision_params
 
 
 # ---------------------------------------------------------------------------

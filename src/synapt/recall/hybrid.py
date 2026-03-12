@@ -196,7 +196,8 @@ _FACTUAL_PATTERNS = re.compile(
     r"favou?rite|prefer|name[ds]?|"
     # Inference about personality/traits — need knowledge nodes
     r"would\s+\w+\s+(?:\w+\s+)?(be|enjoy|like|want|have|prefer|consider|pursue|go|live|move)|"
-    r"does\s+\w+\s+(live|have|enjoy|like|prefer|own)|"
+    r"does\s+\w+\s+(live|have|enjoy|like|prefer|own|wish|want|love|need|know|think|believe|feel)|"
+    r"does\s+\w+'?s?\s+(?:\w+\s+)?(?:employ|wish|want|love|need)|"
     r"what\s+(?:might|would|could)\s+\w+'?s?\s+\w+\s+(?:\w+\s+)?be|"
     r"what\s+\w+\s+(?:might|would)\s+\w+\s+(?:pursue|do|be|have|enjoy|cause)|"
     r"what\s+attributes|what\s+personality|what\s+traits|"
@@ -204,7 +205,33 @@ _FACTUAL_PATTERNS = re.compile(
     r"is\s+it\s+likely\s+that|"
     # Yes/no factual questions about people
     r"(?:did|was|is|are)\s+\w+\s+(?:married|single|alive|religious|patriotic|happy|lonely|feeling|fan)|"
-    r"did\s+\w+\s+(?:have|study|want|go|live|enjoy|play))\b",
+    r"did\s+\w+\s+(?:have|study|want|go|live|enjoy|play)|"
+    # "Did X and Y verb" — compound subjects
+    r"did\s+\w+\s+and\s+\w+\s+(?:study|play|go|work|meet|live|share|have|visit)|"
+    # "Why didn't/doesn't X" — causal questions needing knowledge
+    r"why\s+(?:didn|doesn|don|won|can|isn|wasn)'?t\s+\w+|"
+    # "Are X and Y [predicate]" — comparison/factual
+    r"are\s+\w+\s+and\s+\w+\s+\w+|"
+    # "What [adj] [noun] is/was X" — 2-word gap between what and verb
+    r"what\s+\w+\s+\w+\s+(?:is|was|are|were)\s+\w+|"
+    # "Is the [noun] who" — identity questions
+    r"is\s+the\s+\w+\s+who|"
+    # Inference with context prefix — require "the" or multi-word continuation
+    r"(?:based\s+on|considering|in\s+light\s+of)\s+(?:the|their|his|her|our)\s+\w+|"
+    # Modal questions — "What can/could/would [person] do"
+    # Exclude impersonal pronouns and common verbs (go, be, happen, etc.)
+    r"what\s+(?:\w+\s+){0,2}(?:can|could|would)\s+(?!I\b|it\b|we\b|you\b|they\b|that\b|this\b|go\b|be\b|do\b|get\b|have\b|happen\b|help\b|cause\b|make\b|work\b|stop\b|change\b|lead\b|take\b|turn\b|break\b|fail\b)\w{2,}|"
+    # "What X wouldn't" — negative conditionals
+    r"what\s+\w+\s+wouldn'?t|"
+    # "How did/does [person]" — personal event/behavior questions
+    # Exclude impersonal subjects and common-noun suffixes (-ment, -tion, etc.)
+    r"how\s+did\s+(?!we\b|it\b|they\b|that\b|this\b|the\b)\w{2,}(?<!ment)(?<!tion)(?<!sion)(?<!ness)(?<!ance)(?<!ence)(?<!ing)|"
+    r"how\s+does\s+(?!it\b|they\b|that\b|this\b|the\b)\w{2,}(?<!ment)(?<!tion)(?<!sion)(?<!ness)(?<!ance)(?<!ence)(?<!ing)|"
+    # "What inspired/motivated/made X" — causal personal questions
+    r"what\s+(?:inspired|motivated|sparked|made)\s+\w+|"
+    r"what\s+(?:gave|helps|fuels|gives)\s+\w+|"
+    # "Have X and Y [done something]" — compound subject factual
+    r"have\s+\w+\s+and\s+\w+)\b",
     re.IGNORECASE,
 )
 
@@ -242,8 +269,8 @@ _EXPLORATORY_PATTERNS = re.compile(
 )
 
 _PROCEDURAL_PATTERNS = re.compile(
-    r"\b(how\s+(do|to|should)|step|process|workflow|procedure|"
-    r"deploy|setup|install|configure|migrate|run|build|test)\b",
+    r"\b(how\s+(do|to|should)|steps?|process|workflow|procedure|"
+    r"deploy(?:ed|ing|s)?|setup|install(?:ed|ing|s)?|configur(?:e|ed|ing|es)|migrat(?:e|ed|ing|ion)|run|build|test)\b",
     re.IGNORECASE,
 )
 
@@ -346,6 +373,7 @@ def intent_search_params(intent: str) -> dict:
             "knowledge_boost": 0.5,    # De-prioritize knowledge — temporal needs sequences
             "half_life": 0.0,          # No recency decay — all timeframes matter
             "emb_weight": 1.0,         # Balanced
+            "max_knowledge": 3,        # Cap knowledge — temporal needs raw transcript
         }
     elif intent == "factual":
         return {
@@ -356,14 +384,16 @@ def intent_search_params(intent: str) -> dict:
     elif intent == "debug":
         return {
             "knowledge_boost": 1.0,    # Normal knowledge weight
-            "half_life": 14.0,         # Strong recency — recent errors matter most
+            "half_life": 30.0,         # Moderate recency — recent errors matter but not exclusively
             "emb_weight": 0.8,         # Exact terms matter more for errors
+            "max_knowledge": 5,        # Cap knowledge — raw error traces matter more
         }
     elif intent == "decision":
         return {
             "knowledge_boost": 0.8,    # De-boost knowledge — prefer raw journal entries
             "half_life": 30.0,         # Decisions are timeless but recent ones matter
             "emb_weight": 1.5,         # Semantic matching important
+            "max_knowledge": 3,        # Cap knowledge — journal entries preferred
         }
     elif intent == "exploratory":
         return {
