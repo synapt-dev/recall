@@ -109,16 +109,16 @@ Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversatio
 | System | Multi-Hop | Temporal | Single-Hop | Open-Domain | **Overall** | Infra |
 |--------|-----------|----------|------------|-------------|-------------|-------|
 | Full-Context | — | — | — | — | **72.90** | upper bound |
-| **synapt** | **60.99** | 57.32 | 57.29 | **78.12** | **69.35** | **local 3B model** |
+| **synapt** | **63.83** | **61.99** | 59.38 | **80.62** | **72.34** | **local 8B model** |
 | Mem0+Graph | 47.19 | 58.13 | 65.71 | 75.71 | 68.44 | cloud GPT-4 |
 | Mem0 | 51.15 | 55.51 | 67.13 | 72.93 | 66.88 | cloud GPT-4 |
 | Zep | 41.35 | 49.31 | 61.70 | 76.60 | 65.99 | cloud service |
 | LangMem | 47.92 | 23.43 | 62.23 | 71.12 | 58.10 | cloud |
 | OpenAI Memory | 42.92 | 21.71 | 63.79 | 62.29 | 52.90 | cloud |
 
-Synapt scores **69.35% overall** — beating Mem0+Graph (68.44%), Zep (65.99%), and all other tested systems — while running entirely locally on a 3B parameter model with no cloud API calls.
+Synapt scores **72.34% overall** — beating Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%), and all other tested systems — while running entirely locally with Ministral 8B for enrichment (no cloud API calls).
 
-**Best-in-class**: Open-domain (78.12%) and multi-hop (60.99%) — highest of any system tested, including those using GPT-4 for memory extraction.
+**Best-in-class**: Open-domain (80.62%) and multi-hop (63.83%) — highest of any system tested, including those using GPT-4 for memory extraction.
 
 ## How search works
 
