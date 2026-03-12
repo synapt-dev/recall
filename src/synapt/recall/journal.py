@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from synapt.recall.core import project_worktree_dir, project_index_dir, project_transcript_dir
+from synapt.recall._llm_util import truncate_at_word as _tw
 
 # Paths that are always noise in journal file lists
 _NOISE_PATH_SEGMENTS = ("/.claude/", "/private/tmp/")
@@ -492,7 +493,7 @@ def synthesize_journal_stubs(
         for chunk in sorted_chunks:
             msg = strip_system_artifacts(chunk.user_text.strip())
             if msg:
-                focus = msg[:200]
+                focus = _tw(msg, 200)
                 break
 
         # Collect all files touched, filtering noise paths

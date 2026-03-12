@@ -34,6 +34,7 @@ from synapt.recall.core import (
     format_size,
     project_index_dir,
 )
+from synapt.recall._llm_util import truncate_at_word as _tw
 
 # ---------------------------------------------------------------------------
 # MCP instructions — shared with the unified server (synapt.server)
@@ -721,7 +722,7 @@ def _apply_supersession(
     # Create replacement node
     new_node = {
         "id": new_id,
-        "content": new_content[:300],
+        "content": _tw(new_content, 300),
         "category": category or old_node.get("category", "workflow"),
         "confidence": old_node.get("confidence", 0.5),
         "source_sessions": source_sessions or old_node.get("source_sessions", []),

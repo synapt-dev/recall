@@ -1,6 +1,6 @@
 """Tests for LLM response parsing utilities."""
 
-from synapt.recall._llm_util import parse_llm_json
+from synapt.recall._llm_util import parse_llm_json, truncate_at_word
 
 
 def test_parse_clean_json():
@@ -140,3 +140,41 @@ def test_repair_truncated_dict_no_useful_keys():
     response = '{"random_key": "value", "other'
     result = parse_llm_json(response)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# truncate_at_word
+# ---------------------------------------------------------------------------
+
+def test_truncate_short_text_unchanged():
+    assert truncate_at_word("hello world", 50) == "hello world"
+
+def test_truncate_at_word_boundary():
+    text = "Configure xcconfig file with build targets"
+    result = truncate_at_word(text, 25)
+    assert result == "Configure xcconfig file"
+    # Should not end mid-word
+    assert not result.endswith("fi") and not result.endswith("wit")
+
+def test_truncate_no_mid_word_cut():
+    text = "a" * 50 + " " + "b" * 50
+    result = truncate_at_word(text, 55)
+    assert result == "a" * 50
+    assert not result.endswith("b")
+
+def test_truncate_exact_limit():
+    text = "hello world"
+    assert truncate_at_word(text, 11) == "hello world"
+
+def test_truncate_single_long_word():
+    """If no space found in reasonable range, truncate hard."""
+    text = "x" * 400
+    result = truncate_at_word(text, 300)
+    assert len(result) == 300
+
+def test_truncate_preserves_content():
+    text = "Use --iters 500 for cloud training to prevent truncation artifacts"
+    result = truncate_at_word(text, 40)
+    # Should end at a word boundary within limit
+    assert result[-1] != " "
+    assert len(result) <= 40

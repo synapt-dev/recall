@@ -28,6 +28,7 @@ from synapt.recall.core import (
     all_worktree_archive_dirs,
 )
 from synapt.recall.scrub import scrub_text
+from synapt.recall._llm_util import truncate_at_word as _tw
 
 logger = logging.getLogger("synapt.recall.enrich")
 
@@ -297,10 +298,10 @@ def enrich_entry(
         timestamp=entry.timestamp,
         session_id=entry.session_id,
         branch=entry.branch,
-        focus=_s(str(parsed.get("focus", entry.focus))[:200]),
-        done=[_s(str(d)[:100]) for d in parsed.get("done", []) if d][:5],
-        decisions=[_s(str(d)[:100]) for d in parsed.get("decisions", []) if d][:3],
-        next_steps=[_s(str(d)[:100]) for d in parsed.get("next_steps", []) if d][:3],
+        focus=_s(_tw(str(parsed.get("focus", entry.focus)), 200)),
+        done=[_s(_tw(str(d), 100)) for d in parsed.get("done", []) if d][:5],
+        decisions=[_s(_tw(str(d), 100)) for d in parsed.get("decisions", []) if d][:3],
+        next_steps=[_s(_tw(str(d), 100)) for d in parsed.get("next_steps", []) if d][:3],
         files_modified=entry.files_modified,
         git_log=entry.git_log,
         auto=False,

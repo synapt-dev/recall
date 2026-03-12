@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from synapt.recall.core import project_data_dir
+from synapt.recall._llm_util import truncate_at_word as _tw
 
 
 VALID_CATEGORIES = frozenset({
@@ -80,7 +81,7 @@ class KnowledgeNode:
         now = datetime.now(timezone.utc).isoformat()
         return cls(
             id=_new_id(),
-            content=content[:300],
+            content=_tw(content, 300),
             category=category if category in VALID_CATEGORIES else "workflow",
             confidence=max(0.0, min(1.0, confidence)),
             source_sessions=source_sessions or [],

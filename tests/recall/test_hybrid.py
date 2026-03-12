@@ -185,6 +185,12 @@ class TestQueryIntentClassification:
         assert classify_query_intent("error in the deployment") == "debug"
         assert classify_query_intent("crash when loading the model") == "debug"
 
+    def test_decision(self):
+        assert classify_query_intent("important product decisions") == "decision"
+        assert classify_query_intent("Stripe vs RevenueCat") == "decision"
+        assert classify_query_intent("why did we chose Stripe") == "decision"
+        assert classify_query_intent("tradeoffs we considered") == "decision"
+
     def test_exploratory(self):
         assert classify_query_intent("how did we solve the auth problem") == "exploratory"
         assert classify_query_intent("what did we try for caching") == "exploratory"
@@ -212,11 +218,16 @@ class TestQueryIntentClassification:
 
     def test_intent_params_keys(self):
         """All intents return the expected parameter keys."""
-        for intent in ["temporal", "factual", "debug", "exploratory", "procedural", "general"]:
+        for intent in ["temporal", "factual", "debug", "decision", "exploratory", "procedural", "general"]:
             params = intent_search_params(intent)
             assert "knowledge_boost" in params
             assert "half_life" in params
             assert "emb_weight" in params
+
+    def test_decision_has_low_knowledge_boost(self):
+        """Decision queries should prefer journal entries over knowledge nodes."""
+        decision_params = intent_search_params("decision")
+        assert decision_params["knowledge_boost"] < 1.0
 
     def test_debug_has_short_half_life(self):
         """Debug queries should have shorter half_life (recency matters)."""
