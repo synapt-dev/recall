@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re as _re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -396,14 +397,16 @@ def create_summary_client() -> object | None:
     return get_client(RecallTask.SUMMARIZE, max_tokens=MAX_SUMMARY_TOKENS)
 
 
-import re as _re
-
 # Pattern for CamelCase identifiers (class names, handler names, etc.)
+# Matches two+ capitalized words joined together: FarewellHandler, ConnectionPool
 _CAMELCASE_RE = _re.compile(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b")
-# Common English words that happen to look CamelCase (false positives)
+# Well-known CamelCase names that should not be flagged as hallucinations.
+# Only includes names actually matched by _CAMELCASE_RE (two+ Cap segments).
 _COMMON_CAMELCASE = frozenset({
-    "GitHub", "JavaScript", "TypeScript", "PostgreSQL", "MongoDB",
-    "FastAPI", "NextJs", "NodeJs", "GraphQL", "WebSocket",
+    "WebSocket", "IntelliJ", "PyCharm", "JetBrains", "PyTorch",
+    "TensorFlow", "HuggingFace", "DataFrame", "DataLoader",
+    "GitLab", "BitBucket", "CloudRun", "StackOverflow",
+    "OpenAI", "LangChain", "NumPy", "SciPy",
 })
 
 

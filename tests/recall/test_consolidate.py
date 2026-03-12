@@ -508,8 +508,8 @@ class TestIsGenericNode(unittest.TestCase):
 
     def test_rejects_generic_config(self):
         """Generic config file knowledge."""
-        self.assertTrue(_is_generic_node("Use settings.gradle for the build"))
-        self.assertTrue(_is_generic_node("Configure build.gradle for dependencies"))
+        self.assertTrue(_is_generic_node("Configure settings.gradle for the build"))
+        self.assertTrue(_is_generic_node("Set up pyproject.toml for the project"))
 
     def test_rejects_generic_workflow(self):
         """Generic workflow advice."""
@@ -517,10 +517,12 @@ class TestIsGenericNode(unittest.TestCase):
         self.assertTrue(_is_generic_node("Handle errors gracefully"))
         self.assertTrue(_is_generic_node("Keep dependencies up to date"))
 
-    def test_accepts_specific_config(self):
-        """Config with specific versions/pins should pass."""
-        self.assertFalse(_is_generic_node("Use settings.gradle with pinned version 1.3.8"))
-        self.assertFalse(_is_generic_node("Configure build.gradle with specific compileSdk 34"))
+    def test_tool_tautology_accepts_specific(self):
+        """Tool-tautology patterns should NOT reject content with specificity signals."""
+        self.assertFalse(_is_generic_node("Use pip to install synapt[dev] from local path"))
+        self.assertFalse(_is_generic_node("Use pytest to test with -x flag for fail-fast"))
+        self.assertFalse(_is_generic_node("Use npm to install @types/react@18.2"))
+        self.assertFalse(_is_generic_node("Use gradle to build the :app:debug variant with --stacktrace"))
 
 
 class TestLacksSpecificity(unittest.TestCase):
@@ -590,6 +592,22 @@ class TestGenericFilterInApply(unittest.TestCase):
                 "category": "tooling",
                 "confidence": 0.7,
                 "tags": ["docker"],
+            }]
+        }
+        result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
+        self.assertEqual(result.nodes_created, 0)
+        nodes = read_nodes(self.kn_path)
+        self.assertEqual(len(nodes), 0)
+
+    def test_low_specificity_create_rejected(self):
+        """Short content without specificity signals should be rejected."""
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": "Store secrets in environment variables for safety",
+                "category": "convention",
+                "confidence": 0.7,
+                "tags": [],
             }]
         }
         result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)

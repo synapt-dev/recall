@@ -1277,12 +1277,12 @@ class TestNovelEntities:
         assert "FarewellHandler" in novel
 
     def test_common_camelcase_not_flagged(self):
-        """Well-known tools like GitHub, JavaScript should not be flagged."""
-        summary = "The team uses GitHub for version control and JavaScript for frontend."
-        source = "team uses version control and frontend code"
+        """Well-known tools like PyTorch, TensorFlow should not be flagged."""
+        summary = "The pipeline uses PyTorch with TensorFlow integration."
+        source = "pipeline uses machine learning for training"
         novel = _novel_entities(summary, source)
-        assert "GitHub" not in novel
-        assert "JavaScript" not in novel
+        assert "PyTorch" not in novel
+        assert "TensorFlow" not in novel
 
     def test_entity_present_in_source(self):
         """Entity that appears in source (case-insensitive) is not novel."""

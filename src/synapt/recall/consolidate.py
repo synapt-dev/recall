@@ -70,18 +70,19 @@ _GENERIC_PATTERNS = [
         r"(?i)^(always |never )?(keep|write) (code|functions|methods) (short|small|simple|clean)\b",
         r"(?i)^(always |never )?use gpu\b(?!.*\b(a100|a10g|l4|t4|h100)\b)",
         r"(?i)^(always |never )?use a? ?consistent naming",
-        # Tool-tautology: "Use [tool] for [what that tool obviously does]"
-        r"(?i)^use (gradlew?|gradle) (for|to) (build|compile|run)",
-        r"(?i)^use (npm|yarn|pnpm|bun) (for|to) (install|manage|run)",
-        r"(?i)^use (pip|poetry|uv|conda) (for|to) (install|manage)",
-        r"(?i)^use (git|github|gitlab) (for|to) (track|manage|version|store)",
-        r"(?i)^use (make|cmake|bazel) (for|to) (build|compile)",
-        r"(?i)^use (pytest|jest|mocha|junit) (for|to) (test|run tests)",
-        r"(?i)^use (eslint|flake8|ruff|pylint|clippy) (for|to) (lint|check|format)",
-        r"(?i)^use (prettier|black|gofmt|rustfmt) (for|to) (format|style)",
-        # Generic config/setup knowledge
-        r"(?i)^(use|configure|set up) (settings\.gradle|build\.gradle|package\.json|pyproject\.toml|cargo\.toml)\b(?!.*\b(version|pin|specific))",
-        r"(?i)^(create|add|define) (a )?(dockerfile|makefile|ci pipeline|github action)\s+(for|to)\b",
+        # Tool-tautology: "Use [tool] for/to [primary purpose]" with NO extra
+        # specificity signals.  The negative lookahead prevents false positives
+        # when the sentence includes flags, paths, packages, or versions.
+        r"(?i)^use (gradlew?|gradle) (for|to) (build|compil|runn?)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (npm|yarn|pnpm|bun) (for|to) (install|manag|runn?)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (pip|poetry|uv|conda) (for|to) (install|manag)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (git|github|gitlab) (for|to) (track|manag|version|stor)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (make|cmake|bazel) (for|to) (build|compil)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (pytest|jest|mocha|junit) (for|to) (test|run tests|testing)\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (eslint|flake8|ruff|pylint|clippy) (for|to) (lint|check|format)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (prettier|black|gofmt|rustfmt) (for|to) (format|styl)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        # Generic config/setup knowledge (no specific details)
+        r"(?i)^(use|configure|set up) (settings\.gradle|build\.gradle|package\.json|pyproject\.toml|cargo\.toml)\s+(for|to)\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
         # Generic workflow advice
         r"(?i)^(review|test|verify|validate) (code|changes|pull requests?) before (merging|deploying|releasing)\b",
         r"(?i)^(handle|catch|log) (errors?|exceptions?) (properly|gracefully|carefully)\b",
