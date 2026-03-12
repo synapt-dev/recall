@@ -718,6 +718,12 @@ def _parse_llm_response(response: str) -> dict | None:
     return parse_llm_json(response)
 
 
+def _tw(text: str, max_chars: int) -> str:
+    """Truncate at word boundary (shorthand for this module)."""
+    from synapt.recall._llm_util import truncate_at_word
+    return truncate_at_word(text, max_chars)
+
+
 def _apply_consolidation_result(
     parsed: dict,
     existing_nodes: list[KnowledgeNode],
@@ -749,7 +755,7 @@ def _apply_consolidation_result(
             continue
 
         action = raw_node.get("action", "create")
-        content = scrub_text(str(raw_node.get("content", ""))[:300])
+        content = scrub_text(_tw(str(raw_node.get("content", "")), 300))
         # Strip markdown formatting (bold/italic) that small models inject
         content = strip_markdown_formatting(content)
         category = scrub_text(str(raw_node.get("category", "workflow")))
@@ -815,7 +821,7 @@ def _apply_consolidation_result(
         if action == "contradict":
             existing_id = raw_node.get("existing_id", "")
             contradiction_note = scrub_text(
-                str(raw_node.get("contradiction_note", ""))[:200]
+                _tw(str(raw_node.get("contradiction_note", "")), 200)
             )
             # Reject generic replacement content (pattern-only; no specificity
             # check since contradictions reference existing project-specific nodes)

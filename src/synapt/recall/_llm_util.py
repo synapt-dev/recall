@@ -6,6 +6,20 @@ import json
 import re
 
 
+def truncate_at_word(text: str, max_chars: int) -> str:
+    """Truncate text at a word boundary to avoid mid-word cuts.
+
+    Returns the original text if it's already within the limit.
+    """
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars * 0.7:
+        return truncated[:last_space]
+    return truncated
+
+
 def _is_node_array(data: object) -> bool:
     """Check if data is a non-empty list of dicts (i.e. a knowledge node array)."""
     return isinstance(data, list) and bool(data) and isinstance(data[0], dict)

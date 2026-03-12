@@ -215,9 +215,17 @@ _DEBUG_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_DECISION_PATTERNS = re.compile(
+    r"\b(decisions?|chose|chosen|choices?|selected|picked|prefer|switched|"
+    r"abandoned|dropped|tradeoffs?|trade.offs?|versus|"
+    r"strategic)\b"
+    r"|\bvs\b",
+    re.IGNORECASE,
+)
+
 _EXPLORATORY_PATTERNS = re.compile(
     r"\b(how\s+did\s+we|what\s+did\s+we|tried|approach|strategy|"
-    r"decision|alternative|option|consider|experiment|explore|"
+    r"alternative|consider|experiment|explore|"
     r"history\s+of|evolution\s+of|what\s+happened|tell\s+me\s+about)\b",
     re.IGNORECASE,
 )
@@ -236,7 +244,8 @@ def classify_query_intent(query: str) -> str:
         "temporal"    — When something happened, time-based queries
         "factual"     — Looking up a specific fact (config value, version, etc.)
         "debug"       — Investigating an error or failure
-        "exploratory" — Understanding what was tried, decisions made
+        "decision"    — What was chosen and why (product/business/technical)
+        "exploratory" — Understanding what was tried, general exploration
         "procedural"  — How to do something (steps, workflow)
         "general"     — Default when no clear intent detected
 
@@ -244,6 +253,7 @@ def classify_query_intent(query: str) -> str:
     - temporal → raw transcript evidence, low knowledge boost
     - factual → knowledge nodes first, then FTS
     - debug → recent sessions weighted heavily
+    - decision → journal entries preferred over knowledge nodes
     - exploratory → clusters and timeline, broad search
     - procedural → knowledge nodes + cluster summaries
     - general → balanced hybrid search
@@ -252,13 +262,14 @@ def classify_query_intent(query: str) -> str:
         "temporal": len(_TEMPORAL_PATTERNS.findall(query)),
         "factual": len(_FACTUAL_PATTERNS.findall(query)),
         "debug": len(_DEBUG_PATTERNS.findall(query)),
+        "decision": len(_DECISION_PATTERNS.findall(query)),
         "exploratory": len(_EXPLORATORY_PATTERNS.findall(query)),
         "procedural": len(_PROCEDURAL_PATTERNS.findall(query)),
     }
 
-    # Tiebreak priority: temporal > exploratory > procedural > debug > factual.
-    # Temporal wins ties since temporal signals are usually unambiguous.
-    priority = ["temporal", "exploratory", "procedural", "debug", "factual"]
+    # Tiebreak: decision > temporal > exploratory > procedural > debug > factual.
+    # Decision wins ties since decision keywords are specific.
+    priority = ["decision", "temporal", "exploratory", "procedural", "debug", "factual"]
     best_score = max(scores.values())
     if best_score == 0:
         return "general"
@@ -291,6 +302,12 @@ def intent_search_params(intent: str) -> dict:
             "knowledge_boost": 1.0,    # Normal knowledge weight
             "half_life": 14.0,         # Strong recency — recent errors matter most
             "emb_weight": 0.8,         # Exact terms matter more for errors
+        }
+    elif intent == "decision":
+        return {
+            "knowledge_boost": 0.8,    # De-boost knowledge — prefer raw journal entries
+            "half_life": 30.0,         # Decisions are timeless but recent ones matter
+            "emb_weight": 1.5,         # Semantic matching important
         }
     elif intent == "exploratory":
         return {
