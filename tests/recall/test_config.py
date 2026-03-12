@@ -72,12 +72,14 @@ class TestLoadConfig:
 
     def test_loads_defaults_when_no_files(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
         cfg = load_config()
         assert cfg.get_model("embedding") == DEFAULTS["embedding"]
 
     def test_loads_global_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
 
         config_dir = tmp_path / ".synapt"
@@ -93,6 +95,7 @@ class TestLoadConfig:
 
     def test_project_config_overrides_global(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
 
         # Global config
@@ -115,6 +118,7 @@ class TestLoadConfig:
 
     def test_env_var_overrides_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("SYNAPT_SUMMARY_MODEL", "env-model")
 
@@ -131,6 +135,7 @@ class TestLoadConfig:
 
     def test_backend_from_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
 
         config_dir = tmp_path / ".synapt"
@@ -144,6 +149,7 @@ class TestLoadConfig:
 
     def test_backend_env_overrides_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("SYNAPT_SUMMARY_BACKEND", "mlx")
 
@@ -158,6 +164,7 @@ class TestLoadConfig:
 
     def test_config_caching(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
 
         cfg1 = load_config()
@@ -166,6 +173,7 @@ class TestLoadConfig:
 
     def test_malformed_json_uses_defaults(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
 
         config_dir = tmp_path / ".synapt"
@@ -183,6 +191,7 @@ class TestRouterConfigIntegration:
         from synapt.recall._model_router import get_encoder_decoder_model
 
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
         monkeypatch.chdir(tmp_path)
 
         config_dir = tmp_path / ".synapt"

@@ -128,7 +128,8 @@ def system_entry(uuid: str = "s1"):
 
 
 def write_jsonl(path: Path, entries: list[dict]):
-    with open(path, "w", encoding="utf-8") as f:
+    # Use newline="" to prevent \r\n on Windows — byte offsets must match binary reads
+    with open(path, "w", encoding="utf-8", newline="") as f:
         for entry in entries:
             f.write(json.dumps(entry) + "\n")
 

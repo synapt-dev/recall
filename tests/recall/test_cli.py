@@ -97,17 +97,20 @@ def test_install_global_hooks_preserves_existing_settings(tmp_path):
 # Tests: project slug utilities
 # ---------------------------------------------------------------------------
 
-def test_project_slug_converts_path():
+def test_project_slug_converts_path(tmp_path):
     """project_slug converts absolute paths to Claude Code's slug format."""
-    slug = project_slug(Path("/Users/layne/Development/synapse"))
-    assert slug == "-Users-layne-Development-synapse"
+    test_dir = tmp_path / "Development" / "synapse"
+    test_dir.mkdir(parents=True)
+    slug = project_slug(test_dir)
+    expected = str(test_dir.resolve()).replace("\\", "/").replace("/", "-")
+    assert slug == expected
 
 
 def test_project_slug_defaults_to_cwd(tmp_path):
     """project_slug uses cwd when no argument given."""
     with patch("synapt.recall.core.Path.cwd", return_value=tmp_path):
         slug = project_slug()
-    assert slug == str(tmp_path).replace("/", "-")
+    assert slug == str(tmp_path).replace("\\", "/").replace("/", "-")
 
 
 def test_project_index_dir_returns_in_project_path(tmp_path):
@@ -128,19 +131,24 @@ def test_project_archive_dir_returns_in_project_path(tmp_path):
 
 def test_project_transcript_dir_finds_transcripts(tmp_path):
     """project_transcript_dir finds the matching Claude Code project dir."""
-    proj_dir = tmp_path / ".claude" / "projects" / "-Users-test-myproject"
+    myproject = tmp_path / "myproject"
+    myproject.mkdir()
+    slug = str(myproject.resolve()).replace("\\", "/").replace("/", "-")
+    proj_dir = tmp_path / ".claude" / "projects" / slug
     proj_dir.mkdir(parents=True)
     (proj_dir / "session.jsonl").write_text("{}")
 
     with patch("synapt.recall.core.Path.home", return_value=tmp_path):
-        result = project_transcript_dir(Path("/Users/test/myproject"))
+        result = project_transcript_dir(myproject)
     assert result == proj_dir
 
 
 def test_project_transcript_dir_returns_none_when_missing(tmp_path):
     """project_transcript_dir returns None when no transcripts exist."""
+    nonexistent = tmp_path / "nonexistent"
+    nonexistent.mkdir()
     with patch("synapt.recall.core.Path.home", return_value=tmp_path):
-        result = project_transcript_dir(Path("/Users/test/nonexistent"))
+        result = project_transcript_dir(nonexistent)
     assert result is None
 
 
@@ -155,7 +163,7 @@ def test_cmd_setup_orchestrates_all_steps(tmp_path):
     # Create a fake project with transcripts
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("/", "-")
+    slug = str(project_dir).replace("\\", "/").replace("/", "-")
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -276,7 +284,7 @@ def test_cmd_rebuild_archives_and_builds(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("/", "-")
+    slug = str(project_dir).replace("\\", "/").replace("/", "-")
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -308,7 +316,7 @@ def test_cmd_rebuild_with_sync_skips_when_no_config(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("/", "-")
+    slug = str(project_dir).replace("\\", "/").replace("/", "-")
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -362,7 +370,7 @@ def test_recall_setup_mcp_tool(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("/", "-")
+    slug = str(project_dir).replace("\\", "/").replace("/", "-")
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -407,7 +415,7 @@ def test_recall_setup_no_hook(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("/", "-")
+    slug = str(project_dir).replace("\\", "/").replace("/", "-")
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -481,12 +489,15 @@ def test_catchup_writes_journal_for_unjournaled_session(tmp_path):
 
     # Create a transcript with a session ID and a file modification
     transcript = source / "session1.jsonl"
+    import json as _json
+    file_path = str(project / "src/main.py")
+    assistant_line = _json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": file_path}}
+    ]}})
     transcript.write_text(
         '{"type": "progress", "sessionId": "test-session-001"}\n'
         '{"type": "user", "message": {"content": "fix the bug"}}\n'
-        '{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": "'
-        + str(project / "src/main.py")
-        + '"}}]}}\n'
+        + assistant_line + '\n'
     )
 
     with patch("synapt.recall.core.Path.cwd", return_value=project):

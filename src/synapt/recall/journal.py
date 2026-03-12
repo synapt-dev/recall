@@ -7,6 +7,7 @@ Each entry records what was done, key decisions, and next steps.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -16,7 +17,8 @@ from synapt.recall.core import project_worktree_dir, project_index_dir, project_
 from synapt.recall._llm_util import truncate_at_word as _tw
 
 # Paths that are always noise in journal file lists
-_NOISE_PATH_SEGMENTS = ("/.claude/", "/private/tmp/")
+# Include both Unix and Windows separators for cross-platform matching
+_NOISE_PATH_SEGMENTS = ("/.claude/", "\\.claude\\", "/private/tmp/")
 
 
 def _filter_project_files(
@@ -35,8 +37,8 @@ def _filter_project_files(
     """
     if not project_root:
         project_root = str(Path.cwd())
-    # Normalize: ensure trailing slash for prefix matching
-    prefix = project_root.rstrip("/") + "/"
+    # Normalize: ensure trailing separator for prefix matching (cross-platform)
+    prefix = project_root.rstrip("/\\") + os.sep
 
     result: set[str] = set()
     for fp in files:
@@ -45,8 +47,8 @@ def _filter_project_files(
         # Skip known noise paths
         if any(seg in fp for seg in _NOISE_PATH_SEGMENTS):
             continue
-        # Relative paths are already project-scoped
-        if not fp.startswith("/"):
+        # Relative paths are already project-scoped (no leading / or drive letter)
+        if not os.path.isabs(fp):
             result.add(fp)
             continue
         # Absolute paths: keep only if under project root
