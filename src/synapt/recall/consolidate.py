@@ -249,6 +249,60 @@ def _extract_keywords(text: str) -> set[str]:
     return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
 
 
+# Cached embedding provider for inline dedup (loaded once per process).
+_inline_emb_provider = None
+_inline_emb_loaded = False
+
+_INLINE_COSINE_THRESHOLD = 0.80
+
+
+def _inline_embedding_dedup(
+    candidate_content: str,
+    existing_nodes: "list[KnowledgeNode]",
+    threshold: float = _INLINE_COSINE_THRESHOLD,
+) -> "tuple[KnowledgeNode | None, float]":
+    """Check if candidate is a semantic duplicate of any existing node.
+
+    Uses the embedding provider (cached per process) to compute cosine
+    similarity.  Returns (best_match_node, cosine_similarity) if above
+    threshold, else (None, 0.0).  Degrades gracefully if embeddings are
+    unavailable.
+    """
+    global _inline_emb_provider, _inline_emb_loaded
+    if not _inline_emb_loaded:
+        _inline_emb_loaded = True
+        try:
+            from synapt.recall.embeddings import get_embedding_provider
+            _inline_emb_provider = get_embedding_provider()
+        except Exception:
+            pass
+
+    if _inline_emb_provider is None or not existing_nodes:
+        return (None, 0.0)
+
+    try:
+        from synapt.recall.embeddings import cosine_similarity
+
+        # Batch embed: candidate + all existing
+        texts = [candidate_content] + [n.content for n in existing_nodes]
+        embeddings = _inline_emb_provider.embed(texts)
+        cand_emb = embeddings[0]
+
+        best_match = None
+        best_sim = 0.0
+        for i, node in enumerate(existing_nodes):
+            sim = cosine_similarity(cand_emb, embeddings[i + 1])
+            if sim > best_sim:
+                best_sim = sim
+                best_match = node
+
+        if best_sim >= threshold:
+            return (best_match, best_sim)
+    except Exception:
+        logger.debug("Inline embedding dedup failed", exc_info=True)
+
+    return (None, 0.0)
+
 
 def _dedup_decisions_path(project_dir: Path | None = None) -> Path:
     """Return path to dedup_decisions.jsonl in the project's .synapt/recall/ dir."""
@@ -770,20 +824,36 @@ def _apply_consolidation_result(
         if action == "create":
             # Dedup: if content is very similar to an existing node,
             # auto-convert to corroborate instead of creating a duplicate.
+            # Two signals: (1) keyword Jaccard >= 0.5, (2) embedding
+            # cosine >= 0.80.  Either can trigger auto-corroborate.
             new_kw = _extract_keywords(content)
             best_match = None
             best_sim = 0.0
+            best_method = "jaccard"
             all_sims: list[tuple[float, KnowledgeNode]] = []
             for existing in existing_nodes:
                 sim = _jaccard(new_kw, _extract_keywords(existing.content))
                 if sim > best_sim:
                     best_sim = sim
                     best_match = existing
+                    best_method = "jaccard"
                 if sim > 0:
                     all_sims.append((sim, existing))
+
+            # If Jaccard didn't trigger, try embedding cosine similarity
+            if best_sim < 0.5 and existing_nodes:
+                emb_match, emb_sim = _inline_embedding_dedup(
+                    content, existing_nodes,
+                )
+                if emb_match and emb_sim > best_sim:
+                    best_match = emb_match
+                    best_sim = emb_sim
+                    best_method = "cosine"
+
             if best_match and best_sim >= 0.5:
                 logger.info(
-                    "Auto-corroborate (jaccard=%.2f): %s", best_sim, content[:80],
+                    "Auto-corroborate (%s=%.2f): %s",
+                    best_method, best_sim, content[:80],
                 )
                 new_sources = list(set(best_match.source_sessions + cluster_sessions))
                 new_confidence = compute_confidence(len(new_sources))
@@ -802,7 +872,7 @@ def _apply_consolidation_result(
                         existing_id=best_match.id,
                         existing_content=best_match.content,
                         similarity_score=best_sim,
-                        source="auto-jaccard",
+                        source=f"auto-{best_method}",
                         session_ids=cluster_sessions,
                     )
                 continue
@@ -1061,7 +1131,7 @@ def consolidate(
             # different wording, or nodes created within the same batch).
             merged = dedup_knowledge_nodes(
                 threshold=0.5, project_dir=project_dir,
-                embedding_threshold=0.85,
+                embedding_threshold=_INLINE_COSINE_THRESHOLD,
             )
             if merged:
                 logger.info(
