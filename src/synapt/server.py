@@ -5,10 +5,14 @@ are discovered at startup via ``importlib.metadata`` entry points in the
 ``synapt.plugins`` group.  See ``synapt.plugins`` for the plugin protocol.
 
 Run with:
-    synapt server
+    synapt server          # normal mode
+    synapt server --dev    # auto-reload on source changes
 
 Add to Claude Code (.mcp.json):
     {"mcpServers": {"synapt": {"type": "stdio", "command": "synapt", "args": ["server"]}}}
+
+Dev mode (--dev) watches src/synapt/ for .py changes and restarts the
+server process automatically, so MCP tools always run the latest code.
 """
 
 from __future__ import annotations
@@ -39,8 +43,8 @@ signal.signal(signal.SIGTERM, _handle_sigterm)
 logger = logging.getLogger("synapt.server")
 
 
-def main():
-    """Entry point for the unified synapt MCP server."""
+def _serve():
+    """Start the MCP server (no reload)."""
     from mcp.server.fastmcp import FastMCP
 
     from synapt.plugins import register_plugins
@@ -60,6 +64,190 @@ def main():
         logger.debug("Loaded plugin: %s %s", p.name, p.version or "(no version)")
 
     mcp.run()
+
+
+def _find_watch_paths() -> list[str]:
+    """Find source directories to watch for --dev mode.
+
+    Discovers the synapt package's source directory by walking up from
+    the package's __file__ location. Also watches any editable-install
+    plugin sources (synapt_private, etc.).
+    """
+    import synapt
+
+    paths: list[str] = []
+
+    # Main package source
+    pkg_dir = os.path.dirname(os.path.abspath(synapt.__file__))
+    paths.append(pkg_dir)
+
+    # Also watch plugin packages (e.g., synapt_private) if installed editable
+    try:
+        import importlib.metadata
+        for ep in importlib.metadata.entry_points(group="synapt.plugins"):
+            mod = ep.value.split(":")[0]  # e.g., "synapt_private.plugins"
+            top_pkg = mod.split(".")[0]   # e.g., "synapt_private"
+            try:
+                pkg = __import__(top_pkg)
+                plugin_dir = os.path.dirname(os.path.abspath(pkg.__file__))
+                if plugin_dir not in paths:
+                    paths.append(plugin_dir)
+            except ImportError:
+                pass
+    except Exception:
+        pass
+
+    return paths
+
+
+def _dev_serve():
+    """Start the MCP server with auto-reload on source changes.
+
+    Spawns the actual server as a child process and proxies stdio.
+    When a .py file changes in the watched directories, the child
+    is killed and restarted with fresh imports.
+
+    Uses threading to proxy stdin/stdout between parent and child
+    without blocking the file watcher.
+    """
+    import subprocess
+    import threading
+    import time
+
+    try:
+        from watchfiles import watch, Change
+    except ImportError:
+        print(
+            "watchfiles is required for --dev mode: pip install watchfiles",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    watch_paths = _find_watch_paths()
+
+    # Log to stderr (stdout is for MCP protocol)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [dev] %(message)s",
+        stream=sys.stderr,
+    )
+    dev_log = logging.getLogger("synapt.dev")
+
+    dev_log.info("Dev mode: watching %s", ", ".join(watch_paths))
+
+    child: subprocess.Popen | None = None
+    stop_event = threading.Event()
+
+    def start_child():
+        nonlocal child
+        # Spawn ourselves without --dev to run the actual server
+        cmd = [sys.executable, "-m", "synapt.server"]
+        child = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=sys.stderr,
+        )
+        dev_log.info("Server started (pid %d)", child.pid)
+        return child
+
+    def proxy_stdin(proc):
+        """Forward parent stdin → child stdin."""
+        try:
+            while not stop_event.is_set() and proc.poll() is None:
+                data = sys.stdin.buffer.read1(8192)
+                if not data:
+                    break
+                proc.stdin.write(data)
+                proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def proxy_stdout(proc):
+        """Forward child stdout → parent stdout."""
+        try:
+            while not stop_event.is_set() and proc.poll() is None:
+                data = proc.stdout.read1(8192)
+                if not data:
+                    break
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def kill_child():
+        nonlocal child
+        if child and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            dev_log.info("Server stopped (pid %d)", child.pid)
+        child = None
+
+    def handle_sigterm(signum, frame):
+        stop_event.set()
+        kill_child()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGINT, handle_sigterm)
+
+    try:
+        while not stop_event.is_set():
+            proc = start_child()
+
+            # Start proxy threads
+            stdin_thread = threading.Thread(
+                target=proxy_stdin, args=(proc,), daemon=True,
+            )
+            stdout_thread = threading.Thread(
+                target=proxy_stdout, args=(proc,), daemon=True,
+            )
+            stdin_thread.start()
+            stdout_thread.start()
+
+            # Watch for changes — blocks until a .py file changes
+            # or the child process dies unexpectedly
+            restarted = False
+            for changes in watch(
+                *watch_paths,
+                watch_filter=lambda change, path: path.endswith(".py"),
+                stop_event=stop_event,
+            ):
+                changed_files = [
+                    os.path.basename(p) for _, p in changes
+                ]
+                dev_log.info(
+                    "Detected changes: %s — restarting server",
+                    ", ".join(changed_files[:5]),
+                )
+                kill_child()
+                restarted = True
+                # Brief pause for filesystem to settle
+                time.sleep(0.2)
+                break  # Exit watch loop to restart
+
+            if not restarted:
+                # Watch ended without restart (stop_event or error)
+                break
+
+    finally:
+        kill_child()
+
+
+def main():
+    """Entry point for the unified synapt MCP server.
+
+    Supports --dev flag for auto-reload during development.
+    """
+    if "--dev" in sys.argv:
+        sys.argv.remove("--dev")
+        _dev_serve()
+    else:
+        _serve()
 
 
 if __name__ == "__main__":
