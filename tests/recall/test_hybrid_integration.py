@@ -234,6 +234,15 @@ class TestIntentParameterFlow:
         params = intent_search_params(intent)
         assert params["emb_weight"] >= 2.0
 
+    def test_aggregation_query_params(self):
+        """Aggregation (multi-hop) queries should boost emb_weight and disable recency."""
+        from synapt.recall.hybrid import classify_query_intent, intent_search_params
+        intent = classify_query_intent("What activities does Melanie partake in")
+        assert intent == "aggregation"
+        params = intent_search_params(intent)
+        assert params["emb_weight"] >= 2.0
+        assert params["half_life"] == 0.0
+
     def test_lookup_uses_intent_params(self, tmp_path):
         """Verify that lookup() passes intent params to the lookup methods."""
         index = _build_index(tmp_path)

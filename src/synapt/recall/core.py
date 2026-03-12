@@ -1289,14 +1289,48 @@ class TranscriptIndex:
                             anchored_q, exc_info=True,
                         )
 
+            # Tier 2.5: Per-entity search for multi-entity queries.
+            # When the query mentions 2+ entities (e.g., "What do Jon and
+            # Gina have in common?"), searching "jon AND gina" only finds
+            # chunks where both co-occur. But the answer often requires
+            # combining facts from individual entity chunks (Jon's hobbies
+            # from one session + Gina's hobbies from another).
+            if len(entity_tokens) >= 2 and content_tokens:
+                for ent in entity_tokens:
+                    per_ent_q = _build_entity_anchored_query([ent], content_tokens)
+                    if per_ent_q:
+                        try:
+                            per_ent_rows = self._db.fts_search_raw(
+                                per_ent_q, limit=max_chunks * 4,
+                            )
+                            for rowid, score in per_ent_rows:
+                                if rowid not in seen_rowids:
+                                    fts_results.append((rowid, score * 0.90))
+                                    seen_rowids.add(rowid)
+                        except Exception:
+                            logger.debug(
+                                "Per-entity FTS query failed: %s",
+                                per_ent_q, exc_info=True,
+                            )
+
             # Tier 3: Entity-only search (broadest)
             # Discount: 0.85 — weakest signal, just entity mention.
-            entity_query = " ".join(entity_tokens)
-            entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
-            for rowid, score in entity_fts:
-                if rowid not in seen_rowids:
-                    fts_results.append((rowid, score * 0.85))
-                    seen_rowids.add(rowid)
+            # For multi-entity queries, search each entity individually
+            # to avoid requiring co-occurrence.
+            if len(entity_tokens) >= 2:
+                for ent in entity_tokens:
+                    ent_fts = self._db.fts_search(ent, limit=max_chunks * 3)
+                    for rowid, score in ent_fts:
+                        if rowid not in seen_rowids:
+                            fts_results.append((rowid, score * 0.80))
+                            seen_rowids.add(rowid)
+            else:
+                entity_query = " ".join(entity_tokens)
+                entity_fts = self._db.fts_search(entity_query, limit=max_chunks * 5)
+                for rowid, score in entity_fts:
+                    if rowid not in seen_rowids:
+                        fts_results.append((rowid, score * 0.85))
+                        seen_rowids.add(rowid)
 
         # Convert rowids to chunk indices, applying date and depth filters
         candidates: list[tuple[int, float]] = []

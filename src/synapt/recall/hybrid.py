@@ -236,6 +236,47 @@ _PROCEDURAL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Aggregation queries need facts scattered across multiple sessions:
+# "What activities does Melanie partake in?", "Where has John camped?",
+# "What do Joanna and Nate both have in common?", "What are Maria's dogs' names?"
+_AGGREGATION_PATTERNS = re.compile(
+    r"\b("
+    # "What has X done" / "What did X do" / "What does X do"
+    # Exclude "we/our/I/you" subjects — those are exploratory, not aggregation.
+    r"what\s+(?:has|did|does|do)\s+(?!we\b|our\b|i\b|you\b)\w+\s+\w+"
+    # "What X has Y done" / "What X does Y do" (1 intermediate word)
+    r"|what\s+\S+\s+(?:has|did|does|have)\s+\w+\s+\w+"
+    # "What X Y has Z done" (2 intermediate words: "What martial arts has John done")
+    r"|what\s+\S+\s+\S+\s+(?:has|did|does|have)\s+\w+"
+    # "What X have Y done" plural
+    r"|what\s+\S+\s+have\s+\w+\s+\w+"
+    # "Where has X done" / "Which X has Y visited"
+    r"|where\s+has\s+\w+\s+\w+|which\s+\S+\s+(?:has|have)\s+\w+"
+    # "both" / "in common" / "share" patterns (require "have/do" context)
+    r"|both\s+\w+\s+in\s+common|have\s+in\s+common|do\s+\w+\s+both"
+    r"|both\s+\w+ed|what\s+do\s+\w+\s+and\s+\w+\s+(?:both|have)"
+    r"|(?:have|has|do|does)\s+in\s+common"
+    # "What are X's Y" (pets, names, hobbies)
+    r"|what\s+are\s+\w+'s\s+\w+"
+    # "What do X's Y like/do" (possessive subject)
+    r"|what\s+do\s+\w+'s\s+\w+"
+    # "How many X" (counting)
+    r"|how\s+many\s+\w+\s+(?:has|does|did|have)\s+\w+"
+    r"|how\s+many\s+times|how\s+many\s+\w+\s+does"
+    # "What types/kinds of X"
+    r"|what\s+(?:types?|kinds?|sorts?)\s+of"
+    # "What X is/are important/special to Y" (require adjective + "to" + proper noun)
+    r"|what\s+\w+\s+(?:is|are)\s+(?:important|special|meaningful|significant|dear)\s+to\s+\w+"
+    # "Who supported/helped X when" (aggregation of supporters/people)
+    r"|who\s+(?:supported|helped|joined|accompanied|visited)\s+\w+\s+when"
+    # "In what ways" patterns
+    r"|in\s+what\s+ways"
+    # "What X has Y" with aggregation verbs
+    r"|what\s+\w+\s+(?:has|did|have)\s+\w+\s+(?:participated|attended|visited|done|made|taken|bought|read|seen|played|written|painted|cooked|practiced|adopted)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def classify_query_intent(query: str) -> str:
     """Classify a search query into an intent category.
@@ -247,6 +288,7 @@ def classify_query_intent(query: str) -> str:
         "decision"    — What was chosen and why (product/business/technical)
         "exploratory" — Understanding what was tried, general exploration
         "procedural"  — How to do something (steps, workflow)
+        "aggregation" — Gathering scattered facts across multiple sessions
         "general"     — Default when no clear intent detected
 
     The classification is used to weight search strategies:
@@ -256,6 +298,7 @@ def classify_query_intent(query: str) -> str:
     - decision → journal entries preferred over knowledge nodes
     - exploratory → clusters and timeline, broad search
     - procedural → knowledge nodes + cluster summaries
+    - aggregation → broad entity search, moderate knowledge boost
     - general → balanced hybrid search
     """
     scores = {
@@ -265,11 +308,13 @@ def classify_query_intent(query: str) -> str:
         "decision": len(_DECISION_PATTERNS.findall(query)),
         "exploratory": len(_EXPLORATORY_PATTERNS.findall(query)),
         "procedural": len(_PROCEDURAL_PATTERNS.findall(query)),
+        "aggregation": len(_AGGREGATION_PATTERNS.findall(query)),
     }
 
-    # Tiebreak: decision > temporal > exploratory > procedural > debug > factual.
-    # Decision wins ties since decision keywords are specific.
-    priority = ["decision", "temporal", "exploratory", "procedural", "debug", "factual"]
+    # Aggregation wins over factual since factual patterns match many aggregation
+    # queries ("what does X have") but aggregation needs different treatment.
+    # Decision > aggregation > temporal > exploratory > procedural > debug > factual.
+    priority = ["decision", "aggregation", "temporal", "exploratory", "procedural", "debug", "factual"]
     best_score = max(scores.values())
     if best_score == 0:
         return "general"
@@ -320,6 +365,12 @@ def intent_search_params(intent: str) -> dict:
             "knowledge_boost": 2.5,    # Knowledge highly relevant
             "half_life": 90.0,         # Procedures don't expire quickly
             "emb_weight": 1.2,         # Moderate semantic
+        }
+    elif intent == "aggregation":
+        return {
+            "knowledge_boost": 1.5,    # Moderate — knowledge with source_turns helps
+            "half_life": 0.0,          # All timeframes matter for aggregation
+            "emb_weight": 2.0,         # Semantic matching finds scattered mentions
         }
     else:  # general
         return {

@@ -175,9 +175,9 @@ class TestQueryIntentClassification:
         assert classify_query_intent("what does the config setting do") == "factual"
 
     def test_factual_indirect_what(self):
-        """'What [noun] did/is X' should classify as factual."""
-        assert classify_query_intent("What state did Nate visit") == "factual"
-        assert classify_query_intent("What book did Tim recommend") == "factual"
+        """'What [noun] did/is X' with named entities → aggregation (scattered facts)."""
+        assert classify_query_intent("What state did Nate visit") == "aggregation"
+        assert classify_query_intent("What book did Tim recommend") == "aggregation"
         assert classify_query_intent("What color is Caroline's car") == "factual"
 
     def test_debug(self):
@@ -195,6 +195,27 @@ class TestQueryIntentClassification:
         assert classify_query_intent("how did we solve the auth problem") == "exploratory"
         assert classify_query_intent("what did we try for caching") == "exploratory"
         assert classify_query_intent("tell me about the migration history") == "exploratory"
+
+    def test_aggregation(self):
+        """Aggregation queries gather scattered facts across sessions."""
+        assert classify_query_intent("What activities does Melanie partake in") == "aggregation"
+        assert classify_query_intent("Where has Melanie camped") == "aggregation"
+        assert classify_query_intent("What martial arts has John done") == "aggregation"
+        assert classify_query_intent("What types of yoga has Maria practiced") == "aggregation"
+        assert classify_query_intent("What do Jon and Gina have in common") == "aggregation"
+        assert classify_query_intent("How many times has Melanie gone to the beach") == "aggregation"
+
+    def test_aggregation_excludes_we(self):
+        """'what did we try' is exploratory, not aggregation."""
+        assert classify_query_intent("what did we try for caching") == "exploratory"
+        assert classify_query_intent("what did we decide about auth") != "aggregation"
+
+    def test_aggregation_no_false_positives(self):
+        """Generic questions should not be misclassified as aggregation."""
+        assert classify_query_intent("who was the first person there") != "aggregation"
+        assert classify_query_intent("this is in common use") != "aggregation"
+        assert classify_query_intent("both methods and functions work") != "aggregation"
+        assert classify_query_intent("what configuration is needed to deploy") != "aggregation"
 
     def test_procedural(self):
         assert classify_query_intent("how to deploy the service") == "procedural"
@@ -218,7 +239,7 @@ class TestQueryIntentClassification:
 
     def test_intent_params_keys(self):
         """All intents return the expected parameter keys."""
-        for intent in ["temporal", "factual", "debug", "decision", "exploratory", "procedural", "general"]:
+        for intent in ["temporal", "factual", "debug", "decision", "exploratory", "procedural", "aggregation", "general"]:
             params = intent_search_params(intent)
             assert "knowledge_boost" in params
             assert "half_life" in params
