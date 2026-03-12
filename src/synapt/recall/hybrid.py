@@ -254,9 +254,10 @@ _DEBUG_PATTERNS = re.compile(
 )
 
 _DECISION_PATTERNS = re.compile(
-    r"\b(decisions?|chose|chosen|choices?|switched|"
+    r"\b(decisions?|cho(?:se|sen|ose|osing)|choices?|switch(?:ed|ing)?|"
+    r"pick(?:ed|ing)?|select(?:ed|ing)?|opt(?:ed|ing)?\s+for|"
     r"tradeoffs?|trade.offs?|versus|"
-    r"strategic)\b"
+    r"strategic|pivot(?:ed|ing)?)\b"
     r"|\bvs\b",
     re.IGNORECASE,
 )

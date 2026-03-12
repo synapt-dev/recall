@@ -1112,6 +1112,7 @@ class TranscriptIndex:
         # provide an explicit value (half_life is None).
         emb_weight = 1.0
         kb_default = 2.0
+        intent = ""
         caller_set_half_life = half_life is not None
         if half_life is None:
             half_life = 60.0
@@ -1173,6 +1174,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
+                intent=intent,
             )
 
         # Cache the result (LRU eviction when full)
@@ -1199,6 +1201,7 @@ class TranscriptIndex:
         knowledge_boost: float = 2.0,
         now: datetime | None = None,
         max_knowledge: int | None = None,
+        intent: str = "",
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and self._rowid_to_idx:
@@ -1207,7 +1210,7 @@ class TranscriptIndex:
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
-                now=now, max_knowledge=max_knowledge,
+                now=now, max_knowledge=max_knowledge, intent=intent,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -1230,6 +1233,7 @@ class TranscriptIndex:
         knowledge_boost: float = 2.0,
         now: datetime | None = None,
         max_knowledge: int | None = None,
+        intent: str = "",
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
@@ -1239,7 +1243,7 @@ class TranscriptIndex:
         knowledge_results = self._search_knowledge(
             query, max_chunks, include_historical=include_historical,
             knowledge_boost=knowledge_boost, emb_weight=emb_weight,
-            query_entities=query_entities,
+            query_entities=query_entities, intent=intent,
         )
 
         # Concise mode: search clusters directly, return only summaries
@@ -1416,6 +1420,7 @@ class TranscriptIndex:
             knowledge_results=knowledge_results,
             query=query,
             max_knowledge=max_knowledge,
+            intent=intent,
         )
 
     def _concise_lookup(
@@ -1823,6 +1828,7 @@ class TranscriptIndex:
         knowledge_boost: float = 2.0,
         emb_weight: float = 1.0,
         query_entities: set[str] | None = None,
+        intent: str = "",
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
@@ -1912,6 +1918,12 @@ class TranscriptIndex:
                     if query_entities:
                         if any(e in node_content.lower() for e in query_entities):
                             effective_boost *= ENTITY_BOOST
+                    # Category-intent alignment: boost knowledge nodes whose
+                    # category matches the query intent (e.g. decision-category
+                    # nodes rank higher for decision queries).
+                    node_cat = node.get("category", "")
+                    if intent == "decision" and node_cat == "decision":
+                        effective_boost *= 1.5
                     raw_score = score_map.get(rowid, 0.0)
                     node["base_score"] = raw_score
                     node["score"] = raw_score * effective_boost
@@ -2081,6 +2093,7 @@ class TranscriptIndex:
         knowledge_results: list[dict] | None = None,
         query: str = "",
         max_knowledge: int | None = None,
+        intent: str = "",
     ) -> str:
         """Format ranked chunk indices into a context string.
 
@@ -2222,6 +2235,13 @@ class TranscriptIndex:
             emit_items.append((max_score, block, "cluster", cluster_id))
 
         for idx, score in ungrouped:
+            # Journal decision boost: journal chunks with "Decisions:" content
+            # rank higher for decision-intent queries. This surfaces the raw
+            # rationale instead of distilled knowledge nodes.
+            if intent == "decision":
+                chunk = self.chunks[idx]
+                if chunk.turn_index < 0 and "Decisions:" in chunk.assistant_text:
+                    score *= 1.3
             block = self._format_chunk_block(idx)
             emit_items.append((score, block, "chunk", self.chunks[idx].id))
 
