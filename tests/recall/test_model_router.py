@@ -11,6 +11,7 @@ from synapt.recall._model_router import (
     get_client,
     get_encoder_decoder_model,
     is_encoder_decoder,
+    register_backend,
 )
 from synapt.recall.config import clear_config_cache
 
@@ -122,15 +123,56 @@ class TestFallbackChain:
             assert not is_encoder_decoder(client)
 
     def test_no_backend_returns_none(self, monkeypatch):
-        """When all backends unavailable, returns None."""
+        """When all backends (including plugins) unavailable, returns None."""
         import synapt.recall._model_router as router
 
         monkeypatch.setattr(router, "_get_onnx_client", lambda mt, model_name=None: None)
         monkeypatch.setattr(router, "_get_transformers_client", lambda mt, model_name=None: None)
         monkeypatch.setattr(router, "_get_mlx_client", lambda mt: None)
         monkeypatch.setattr(router, "_get_ollama_client", lambda mt: None)
+        monkeypatch.setattr(router, "_extra_backends", {})
+        monkeypatch.setattr(router, "_backends_loaded", True)
         client = get_client(RecallTask.SUMMARIZE)
         assert client is None
+
+
+class TestBackendRegistry:
+    """Test plugin backend registration."""
+
+    def test_register_backend(self, monkeypatch):
+        """Registered backends appear in the fallback chain."""
+        import synapt.recall._model_router as router
+
+        sentinel = object()
+        register_backend("test-backend", lambda mt: sentinel)
+
+        # Disable built-in backends so plugin backend is reached
+        monkeypatch.setattr(router, "_get_onnx_client", lambda mt, model_name=None: None)
+        monkeypatch.setattr(router, "_get_transformers_client", lambda mt, model_name=None: None)
+        monkeypatch.setattr(router, "_get_mlx_client", lambda mt: None)
+
+        client = get_client(RecallTask.ENRICH)
+        assert client is sentinel
+
+    def test_override_selects_plugin_backend(self, monkeypatch):
+        """backend=<name> in config selects a registered plugin backend."""
+        import synapt.recall._model_router as router
+
+        sentinel = object()
+        register_backend("custom", lambda mt: sentinel)
+        monkeypatch.setattr(router, "_backends_loaded", True)
+        monkeypatch.setenv("SYNAPT_SUMMARY_BACKEND", "custom")
+
+        client = get_client(RecallTask.ENRICH)
+        assert client is sentinel
+
+    def test_entry_point_discovery(self):
+        """synapt.backends entry points are discovered (Modal is installed)."""
+        import synapt.recall._model_router as router
+        # Entry point discovery happens lazily on first get_client()
+        router._load_extra_backends()
+        # Modal backend should be discovered via synapt-private entry point
+        assert "modal" in router._extra_backends
 
 
 class TestIsEncoderDecoder:
