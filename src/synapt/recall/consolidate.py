@@ -158,18 +158,23 @@ def _has_proper_nouns(content: str) -> bool:
             return True
     return False
 
-def _lacks_specificity(content: str) -> bool:
+def _lacks_specificity(content: str, threshold: int = 120) -> bool:
     """Return True if content lacks project-specific identifiers.
 
     Catches tool-knowledge that's technically accurate but not specific
     to the project — e.g., "Use gradlew and settings.gradle.kts for
     root Gradle builds" is true for ALL Gradle projects.
 
-    Only applied to short content (< 120 chars) where specificity signals
-    are more meaningful. Longer content is more likely to include context
-    even without explicit identifiers.
+    Only applied to short content (< threshold chars) where specificity
+    signals are more meaningful. Longer content is more likely to include
+    context even without explicit identifiers.
+
+    Args:
+        content: Text to check.
+        threshold: Character length above which the filter is skipped.
+            Default 120; set higher to catch more, or 10000+ to disable.
     """
-    if len(content) > 120:
+    if len(content) > threshold:
         return False
     if _SPECIFICITY_SIGNALS.search(content) is not None:
         return False
@@ -841,6 +846,7 @@ def _apply_consolidation_result(
     knowledge_path: Path,
     decision_log_path: Path | None = None,
     db=None,
+    content_profile=None,
 ) -> ConsolidationResult:
     """Apply parsed LLM output: create, corroborate, or contradict nodes.
 
@@ -885,13 +891,23 @@ def _apply_consolidation_result(
         if not content:
             continue
 
-        # Reject generic programming advice
-        if action == "create" and _is_generic_node(content):
-            logger.info("Rejected generic node (pattern): %s", content[:80])
-            continue
-        if action == "create" and _lacks_specificity(content):
-            logger.info("Rejected generic node (low specificity): %s", content[:80])
-            continue
+        # Get adaptive params for content-aware filtering
+        _ap = None
+        if content_profile is not None:
+            from synapt.recall.content_profile import adaptive_params
+            _ap = adaptive_params(content_profile)
+
+        # Reject generic programming advice (disabled for personal content)
+        if action == "create" and (_ap is None or _ap.generic_filter_enabled):
+            if _is_generic_node(content):
+                logger.info("Rejected generic node (pattern): %s", content[:80])
+                continue
+        # Reject low-specificity (threshold adapts to content type)
+        if action == "create":
+            spec_threshold = _ap.specificity_threshold if _ap else 120
+            if _lacks_specificity(content, threshold=spec_threshold):
+                logger.info("Rejected generic node (low specificity): %s", content[:80])
+                continue
 
         # Reject contamination from few-shot example placeholders
         if "[PersonA]" in content or "[PersonB]" in content:
@@ -1101,6 +1117,7 @@ def consolidate(
     force: bool = False,
     min_entries: int = 3,
     adapter_path: str = "",
+    content_profile=None,
 ) -> ConsolidationResult:
     """Run memory consolidation: extract knowledge from journal entries.
 
@@ -1122,6 +1139,30 @@ def consolidate(
 
     if not journal_path.exists():
         return result
+
+    # Auto-detect content profile from transcript chunks if not provided
+    if content_profile is None:
+        try:
+            from synapt.recall.content_profile import detect_content_profile
+            idx_dir = project_index_dir(project_dir)
+            from synapt.recall.storage import RecallDB
+            db_path = idx_dir / "recall.db"
+            if db_path.exists():
+                _db = RecallDB(db_path)
+                from synapt.recall.core import parse_transcript
+                # Sample chunks from the DB for classification
+                chunk_texts = _db.sample_chunk_texts(limit=100)
+                if chunk_texts:
+                    # Create lightweight objects with .text attribute
+                    class _TextHolder:
+                        def __init__(self, t): self.text = t
+                    content_profile = detect_content_profile(
+                        [_TextHolder(t) for t in chunk_texts]
+                    )
+                    logger.info("Auto-detected content profile: %s", content_profile.content_type)
+                _db.close()
+        except Exception:
+            logger.debug("Content profile auto-detection failed", exc_info=True)
 
     # Read and dedup journal entries
     raw_entries = _read_all_entries(journal_path)
@@ -1261,6 +1302,7 @@ def consolidate(
             parsed, existing_nodes, cluster, kn_path,
             decision_log_path=decision_path,
             db=db,
+            content_profile=content_profile,
         )
         result.nodes_created += cluster_result.nodes_created
         result.nodes_corroborated += cluster_result.nodes_corroborated
