@@ -160,11 +160,16 @@ def read_nodes(
 
 
 def _dedup_nodes(nodes: list[KnowledgeNode]) -> list[KnowledgeNode]:
-    """Keep only the latest version of each node (by id, latest updated_at)."""
+    """Keep only the latest version of each node (by id, latest updated_at).
+
+    Uses ``>=`` so that when timestamps tie (Windows datetime resolution
+    is ~15 ms) the *last* entry in the file wins — which is always the
+    most-recently appended version from ``update_node``.
+    """
     best: dict[str, KnowledgeNode] = {}
     for node in nodes:
         existing = best.get(node.id)
-        if existing is None or node.updated_at > existing.updated_at:
+        if existing is None or node.updated_at >= existing.updated_at:
             best[node.id] = node
     return list(best.values())
 

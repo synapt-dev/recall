@@ -16,9 +16,13 @@ from pathlib import Path
 from synapt.recall.core import project_worktree_dir, project_index_dir, project_transcript_dir
 from synapt.recall._llm_util import truncate_at_word as _tw
 
-# Paths that are always noise in journal file lists
-# Include both Unix and Windows separators for cross-platform matching
-_NOISE_PATH_SEGMENTS = ("/.claude/", "\\.claude\\", "/private/tmp/")
+# Paths that are always noise in journal file lists (checked after normalising to /)
+_NOISE_PATH_SEGMENTS = ("/.claude/", "/private/tmp/")
+
+
+def _norm(p: str) -> str:
+    """Normalise path separators to forward slash for cross-platform comparison."""
+    return p.replace("\\", "/")
 
 
 def _filter_project_files(
@@ -37,23 +41,24 @@ def _filter_project_files(
     """
     if not project_root:
         project_root = str(Path.cwd())
-    # Normalize: ensure trailing separator for prefix matching (cross-platform)
-    prefix = project_root.rstrip("/\\") + os.sep
+    # Normalise to forward slashes for cross-platform prefix matching
+    prefix = _norm(project_root).rstrip("/") + "/"
 
     result: set[str] = set()
     for fp in files:
         if not fp or fp.isspace():
             continue
+        norm_fp = _norm(fp)
         # Skip known noise paths
-        if any(seg in fp for seg in _NOISE_PATH_SEGMENTS):
+        if any(seg in norm_fp for seg in _NOISE_PATH_SEGMENTS):
             continue
         # Relative paths are already project-scoped (no leading / or drive letter)
         if not os.path.isabs(fp):
             result.add(fp)
             continue
         # Absolute paths: keep only if under project root
-        if fp.startswith(prefix):
-            result.add(fp[len(prefix):])
+        if norm_fp.startswith(prefix):
+            result.add(norm_fp[len(prefix):])
         # else: absolute path outside project — skip
     return sorted(result)
 
