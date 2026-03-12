@@ -165,6 +165,23 @@ def test_parse_degenerated_repetitive_bullets():
     assert len(result["nodes"]) == 3
 
 
+def test_parse_metadata_sub_items_skipped():
+    """Sub-items like '* Category: convention' should not create nodes."""
+    response = (
+        '1. "Always run tests before deploying"\n'
+        '   * Category: convention\n'
+        '   * Confidence: 0.9\n'
+        '   * Tags: ["testing", "deploy"]\n'
+        '2. "Use Python 3.12 for all projects"\n'
+        '   * Category: preference\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 2
+    assert result["nodes"][0]["content"] == "Always run tests before deploying"
+    assert result["nodes"][1]["content"] == "Use Python 3.12 for all projects"
+
+
 def test_parse_empty_response():
     assert parse_llm_json("") is None
 

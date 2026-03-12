@@ -252,9 +252,10 @@ _AGGREGATION_PATTERNS = re.compile(
     r"|what\s+\S+\s+have\s+\w+\s+\w+"
     # "Where has X done" / "Which X has Y visited"
     r"|where\s+has\s+\w+\s+\w+|which\s+\S+\s+(?:has|have)\s+\w+"
-    # "both" / "in common" / "share" patterns
+    # "both" / "in common" / "share" patterns (require "have/do" context)
     r"|both\s+\w+\s+in\s+common|have\s+in\s+common|do\s+\w+\s+both"
-    r"|both\s+\w+ed|both\s+\w+\s+and\s+\w+|in\s+common"
+    r"|both\s+\w+ed|what\s+do\s+\w+\s+and\s+\w+\s+(?:both|have)"
+    r"|(?:have|has|do|does)\s+in\s+common"
     # "What are X's Y" (pets, names, hobbies)
     r"|what\s+are\s+\w+'s\s+\w+"
     # "What do X's Y like/do" (possessive subject)
@@ -264,10 +265,10 @@ _AGGREGATION_PATTERNS = re.compile(
     r"|how\s+many\s+times|how\s+many\s+\w+\s+does"
     # "What types/kinds of X"
     r"|what\s+(?:types?|kinds?|sorts?)\s+of"
-    # "What X is/are important/special to Y"
-    r"|what\s+\w+\s+(?:is|are)\s+\w+\s+to\s+\w+"
-    # "Who X when/after" (aggregation of supporters/people)
-    r"|who\s+\w+\s+\w+\s+when|who\s+\w+\s+\w+\s+\w+\s+\w+"
+    # "What X is/are important/special to Y" (require adjective + "to" + proper noun)
+    r"|what\s+\w+\s+(?:is|are)\s+(?:important|special|meaningful|significant|dear)\s+to\s+\w+"
+    # "Who supported/helped X when" (aggregation of supporters/people)
+    r"|who\s+(?:supported|helped|joined|accompanied|visited)\s+\w+\s+when"
     # "In what ways" patterns
     r"|in\s+what\s+ways"
     # "What X has Y" with aggregation verbs

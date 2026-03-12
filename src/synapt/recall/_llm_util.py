@@ -268,6 +268,14 @@ def _parse_markdown_nodes(text: str) -> list[dict]:
         if len(item_text) < 5:
             continue
 
+        # Skip pure metadata sub-items (e.g., "Category: convention",
+        # "Confidence: 0.9") that appear under numbered list items.
+        if re.match(
+            r'^(?:Category|Confidence|Tags|Action|Source):\s',
+            item_text, re.IGNORECASE,
+        ):
+            continue
+
         node = _parse_single_bullet_item(item_text, current_section_cat)
         if node:
             # Inline dedup: small models degenerate into repetitive
@@ -404,7 +412,7 @@ def _parse_single_bullet_item(item_text: str, section_cat: str) -> dict | None:
             ]
 
     # Clean trailing category annotation like "(fact)" or "(preference)"
-    item_text = re.sub(r'\s*\((?:fact|preference|decision|convention|workflow)\)\s*$',
+    item_text = re.sub(r'\s*\((?:fact|preference|decision|convention|workflow|lesson-learned)\)\s*$',
                        '', item_text)
 
     # Strip trailing period and whitespace

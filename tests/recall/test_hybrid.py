@@ -210,6 +210,13 @@ class TestQueryIntentClassification:
         assert classify_query_intent("what did we try for caching") == "exploratory"
         assert classify_query_intent("what did we decide about auth") != "aggregation"
 
+    def test_aggregation_no_false_positives(self):
+        """Generic questions should not be misclassified as aggregation."""
+        assert classify_query_intent("who was the first person there") != "aggregation"
+        assert classify_query_intent("this is in common use") != "aggregation"
+        assert classify_query_intent("both methods and functions work") != "aggregation"
+        assert classify_query_intent("what configuration is needed to deploy") != "aggregation"
+
     def test_procedural(self):
         assert classify_query_intent("how to deploy the service") == "procedural"
         assert classify_query_intent("steps to configure the database") == "procedural"
