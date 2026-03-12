@@ -60,6 +60,7 @@ MIN_RESPONSE_TOKENS = 800
 # Compiled once at import time for performance.
 _GENERIC_PATTERNS = [
     re.compile(p) for p in [
+        # "Always use X" / "Never do Y" generic advice
         r"(?i)^(always |never )?(use|write|keep|follow|maintain) (a )?(consistent|clean|good|proper|clear)",
         r"(?i)^(always |never )?(use|write) (unit |integration )?tests\b",
         r"(?i)^(always |never )?(use|prefer) docker\b",
@@ -69,8 +70,58 @@ _GENERIC_PATTERNS = [
         r"(?i)^(always |never )?(keep|write) (code|functions|methods) (short|small|simple|clean)\b",
         r"(?i)^(always |never )?use gpu\b(?!.*\b(a100|a10g|l4|t4|h100)\b)",
         r"(?i)^(always |never )?use a? ?consistent naming",
+        # Tool-tautology: "Use [tool] for/to [primary purpose]" with NO extra
+        # specificity signals.  The negative lookahead prevents false positives
+        # when the sentence includes flags, paths, packages, or versions.
+        r"(?i)^use (gradlew?|gradle) (for|to) (build|compil|runn?)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (npm|yarn|pnpm|bun) (for|to) (install|manag|runn?)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (pip|poetry|uv|conda) (for|to) (install|manag)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (git|github|gitlab) (for|to) (track|manag|version|stor)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (make|cmake|bazel) (for|to) (build|compil)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (pytest|jest|mocha|junit) (for|to) (test|run tests|testing)\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (eslint|flake8|ruff|pylint|clippy) (for|to) (lint|check|format)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        r"(?i)^use (prettier|black|gofmt|rustfmt) (for|to) (format|styl)\w*\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        # Generic config/setup knowledge (no specific details)
+        r"(?i)^(use|configure|set up) (settings\.gradle|build\.gradle|package\.json|pyproject\.toml|cargo\.toml)\s+(for|to)\b(?!.*( -\w|/|@|\[|:|\d+\.\d))",
+        # Generic workflow advice
+        r"(?i)^(review|test|verify|validate) (code|changes|pull requests?) before (merging|deploying|releasing)\b",
+        r"(?i)^(handle|catch|log) (errors?|exceptions?) (properly|gracefully|carefully)\b",
+        r"(?i)^(keep|maintain|update) depend(encies|ency) (up.to.date|current|regularly)\b",
     ]
 ]
+
+# Specificity signals — content with these patterns is likely project-specific.
+# Presence of ANY of these exempts a node from the low-specificity filter.
+# Note: no IGNORECASE — CamelCase detection requires case sensitivity.
+_SPECIFICITY_SIGNALS = re.compile(
+    r"/[\w./-]{3,}"              # File paths
+    r"|v\d+\.\d+"                # Version numbers
+    r"|\d+\.\d+\.\d+"           # SemVer
+    r"|--[\w-]{2,}"              # CLI flags
+    r"|\b[A-Z][a-z]+[A-Z]\w*"   # CamelCase identifiers
+    r"|\b[A-Z]\d{2,}\w*\b"      # Model/hardware identifiers: A100, H100, L4, T4
+    r"|\b[a-z]\w+_\w+\b"        # Snake_case identifiers (2+ parts, lowercase start)
+    r"|\b[Ss]ession\s*#?\d+"    # Session references
+    r"|\b[Pp][Rr]\s*#?\d+"      # PR references
+    r"|\b[Ii]ssue\s*#?\d+"      # Issue references
+    r"|\b[Cc]onv\s*#?\d+"       # Conv references
+    r"|\b\d{4}-\d{2}-\d{2}\b",  # Dates
+)
+
+def _lacks_specificity(content: str) -> bool:
+    """Return True if content lacks project-specific identifiers.
+
+    Catches tool-knowledge that's technically accurate but not specific
+    to the project — e.g., "Use gradlew and settings.gradle.kts for
+    root Gradle builds" is true for ALL Gradle projects.
+
+    Only applied to short content (< 120 chars) where specificity signals
+    are more meaningful. Longer content is more likely to include context
+    even without explicit identifiers.
+    """
+    if len(content) > 120:
+        return False
+    return _SPECIFICITY_SIGNALS.search(content) is None
 
 # Stopwords for keyword extraction
 _STOPWORDS = frozenset({
@@ -718,7 +769,10 @@ def _apply_consolidation_result(
 
         # Reject generic programming advice
         if action == "create" and _is_generic_node(content):
-            logger.info("Rejected generic node: %s", content[:80])
+            logger.info("Rejected generic node (pattern): %s", content[:80])
+            continue
+        if action == "create" and _lacks_specificity(content):
+            logger.info("Rejected generic node (low specificity): %s", content[:80])
             continue
 
         # Reject contamination from few-shot example placeholders
@@ -763,7 +817,8 @@ def _apply_consolidation_result(
             contradiction_note = scrub_text(
                 str(raw_node.get("contradiction_note", ""))[:200]
             )
-            # Reject generic replacement content
+            # Reject generic replacement content (pattern-only; no specificity
+            # check since contradictions reference existing project-specific nodes)
             if _is_generic_node(content):
                 logger.info("Rejected generic contradict node: %s", content[:80])
                 continue

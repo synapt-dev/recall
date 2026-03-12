@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re as _re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -396,6 +397,42 @@ def create_summary_client() -> object | None:
     return get_client(RecallTask.SUMMARIZE, max_tokens=MAX_SUMMARY_TOKENS)
 
 
+# Pattern for CamelCase identifiers (class names, handler names, etc.)
+# Matches two+ capitalized words joined together: FarewellHandler, ConnectionPool
+_CAMELCASE_RE = _re.compile(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b")
+# Well-known CamelCase names that should not be flagged as hallucinations.
+# Only includes names actually matched by _CAMELCASE_RE (two+ Cap segments).
+_COMMON_CAMELCASE = frozenset({
+    "WebSocket", "IntelliJ", "PyCharm", "JetBrains", "PyTorch",
+    "TensorFlow", "HuggingFace", "DataFrame", "DataLoader",
+    "GitLab", "BitBucket", "CloudRun", "StackOverflow",
+    "OpenAI", "LangChain", "NumPy", "SciPy",
+})
+
+
+def _novel_entities(summary: str, source_text_lower: str) -> set[str]:
+    """Find CamelCase entities in summary that don't appear in source text.
+
+    Used as a hallucination detector: if the LLM invents class names,
+    handler names, or component names not present in the excerpts,
+    the summary is likely fabricated.
+
+    Args:
+        summary: The LLM-generated summary text.
+        source_text_lower: The source excerpts text, lowercased.
+
+    Returns:
+        Set of novel CamelCase entities found in summary but not source.
+    """
+    entities = set(_CAMELCASE_RE.findall(summary))
+    entities -= _COMMON_CAMELCASE
+    novel = set()
+    for entity in entities:
+        if entity.lower() not in source_text_lower:
+            novel.add(entity)
+    return novel
+
+
 def generate_llm_summary(
     chunk_texts: list[dict],
     topic: str,
@@ -448,7 +485,7 @@ def generate_llm_summary(
     if not summary:
         return None
 
-    # Quality gate: reject if longer than the input (hallucination signal)
+    # Quality gate 1: reject if longer than the input (hallucination signal)
     input_len = sum(
         len(ct.get("user_text", "")) + len(ct.get("assistant_text", ""))
         for ct in chunk_texts
@@ -457,6 +494,16 @@ def generate_llm_summary(
         logger.warning(
             "LLM summary (%d chars) longer than input (%d chars), rejecting",
             len(summary), input_len,
+        )
+        return None
+
+    # Quality gate 2: reject if summary introduces entities not in source
+    source_text = excerpts.lower()
+    novel = _novel_entities(summary, source_text)
+    if len(novel) >= 2:
+        logger.warning(
+            "LLM summary has %d novel entities not in source (%s), rejecting",
+            len(novel), ", ".join(sorted(novel)[:5]),
         )
         return None
 
