@@ -1,7 +1,8 @@
 """synapt.recall MCP server — expose transcript search as tools for Claude Code.
 
-Provides thirteen tools via the Model Context Protocol:
+Provides fourteen tools via the Model Context Protocol:
   - recall_search: Search past session transcripts by keyword/topic
+  - recall_quick: Fast, low-cost knowledge-only search for speculative checks
   - recall_context: Drill down into a search result for full raw content
   - recall_files: Find sessions that touched a specific file
   - recall_sessions: List recent sessions with summaries
@@ -42,21 +43,24 @@ from synapt.recall._llm_util import truncate_at_word as _tw
 
 MCP_INSTRUCTIONS = (
     "You have access to synapt recall — persistent memory across sessions. "
-    "USE IT PROACTIVELY without being asked:\n"
-    "- At session start: search for recent work on the current project/branch\n"
-    "- Before making architectural decisions: check if past sessions discussed this\n"
-    "- When debugging: search for similar errors or past fixes\n"
-    "- When the user references past work: search for it immediately\n"
-    "- Before implementing features: check if prior sessions attempted this\n"
+    "Search BEFORE you act, not after.\n"
     "\n"
-    "Key tools:\n"
-    "- recall_search: Search past sessions by topic/keyword\n"
-    "- recall_files: Find sessions that touched specific files\n"
-    "- recall_journal: Read/write session journal entries\n"
-    "- recall_remind: Set cross-session reminders\n"
+    "WHEN TO SEARCH (do this automatically, without being asked):\n"
+    "- Before editing a file you haven't seen this session -> recall_files\n"
+    "- Before making a design decision -> recall_search for prior discussion\n"
+    "- When debugging an error -> recall_search for past fixes\n"
+    "- When user references past work -> recall_search immediately\n"
+    "- Starting a session -> recall_journal to read recent entries\n"
     "\n"
-    "Do NOT wait for the user to say 'use recall' — if context from past "
-    "sessions would help, search for it automatically."
+    "WHICH TOOL:\n"
+    "- recall_quick: Fast, cheap knowledge check. Use speculatively when unsure.\n"
+    "- recall_search: Full search with transcript chunks. Use when you need detail.\n"
+    "- recall_files: Find sessions that touched a specific file path.\n"
+    "- recall_journal: Read/write session notes. Check at session start.\n"
+    "- recall_remind: Set/check cross-session reminders.\n"
+    "\n"
+    "DO NOT search for: general programming questions, syntax help, "
+    "API docs, or anything not specific to this project's history."
 )
 
 # ---------------------------------------------------------------------------
@@ -257,6 +261,41 @@ def recall_search(
                     f"{index._embedding_reason}]"
                 )
             return msg
+        return "No results found."
+    except Exception as exc:
+        return f"Search failed: {exc}"
+
+
+def recall_quick(query: str) -> str:
+    """Quick, low-cost memory check. Use this speculatively — when you're
+    not sure if past context exists but want to check.
+
+    Returns only knowledge nodes and cluster summaries (no raw transcript
+    chunks), keeping output short and fast. If you find something relevant,
+    follow up with recall_search or recall_context for full detail.
+
+    Args:
+        query: Natural language query or keywords to search for.
+    """
+    index = _get_index()
+    if index is None:
+        index_dir = project_index_dir()
+        return f"No index found at {index_dir}. Run `synapt recall setup` first."
+
+    try:
+        result = index.lookup(
+            query,
+            max_chunks=5,
+            max_tokens=500,
+            half_life=None,
+            threshold_ratio=0.2,
+            depth="concise",
+        )
+        if result:
+            return result
+        diag = index._last_diagnostics
+        if diag:
+            return diag.format_message()
         return "No results found."
     except Exception as exc:
         return f"Search failed: {exc}"
@@ -1185,6 +1224,7 @@ def register_tools(mcp) -> None:
     repair and watch tools on a single MCP server.
     """
     mcp.tool()(recall_search)
+    mcp.tool()(recall_quick)
     mcp.tool()(recall_files)
     mcp.tool()(recall_sessions)
     mcp.tool()(recall_build)
