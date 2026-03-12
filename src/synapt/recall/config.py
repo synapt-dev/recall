@@ -1,6 +1,6 @@
-"""User-configurable model selection for the recall system.
+"""User-configurable model selection and query defaults for the recall system.
 
-Loads model preferences from config files and environment variables.
+Loads preferences from config files and environment variables.
 Priority (highest wins): env vars → project config → global config → defaults.
 
 Config locations:
@@ -16,7 +16,8 @@ Example config:
       "consolidation": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
       "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2"
     },
-    "backend": "auto"
+    "backend": "auto",
+    "max_tokens": 1500
   }
 """
 
@@ -38,13 +39,16 @@ DEFAULTS = {
     "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2",
 }
 
-# Env var → config key mapping
+# Env var → config key mapping (model overrides)
 _ENV_MAP = {
     "SYNAPT_SUMMARY_MODEL": "summarization",
     "SYNAPT_ENRICHMENT_MODEL": "enrichment",
     "SYNAPT_RERANKER_MODEL": "reranker",
     "SYNAPT_EMBEDDING_MODEL": "embedding",
 }
+
+# Default query parameters
+DEFAULT_MAX_TOKENS = 1500
 
 # Reverse lookup: config key → env var name
 _KEY_TO_ENV = {v: k for k, v in _ENV_MAP.items()}
@@ -56,6 +60,7 @@ class RecallConfig:
 
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULTS))
     backend: str = "auto"
+    max_tokens: int = DEFAULT_MAX_TOKENS
 
     def get_model(self, key: str) -> str:
         """Get a model name by key, with env var override."""
@@ -67,6 +72,16 @@ class RecallConfig:
                 return env_val
 
         return self.models.get(key, DEFAULTS.get(key, ""))
+
+    def get_max_tokens(self) -> int:
+        """Get the configured max_tokens default, with env var override."""
+        env_val = os.environ.get("SYNAPT_MAX_TOKENS")
+        if env_val:
+            try:
+                return int(env_val)
+            except ValueError:
+                logger.warning("Invalid SYNAPT_MAX_TOKENS=%r, using %d", env_val, self.max_tokens)
+        return self.max_tokens
 
     def active_models(self) -> dict[str, str]:
         """Get all active model names (with env overrides applied)."""
@@ -161,7 +176,20 @@ def load_config() -> RecallConfig:
     if env_backend:
         backend = env_backend
 
-    config = RecallConfig(models=models, backend=backend)
+    # max_tokens: project overrides global overrides default
+    max_tokens = DEFAULT_MAX_TOKENS
+    if "max_tokens" in global_data:
+        try:
+            max_tokens = int(global_data["max_tokens"])
+        except (ValueError, TypeError):
+            logger.warning("Invalid max_tokens in global config, using default")
+    if "max_tokens" in project_data:
+        try:
+            max_tokens = int(project_data["max_tokens"])
+        except (ValueError, TypeError):
+            logger.warning("Invalid max_tokens in project config, using default")
+
+    config = RecallConfig(models=models, backend=backend, max_tokens=max_tokens)
     _cached_config = config
     _cached_mtime = current_mtime
 
