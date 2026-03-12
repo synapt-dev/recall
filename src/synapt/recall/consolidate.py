@@ -359,6 +359,9 @@ _DEFAULT_GOOD_EXAMPLES = [
     '- FORMAT EXAMPLE: "[PersonA] calls [PersonB] by the nickname Zee" (fact)',
     '- FORMAT EXAMPLE: "[PersonB] grew up in Dublin, Ireland before moving abroad" (fact)',
     '- FORMAT EXAMPLE: "[PersonA] switched from yoga to pilates for back pain" (decision)',
+    '- FORMAT EXAMPLE: "[PersonB] collects classic children\'s books, especially Dr. Seuss" (preference)',
+    '- FORMAT EXAMPLE: "[PersonA] is studying for a counseling certification" (fact)',
+    '- FORMAT EXAMPLE: "[PersonB] enjoys classical music, particularly Vivaldi" (preference)',
 ]
 
 

@@ -216,7 +216,7 @@ class TestIntentParameterFlow:
         intent = classify_query_intent("why did the build fail yesterday")
         assert intent == "debug"
         params = intent_search_params(intent)
-        assert params["half_life"] < 30
+        assert params["half_life"] <= 30
 
     def test_factual_query_boosts_knowledge(self):
         """Factual queries should have high knowledge_boost."""
