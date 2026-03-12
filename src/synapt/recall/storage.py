@@ -1031,6 +1031,23 @@ class RecallDB:
                 continue
         return result
 
+    def get_knowledge_embeddings_by_id(self) -> dict[str, list[float]]:
+        """Load active knowledge node embeddings keyed by node ID.
+
+        Returns {node_id: [float, ...]} for nodes with stored embeddings.
+        """
+        result: dict[str, list[float]] = {}
+        rows = self._conn.execute(
+            "SELECT id, embedding FROM knowledge "
+            "WHERE embedding IS NOT NULL AND status = 'active'"
+        ).fetchall()
+        for r in rows:
+            try:
+                result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+            except struct.error:
+                continue
+        return result
+
     def save_knowledge_embeddings(self, embeddings: dict[int, list[float]]) -> None:
         """Store embedding BLOBs for knowledge nodes by rowid."""
         cur = self._conn.cursor()
