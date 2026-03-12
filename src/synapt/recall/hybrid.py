@@ -193,7 +193,18 @@ _FACTUAL_PATTERNS = re.compile(
     r"where\s+(is|are|does|did)|"
     r"how\s+(many|much|old|long|often)|port|version|url|endpoint|config|setting|"
     r"api\s+key|database|schema|table|"
-    r"favou?rite|prefer|name[ds]?)\b",
+    r"favou?rite|prefer|name[ds]?|"
+    # Inference about personality/traits — need knowledge nodes
+    r"would\s+\w+\s+(?:\w+\s+)?(be|enjoy|like|want|have|prefer|consider|pursue|go|live|move)|"
+    r"does\s+\w+\s+(live|have|enjoy|like|prefer|own)|"
+    r"what\s+(?:might|would|could)\s+\w+'?s?\s+\w+\s+(?:\w+\s+)?be|"
+    r"what\s+\w+\s+(?:might|would)\s+\w+\s+(?:pursue|do|be|have|enjoy|cause)|"
+    r"what\s+attributes|what\s+personality|what\s+traits|"
+    r"what\s+(?:might|would|could)\s+\w+\s+(?:pursue|do|be|enjoy|help)|"
+    r"is\s+it\s+likely\s+that|"
+    # Yes/no factual questions about people
+    r"(?:did|was|is|are)\s+\w+\s+(?:married|single|alive|religious|patriotic|happy|lonely|feeling|fan)|"
+    r"did\s+\w+\s+(?:have|study|want|go|live|enjoy|play))\b",
     re.IGNORECASE,
 )
 

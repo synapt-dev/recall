@@ -180,6 +180,15 @@ class TestQueryIntentClassification:
         assert classify_query_intent("What book did Tim recommend") == "aggregation"
         assert classify_query_intent("What color is Caroline's car") == "factual"
 
+    def test_factual_inference(self):
+        """Inference questions about personality/traits need knowledge nodes."""
+        assert classify_query_intent("Would Caroline be considered religious") == "factual"
+        assert classify_query_intent("Would Melanie likely enjoy classical music") == "factual"
+        assert classify_query_intent("Did James have a girlfriend") == "factual"
+        assert classify_query_intent("Is Deborah married") == "factual"
+        assert classify_query_intent("Was James feeling lonely") == "factual"
+        assert classify_query_intent("Does John live close to a beach") == "factual"
+
     def test_debug(self):
         assert classify_query_intent("why did the build fail") == "debug"
         assert classify_query_intent("error in the deployment") == "debug"
