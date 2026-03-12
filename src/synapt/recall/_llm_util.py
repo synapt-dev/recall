@@ -244,6 +244,7 @@ def _parse_markdown_nodes(text: str) -> list[dict]:
     # Split text into lines and process
     lines = text.split("\n")
     current_section_cat = "fact"  # default category
+    prefix_counts: dict[str, int] = {}  # Track repetitive prefixes
 
     for line in lines:
         stripped = line.strip()
@@ -269,6 +270,16 @@ def _parse_markdown_nodes(text: str) -> list[dict]:
 
         node = _parse_single_bullet_item(item_text, current_section_cat)
         if node:
+            # Inline dedup: small models degenerate into repetitive
+            # variations ("X's art is about love", "X's art is about
+            # pride", etc.). Detect by checking if the 4-word prefix
+            # has been seen too many times.
+            content = node["content"]
+            prefix = " ".join(content.split()[:4]).lower()
+            prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+            if prefix_counts[prefix] > 3:
+                continue  # Skip repetitive variations
+
             nodes.append(node)
             # Safety cap: small models can degenerate into hundreds of
             # repetitive bullets. Downstream dedup handles quality, but

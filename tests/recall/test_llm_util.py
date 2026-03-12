@@ -152,6 +152,19 @@ def test_parse_real_3b_failure_response():
     assert result["nodes"][2]["source_turns"] == ["s001c00:5", "s008c00:10"]
 
 
+def test_parse_degenerated_repetitive_bullets():
+    """3B models degenerate into repetitive variations — inline dedup caps them."""
+    bullets = ["* Caroline's art is about " + topic for topic in [
+        "friendship", "love", "pride", "identity", "acceptance",
+        "expression", "growth", "self-care", "advocacy", "creativity",
+    ]]
+    response = "**Facts**\n\n" + "\n".join(bullets)
+    result = parse_llm_json(response)
+    assert result is not None
+    # 4-word prefix "caroline's art is about" allows max 3 through
+    assert len(result["nodes"]) == 3
+
+
 def test_parse_empty_response():
     assert parse_llm_json("") is None
 
