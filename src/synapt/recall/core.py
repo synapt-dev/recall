@@ -1166,6 +1166,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
+                intent=intent,
             )
         else:
             result = self._global_lookup(
@@ -1611,6 +1612,7 @@ class TranscriptIndex:
         knowledge_boost: float = 2.0,
         now: datetime | None = None,
         max_knowledge: int | None = None,
+        intent: str = "",
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
@@ -1618,6 +1620,7 @@ class TranscriptIndex:
             self._search_knowledge(
                 query, max_chunks, include_historical=include_historical,
                 knowledge_boost=knowledge_boost, emb_weight=emb_weight,
+                intent=intent,
             )
             if self._db else []
         )
@@ -1631,6 +1634,7 @@ class TranscriptIndex:
                 depth=depth,
                 now=now,
                 max_knowledge=max_knowledge,
+                intent=intent,
             )
         return self._progressive_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, max_sessions,
@@ -1653,6 +1657,7 @@ class TranscriptIndex:
         emb_weight: float = 1.0,
         now: datetime | None = None,
         max_knowledge: int | None = None,
+        intent: str = "",
     ) -> str:
         """Progressive session search using FTS5 (SQLite backend)."""
         hits: list[tuple[int, float]] = []
@@ -1747,6 +1752,7 @@ class TranscriptIndex:
             knowledge_results=knowledge_results,
             query=query,
             max_knowledge=max_knowledge,
+            intent=intent,
         )
 
     def _progressive_lookup_bm25(
