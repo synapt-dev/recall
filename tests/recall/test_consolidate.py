@@ -682,6 +682,44 @@ class TestGenericFilterInApply(unittest.TestCase):
         finally:
             mod._inline_embedding_dedup = original_fn
 
+    def test_embedding_below_threshold_still_creates(self):
+        """Low cosine similarity should NOT auto-corroborate; node is created normally."""
+        import synapt.recall.consolidate as mod
+
+        existing = KnowledgeNode.create(
+            content="Kotlin Multiplatform projects are linked to Xcode for iOS builds",
+            category="architecture",
+            source_sessions=["s0"],
+        )
+        append_node(existing, self.kn_path)
+
+        original_fn = mod._inline_embedding_dedup
+
+        def mock_emb_dedup(candidate, existing_nodes, threshold=0.80):
+            # Simulate: cosine similarity below threshold
+            if existing_nodes:
+                return (None, 0.60)
+            return (None, 0.0)
+
+        mod._inline_embedding_dedup = mock_emb_dedup
+        try:
+            parsed = {
+                "nodes": [{
+                    "action": "create",
+                    "content": "Gradle builds use the Kotlin DSL for configuration",
+                    "category": "tooling",
+                    "confidence": 0.7,
+                    "tags": [],
+                }]
+            }
+            result = _apply_consolidation_result(
+                parsed, [existing], self.cluster, self.kn_path,
+            )
+            self.assertEqual(result.nodes_created, 1)
+            self.assertEqual(result.nodes_corroborated, 0)
+        finally:
+            mod._inline_embedding_dedup = original_fn
+
     def test_generic_contradict_rejected(self):
         """Contradict with generic replacement content should be rejected."""
         existing = KnowledgeNode.create(

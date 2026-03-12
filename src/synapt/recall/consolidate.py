@@ -258,9 +258,9 @@ _INLINE_COSINE_THRESHOLD = 0.80
 
 def _inline_embedding_dedup(
     candidate_content: str,
-    existing_nodes: list,
+    existing_nodes: "list[KnowledgeNode]",
     threshold: float = _INLINE_COSINE_THRESHOLD,
-) -> tuple:
+) -> "tuple[KnowledgeNode | None, float]":
     """Check if candidate is a semantic duplicate of any existing node.
 
     Uses the embedding provider (cached per process) to compute cosine
