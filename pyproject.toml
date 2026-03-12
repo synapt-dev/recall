@@ -26,6 +26,7 @@ Repository = "https://github.com/laynepenney/synapt"
 hf = ["huggingface_hub>=0.20"]
 onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
 transformers = ["transformers>=4.30", "peft>=0.7"]
+dev = ["watchfiles>=0.20"]
 test = ["pytest>=7.0", "numpy", "pytest-benchmark>=4.0"]
 
 [project.scripts]

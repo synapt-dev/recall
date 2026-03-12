@@ -75,7 +75,7 @@ def _print_help(extra_commands: dict | None = None):
         "",
         "Commands:",
         "  recall    Search and manage past session transcripts",
-        "  server    Start the unified MCP server",
+        "  server    Start the unified MCP server (--dev for auto-reload)",
     ]
     if extra_commands:
         for name in sorted(extra_commands):
