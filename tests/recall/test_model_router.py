@@ -144,6 +144,9 @@ class TestBackendRegistry:
         import synapt.recall._model_router as router
 
         sentinel = object()
+        # Isolate from any co-installed plugins (e.g. synapt-private)
+        monkeypatch.setattr(router, "_extra_backends", {})
+        monkeypatch.setattr(router, "_backends_loaded", True)
         register_backend("test-backend", lambda mt: sentinel)
 
         # Disable built-in backends so plugin backend is reached
