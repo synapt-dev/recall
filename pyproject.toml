@@ -43,6 +43,11 @@ synapt-convert = "synapt._models.convert:main"
 # a module with a register(register_fn) callable. Example:
 # modal = "synapt_private.backends"
 
+[project.entry-points."synapt.commands"]
+# Plugins register CLI subcommands here. Each entry point must reference
+# a callable main() function. Example:
+# repair = "synapt_private.repair.cli:cli_main"
+
 [tool.pytest.ini_options]
 addopts = "--benchmark-disable"
 
