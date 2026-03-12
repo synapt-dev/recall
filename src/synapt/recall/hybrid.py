@@ -216,8 +216,8 @@ _DEBUG_PATTERNS = re.compile(
 )
 
 _DECISION_PATTERNS = re.compile(
-    r"\b(decisions?|chose|chosen|choices?|selected|picked|prefer|switched|"
-    r"abandoned|dropped|tradeoffs?|trade.offs?|versus|"
+    r"\b(decisions?|chose|chosen|choices?|switched|"
+    r"tradeoffs?|trade.offs?|versus|"
     r"strategic)\b"
     r"|\bvs\b",
     re.IGNORECASE,

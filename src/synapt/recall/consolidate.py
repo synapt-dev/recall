@@ -41,6 +41,7 @@ from synapt.recall.knowledge import (
 from synapt.recall.clustering import _jaccard
 from synapt.recall.scrub import scrub_text, strip_markdown_formatting
 from synapt.recall.core import project_data_dir, project_index_dir
+from synapt.recall._llm_util import truncate_at_word as _tw
 
 logger = logging.getLogger("synapt.recall.consolidate")
 
@@ -716,12 +717,6 @@ def _parse_llm_response(response: str) -> dict | None:
     """Parse the LLM's JSON response."""
     from synapt.recall._llm_util import parse_llm_json
     return parse_llm_json(response)
-
-
-def _tw(text: str, max_chars: int) -> str:
-    """Truncate at word boundary (shorthand for this module)."""
-    from synapt.recall._llm_util import truncate_at_word
-    return truncate_at_word(text, max_chars)
 
 
 def _apply_consolidation_result(
