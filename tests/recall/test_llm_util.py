@@ -23,24 +23,13 @@ def test_parse_markdown_numbered_list():
     response = (
         'After analyzing, I found:\n\n'
         '1. "Always run tests before deploying" (convention)\n'
-        '\t* Category: convention\n'
-        '\t* Confidence: 0.9\n'
-        '\t* Tags: ["testing", "deploy"]\n'
         '2. "Use Python 3.12 for all projects" (preference)\n'
-        '\t* Category: preference\n'
-        '\t* Confidence: 0.7\n'
-        '\t* Tags: ["python"]\n'
     )
     result = parse_llm_json(response)
     assert result is not None
     assert len(result["nodes"]) == 2
     assert result["nodes"][0]["content"] == "Always run tests before deploying"
-    assert result["nodes"][0]["category"] == "convention"
-    assert result["nodes"][0]["confidence"] == 0.9
-    assert result["nodes"][0]["tags"] == ["testing", "deploy"]
     assert result["nodes"][1]["content"] == "Use Python 3.12 for all projects"
-    assert result["nodes"][1]["category"] == "preference"
-    assert result["nodes"][1]["confidence"] == 0.7
 
 
 def test_parse_markdown_without_metadata():
@@ -54,8 +43,113 @@ def test_parse_markdown_without_metadata():
     assert result is not None
     assert len(result["nodes"]) == 2
     assert result["nodes"][0]["content"] == "Database uses PostgreSQL 15"
-    assert result["nodes"][0]["category"] == "workflow"  # default
+    assert result["nodes"][0]["category"] == "fact"  # default
     assert result["nodes"][0]["confidence"] == 0.6  # default
+
+
+def test_parse_bullet_list_with_section_headers():
+    """3B models output bullet lists under section headers like **Facts**."""
+    response = (
+        'After analyzing the session summaries:\n\n'
+        '**Facts**\n\n'
+        '* Caroline adopted a rescue dog named Rex in April 2025.\n'
+        '* Caroline signed up for pottery class on July 2nd.\n'
+        '* Caroline grew up in Dublin, Ireland.\n\n'
+        '**Preferences**\n\n'
+        '* Caroline prefers pottery class over other activities.\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 4
+    assert result["nodes"][0]["content"] == "Caroline adopted a rescue dog named Rex in April 2025"
+    assert result["nodes"][0]["category"] == "fact"
+    assert result["nodes"][1]["content"] == "Caroline signed up for pottery class on July 2nd"
+    assert result["nodes"][1]["category"] == "fact"
+    assert result["nodes"][2]["content"] == "Caroline grew up in Dublin, Ireland"
+    assert result["nodes"][2]["category"] == "fact"
+    assert result["nodes"][3]["content"] == "Caroline prefers pottery class over other activities"
+    assert result["nodes"][3]["category"] == "preference"
+
+
+def test_parse_bullet_list_with_source_turns():
+    """Bullet items with source turn references at end."""
+    response = (
+        '**Facts**\n\n'
+        '* Caroline attended a council meeting for adoption (s008c00:10)\n'
+        '* Caroline signed up for pottery class (s001c00:5, s008c00:10)\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 2
+    assert result["nodes"][0]["content"] == "Caroline attended a council meeting for adoption"
+    assert result["nodes"][0]["source_turns"] == ["s008c00:10"]
+    assert result["nodes"][1]["source_turns"] == ["s001c00:5", "s008c00:10"]
+
+
+def test_parse_bullet_list_with_inline_structured_fields():
+    """Bullet items with inline category/confidence/tags fields."""
+    response = (
+        '**Facts**\n\n'
+        '* Caroline adopted a rescue dog named Rex in April 2025. '
+        '(category: fact, existing_id: null, content: "Caroline adopted a rescue dog named Rex in April 2025", '
+        'confidence: 0.9, tags: ["adoption", "dog"], '
+        'source_turns: ["s008c00:5", "s012c00:10"])\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 1
+    node = result["nodes"][0]
+    assert node["content"] == "Caroline adopted a rescue dog named Rex in April 2025"
+    assert node["category"] == "fact"
+    assert node["confidence"] == 0.9
+    assert node["tags"] == ["adoption", "dog"]
+    assert node["source_turns"] == ["s008c00:5", "s012c00:10"]
+
+
+def test_parse_bullet_list_with_category_annotation():
+    """Bullet items with category annotation in parentheses."""
+    response = (
+        'Knowledge:\n\n'
+        '* Caroline discussed her transition and received support (fact)\n'
+        '* Caroline prefers hiking over camping (preference)\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 2
+    assert result["nodes"][0]["content"] == "Caroline discussed her transition and received support"
+    assert result["nodes"][1]["content"] == "Caroline prefers hiking over camping"
+
+
+def test_parse_dash_bullet_list():
+    """Dash-prefixed bullet items."""
+    response = (
+        '**Facts**\n\n'
+        '- Caroline joined a new LGBTQ activist group last Tuesday.\n'
+        '- Caroline passed adoption agency interviews last Friday.\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 2
+    assert result["nodes"][0]["content"] == "Caroline joined a new LGBTQ activist group last Tuesday"
+    assert result["nodes"][1]["content"] == "Caroline passed adoption agency interviews last Friday"
+
+
+def test_parse_real_3b_failure_response():
+    """Actual 3B model response that was going to consolidation_failures.jsonl."""
+    response = (
+        'After analyzing the session summaries, I extracted the following '
+        'durable knowledge nodes:\n\n'
+        '**Facts**\n\n'
+        '* Caroline attended a council meeting for adoption (s008c00:10)\n'
+        '* Caroline realized she could be herself without fear and transitioned (s008c00:10)\n'
+        '* Caroline signed up for pottery class on July 2nd (s001c00:5, s008c00:10)\n'
+        '* Melanie got peace through creativity and family (s008c00:10)\n'
+    )
+    result = parse_llm_json(response)
+    assert result is not None
+    assert len(result["nodes"]) == 4
+    assert result["nodes"][0]["category"] == "fact"
+    assert result["nodes"][2]["source_turns"] == ["s001c00:5", "s008c00:10"]
 
 
 def test_parse_empty_response():

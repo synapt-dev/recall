@@ -106,8 +106,56 @@ _SPECIFICITY_SIGNALS = re.compile(
     r"|\b[Pp][Rr]\s*#?\d+"      # PR references
     r"|\b[Ii]ssue\s*#?\d+"      # Issue references
     r"|\b[Cc]onv\s*#?\d+"       # Conv references
-    r"|\b\d{4}-\d{2}-\d{2}\b",  # Dates
+    r"|\b\d{4}-\d{2}-\d{2}\b"   # Dates
+    r"|\b(?:January|February|March|April|May|June|July|August|September|October|November|December) \d"  # Month+day/year
+    ,
 )
+
+# Proper nouns not at start of sentence indicate entity-specific content.
+# Matches capitalized words (3+ chars) that aren't the first word and aren't
+# common English words. Applied separately since it needs word-position context.
+_COMMON_CAPS = frozenset({
+    # Pronouns & determiners
+    "The", "This", "That", "These", "Those", "They", "Their", "There",
+    "What", "When", "Where", "Which", "While", "Who", "Why", "How",
+    "And", "But", "For", "Not", "All", "Any", "Some", "From", "With",
+    "Into", "Also", "Just", "Very", "Each", "Both", "After", "Before",
+    "During", "About", "Above", "Below", "Between", "Through",
+    # Common verbs at sentence start
+    "Use", "Using", "Used", "Keep", "Always", "Never", "Follow",
+    "Make", "Run", "Set", "Get", "Let", "See", "Try", "Add",
+    "Write", "Read", "Check", "Test", "Build", "Create", "Store",
+    "Handle", "Configure", "Install", "Deploy", "Start", "Stop",
+    "Enable", "Disable", "Include", "Avoid", "Ensure", "Verify",
+    "Review", "Update", "Remove", "Move", "Copy", "Save", "Load",
+    "Define", "Implement", "Consider", "Prefer", "Maintain",
+    # Common technology names (not project-specific)
+    "Docker", "Gradle", "Android", "Python", "Java", "Swift",
+    "Rust", "Linux", "Windows", "React", "Node", "Rails",
+    "Redis", "Mongo", "Postgres", "MySQL", "Nginx", "Apache",
+    "Kubernetes", "Terraform", "Jenkins", "Github", "Gitlab",
+})
+
+
+def _has_proper_nouns(content: str) -> bool:
+    """Check if content contains proper nouns (named entities).
+
+    Finds capitalized words that aren't common English words. The first
+    word is checked too but only counted if it's not a common sentence
+    starter. One proper noun is sufficient — it indicates the content
+    refers to a specific entity (person, place, product).
+    """
+    words = content.split()
+    if len(words) < 2:
+        return False
+    for w in words:
+        clean = w.rstrip(".,;:!?'\")")
+        if (len(clean) >= 2
+                and clean[0].isupper()
+                and clean[1:].islower()
+                and clean not in _COMMON_CAPS):
+            return True
+    return False
 
 def _lacks_specificity(content: str) -> bool:
     """Return True if content lacks project-specific identifiers.
@@ -122,7 +170,12 @@ def _lacks_specificity(content: str) -> bool:
     """
     if len(content) > 120:
         return False
-    return _SPECIFICITY_SIGNALS.search(content) is None
+    if _SPECIFICITY_SIGNALS.search(content) is not None:
+        return False
+    # Proper nouns (person names, place names) are strong entity signals
+    if _has_proper_nouns(content):
+        return False
+    return True
 
 # Stopwords for keyword extraction
 _STOPWORDS = frozenset({

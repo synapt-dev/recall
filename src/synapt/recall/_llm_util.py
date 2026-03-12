@@ -90,12 +90,14 @@ def parse_llm_json(response: str) -> dict | None:
 
     # Fallback: extract nodes from markdown-formatted lists.
     # Small models sometimes output numbered lists instead of JSON:
-    #   1. "content here" (category)
-    #      * Category: workflow
-    #      * Confidence: 0.8
-    nodes = _parse_markdown_nodes(response)
-    if nodes:
-        return {"nodes": nodes}
+    #   **Facts**
+    #   * Caroline adopted a rescue dog named Rex (s008c00:5)
+    # Skip this fallback when the text looks like an enrichment response
+    # (Focus:/Done:/Decisions: headers) — those have their own parser.
+    if not re.search(r'(?mi)^(?:focus|done|decisions?|next[_ ]?steps?)\s*:', response):
+        nodes = _parse_markdown_nodes(response)
+        if nodes:
+            return {"nodes": nodes}
 
     return None
 
@@ -217,75 +219,190 @@ def _repair_truncated_dict(text: str) -> dict | None:
 def _parse_markdown_nodes(text: str) -> list[dict]:
     """Extract knowledge nodes from markdown-formatted LLM output.
 
-    Handles patterns like:
+    Handles numbered lists, bullet lists (* or -), and section headers:
+        **Facts**
+        * Caroline adopted a rescue dog named Rex (s008c00:5)
+        * Caroline signed up for pottery class on July 2nd (s001c00:5)
+
         1. "Train on Alfred, test on Batman" (convention)
            * Category: convention
            * Confidence: 0.8
-           * Tags: ["training", "eval"]
     """
     nodes = []
-    # Split into numbered items (first element is text before item 1 — skip it)
-    items = re.split(r'\n\s*\d+\.\s+', text)
-    for item in items[1:]:
-        if not item.strip():
+
+    # Track section headers (e.g., **Facts**, **Preferences**) for category
+    _SECTION_TO_CATEGORY = {
+        "facts": "fact", "fact": "fact",
+        "preferences": "preference", "preference": "preference",
+        "decisions": "decision", "decision": "decision",
+        "conventions": "convention", "convention": "convention",
+        "workflows": "workflow", "workflow": "workflow",
+        "lessons": "lesson-learned", "lesson-learned": "lesson-learned",
+        "lessons learned": "lesson-learned",
+    }
+
+    # Split text into lines and process
+    lines = text.split("\n")
+    current_section_cat = "fact"  # default category
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
             continue
-        # Extract quoted content
-        content_match = re.search(r'"([^"]+)"', item)
-        if not content_match:
-            # Try unquoted: first line up to parenthetical
-            first_line = item.split('\n')[0].strip()
-            content_match = re.match(r'(.+?)(?:\s*\(|$)', first_line)
-            if not content_match or len(content_match.group(1)) < 5:
-                continue
-            content = content_match.group(1).strip(' "')
-        else:
-            content = content_match.group(1)
 
-        if len(content) < 5:
+        # Detect section headers: **Facts**, **Preferences**, etc.
+        section_match = re.match(r'\*\*(\w[\w\s-]*?)\*\*\s*$', stripped)
+        if section_match:
+            section_name = section_match.group(1).strip().lower()
+            if section_name in _SECTION_TO_CATEGORY:
+                current_section_cat = _SECTION_TO_CATEGORY[section_name]
             continue
 
-        node: dict = {
-            "action": "create",
-            "existing_id": None,
-            "content": content,
-            "category": "workflow",
-            "confidence": 0.6,
-            "tags": [],
-            "contradiction_note": "",
-        }
+        # Match bullet items: * item, - item, or numbered: 1. item
+        bullet_match = re.match(r'(?:[*\-]\s+|\d+\.\s+)(.+)', stripped)
+        if not bullet_match:
+            continue
 
-        # Extract category
-        cat_match = re.search(
-            r'[Cc]ategory:\s*(\w[\w\s_-]*)', item,
-        )
+        item_text = bullet_match.group(1).strip()
+        if len(item_text) < 5:
+            continue
+
+        node = _parse_single_bullet_item(item_text, current_section_cat)
+        if node:
+            nodes.append(node)
+            # Safety cap: small models can degenerate into hundreds of
+            # repetitive bullets. Downstream dedup handles quality, but
+            # we cap here for performance.
+            if len(nodes) >= 50:
+                break
+
+    return nodes
+
+
+# Pattern to match source turn references at end of text: (s008c00:10) or
+# (s001c00:5, s008c00:10)
+_SOURCE_TURNS_RE = re.compile(
+    r'\(([s]\d{3}c\d{2}:\d+(?:\s*,\s*[s]\d{3}c\d{2}:\d+)*)\)\s*$'
+)
+
+
+def _parse_single_bullet_item(item_text: str, section_cat: str) -> dict | None:
+    """Parse a single bullet item into a knowledge node dict.
+
+    Handles two formats:
+    1. Simple: "Caroline adopted Rex (s008c00:5)"
+    2. Structured: "Caroline adopted Rex. (category: fact, confidence: 0.9, ...)"
+    """
+    node: dict = {
+        "action": "create",
+        "existing_id": None,
+        "content": "",
+        "category": section_cat,
+        "confidence": 0.6,
+        "tags": [],
+        "contradiction_note": "",
+        "source_turns": [],
+    }
+
+    # Extract source turns from end: (s008c00:10) or (s001c00:5, s008c00:10)
+    source_match = _SOURCE_TURNS_RE.search(item_text)
+    if source_match:
+        refs = source_match.group(1)
+        node["source_turns"] = [r.strip() for r in refs.split(",")]
+        item_text = item_text[:source_match.start()].rstrip()
+
+    # Check for inline structured fields: (category: fact, confidence: 0.9, ...)
+    struct_match = re.search(r'\(category:\s*\w', item_text)
+    if struct_match:
+        struct_text = item_text[struct_match.start():]
+        item_text = item_text[:struct_match.start()].rstrip(" .,")
+
+        # Extract category from inline fields
+        cat_match = re.search(r'category:\s*(\w[\w_-]*)', struct_text)
         if cat_match:
             node["category"] = cat_match.group(1).strip().lower()
 
-        # Extract confidence
-        conf_match = re.search(r'[Cc]onfidence:\s*([\d.]+)', item)
+        # Extract confidence from inline fields
+        conf_match = re.search(r'confidence:\s*([\d.]+)', struct_text)
         if conf_match:
             try:
                 node["confidence"] = min(1.0, max(0.0, float(conf_match.group(1))))
             except ValueError:
                 pass
 
-        # Extract tags
-        tags_match = re.search(r'[Tt]ags:\s*\[([^\]]*)\]', item)
+        # Extract tags from inline fields
+        tags_match = re.search(r'tags:\s*\[([^\]]*)\]', struct_text)
         if tags_match:
-            tags_str = tags_match.group(1)
             node["tags"] = [
                 t.strip().strip('"\'')
-                for t in tags_str.split(",")
+                for t in tags_match.group(1).split(",")
                 if t.strip().strip('"\'')
             ]
 
-        # Extract action (corroborate/contradict)
+        # Extract source_turns from inline fields (if not already found)
+        if not node["source_turns"]:
+            st_match = re.search(r'source_turns:\s*\[([^\]]*)\]', struct_text)
+            if st_match:
+                node["source_turns"] = [
+                    t.strip().strip('"\'')
+                    for t in st_match.group(1).split(",")
+                    if t.strip().strip('"\'')
+                ]
+
+        # Extract content from inline "content" field if present
+        content_match = re.search(r'content:\s*"([^"]*)"', struct_text)
+        if content_match and len(content_match.group(1)) > len(item_text):
+            item_text = content_match.group(1)
+
+        # Extract action
         action_match = re.search(
-            r'[Aa]ction:\s*(create|corroborate|contradict)', item,
+            r'action:\s*(create|corroborate|contradict)', struct_text,
         )
         if action_match:
             node["action"] = action_match.group(1).lower()
 
-        nodes.append(node)
+        # Extract existing_id
+        eid_match = re.search(r'existing_id:\s*"([^"]*)"', struct_text)
+        if eid_match:
+            node["existing_id"] = eid_match.group(1)
+    else:
+        # Try standalone metadata lines (for numbered-list sub-items)
+        cat_match = re.search(r'[Cc]ategory:\s*(\w[\w\s_-]*)', item_text)
+        if cat_match:
+            node["category"] = cat_match.group(1).strip().lower()
 
-    return nodes
+        conf_match = re.search(r'[Cc]onfidence:\s*([\d.]+)', item_text)
+        if conf_match:
+            try:
+                node["confidence"] = min(1.0, max(0.0, float(conf_match.group(1))))
+            except ValueError:
+                pass
+
+        action_match = re.search(
+            r'[Aa]ction:\s*(create|corroborate|contradict)', item_text,
+        )
+        if action_match:
+            node["action"] = action_match.group(1).lower()
+
+        tags_match = re.search(r'[Tt]ags:\s*\[([^\]]*)\]', item_text)
+        if tags_match:
+            node["tags"] = [
+                t.strip().strip('"\'')
+                for t in tags_match.group(1).split(",")
+                if t.strip().strip('"\'')
+            ]
+
+    # Clean trailing category annotation like "(fact)" or "(preference)"
+    item_text = re.sub(r'\s*\((?:fact|preference|decision|convention|workflow)\)\s*$',
+                       '', item_text)
+
+    # Strip trailing period and whitespace
+    content = item_text.rstrip(" .")
+    # Strip surrounding quotes: "fact content" → fact content
+    if len(content) >= 2 and content[0] == '"' and content[-1] == '"':
+        content = content[1:-1]
+    if len(content) < 5:
+        return None
+
+    node["content"] = content
+    return node
