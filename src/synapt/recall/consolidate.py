@@ -129,6 +129,8 @@ _COMMON_CAPS = frozenset({
     "Enable", "Disable", "Include", "Avoid", "Ensure", "Verify",
     "Review", "Update", "Remove", "Move", "Copy", "Save", "Load",
     "Define", "Implement", "Consider", "Prefer", "Maintain",
+    "Monitor", "Optimize", "Migrate", "Document", "Refactor",
+    "Debug", "Validate", "Integrate", "Manage", "Process",
     # Common technology names (not project-specific)
     "Docker", "Gradle", "Android", "Python", "Java", "Swift",
     "Rust", "Linux", "Windows", "React", "Node", "Rails",
