@@ -47,6 +47,7 @@ class KnowledgeNode:
     confidence: float                    # 0.0-1.0
     source_sessions: list[str] = field(default_factory=list)
     source_turns: list[str] = field(default_factory=list)  # "session_id:turn_num"
+    source_offsets: list[dict] = field(default_factory=list)  # [{"s": sid, "t": turn, "b": begin, "e": end}]
     created_at: str = ""                 # ISO 8601
     updated_at: str = ""                 # ISO 8601
     status: str = "active"               # active | stale | contradicted
@@ -197,6 +198,44 @@ def update_node(
     updated = KnowledgeNode.from_dict(d)
     append_node(updated, path)
     return True
+
+
+def batch_update_nodes(
+    updates: dict[str, dict],
+    path: Path | None = None,
+) -> int:
+    """Batch-update multiple knowledge nodes in one read/write pass.
+
+    Args:
+        updates: Mapping of node_id -> dict of field updates.
+        path: Path to knowledge.jsonl.
+
+    Returns the number of nodes actually updated.
+    """
+    path = path or _knowledge_path()
+    if not path.exists() or not updates:
+        return 0
+    nodes = _dedup_nodes(_read_all_nodes(path))
+    by_id = {n.id: n for n in nodes}
+    now = datetime.now(timezone.utc).isoformat()
+    to_append: list[KnowledgeNode] = []
+    for node_id, fields in updates.items():
+        target = by_id.get(node_id)
+        if target is None:
+            continue
+        d = target.to_dict()
+        d.update(fields)
+        d["updated_at"] = now
+        to_append.append(KnowledgeNode.from_dict(d))
+    if not to_append:
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        for node in to_append:
+            f.write(json.dumps(node.to_dict()) + "\n")
+        f.flush()
+    return len(to_append)
 
 
 def compact_knowledge(path: Path | None = None) -> int:
