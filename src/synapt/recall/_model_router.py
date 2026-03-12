@@ -15,10 +15,56 @@ Override with SYNAPT_SUMMARY_BACKEND=onnx|mlx|transformers|ollama env var.
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 from enum import Enum
+from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+# --- Backend registry ---
+# Plugins register custom backends (e.g. Modal) via entry points or
+# direct calls to register_backend().  Discovered backends are inserted
+# into the decoder-only fallback chain between MLX and Ollama.
+
+_extra_backends: dict[str, Callable[[int], object | None]] = {}
+_backends_loaded: bool = False
+
+
+def register_backend(name: str, factory: Callable[[int], object | None]) -> None:
+    """Register a custom model backend.
+
+    Args:
+        name: Backend identifier (used in config ``backend`` field).
+        factory: Callable that accepts ``max_tokens`` and returns a
+            model client instance, or None if unavailable.
+    """
+    _extra_backends[name] = factory
+    logger.debug("Registered extra backend: %s", name)
+
+
+def _load_extra_backends() -> None:
+    """Discover backends registered via ``synapt.backends`` entry points.
+
+    Each entry point should reference a module with a
+    ``register(register_fn)`` callable that calls ``register_fn(name, factory)``.
+    Called once on first ``get_client()`` invocation.
+    """
+    global _backends_loaded
+    if _backends_loaded:
+        return
+    _backends_loaded = True
+
+    eps = importlib.metadata.entry_points(group="synapt.backends")
+    for ep in eps:
+        try:
+            module = ep.load()
+            module.register(register_backend)
+            logger.debug("Loaded backend entry point: %s", ep.name)
+        except Exception:
+            logger.debug(
+                "Backend entry point %r failed to load", ep.name, exc_info=True
+            )
 
 # Default models per architecture
 DEFAULT_DECODER_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
@@ -78,7 +124,12 @@ def get_client(
     Returns a ModelClient instance, or None if no backend is available.
     The client is cached per (backend, max_tokens) to avoid reloading models.
     Model names are resolved from config files and env vars.
+
+    Plugin backends registered via ``synapt.backends`` entry points are
+    inserted into the decoder-only fallback chain between MLX and Ollama.
     """
+    _load_extra_backends()
+
     from synapt.recall.config import load_config
     cfg = load_config()
 
@@ -91,6 +142,14 @@ def get_client(
         return _get_transformers_client(max_tokens)
     elif override == "ollama":
         return _get_ollama_client(max_tokens)
+    elif override in _extra_backends:
+        key = (override, max_tokens)
+        cached = _client_cache.get(key, _NOT_FOUND)
+        if cached is not _NOT_FOUND:
+            return cached
+        client = _extra_backends[override](max_tokens)
+        _client_cache[key] = client
+        return client
 
     preferred = _TASK_PREFERENCE[task]
     model_key = _TASK_MODEL_KEY.get(task)
@@ -103,10 +162,10 @@ def get_client(
             client = _get_transformers_client(max_tokens, model_name=model_name)
         if client is not None:
             return client
-        # Fall back to decoder-only
-        return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
+        # Fall back to decoder-only (including plugin backends)
+        return _get_decoder_only_client(max_tokens)
     else:
-        return _get_mlx_client(max_tokens) or _get_ollama_client(max_tokens)
+        return _get_decoder_only_client(max_tokens)
 
 
 _NOT_FOUND = object()  # Sentinel for cached negative lookups
@@ -203,9 +262,32 @@ def _get_ollama_client(max_tokens: int) -> object | None:
         return None
 
 
+def _get_decoder_only_client(max_tokens: int) -> object | None:
+    """Try MLX → plugin backends → Ollama for decoder-only inference."""
+    client = _get_mlx_client(max_tokens)
+    if client is not None:
+        return client
+    for name, factory in _extra_backends.items():
+        key = (name, max_tokens)
+        cached = _client_cache.get(key, _NOT_FOUND)
+        if cached is not _NOT_FOUND:
+            return cached
+        client = factory(max_tokens)
+        _client_cache[key] = client
+        if client is not None:
+            return client
+    return _get_ollama_client(max_tokens)
+
+
 def clear_cache() -> None:
-    """Clear the client cache. Useful for testing."""
+    """Clear the client cache. Useful for testing.
+
+    Preserves registered backends (they are stateless factories).
+    Resets backend discovery so entry points are re-scanned on next call.
+    """
+    global _backends_loaded
     _client_cache.clear()
+    _backends_loaded = False
 
 
 def is_encoder_decoder(client: object) -> bool:
