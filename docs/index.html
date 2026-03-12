@@ -89,7 +89,21 @@
     .hero {
       text-align: center;
       padding: 6rem 0 4rem;
+      background: url('assets/hero_memory.png') center/cover no-repeat;
+      position: relative;
     }
+    .hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(
+        180deg,
+        rgba(13, 17, 23, 0.85) 0%,
+        rgba(13, 17, 23, 0.7) 50%,
+        rgba(13, 17, 23, 0.95) 100%
+      );
+    }
+    .hero .container { position: relative; z-index: 1; }
     .hero h1 {
       font-size: 3.2rem;
       font-weight: 700;
@@ -506,6 +520,10 @@
           </tr>
         </tbody>
       </table>
+      <div style="text-align: center; margin: 2.5rem 0 1.5rem;">
+        <img src="assets/locomo_radar.svg" alt="LOCOMO benchmark radar chart — synapt vs Mem0, Mem0+Graph, Zep"
+             style="max-width: 550px; width: 100%;">
+      </div>
       <p class="footnote">
         Competitor data from <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a>.
         Synapt runs entirely locally &mdash; beating cloud systems that use GPT-4 for memory extraction.
