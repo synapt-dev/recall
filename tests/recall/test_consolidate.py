@@ -23,6 +23,7 @@ from synapt.recall.consolidate import (
     _format_journal_cluster,
     _get_project_context,
     _is_generic_node,
+    _lacks_specificity,
     _load_response_cache,
     _save_cached_response,
     _jaccard,
@@ -305,10 +306,10 @@ class TestApplyConsolidation(unittest.TestCase):
         parsed = {
             "nodes": [{
                 "action": "create",
-                "content": "Always run tests before merging",
+                "content": "Use --iters 500 for cloud training to prevent truncation",
                 "category": "convention",
                 "confidence": 0.7,
-                "tags": ["testing", "ci"],
+                "tags": ["training", "cloud"],
                 "contradiction_note": "",
             }]
         }
@@ -316,7 +317,7 @@ class TestApplyConsolidation(unittest.TestCase):
         self.assertEqual(result.nodes_created, 1)
         nodes = read_nodes(self.kn_path)
         self.assertEqual(len(nodes), 1)
-        self.assertEqual(nodes[0].content, "Always run tests before merging")
+        self.assertEqual(nodes[0].content, "Use --iters 500 for cloud training to prevent truncation")
         self.assertEqual(nodes[0].category, "convention")
         self.assertEqual(nodes[0].source_sessions, ["s1", "s2"])
 
@@ -424,10 +425,10 @@ class TestApplyConsolidation(unittest.TestCase):
                 },
                 {
                     "action": "create",
-                    "content": "Always review PRs before merge",
+                    "content": "Use --writer-from flag to freeze writer output across eval runs",
                     "category": "workflow",
                     "confidence": 0.6,
-                    "tags": ["review"],
+                    "tags": ["eval"],
                 },
             ]
         }
@@ -438,7 +439,8 @@ class TestApplyConsolidation(unittest.TestCase):
         self.assertEqual(result.nodes_created, 1)
 
     def test_content_truncated_at_300_chars(self):
-        long_content = "x" * 500
+        # Long content (>120 chars) skips specificity check, so plain text is fine
+        long_content = "ConnectionPool uses threading.local() for per-thread isolation " + "x" * 500
         parsed = {
             "nodes": [{
                 "action": "create",
@@ -495,6 +497,80 @@ class TestIsGenericNode(unittest.TestCase):
         self.assertTrue(_is_generic_node("Write functions small"))
 
 
+    def test_rejects_tool_tautology(self):
+        """Tool used for its primary purpose is generic."""
+        self.assertTrue(_is_generic_node("Use gradlew to build the project"))
+        self.assertTrue(_is_generic_node("Use npm to install dependencies"))
+        self.assertTrue(_is_generic_node("Use pip to install packages"))
+        self.assertTrue(_is_generic_node("Use pytest for testing"))
+        self.assertTrue(_is_generic_node("Use black for formatting"))
+        self.assertTrue(_is_generic_node("Use eslint to check code"))
+
+    def test_rejects_generic_config(self):
+        """Generic config file knowledge."""
+        self.assertTrue(_is_generic_node("Use settings.gradle for the build"))
+        self.assertTrue(_is_generic_node("Configure build.gradle for dependencies"))
+
+    def test_rejects_generic_workflow(self):
+        """Generic workflow advice."""
+        self.assertTrue(_is_generic_node("Review code before merging"))
+        self.assertTrue(_is_generic_node("Handle errors gracefully"))
+        self.assertTrue(_is_generic_node("Keep dependencies up to date"))
+
+    def test_accepts_specific_config(self):
+        """Config with specific versions/pins should pass."""
+        self.assertFalse(_is_generic_node("Use settings.gradle with pinned version 1.3.8"))
+        self.assertFalse(_is_generic_node("Configure build.gradle with specific compileSdk 34"))
+
+
+class TestLacksSpecificity(unittest.TestCase):
+    """Test the specificity signal detection for filtering generic knowledge."""
+
+    def test_generic_tool_knowledge(self):
+        """Tool knowledge without project-specific signals is generic."""
+        self.assertTrue(_lacks_specificity("Use Gradle for building Android apps"))
+        self.assertTrue(_lacks_specificity("Store secrets in environment variables"))
+        self.assertTrue(_lacks_specificity("Run tests before deploying to production"))
+
+    def test_specific_with_path(self):
+        """Content with file paths is specific."""
+        self.assertFalse(_lacks_specificity("Store config in /src/config/models.json"))
+        self.assertFalse(_lacks_specificity("Run ./scripts/verify_quality_curve.py"))
+
+    def test_specific_with_version(self):
+        """Content with version numbers is specific."""
+        self.assertFalse(_lacks_specificity("Pin croniter to v1.3.8 in pyproject.toml"))
+        self.assertFalse(_lacks_specificity("Upgraded from 3.2.1 to 4.0.0"))
+
+    def test_specific_with_cli_flag(self):
+        """Content with CLI flags is specific."""
+        self.assertFalse(_lacks_specificity("Use --full-pipeline for LOCOMO eval"))
+        self.assertFalse(_lacks_specificity("The --writer-from flag freezes output"))
+
+    def test_specific_with_camelcase(self):
+        """Content with CamelCase identifiers is specific."""
+        self.assertFalse(_lacks_specificity("ConnectionPool uses threading.local()"))
+        self.assertFalse(_lacks_specificity("KnowledgeNode stores source_sessions"))
+
+    def test_specific_with_snake_case(self):
+        """Content with multi-part snake_case identifiers is specific."""
+        self.assertFalse(_lacks_specificity("The source_turns field links to transcripts"))
+
+    def test_specific_with_session_ref(self):
+        """Content with session/PR/issue references is specific."""
+        self.assertFalse(_lacks_specificity("Decided in session 7 to use WAL mode"))
+        self.assertFalse(_lacks_specificity("Fixed in PR #25 with rstrip fix"))
+
+    def test_specific_with_date(self):
+        """Content with dates is specific."""
+        self.assertFalse(_lacks_specificity("Merge freeze begins 2026-03-05"))
+
+    def test_long_content_passes(self):
+        """Content > 120 chars always passes (assumed to have context)."""
+        long = "Use Gradle for building" + " and more detail" * 8  # > 120 chars
+        self.assertFalse(_lacks_specificity(long))
+
+
 class TestGenericFilterInApply(unittest.TestCase):
     """Test that generic nodes are rejected during application."""
 
@@ -525,7 +601,7 @@ class TestGenericFilterInApply(unittest.TestCase):
         parsed = {
             "nodes": [{
                 "action": "create",
-                "content": "Use A100 for 8B model training",
+                "content": "Use A100 with --batch-size 4 for 8B model training",
                 "category": "infrastructure",
                 "confidence": 0.7,
                 "tags": ["gpu"],
@@ -537,7 +613,7 @@ class TestGenericFilterInApply(unittest.TestCase):
     def test_auto_corroborate_near_duplicate(self):
         """Create with content similar to existing node should auto-corroborate."""
         existing = KnowledgeNode.create(
-            content="Use config options for phase filtering and custom prompts for L3 repair loop",
+            content="Use --phase-filter config options for phase filtering and custom prompts for L3 repair loop",
             category="architecture",
             source_sessions=["s0"],
         )
@@ -545,7 +621,7 @@ class TestGenericFilterInApply(unittest.TestCase):
         parsed = {
             "nodes": [{
                 "action": "create",
-                "content": "Use config options for phase filtering (e.g., runtime errors) and custom prompts for L3 repair",
+                "content": "Use --phase-filter config options for phase filtering (e.g., runtime errors) and custom prompts for L3 repair",
                 "category": "architecture",
                 "confidence": 0.7,
                 "tags": ["repair"],
@@ -563,7 +639,7 @@ class TestGenericFilterInApply(unittest.TestCase):
     def test_no_auto_corroborate_different_content(self):
         """Create with dissimilar content should not auto-corroborate."""
         existing = KnowledgeNode.create(
-            content="Use A100 for 8B model training — A10G OOMs",
+            content="Use A100 with --batch-size 4 for 8B model training — A10G OOMs",
             category="infrastructure",
             source_sessions=["s0"],
         )
@@ -571,7 +647,7 @@ class TestGenericFilterInApply(unittest.TestCase):
         parsed = {
             "nodes": [{
                 "action": "create",
-                "content": "Package renamed from synapse to synapt",
+                "content": "Package renamed from synapse to synapt (see PR #12)",
                 "category": "decision",
                 "confidence": 0.8,
                 "tags": ["naming"],
@@ -585,12 +661,9 @@ class TestGenericFilterInApply(unittest.TestCase):
 
     def test_auto_corroborate_at_exact_boundary(self):
         """Jaccard of exactly 0.5 should trigger auto-corroborate (>= threshold)."""
-        # Craft two strings where jaccard is exactly 0.5:
-        # keywords("a b c d") = {"a","b","c","d"}, keywords("a b e f") = {"a","b","e","f"}
-        # intersection = {"a","b"}, union = {"a","b","c","d","e","f"} → 2/6 ≈ 0.33 — too low
-        # Need: intersection=N, union=2N → jaccard=0.5
-        # keywords("a b c d") ∩ keywords("a b e f"): |inter|=2, |union|=6 → 0.33
-        # keywords("a b") ∩ keywords("a b c d"): |inter|=2, |union|=4 → 0.5 ✓
+        # keywords("alpha bravo") = {"alpha","bravo"}, |inter|=2
+        # keywords("alpha bravo --charlie delta") = {"alpha","bravo","charlie","delta"}, |union|=4
+        # jaccard = 2/4 = 0.5 ✓
         existing = KnowledgeNode.create(
             content="alpha bravo",
             category="convention",
@@ -600,7 +673,7 @@ class TestGenericFilterInApply(unittest.TestCase):
         parsed = {
             "nodes": [{
                 "action": "create",
-                "content": "alpha bravo charlie delta",
+                "content": "alpha bravo --charlie delta",
                 "category": "convention",
                 "confidence": 0.7,
                 "tags": [],
@@ -618,14 +691,14 @@ class TestGenericFilterInApply(unittest.TestCase):
             "nodes": [
                 {
                     "action": "create",
-                    "content": "Use Modal for cloud GPU training runs",
+                    "content": "Use Modal with --gpu a10g for cloud GPU training runs",
                     "category": "infrastructure",
                     "confidence": 0.7,
                     "tags": ["modal", "training"],
                 },
                 {
                     "action": "create",
-                    "content": "Use Modal for cloud GPU training and evaluation",
+                    "content": "Use Modal with --gpu a10g for cloud GPU training and evaluation",
                     "category": "infrastructure",
                     "confidence": 0.6,
                     "tags": ["modal", "eval"],
@@ -649,7 +722,7 @@ class TestGenericFilterInApply(unittest.TestCase):
         # for semantically similar but keyword-different content.
         original_fn = mod._inline_embedding_dedup
         existing = KnowledgeNode.create(
-            content="Kotlin Multiplatform projects are linked to Xcode for iOS builds",
+            content="Kotlin Multiplatform projects are linked to Xcode via build_phases for iOS builds",
             category="architecture",
             source_sessions=["s0"],
         )
@@ -668,7 +741,7 @@ class TestGenericFilterInApply(unittest.TestCase):
             parsed = {
                 "nodes": [{
                     "action": "create",
-                    "content": "KMP frameworks linked to Xcode for native iOS integration",
+                    "content": "KMP frameworks linked to Xcode for native iOS integration via CocoaPods",
                     "category": "architecture",
                     "confidence": 0.7,
                     "tags": [],
@@ -687,7 +760,7 @@ class TestGenericFilterInApply(unittest.TestCase):
         import synapt.recall.consolidate as mod
 
         existing = KnowledgeNode.create(
-            content="Kotlin Multiplatform projects are linked to Xcode for iOS builds",
+            content="Kotlin Multiplatform projects are linked to Xcode via build_phases for iOS builds",
             category="architecture",
             source_sessions=["s0"],
         )
@@ -706,7 +779,7 @@ class TestGenericFilterInApply(unittest.TestCase):
             parsed = {
                 "nodes": [{
                     "action": "create",
-                    "content": "Gradle builds use the Kotlin DSL for configuration",
+                    "content": "Gradle builds use the Kotlin DSL with settings_gradle for configuration",
                     "category": "tooling",
                     "confidence": 0.7,
                     "tags": [],
@@ -1015,14 +1088,14 @@ class TestDedupDecisionLogging(unittest.TestCase):
     def test_auto_corroborate_logs_decision(self):
         """Jaccard >= 0.5 auto-corroborate should log with similarity score."""
         existing = KnowledgeNode.create(
-            content="alpha bravo charlie delta echo",
+            content="alpha bravo charlie delta echo --verbose",
             category="convention", source_sessions=["s0"],
         )
         append_node(existing, self.kn_path)
         # Content shares enough keywords to trigger Jaccard >= 0.5
         parsed = {"nodes": [{
             "action": "create",
-            "content": "alpha bravo charlie delta foxtrot",
+            "content": "alpha bravo charlie delta foxtrot --verbose",
             "category": "convention",
         }]}
         cluster = [_make_entry(session_id="s1")]
@@ -1052,7 +1125,7 @@ class TestDedupDecisionLogging(unittest.TestCase):
         # Completely different content — all below 0.5 threshold
         parsed = {"nodes": [{
             "action": "create",
-            "content": "completely different zebra xylophone quantum",
+            "content": "completely different zebra xylophone --quantum-mode",
             "category": "workflow",
         }]}
         cluster = [_make_entry(session_id="s1")]
@@ -1072,7 +1145,7 @@ class TestDedupDecisionLogging(unittest.TestCase):
         """Create with no existing nodes — no negative_pairs field."""
         parsed = {"nodes": [{
             "action": "create",
-            "content": "Brand new knowledge about testing patterns",
+            "content": "Brand new knowledge about testing patterns with --coverage",
             "category": "workflow",
         }]}
         cluster = [_make_entry(session_id="s1")]
@@ -1098,7 +1171,7 @@ class TestDedupDecisionLogging(unittest.TestCase):
         parsed = {"nodes": [
             {"action": "corroborate", "existing_id": existing.id,
              "content": "A100 needed", "category": "infrastructure"},
-            {"action": "create", "content": "New pattern about linting tools",
+            {"action": "create", "content": "New pattern about linting tools with --fix flag",
              "category": "workflow"},
         ]}
         cluster = [_make_entry(session_id="s1")]

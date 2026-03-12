@@ -12,6 +12,7 @@ from synapt.recall.clustering import (
     _extract_topic,
     _has_meaningful_content,
     _jaccard,
+    _novel_entities,
     cluster_chunks,
     generate_concat_summary,
 )
@@ -1248,6 +1249,57 @@ class TestHasMeaningfulContent:
         """Handles missing user_text/assistant_text keys."""
         texts = [{"user_text": "hello"}, {}]
         assert _has_meaningful_content(texts) is False
+
+
+class TestNovelEntities:
+    """Test _novel_entities() hallucination detection for cluster summaries."""
+
+    def test_no_novel_entities(self):
+        """Summary using only entities from source should return empty set."""
+        summary = "The ConnectionPool was refactored to use threading.local()."
+        source = "assistant: connectionpool refactored with threading.local()"
+        assert _novel_entities(summary, source) == set()
+
+    def test_detects_fabricated_entity(self):
+        """Summary inventing a class name not in source should be caught."""
+        summary = "The FarewellHandler processes exit commands and sends goodbye messages."
+        source = "user ran /exit command. assistant: goodbye!"
+        novel = _novel_entities(summary, source)
+        assert "FarewellHandler" in novel
+
+    def test_multiple_fabricated_entities(self):
+        """Multiple invented entities should all be caught."""
+        summary = "The ExitManager delegates to FarewellHandler for graceful shutdown."
+        source = "user said bye, assistant closed the session"
+        novel = _novel_entities(summary, source)
+        assert len(novel) >= 2
+        assert "ExitManager" in novel
+        assert "FarewellHandler" in novel
+
+    def test_common_camelcase_not_flagged(self):
+        """Well-known tools like GitHub, JavaScript should not be flagged."""
+        summary = "The team uses GitHub for version control and JavaScript for frontend."
+        source = "team uses version control and frontend code"
+        novel = _novel_entities(summary, source)
+        assert "GitHub" not in novel
+        assert "JavaScript" not in novel
+
+    def test_entity_present_in_source(self):
+        """Entity that appears in source (case-insensitive) is not novel."""
+        summary = "ConnectionPool uses threading.local() for isolation."
+        source = "the connectionpool class provides per-thread isolation"
+        novel = _novel_entities(summary, source)
+        assert "ConnectionPool" not in novel
+
+    def test_empty_summary(self):
+        """Empty summary should return empty set."""
+        assert _novel_entities("", "some source text") == set()
+
+    def test_no_camelcase(self):
+        """Summary without CamelCase should return empty set."""
+        summary = "The database was refactored to use WAL mode."
+        source = "database uses wal mode"
+        assert _novel_entities(summary, source) == set()
 
 
 class TestContentHashReuse:
