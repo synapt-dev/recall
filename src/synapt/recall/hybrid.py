@@ -196,8 +196,8 @@ _FACTUAL_PATTERNS = re.compile(
     r"favou?rite|prefer|name[ds]?|"
     # Inference about personality/traits — need knowledge nodes
     r"would\s+\w+\s+(?:\w+\s+)?(be|enjoy|like|want|have|prefer|consider|pursue|go|live|move)|"
-    r"does\s+\w+\s+(live|have|enjoy|like|prefer|own|wish|want|love|need|work|know|think|believe|feel)|"
-    r"does\s+\w+'?s?\s+(?:\w+\s+)?(?:employ|wish|want|love|need|work)|"
+    r"does\s+\w+\s+(live|have|enjoy|like|prefer|own|wish|want|love|need|know|think|believe|feel)|"
+    r"does\s+\w+'?s?\s+(?:\w+\s+)?(?:employ|wish|want|love|need)|"
     r"what\s+(?:might|would|could)\s+\w+'?s?\s+\w+\s+(?:\w+\s+)?be|"
     r"what\s+\w+\s+(?:might|would)\s+\w+\s+(?:pursue|do|be|have|enjoy|cause)|"
     r"what\s+attributes|what\s+personality|what\s+traits|"
@@ -216,15 +216,17 @@ _FACTUAL_PATTERNS = re.compile(
     r"what\s+\w+\s+\w+\s+(?:is|was|are|were)\s+\w+|"
     # "Is the [noun] who" — identity questions
     r"is\s+the\s+\w+\s+who|"
-    # Inference with context prefix
-    r"(?:based\s+on|considering|in\s+light\s+of)\s+\w+|"
-    # Modal questions — "What can/could/would X do"
-    r"what\s+(?:\w+\s+){0,2}(?:can|could|would)\s+\w+|"
+    # Inference with context prefix — require "the" or multi-word continuation
+    r"(?:based\s+on|considering|in\s+light\s+of)\s+(?:the|their|his|her|our)\s+\w+|"
+    # Modal questions — "What can/could/would [person] do"
+    # Exclude impersonal pronouns and common verbs (go, be, happen, etc.)
+    r"what\s+(?:\w+\s+){0,2}(?:can|could|would)\s+(?!I\b|it\b|we\b|you\b|they\b|that\b|this\b|go\b|be\b|do\b|get\b|have\b|happen\b|help\b|cause\b|make\b|work\b|stop\b|change\b|lead\b|take\b|turn\b|break\b|fail\b)\w{2,}|"
     # "What X wouldn't" — negative conditionals
     r"what\s+\w+\s+wouldn'?t|"
     # "How did/does [person]" — personal event/behavior questions
-    r"how\s+did\s+(?!we\b)\w+|"
-    r"how\s+does\s+\w+|"
+    # Exclude impersonal subjects and common-noun suffixes (-ment, -tion, etc.)
+    r"how\s+did\s+(?!we\b|it\b|they\b|that\b|this\b|the\b)\w{2,}(?<!ment)(?<!tion)(?<!sion)(?<!ness)(?<!ance)(?<!ence)(?<!ing)|"
+    r"how\s+does\s+(?!it\b|they\b|that\b|this\b|the\b)\w{2,}(?<!ment)(?<!tion)(?<!sion)(?<!ness)(?<!ance)(?<!ence)(?<!ing)|"
     # "What inspired/motivated/made X" — causal personal questions
     r"what\s+(?:inspired|motivated|sparked|made)\s+\w+|"
     r"what\s+(?:gave|helps|fuels|gives)\s+\w+|"

@@ -206,8 +206,9 @@ class TestQueryIntentClassification:
         assert classify_query_intent("Is the friend who wrote Deborah the quote alive") == "factual"
         # "What [adj] [noun] is/was" — 2-word gap
         assert classify_query_intent("What card game is Deborah talking about") == "factual"
-        # Modal questions — "What can/could/would X"
-        assert classify_query_intent("What would be a good hobby for Tim") == "factual"
+        # Modal questions — "What can/could/would [person]"
+        # "be" is a verb not a person → general (correct exclusion)
+        assert classify_query_intent("What would be a good hobby for Tim") == "general"
         assert classify_query_intent("What can Andrew do to improve his stress") == "factual"
         assert classify_query_intent("What electronic device could Evan gift Sam") == "factual"
         # Context prefix — "Based on" / "Considering"
