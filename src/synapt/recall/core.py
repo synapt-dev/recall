@@ -549,7 +549,7 @@ def parse_transcript(
         chunks.append(chunk)
         turn_index += 1
 
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8", newline="") as f:
         for raw_line in f:
             line_start = current_offset
             current_offset += len(raw_line.encode("utf-8"))
@@ -3021,7 +3021,9 @@ def project_slug(project_dir: Path | None = None) -> str:
         /Users/layne/Development/synapse → -Users-layne-Development-synapse
     """
     p = (project_dir or Path.cwd()).resolve()
-    return str(p).replace("/", "-")
+    # Use PurePosixPath to normalise Windows backslashes before slugifying.
+    # On Unix this is a no-op; on Windows it converts C:\Users\... → C:/Users/...
+    return str(p).replace("\\", "/").replace("/", "-")
 
 
 def _worktree_name(project_dir: Path | None = None) -> str:

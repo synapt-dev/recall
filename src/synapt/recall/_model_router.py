@@ -138,6 +138,8 @@ def get_client(
         return _get_onnx_client(max_tokens)
     elif override == "mlx":
         return _get_mlx_client(max_tokens)
+    elif override == "llamacpp":
+        return _get_llamacpp_client(max_tokens)
     elif override == "transformers":
         return _get_transformers_client(max_tokens)
     elif override == "ollama":
@@ -262,9 +264,32 @@ def _get_ollama_client(max_tokens: int) -> object | None:
         return None
 
 
+def _get_llamacpp_client(max_tokens: int) -> object | None:
+    """Try to create a LlamaCppClient. Returns None if unavailable."""
+    key = ("llamacpp", max_tokens)
+    if key in _client_cache:
+        return _client_cache[key]
+
+    try:
+        from synapt._models.llamacpp_client import LlamaCppClient
+        client = LlamaCppClient(max_tokens=max_tokens)
+        # Verify llama-cpp-python is importable (deferred until first use)
+        import llama_cpp  # noqa: F401
+        _client_cache[key] = client
+        logger.debug("LlamaCppClient available for in-process GGUF inference")
+        return client
+    except ImportError:
+        logger.debug("llama-cpp-python not installed, skipping llama.cpp backend")
+        _client_cache[key] = None
+        return None
+
+
 def _get_decoder_only_client(max_tokens: int) -> object | None:
-    """Try MLX → plugin backends → Ollama for decoder-only inference."""
+    """Try MLX → llama.cpp → plugin backends → Ollama for decoder-only inference."""
     client = _get_mlx_client(max_tokens)
+    if client is not None:
+        return client
+    client = _get_llamacpp_client(max_tokens)
     if client is not None:
         return client
     for name, factory in _extra_backends.items():

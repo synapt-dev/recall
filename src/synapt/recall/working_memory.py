@@ -54,10 +54,12 @@ class WorkingMemory:
 
     def __init__(self) -> None:
         self._slots: dict[str, WorkingMemorySlot] = {}  # keyed by item_id
+        self._access_seq: int = 0  # Monotonic counter for LRU ordering
 
     def record(self, item_type: str, item_id: str, content: str) -> None:
         """Record that an item was returned in search results or drilled into."""
-        now = time.monotonic()
+        self._access_seq += 1
+        now = self._access_seq  # Use counter, not clock (Windows timer ~15ms)
         key = item_id
         if key in self._slots:
             slot = self._slots[key]

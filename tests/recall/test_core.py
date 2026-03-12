@@ -621,74 +621,71 @@ def test_lookup_empty_date_range_returns_nothing():
 # Tests: persistence (save/load round-trip)
 # ---------------------------------------------------------------------------
 
-def test_save_load_roundtrip():
+def test_save_load_roundtrip(tmp_path):
     """Legacy save (no DB) + load triggers auto-migration to SQLite."""
     chunks = make_test_chunks()
     index = TranscriptIndex(chunks)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        save_dir = Path(tmpdir) / "test-index"
-        index.save(save_dir)
+    save_dir = tmp_path / "test-index"
+    index.save(save_dir)
 
-        # Legacy save writes JSONL + manifest
-        assert (save_dir / "chunks.jsonl").exists()
-        assert (save_dir / "manifest.json").exists()
+    # Legacy save writes JSONL + manifest
+    assert (save_dir / "chunks.jsonl").exists()
+    assert (save_dir / "manifest.json").exists()
 
-        # load() auto-migrates to SQLite
-        loaded = TranscriptIndex.load(save_dir)
-        assert len(loaded.chunks) == len(chunks)
+    # load() auto-migrates to SQLite
+    loaded = TranscriptIndex.load(save_dir)
+    assert len(loaded.chunks) == len(chunks)
 
-        # After migration: recall.db exists, legacy files cleaned up
-        assert (save_dir / "recall.db").exists()
-        assert not (save_dir / "chunks.jsonl").exists()
-        assert not (save_dir / "manifest.json").exists()
+    # After migration: recall.db exists, legacy files cleaned up
+    assert (save_dir / "recall.db").exists()
+    assert not (save_dir / "chunks.jsonl").exists()
+    assert not (save_dir / "manifest.json").exists()
 
-        # Search still works (now via FTS5)
-        result = loaded.lookup("quality curve")
-        assert "quality curve" in result.lower() or "hermite" in result.lower()
+    # Search still works (now via FTS5)
+    result = loaded.lookup("quality curve")
+    assert "quality curve" in result.lower() or "hermite" in result.lower()
 
 
-def test_save_load_manifest():
+def test_save_load_manifest(tmp_path):
     chunks = make_test_chunks()
     index = TranscriptIndex(chunks)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        save_dir = Path(tmpdir) / "test-index"
-        index.save(save_dir)
+    save_dir = tmp_path / "test-index"
+    index.save(save_dir)
 
-        with open(save_dir / "manifest.json") as f:
-            manifest = json.load(f)
+    with open(save_dir / "manifest.json") as f:
+        manifest = json.load(f)
 
-        assert manifest["chunk_count"] == 4
-        assert manifest["session_count"] == 2
-        assert "build_timestamp" in manifest
-        assert "chunks_hash" in manifest
+    assert manifest["chunk_count"] == 4
+    assert manifest["session_count"] == 2
+    assert "build_timestamp" in manifest
+    assert "chunks_hash" in manifest
 
 
-def test_save_load_sqlite_roundtrip():
+def test_save_load_sqlite_roundtrip(tmp_path):
     """Save with RecallDB, load from recall.db — no legacy files involved."""
     from synapt.recall.storage import RecallDB
 
     chunks = make_test_chunks()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        save_dir = Path(tmpdir) / "test-index"
-        save_dir.mkdir(parents=True)
-        db = RecallDB(save_dir / "recall.db")
-        index = TranscriptIndex(chunks, db=db)
-        index.save(save_dir)
+    save_dir = tmp_path / "test-index"
+    save_dir.mkdir(parents=True)
+    db = RecallDB(save_dir / "recall.db")
+    index = TranscriptIndex(chunks, db=db)
+    index.save(save_dir)
 
-        # Only recall.db, no legacy files
-        assert (save_dir / "recall.db").exists()
-        assert not (save_dir / "chunks.jsonl").exists()
-        assert not (save_dir / "manifest.json").exists()
+    # Only recall.db, no legacy files
+    assert (save_dir / "recall.db").exists()
+    assert not (save_dir / "chunks.jsonl").exists()
+    assert not (save_dir / "manifest.json").exists()
 
-        loaded = TranscriptIndex.load(save_dir)
-        assert len(loaded.chunks) == len(chunks)
+    loaded = TranscriptIndex.load(save_dir)
+    assert len(loaded.chunks) == len(chunks)
 
-        result = loaded.lookup("quality curve")
-        assert "quality curve" in result.lower() or "hermite" in result.lower()
-        db.close()
+    result = loaded.lookup("quality curve")
+    assert "quality curve" in result.lower() or "hermite" in result.lower()
+    db.close()
 
 
 def test_lookup_via_fts5():
@@ -1333,34 +1330,33 @@ def test_parse_raised_caps():
 # Tests: drill-down (read_turn_context)
 # ---------------------------------------------------------------------------
 
-def test_read_turn_context():
+def test_read_turn_context(tmp_path):
     """read_turn_context reads raw transcript content for a chunk."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        transcript = Path(tmpdir) / "test-session-001.jsonl"
+    transcript = tmp_path / "test-session-001.jsonl"
 
-        entries = [
-            user_text_entry("How do I fix the auth bug?"),
-            assistant_entry(
-                text="Let me check the code.",
-                tool_name="Read",
-                tool_input={"file_path": "/src/auth.py"},
-                tool_use_id="toolu_read1",
-            ),
-            tool_result_entry(
-                tool_use_id="toolu_read1",
-                result="def login():\n    pass",
-            ),
-        ]
-        write_jsonl(transcript, entries)
+    entries = [
+        user_text_entry("How do I fix the auth bug?"),
+        assistant_entry(
+            text="Let me check the code.",
+            tool_name="Read",
+            tool_input={"file_path": "/src/auth.py"},
+            tool_use_id="toolu_read1",
+        ),
+        tool_result_entry(
+            tool_use_id="toolu_read1",
+            result="def login():\n    pass",
+        ),
+    ]
+    write_jsonl(transcript, entries)
 
-        chunks = parse_transcript(transcript)
-        assert len(chunks) == 1
+    chunks = parse_transcript(transcript)
+    assert len(chunks) == 1
 
-        index = TranscriptIndex(chunks)
-        context = index.read_turn_context(chunks[0].id)
-        assert "auth bug" in context
-        assert "Let me check the code" in context
-        assert "def login():" in context  # Full tool result content
+    index = TranscriptIndex(chunks)
+    context = index.read_turn_context(chunks[0].id)
+    assert "auth bug" in context
+    assert "Let me check the code" in context
+    assert "def login():" in context  # Full tool result content
 
 
 def test_read_turn_context_missing_chunk():
@@ -1370,40 +1366,39 @@ def test_read_turn_context_missing_chunk():
     assert "not found" in result
 
 
-def test_read_turn_context_multibyte_utf8():
+def test_read_turn_context_multibyte_utf8(tmp_path):
     """Drill-down reads exact bytes, not characters, so multi-byte UTF-8 stays within turn bounds."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        transcript = Path(tmpdir) / "test-session-001.jsonl"
+    transcript = tmp_path / "test-session-001.jsonl"
 
-        # Write entries with ensure_ascii=False so emoji stay as raw UTF-8
-        entries = [
-            {"type": "user", "uuid": "u1", "timestamp": "2026-01-01",
-             "sessionId": "test-session-001",
-             "message": {"role": "user", "content": "Fix the bug \U0001f41b\U0001f41b\U0001f41b"}},
-            {"type": "assistant", "uuid": "a1", "timestamp": "2026-01-01",
-             "sessionId": "test-session-001",
-             "message": {"role": "assistant",
-                         "content": [{"type": "text", "text": "Done \u2705"}]}},
-            {"type": "user", "uuid": "u2", "timestamp": "2026-01-02",
-             "sessionId": "test-session-001",
-             "message": {"role": "user", "content": "NEXT TURN sentinel"}},
-            {"type": "assistant", "uuid": "a2", "timestamp": "2026-01-02",
-             "sessionId": "test-session-001",
-             "message": {"role": "assistant",
-                         "content": [{"type": "text", "text": "second answer"}]}},
-        ]
-        with open(transcript, "w", encoding="utf-8") as f:
-            for e in entries:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    # Write entries with ensure_ascii=False so emoji stay as raw UTF-8
+    entries = [
+        {"type": "user", "uuid": "u1", "timestamp": "2026-01-01",
+         "sessionId": "test-session-001",
+         "message": {"role": "user", "content": "Fix the bug \U0001f41b\U0001f41b\U0001f41b"}},
+        {"type": "assistant", "uuid": "a1", "timestamp": "2026-01-01",
+         "sessionId": "test-session-001",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "Done \u2705"}]}},
+        {"type": "user", "uuid": "u2", "timestamp": "2026-01-02",
+         "sessionId": "test-session-001",
+         "message": {"role": "user", "content": "NEXT TURN sentinel"}},
+        {"type": "assistant", "uuid": "a2", "timestamp": "2026-01-02",
+         "sessionId": "test-session-001",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "second answer"}]}},
+    ]
+    with open(transcript, "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
-        chunks = parse_transcript(transcript)
-        assert len(chunks) == 2
+    chunks = parse_transcript(transcript)
+    assert len(chunks) == 2
 
-        index = TranscriptIndex(chunks)
-        context = index.read_turn_context(chunks[0].id)
-        # First turn should contain the emoji but NOT the sentinel from turn 2
-        assert "\U0001f41b" in context
-        assert "NEXT TURN sentinel" not in context
+    index = TranscriptIndex(chunks)
+    context = index.read_turn_context(chunks[0].id)
+    # First turn should contain the emoji but NOT the sentinel from turn 2
+    assert "\U0001f41b" in context
+    assert "NEXT TURN sentinel" not in context
 
 
 def test_read_turn_context_deleted_file():

@@ -190,8 +190,8 @@ class TestProjectTranscriptDirsGripspace:
 
         # Create fake Claude Code transcript dirs
         fake_home = tmp_path / "home"
-        slug_a = str(repo_a).replace("/", "-")
-        slug_b = str(repo_b).replace("/", "-")
+        slug_a = str(repo_a).replace("\\", "/").replace("/", "-")
+        slug_b = str(repo_b).replace("\\", "/").replace("/", "-")
         td_a = fake_home / ".claude" / "projects" / slug_a
         td_b = fake_home / ".claude" / "projects" / slug_b
         td_a.mkdir(parents=True)
@@ -211,7 +211,7 @@ class TestProjectTranscriptDirsGripspace:
         repo = _make_git_repo(grip, "my-repo")
 
         fake_home = tmp_path / "home"
-        slug = str(repo).replace("/", "-")
+        slug = str(repo).replace("\\", "/").replace("/", "-")
         td = fake_home / ".claude" / "projects" / slug
         td.mkdir(parents=True)
         (td / "session.jsonl").write_text("{}")
@@ -245,13 +245,13 @@ class TestProjectTranscriptDirsGripspace:
 
         fake_home = tmp_path / "home"
         # Create transcript dir for the gripspace root itself
-        slug_root = str(grip).replace("/", "-")
+        slug_root = str(grip).replace("\\", "/").replace("/", "-")
         td_root = fake_home / ".claude" / "projects" / slug_root
         td_root.mkdir(parents=True)
         (td_root / "session-root.jsonl").write_text("{}")
 
         # And for the sub-repo
-        slug_repo = str(repo).replace("/", "-")
+        slug_repo = str(repo).replace("\\", "/").replace("/", "-")
         td_repo = fake_home / ".claude" / "projects" / slug_repo
         td_repo.mkdir(parents=True)
         (td_repo / "session-repo.jsonl").write_text("{}")

@@ -6,8 +6,8 @@ Each entry records what was done, key decisions, and next steps.
 
 from __future__ import annotations
 
-import fcntl
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -16,8 +16,13 @@ from pathlib import Path
 from synapt.recall.core import project_worktree_dir, project_index_dir, project_transcript_dir
 from synapt.recall._llm_util import truncate_at_word as _tw
 
-# Paths that are always noise in journal file lists
+# Paths that are always noise in journal file lists (checked after normalising to /)
 _NOISE_PATH_SEGMENTS = ("/.claude/", "/private/tmp/")
+
+
+def _norm(p: str) -> str:
+    """Normalise path separators to forward slash for cross-platform comparison."""
+    return p.replace("\\", "/")
 
 
 def _filter_project_files(
@@ -36,23 +41,24 @@ def _filter_project_files(
     """
     if not project_root:
         project_root = str(Path.cwd())
-    # Normalize: ensure trailing slash for prefix matching
-    prefix = project_root.rstrip("/") + "/"
+    # Normalise to forward slashes for cross-platform prefix matching
+    prefix = _norm(project_root).rstrip("/") + "/"
 
     result: set[str] = set()
     for fp in files:
         if not fp or fp.isspace():
             continue
+        norm_fp = _norm(fp)
         # Skip known noise paths
-        if any(seg in fp for seg in _NOISE_PATH_SEGMENTS):
+        if any(seg in norm_fp for seg in _NOISE_PATH_SEGMENTS):
             continue
-        # Relative paths are already project-scoped
-        if not fp.startswith("/"):
+        # Relative paths are already project-scoped (no leading / or drive letter)
+        if not os.path.isabs(fp):
             result.add(fp)
             continue
         # Absolute paths: keep only if under project root
-        if fp.startswith(prefix):
-            result.add(fp[len(prefix):])
+        if norm_fp.startswith(prefix):
+            result.add(norm_fp[len(prefix):])
         # else: absolute path outside project — skip
     return sorted(result)
 
@@ -104,17 +110,18 @@ class JournalEntry:
 def append_entry(entry: JournalEntry, path: Path | None = None) -> Path:
     """Append a journal entry to the JSONL file.
 
-    Uses fcntl.flock for exclusive locking to prevent interleaved writes
+    Uses exclusive file locking to prevent interleaved writes
     when multiple processes append concurrently (e.g., background enrich
     + SessionEnd hook).
     """
     path = path or _journal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         f.write(json.dumps(entry.to_dict()) + "\n")
         f.flush()
-        # flock released on close
+        # lock released on close
     return path
 
 
@@ -216,8 +223,9 @@ def compact_journal(path: Path | None = None) -> int:
     # Open in "r+" (read-write, no truncate) so we can hold LOCK_EX on the
     # exact file descriptor we will rewrite.  All concurrent append_entry
     # callers flock the same path and will block until we close this fd.
+    from synapt.recall._filelock import lock_exclusive
     with open(path, "r+", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        lock_exclusive(f)
         # Check for empty file AFTER acquiring the lock.  stat() before open()
         # is a TOCTOU race: a concurrent append_entry could write between the
         # stat() and the flock(), causing us to miss newly written entries.

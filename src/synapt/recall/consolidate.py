@@ -13,7 +13,6 @@ Requires mlx-lm (pip install mlx-lm). Degrades gracefully if not installed.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
@@ -525,13 +524,14 @@ def _save_cached_response(
         entry = {"key": key, "response": response}
         if prompt:
             entry["prompt"] = prompt
+        from synapt.recall._filelock import lock_exclusive, unlock
         with open(cache_path, "a", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            lock_exclusive(f)
             try:
                 f.write(json.dumps(entry) + "\n")
                 f.flush()
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                unlock(f)
     except OSError:
         pass  # Cache is best-effort
 
@@ -574,9 +574,10 @@ def _log_dedup_decision(
         entry["negative_pairs"] = negative_pairs
 
     try:
+        from synapt.recall._filelock import lock_exclusive
         decision_path.parent.mkdir(parents=True, exist_ok=True)
         with open(decision_path, "a", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            lock_exclusive(f)
             f.write(json.dumps(entry) + "\n")
             f.flush()
     except OSError:
@@ -1239,8 +1240,9 @@ def consolidate(
             )
             # Save failure for diagnostics (full prompt + response)
             try:
+                from synapt.recall._filelock import lock_exclusive, unlock
                 with open(failures_path, "a", encoding="utf-8") as ff:
-                    fcntl.flock(ff, fcntl.LOCK_EX)
+                    lock_exclusive(ff)
                     try:
                         ff.write(json.dumps({
                             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1250,7 +1252,7 @@ def consolidate(
                             "cluster_sessions": [e.session_id for e in cluster],
                         }) + "\n")
                     finally:
-                        fcntl.flock(ff, fcntl.LOCK_UN)
+                        unlock(ff)
             except OSError:
                 pass
             return False
