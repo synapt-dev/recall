@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Synapt - Persistent Memory for AI Coding Assistants</title>
-  <meta name="description" content="Synapt indexes your past AI coding sessions and makes them searchable. Hybrid BM25 + semantic search with Reciprocal Rank Fusion.">
+  <meta name="description" content="Persistent memory for AI coding assistants. The difference between a stranger and a collaborator is shared context. Local-first, beats cloud systems on LOCOMO benchmark.">
   <meta property="og:title" content="Synapt">
   <meta property="og:description" content="Persistent conversational memory for AI coding assistants">
   <meta property="og:type" content="website">
@@ -350,9 +350,9 @@
     <div class="container">
       <h1>Memory for AI coding assistants</h1>
       <p>
-        Synapt indexes your past sessions and makes them searchable &mdash;
-        so your AI assistant remembers what you worked on, decisions you made,
-        and patterns you established.
+        The difference between a stranger and a collaborator is shared context.
+        Synapt gives your AI assistant persistent memory &mdash; so every conversation
+        picks up where the last one left off.
       </p>
       <div class="hero-actions">
         <a href="#quickstart" class="btn btn-primary">Get started</a>
@@ -379,7 +379,7 @@
         <div class="feature-card">
           <div class="tag tag-search">Search</div>
           <h3>Query intent routing</h3>
-          <p>Classifies queries as factual, debug, exploratory, or procedural. Adjusts recency decay, knowledge boost, and embedding weight automatically.</p>
+          <p>Classifies queries as factual, temporal, debug, decision, aggregation, or procedural. Adjusts recency decay, knowledge boost, and embedding weight automatically.</p>
         </div>
         <div class="feature-card">
           <div class="tag tag-memory">Memory</div>
@@ -477,13 +477,13 @@
             <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
           </tr>
           <tr class="highlight-row">
-            <td><strong>synapt</strong></td>
-            <td class="best">60.99</td>
-            <td>57.32</td>
-            <td>57.29</td>
-            <td class="best">78.12</td>
-            <td class="best"><strong>69.35</strong></td>
-            <td>local 3B model</td>
+            <td><strong>synapt v0.6</strong></td>
+            <td class="best">63.83</td>
+            <td class="best">61.99</td>
+            <td>59.38</td>
+            <td class="best">80.62</td>
+            <td class="best"><strong>72.34</strong></td>
+            <td>local 8B model</td>
           </tr>
           <tr>
             <td>Mem0+Graph</td><td>47.19</td><td>58.13</td><td>65.71</td><td>75.71</td><td>68.44</td><td>cloud GPT-4</td>
@@ -503,7 +503,9 @@
         </tbody>
       </table>
       <p class="footnote">
-        Competitor data from <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a>. Synapt runs entirely locally on a 3B parameter model with no cloud API calls.
+        Competitor data from <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a>.
+        Synapt runs entirely locally &mdash; beating cloud systems that use GPT-4 for memory extraction.
+        Don't waste your tokens on memory.
       </p>
     </div>
   </section>
