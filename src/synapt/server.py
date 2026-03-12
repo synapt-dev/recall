@@ -182,12 +182,13 @@ def _dev_serve():
         except (BrokenPipeError, OSError):
             pass
 
-    def monitor_child(proc, crash_event):
-        """Watch for unexpected child death and signal the watcher."""
+    def monitor_child(proc, crash_event, watch_stop_event):
+        """Watch for unexpected child death and break out of watch()."""
         proc.wait()
         if not child_stop.is_set():
             dev_log.warning("Server crashed (pid %d, exit %d)", proc.pid, proc.returncode)
             crash_event.set()
+            watch_stop_event.set()  # Unblock watch() iterator
 
     def kill_child(stdin_thread=None, stdout_thread=None):
         nonlocal child
@@ -225,8 +226,10 @@ def _dev_serve():
         while not stop_event.is_set():
             proc = start_child()
 
-            # Event set when the child crashes unexpectedly
+            # Per-cycle events
             crash_event = threading.Event()
+            # Controls watch() lifetime — set on crash or global stop
+            watch_stop = threading.Event()
 
             # Start proxy threads
             stdin_thread = threading.Thread(
@@ -236,23 +239,24 @@ def _dev_serve():
                 target=proxy_stdout, args=(proc,), daemon=True,
             )
             monitor_thread = threading.Thread(
-                target=monitor_child, args=(proc, crash_event), daemon=True,
+                target=monitor_child, args=(proc, crash_event, watch_stop),
+                daemon=True,
             )
             stdin_thread.start()
             stdout_thread.start()
             monitor_thread.start()
 
             # Watch for changes — blocks until a .py file changes,
-            # the child crashes, or stop_event is set
+            # the child crashes (via watch_stop), or global stop
             restarted = False
             for changes in watch(
                 *watch_paths,
                 watch_filter=lambda change, path: path.endswith(".py"),
-                stop_event=stop_event,
+                stop_event=watch_stop,
                 raise_interrupt=False,
             ):
                 if crash_event.is_set():
-                    dev_log.info("Child crashed, restarting")
+                    restarted = True
                     break
                 changed_files = [
                     os.path.basename(p) for _, p in changes
@@ -264,7 +268,6 @@ def _dev_serve():
                 restarted = True
                 break  # Exit watch loop to restart
 
-            # Also restart if crash happened while no file changes
             if crash_event.is_set():
                 restarted = True
 
