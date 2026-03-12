@@ -1975,8 +1975,14 @@ class TranscriptIndex:
         else:
             header = f"--- [knowledge] {category} ({conf_label} confidence) ---"
 
-        # Temporal metadata
-        meta_parts = [f"Based on {len(sources)} session(s), last updated {updated}"]
+        # Temporal metadata with source attribution
+        if sources:
+            source_refs = ", ".join(s[:8] for s in sources[-5:])
+            if len(sources) > 5:
+                source_refs += f" +{len(sources) - 5} more"
+            meta_parts = [f"Sources: {source_refs}. Updated {updated}"]
+        else:
+            meta_parts = [f"Last updated {updated}"]
         valid_from = node.get("valid_from")
         valid_until = node.get("valid_until")
         if valid_from and valid_until:
