@@ -751,6 +751,24 @@ class RecallDB:
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return row[0] if row else 0
 
+    def sample_chunk_texts(self, limit: int = 100) -> list[str]:
+        """Return a sample of chunk texts for content profile detection.
+
+        Samples evenly across the dataset (not just the first N) to get
+        a representative view of the content type. Concatenates user_text,
+        assistant_text, and files_touched for a holistic signal.
+        """
+        total = self.chunk_count()
+        step = max(1, total // limit)
+        rows = self._conn.execute(
+            "SELECT user_text, assistant_text, files_touched "
+            "FROM chunks WHERE rowid % ? = 0 LIMIT ?",
+            (step, limit),
+        ).fetchall()
+        return [
+            f"{r[0] or ''} {r[1] or ''} {r[2] or ''}" for r in rows
+        ]
+
     # -- FTS5 search -------------------------------------------------------
 
     def fts_search(

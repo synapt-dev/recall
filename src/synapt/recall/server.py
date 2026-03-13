@@ -30,12 +30,19 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from synapt.recall.config import load_config
 from synapt.recall.core import (
     TranscriptIndex,
     format_size,
     project_index_dir,
 )
 from synapt.recall._llm_util import truncate_at_word as _tw
+
+
+def _cap_tokens(requested: int) -> int:
+    """Apply the user-configured max_tokens cap."""
+    limit = load_config().get_max_tokens()
+    return min(requested, limit)
 
 # ---------------------------------------------------------------------------
 # MCP instructions — shared with the unified server (synapt.server)
@@ -180,6 +187,7 @@ def recall_search(
                             in results. When multiple versions exist in the same lineage,
                             the highest-confidence one is kept (confidence-based fallback).
     """
+    max_tokens = _cap_tokens(max_tokens)
     index = _get_index()
 
     # Always search the live transcript — covers the current session which is
@@ -277,6 +285,7 @@ def recall_quick(query: str) -> str:
     Args:
         query: Natural language query or keywords to search for.
     """
+    quick_budget = _cap_tokens(500)
     index = _get_index()
     if index is None:
         index_dir = project_index_dir()
@@ -286,7 +295,7 @@ def recall_quick(query: str) -> str:
         result = index.lookup(
             query,
             max_chunks=5,
-            max_tokens=500,
+            max_tokens=quick_budget,
             half_life=None,
             threshold_ratio=0.2,
             depth="concise",
@@ -320,6 +329,7 @@ def recall_files(
         after: Only include results from after this date (ISO 8601).
         before: Only include results from before this date (ISO 8601).
     """
+    max_tokens = _cap_tokens(max_tokens)
     index = _get_index()
     if index is None:
         index_dir = project_index_dir()

@@ -677,6 +677,19 @@ class TranscriptIndex:
         # Sort by timestamp descending (most recent first)
         self.chunks = sorted(chunks, key=lambda c: c.timestamp, reverse=True)
 
+        # Content profile — adapts filters and retrieval to content type
+        from synapt.recall.content_profile import detect_content_profile, adaptive_params
+        self.content_profile = detect_content_profile(self.chunks)
+        self._adaptive = adaptive_params(self.content_profile)
+        if self.content_profile.content_type != "code":
+            logger.info(
+                "Content profile: %s (file_refs=%d, personal=%d, chunks=%d)",
+                self.content_profile.content_type,
+                self.content_profile.file_refs,
+                self.content_profile.personal_refs,
+                self.content_profile.total_chunks,
+            )
+
         # Group by session for progressive search
         self.sessions: dict[str, list[TranscriptChunk]] = {}
         for chunk in self.chunks:
@@ -1154,6 +1167,16 @@ class TranscriptIndex:
                     )
         except Exception:
             logger.debug("Intent classification failed, using defaults", exc_info=True)
+
+        # Apply content-profile adjustments (after intent, before caller overrides)
+        if hasattr(self, "_adaptive"):
+            _ap = self._adaptive
+            # Raise max_knowledge floor for personal/mixed content
+            if max_knowledge is None and _ap.max_knowledge_default is not None:
+                max_knowledge = _ap.max_knowledge_default
+            elif max_knowledge is not None and _ap.max_knowledge_default is not None:
+                max_knowledge = max(max_knowledge, _ap.max_knowledge_default)
+            kb_default = kb_default + _ap.knowledge_boost_adjust
 
         # Apply caller override for knowledge boost (after intent classification)
         _knowledge_boost = knowledge_boost if knowledge_boost is not None else kb_default
@@ -2328,8 +2351,12 @@ class TranscriptIndex:
                 if knowledge_emitted >= max_knowledge:
                     continue
             block_tokens_set = set(_tokenize(block))
+            dedup_threshold = getattr(
+                getattr(self, "_adaptive", None), "dedup_jaccard",
+                _DEDUP_JACCARD_THRESHOLD,
+            )
             if block_tokens_set and emitted_token_sets:
-                if any(_jaccard(block_tokens_set, prev) > _DEDUP_JACCARD_THRESHOLD
+                if any(_jaccard(block_tokens_set, prev) > dedup_threshold
                        for prev in emitted_token_sets):
                     continue  # Skip near-duplicate
             block_tokens = len(block) // 4

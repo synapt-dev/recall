@@ -598,17 +598,24 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def cmd_search(args: argparse.Namespace) -> None:
     """Search the transcript index."""
+    from synapt.recall.config import load_config
+
     index_dir = _resolve_index_dir(args)
     if not (index_dir / "recall.db").exists() and not (index_dir / "chunks.jsonl").exists():
         print(f"Error: no index found at {index_dir}", file=sys.stderr)
         print("Run 'synapt build' or 'synapt setup' first.", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve max_tokens: CLI flag → config → default (500 for CLI)
+    max_tokens = args.max_tokens
+    if max_tokens is None:
+        max_tokens = min(500, load_config().get_max_tokens())
+
     index = TranscriptIndex.load(index_dir, use_embeddings=True)
     result = index.lookup(
         args.query,
         max_chunks=args.max_chunks,
-        max_tokens=args.max_tokens,
+        max_tokens=max_tokens,
         max_sessions=args.max_sessions,
         after=args.after,
         before=args.before,
@@ -1724,7 +1731,7 @@ def main():
     search_parser.add_argument("query", help="Search query")
     search_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
     search_parser.add_argument("--max-chunks", type=int, default=5, help="Max chunks to return")
-    search_parser.add_argument("--max-tokens", type=int, default=500, help="Token budget")
+    search_parser.add_argument("--max-tokens", type=int, default=None, help="Token budget (default: from config, or 500)")
     search_parser.add_argument("--max-sessions", type=int, default=None, help="Progressive: only search N recent sessions")
     search_parser.add_argument("--after", default=None, help="Only results after this date (ISO 8601, e.g. 2026-02-28)")
     search_parser.add_argument("--before", default=None, help="Only results before this date (ISO 8601, e.g. 2026-03-01)")
