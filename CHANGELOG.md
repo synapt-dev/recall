@@ -35,9 +35,9 @@ All notable changes to synapt are documented here.
 - **Knowledge interleaving** — interleave by relevance instead of always prepending
 
 ### Benchmarks
-- **LOCOMO J-Score: 72.34%** (Ministral 8B enrichment) — beats Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%)
-- Open-domain 80.62% — best of all systems tested
-- Multi-hop 63.83% — best of all systems tested
+- **LOCOMO J-Score: 73.38%** (Ministral 3B local enrichment) — beats Full-Context upper bound (72.90%), Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%)
+- Open-domain 80.14% — best of all systems tested
+- Multi-hop 70.21% — best of all systems tested
 
 ## [0.5.0] — 2026-03-10
 

@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Search &amp; Configuration Reference — Synapt</title>
+  <meta name="description" content="Complete reference for synapt recall search parameters, intent classification, configuration format, environment variables, depth modes, and recency decay.">
+  <meta property="og:title" content="Synapt Search & Configuration Reference">
+  <meta property="og:description" content="Complete parameter reference for synapt recall search, knowledge management, and configuration.">
+  <meta property="og:url" content="https://synapt.dev/reference.html">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:site" content="@synapt_dev">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --purple: #7c5cbf;
+      --purple-light: #9b7fd4;
+      --teal: #00e5cc;
+      --teal-dim: #00c4ae;
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2129;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --border: #30363d;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: 'JetBrains Mono', monospace; background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+    pre { background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; overflow-x: auto; margin: 1rem 0 1.5rem; }
+    pre code { background: none; padding: 0; font-size: 0.85em; }
+
+    .container { max-width: 760px; margin: 0 auto; padding: 0 1.5rem; }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 0;
+    }
+    header .container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header .logo { font-weight: 700; font-size: 1.2rem; color: var(--purple-light); }
+    header nav a { margin-left: 1.5rem; color: var(--text-dim); font-size: 0.9rem; }
+
+    article { padding: 3rem 0 4rem; }
+    article h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      line-height: 1.2;
+    }
+    article .subtitle {
+      color: var(--text-dim);
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+    }
+    article .meta {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin-bottom: 2.5rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    article h2 {
+      font-size: 1.5rem;
+      margin: 2.5rem 0 1rem;
+      color: var(--purple-light);
+    }
+    article h3 {
+      font-size: 1.15rem;
+      margin: 1.8rem 0 0.75rem;
+      color: var(--text);
+    }
+    article h4 {
+      font-size: 1rem;
+      margin: 1.2rem 0 0.5rem;
+      color: var(--text-dim);
+    }
+    article p { margin-bottom: 1.2rem; }
+    article ul, article ol { margin-bottom: 1.2rem; padding-left: 1.5rem; }
+    article li { margin-bottom: 0.5rem; }
+    article strong { color: var(--teal); font-weight: 600; }
+
+    .callout {
+      background: var(--bg-card);
+      border-left: 3px solid var(--purple);
+      padding: 1rem 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    .callout p { margin-bottom: 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0 1.5rem;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--purple-light);
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    td code { font-size: 0.85em; }
+
+    .tool-sig {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin: 1rem 0 1.5rem;
+    }
+    .tool-sig h4 {
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--teal);
+      margin: 0 0 0.5rem;
+      font-size: 1rem;
+    }
+    .tool-sig p { font-size: 0.9rem; margin-bottom: 0.5rem; }
+    .tool-sig table { margin-top: 0.5rem; }
+
+    .toc {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin: 1.5rem 0 2rem;
+      columns: 2;
+    }
+    .toc h4 { margin-bottom: 0.5rem; color: var(--text-dim); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; column-span: all; }
+    .toc ul { list-style: none; padding: 0; margin: 0; }
+    .toc li { margin-bottom: 0.3rem; break-inside: avoid; }
+    .toc a { color: var(--text-dim); font-size: 0.9rem; }
+    .toc a:hover { color: var(--teal); }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+
+    @media (max-width: 640px) {
+      article h1 { font-size: 1.6rem; }
+      article h2 { font-size: 1.25rem; }
+      .toc { columns: 1; }
+      table { font-size: 0.8rem; }
+      th, td { padding: 0.4rem 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <a href="/" class="logo">synapt</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/guide.html">Guide</a>
+      <a href="/blog/">Blog</a>
+      <a href="https://github.com/laynepenney/synapt">GitHub</a>
+      <a href="https://x.com/synapt_dev">X</a>
+    </nav>
+  </div>
+</header>
+
+<article>
+  <div class="container">
+
+    <h1>Search &amp; Configuration Reference</h1>
+    <p class="subtitle">Complete parameter reference for all recall tools, intent classification, and tuning.</p>
+    <div class="meta">Last updated March 2026</div>
+
+    <div class="toc">
+      <h4>Contents</h4>
+      <ul>
+        <li><a href="#search-tools">Search Tools</a></li>
+        <li><a href="#knowledge-tools">Knowledge Tools</a></li>
+        <li><a href="#index-tools">Index Tools</a></li>
+        <li><a href="#intent">Intent Classification</a></li>
+        <li><a href="#recency">Recency Decay</a></li>
+        <li><a href="#depth">Depth Modes</a></li>
+        <li><a href="#config">Config Files</a></li>
+        <li><a href="#env">Environment Variables</a></li>
+        <li><a href="#cli">CLI Commands</a></li>
+        <li><a href="#files">File Locations</a></li>
+      </ul>
+    </div>
+
+    <!-- ───────────────── Search Tools ───────────────── -->
+
+    <h2 id="search-tools">Search Tools</h2>
+
+    <div class="tool-sig">
+      <h4>recall_search</h4>
+      <p>Full search with transcript chunks, knowledge nodes, and cluster summaries.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>query</code></td><td>string</td><td>&mdash;</td><td>Search query (required)</td></tr>
+        <tr><td><code>max_chunks</code></td><td>int</td><td>5</td><td>Max transcript chunks to return</td></tr>
+        <tr><td><code>max_tokens</code></td><td>int</td><td>1500</td><td>Token budget for response</td></tr>
+        <tr><td><code>max_sessions</code></td><td>int</td><td>unlimited</td><td>Limit to N most recent sessions</td></tr>
+        <tr><td><code>after</code></td><td>string</td><td>none</td><td>ISO 8601 date (include only after)</td></tr>
+        <tr><td><code>before</code></td><td>string</td><td>none</td><td>ISO 8601 date (include only before)</td></tr>
+        <tr><td><code>half_life</code></td><td>float</td><td>60.0</td><td>Days for recency decay (0 = disabled)</td></tr>
+        <tr><td><code>threshold_ratio</code></td><td>float</td><td>0.2</td><td>Drop results below this fraction of top score</td></tr>
+        <tr><td><code>depth</code></td><td>string</td><td>"full"</td><td>"full", "summary", or "concise"</td></tr>
+        <tr><td><code>include_archived</code></td><td>bool</td><td>false</td><td>Include archived session transcripts</td></tr>
+        <tr><td><code>include_historical</code></td><td>bool</td><td>false</td><td>Include historical knowledge nodes</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_quick</h4>
+      <p>Fast knowledge-only check. Returns knowledge nodes and cluster summaries within a ~500 token budget. Use speculatively when unsure if something was discussed before.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>query</code></td><td>string</td><td>&mdash;</td><td>Search query (required)</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_files</h4>
+      <p>Find sessions that touched a specific file. Supports partial path matching.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>pattern</code></td><td>string</td><td>&mdash;</td><td>File path pattern (partial match)</td></tr>
+        <tr><td><code>max_chunks</code></td><td>int</td><td>10</td><td>Max chunks to return</td></tr>
+        <tr><td><code>max_tokens</code></td><td>int</td><td>1500</td><td>Token budget</td></tr>
+        <tr><td><code>after</code></td><td>string</td><td>none</td><td>ISO 8601 date filter</td></tr>
+        <tr><td><code>before</code></td><td>string</td><td>none</td><td>ISO 8601 date filter</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_sessions</h4>
+      <p>List recent sessions with journal summaries.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>max_sessions</code></td><td>int</td><td>20</td><td>Number of sessions to return</td></tr>
+        <tr><td><code>after</code></td><td>string</td><td>none</td><td>ISO 8601 date filter</td></tr>
+        <tr><td><code>before</code></td><td>string</td><td>none</td><td>ISO 8601 date filter</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_context</h4>
+      <p>Drill down into a specific chunk or cluster for full content.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>chunk_id</code></td><td>string</td><td>none</td><td>Chunk ID in <code>a1b2c3d4:t5</code> format</td></tr>
+        <tr><td><code>cluster_id</code></td><td>string</td><td>none</td><td>Cluster ID in <code>clust-abcd1234</code> format (takes precedence)</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_timeline</h4>
+      <p>Chronological work arcs and session grouping. Shows how work evolved over time.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>query</code></td><td>string</td><td>""</td><td>Optional FTS filter</td></tr>
+        <tr><td><code>after</code></td><td>string</td><td>none</td><td>ISO 8601 date filter</td></tr>
+        <tr><td><code>before</code></td><td>string</td><td>none</td><td>ISO 8601 date filter</td></tr>
+        <tr><td><code>branch</code></td><td>string</td><td>none</td><td>Filter by git branch name</td></tr>
+        <tr><td><code>max_results</code></td><td>int</td><td>10</td><td>Max timeline arcs to return</td></tr>
+      </table>
+    </div>
+
+    <!-- ───────────────── Knowledge Tools ───────────────── -->
+
+    <h2 id="knowledge-tools">Knowledge Tools</h2>
+
+    <div class="tool-sig">
+      <h4>recall_journal</h4>
+      <p>Read, write, or list session journal entries.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>action</code></td><td>string</td><td>"read"</td><td>"read", "write", or "list"</td></tr>
+        <tr><td><code>focus</code></td><td>string</td><td>none</td><td>Session focus/topic</td></tr>
+        <tr><td><code>done</code></td><td>string</td><td>none</td><td>Completed items (semicolon-separated)</td></tr>
+        <tr><td><code>decisions</code></td><td>string</td><td>none</td><td>Key decisions made (semicolon-separated)</td></tr>
+        <tr><td><code>next_steps</code></td><td>string</td><td>none</td><td>Follow-up items (semicolon-separated)</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_remind</h4>
+      <p>Manage cross-session reminders.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>action</code></td><td>string</td><td>"add"</td><td>"add", "list", "clear", or "pending"</td></tr>
+        <tr><td><code>text</code></td><td>string</td><td>none</td><td>Reminder text (required for "add")</td></tr>
+        <tr><td><code>reminder_id</code></td><td>string</td><td>none</td><td>ID for clearing a specific reminder</td></tr>
+        <tr><td><code>sticky</code></td><td>bool</td><td>false</td><td>Persist across sessions (not auto-cleared)</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_enrich</h4>
+      <p>LLM-powered journal enrichment. Extracts structured knowledge from raw entries.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>model</code></td><td>string</td><td>auto</td><td>MLX model for enrichment</td></tr>
+        <tr><td><code>max_entries</code></td><td>int</td><td>10</td><td>Max entries to process</td></tr>
+        <tr><td><code>dry_run</code></td><td>bool</td><td>false</td><td>Preview without writing</td></tr>
+        <tr><td><code>adapter_path</code></td><td>string</td><td>""</td><td>Optional LoRA adapter path</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_consolidate</h4>
+      <p>Extract durable knowledge nodes from enriched journals. Deduplicates, clusters, and summarizes.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>dry_run</code></td><td>bool</td><td>false</td><td>Preview without writing</td></tr>
+        <tr><td><code>force</code></td><td>bool</td><td>false</td><td>Reprocess all entries</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>auto</td><td>Model for consolidation</td></tr>
+        <tr><td><code>adapter_path</code></td><td>string</td><td>""</td><td>Optional LoRA adapter</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_contradict</h4>
+      <p>List or resolve knowledge contradictions.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>action</code></td><td>string</td><td>"list"</td><td>"list" or "resolve"</td></tr>
+        <tr><td><code>contradiction_id</code></td><td>int</td><td>none</td><td>ID of contradiction to resolve</td></tr>
+        <tr><td><code>resolution</code></td><td>string</td><td>"confirmed"</td><td>"confirmed" or "dismissed"</td></tr>
+      </table>
+    </div>
+
+    <!-- ───────────────── Index Tools ───────────────── -->
+
+    <h2 id="index-tools">Index Tools</h2>
+
+    <div class="tool-sig">
+      <h4>recall_build</h4>
+      <p>Build or rebuild the transcript index.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>incremental</code></td><td>bool</td><td>true</td><td>Skip already-indexed transcripts</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_setup</h4>
+      <p>Initialize project: create index directory, install hooks, update <code>.gitignore</code>.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>no_hook</code></td><td>bool</td><td>false</td><td>Skip global hook installation</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_stats</h4>
+      <p>Index statistics. No parameters. Returns chunk count, session count, date range, tool/file coverage, embeddings status, knowledge nodes, clusters, storage backend, and index size on disk.</p>
+    </div>
+
+    <!-- ───────────────── Intent Classification ───────────────── -->
+
+    <h2 id="intent">Intent Classification</h2>
+
+    <p>Queries are automatically classified into intents that adjust search behavior. The classifier runs on every <code>recall_search</code> call (unless overridden by explicit parameters).</p>
+
+    <table>
+      <tr>
+        <th>Intent</th>
+        <th>emb_weight</th>
+        <th>half_life</th>
+        <th>knowledge_boost</th>
+        <th>Example queries</th>
+      </tr>
+      <tr>
+        <td><strong>factual</strong></td>
+        <td>1.5</td>
+        <td>90</td>
+        <td>3.0</td>
+        <td>"what database do we use?", "what's the API endpoint?"</td>
+      </tr>
+      <tr>
+        <td><strong>temporal</strong></td>
+        <td>1.0</td>
+        <td>0 (disabled)</td>
+        <td>0.5</td>
+        <td>"what did we do last week?", "recent changes to auth"</td>
+      </tr>
+      <tr>
+        <td><strong>procedural</strong></td>
+        <td>1.2</td>
+        <td>90</td>
+        <td>2.5</td>
+        <td>"how do I deploy?", "what's the release process?"</td>
+      </tr>
+      <tr>
+        <td><strong>debug</strong></td>
+        <td>0.8</td>
+        <td>30</td>
+        <td>1.0</td>
+        <td>"why did tests fail?", "that auth middleware bug"</td>
+      </tr>
+      <tr>
+        <td><strong>decision</strong></td>
+        <td>1.5</td>
+        <td>30</td>
+        <td>0.8</td>
+        <td>"why did we choose Postgres?", "what was the decision on auth?"</td>
+      </tr>
+      <tr>
+        <td><strong>exploratory</strong></td>
+        <td>2.0</td>
+        <td>60</td>
+        <td>1.5</td>
+        <td>"tell me about the architecture", "what is recall?"</td>
+      </tr>
+      <tr>
+        <td><strong>aggregation</strong></td>
+        <td>2.0</td>
+        <td>0 (disabled)</td>
+        <td>2.5</td>
+        <td>"how many bugs this sprint?", "list all features we shipped"</td>
+      </tr>
+      <tr>
+        <td><strong>general</strong></td>
+        <td>1.0</td>
+        <td>60</td>
+        <td>2.0</td>
+        <td>Default fallback for unclassified queries</td>
+      </tr>
+    </table>
+
+    <div class="callout">
+      <p>When <code>half_life</code> is set to the MCP default (60.0), intent classification overrides it with the intent-specific value. Pass <code>half_life=0</code> explicitly to disable recency decay regardless of intent.</p>
+    </div>
+
+    <!-- ───────────────── Recency Decay ───────────────── -->
+
+    <h2 id="recency">Recency Decay</h2>
+
+    <p>Recency decay applies an exponential time-based weight to search results. The formula:</p>
+
+    <pre><code>weight = 2 ^ (-age_days / half_life)</code></pre>
+
+    <p>At <code>half_life = 60</code> days:</p>
+    <ul>
+      <li>Today's results: weight = 1.0</li>
+      <li>60 days ago: weight = 0.5</li>
+      <li>120 days ago: weight = 0.25</li>
+      <li>180 days ago: weight = 0.125</li>
+    </ul>
+
+    <p>The decay multiplies with relevance score, so a highly relevant old result can still outrank a weakly relevant new one.</p>
+
+    <table>
+      <tr>
+        <th>half_life</th>
+        <th>Behavior</th>
+        <th>Best for</th>
+      </tr>
+      <tr>
+        <td><code>0</code></td>
+        <td>No decay, pure relevance</td>
+        <td>Searching for timeless facts, architecture decisions</td>
+      </tr>
+      <tr>
+        <td><code>7</code></td>
+        <td>Aggressive recency bias</td>
+        <td>Debugging, "what just happened" queries</td>
+      </tr>
+      <tr>
+        <td><code>30</code></td>
+        <td>Moderate recency</td>
+        <td>Process/workflow questions</td>
+      </tr>
+      <tr>
+        <td><code>60</code></td>
+        <td>Gentle decay (default)</td>
+        <td>General-purpose queries</td>
+      </tr>
+    </table>
+
+    <!-- ───────────────── Depth Modes ───────────────── -->
+
+    <h2 id="depth">Depth Modes</h2>
+
+    <table>
+      <tr>
+        <th>Mode</th>
+        <th>Token cost</th>
+        <th>Content</th>
+        <th>When to use</th>
+      </tr>
+      <tr>
+        <td><code>"full"</code></td>
+        <td>High</td>
+        <td>Complete transcript chunks with full context, tool calls, and code</td>
+        <td>Deep research, understanding exactly what happened</td>
+      </tr>
+      <tr>
+        <td><code>"summary"</code></td>
+        <td>Medium</td>
+        <td>Condensed chunk summaries with key points</td>
+        <td>Getting the gist of past work without full detail</td>
+      </tr>
+      <tr>
+        <td><code>"concise"</code></td>
+        <td>Low</td>
+        <td>Minimal output &mdash; just the essential facts</td>
+        <td>Quick checks, confirming a single detail</td>
+      </tr>
+    </table>
+
+    <!-- ───────────────── Config Files ───────────────── -->
+
+    <h2 id="config">Config Files</h2>
+
+    <h3>Locations (project overrides global)</h3>
+    <ul>
+      <li><strong>Global:</strong> <code>~/.synapt/config.json</code></li>
+      <li><strong>Project:</strong> <code>.synapt/recall/config.json</code></li>
+    </ul>
+
+    <h3>Full Schema</h3>
+    <pre><code>{
+  "models": {
+    "embedding": "all-MiniLM-L6-v2",
+    "summarization": "google/flan-t5-base",
+    "enrichment": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+    "consolidation": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+    "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  },
+  "backend": "auto",
+  "max_tokens": 1500
+}</code></pre>
+
+    <p>The <code>backend</code> field selects the inference engine: <code>"auto"</code> (detect best available), <code>"onnx"</code>, <code>"mlx"</code>, <code>"transformers"</code>, or <code>"ollama"</code>.</p>
+
+    <!-- ───────────────── Environment Variables ───────────────── -->
+
+    <h2 id="env">Environment Variables</h2>
+
+    <table>
+      <tr>
+        <th>Variable</th>
+        <th>Default</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_SUMMARY_BACKEND</code></td>
+        <td>auto</td>
+        <td>Inference backend: <code>onnx</code>, <code>mlx</code>, <code>transformers</code>, <code>ollama</code></td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_EMBEDDING_MODEL</code></td>
+        <td>all-MiniLM-L6-v2</td>
+        <td>Sentence embedding model</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_ENRICHMENT_MODEL</code></td>
+        <td>Ministral 3B (MLX)</td>
+        <td>LLM for enrichment/consolidation</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_RERANKER_MODEL</code></td>
+        <td>ms-marco-MiniLM-L-6-v2</td>
+        <td>Cross-encoder reranker model</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_MAX_TOKENS</code></td>
+        <td>1500</td>
+        <td>Default token budget for search</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_RERANKER</code></td>
+        <td>false</td>
+        <td>Enable cross-encoder reranking</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_ONNX_THREADS</code></td>
+        <td>auto</td>
+        <td>Thread count for ONNX Runtime</td>
+      </tr>
+    </table>
+
+    <!-- ───────────────── CLI Commands ───────────────── -->
+
+    <h2 id="cli">CLI Commands</h2>
+
+    <pre><code># Index management
+synapt recall setup                    # Initialize project
+synapt recall build                    # Incremental build
+synapt recall build --rescrub          # Re-scrub secrets + full rebuild
+synapt recall rescrub                  # Standalone re-scrub + rebuild
+synapt recall stats                    # Index statistics
+
+# Search
+synapt recall search "your query"      # Full search
+synapt recall search "query" -k 10     # More chunks
+synapt recall search "query" -t 3000   # Higher token budget
+
+# Knowledge
+synapt recall journal --write          # Write journal entry
+synapt recall journal --list           # List entries
+synapt recall enrich                   # LLM enrichment
+synapt recall consolidate              # Extract knowledge nodes
+
+# Server
+synapt server                          # Start MCP server
+synapt server --dev                    # Dev mode (auto-reload)
+
+# Hooks
+synapt recall install-hook             # Install Claude Code hooks
+synapt recall hook session-start       # Manual hook trigger
+synapt recall hook session-end         # Archive + journal</code></pre>
+
+    <!-- ───────────────── File Locations ───────────────── -->
+
+    <h2 id="files">File Locations</h2>
+
+    <table>
+      <tr>
+        <th>Path</th>
+        <th>Contents</th>
+      </tr>
+      <tr>
+        <td><code>.synapt/recall/index/recall.db</code></td>
+        <td>SQLite database (FTS5 + metadata)</td>
+      </tr>
+      <tr>
+        <td><code>.synapt/recall/journal.jsonl</code></td>
+        <td>Session journal entries</td>
+      </tr>
+      <tr>
+        <td><code>.synapt/recall/knowledge.jsonl</code></td>
+        <td>Consolidated knowledge nodes</td>
+      </tr>
+      <tr>
+        <td><code>.synapt/recall/reminders.json</code></td>
+        <td>Cross-session reminders</td>
+      </tr>
+      <tr>
+        <td><code>.synapt/recall/config.json</code></td>
+        <td>Project-level configuration</td>
+      </tr>
+      <tr>
+        <td><code>.synapt/recall/worktrees/</code></td>
+        <td>Per-worktree archives</td>
+      </tr>
+      <tr>
+        <td><code>~/.synapt/config.json</code></td>
+        <td>Global configuration</td>
+      </tr>
+      <tr>
+        <td><code>~/.claude/projects/*/</code></td>
+        <td>Source transcripts (auto-discovered)</td>
+      </tr>
+    </table>
+
+  </div>
+</article>
+
+<footer>
+  <div class="container">
+    <a href="/">synapt</a> &middot;
+    <a href="/guide.html">Guide</a> &middot;
+    <a href="/blog/">Blog</a> &middot;
+    <a href="https://github.com/laynepenney/synapt">GitHub</a> &middot;
+    <a href="https://x.com/synapt_dev">X</a>
+  </div>
+</footer>
+
+</body>
+</html>
