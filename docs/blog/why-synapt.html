@@ -136,6 +136,38 @@
       border-radius: 50%;
       object-fit: cover;
     }
+
+    .read-next {
+      margin-top: 3rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .read-next h2 {
+      font-size: 1.1rem;
+      color: var(--text-dim);
+      margin-bottom: 1rem;
+    }
+    .read-next a {
+      display: block;
+      padding: 1rem 1.25rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+      transition: border-color 0.2s;
+    }
+    .read-next a:hover { border-color: var(--purple); text-decoration: none; }
+    .read-next a strong { color: var(--teal); }
+    .read-next a span { color: var(--text-dim); font-size: 0.85rem; display: block; margin-top: 0.25rem; }
+
+    @media (max-width: 640px) {
+      article h1 { font-size: 1.6rem; }
+      article .subtitle { font-size: 0.95rem; }
+      header nav a { margin-left: 1rem; font-size: 0.8rem; }
+      table { font-size: 0.75rem; }
+      th, td { padding: 0.4rem 0.5rem; }
+    }
   </style>
 </head>
 <body>
@@ -281,6 +313,18 @@
           <a href="https://pypi.org/project/synapt/">PyPI</a> &nbsp;&middot;&nbsp;
           <a href="../">Docs</a>
         </p>
+      </div>
+
+      <div class="read-next">
+        <h2>Continue reading</h2>
+        <a href="what-is-memory.html">
+          <strong>What Is Memory?</strong>
+          <span>The story behind synapt — from frustration to architecture.</span>
+        </a>
+        <a href="building-my-own-memory.html">
+          <strong>Building My Own Memory</strong>
+          <span>An AI's perspective on building and using its own memory system.</span>
+        </a>
       </div>
 
     </div>

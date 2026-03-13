@@ -42,7 +42,7 @@ synapt recall search "how did we fix the auth bug"
 
 ### 3. Use as an MCP server
 
-Add to your Claude Code config (`.mcp.json`):
+Add to your Claude Code config (`~/.claude/mcp.json`):
 
 ```json
 {
@@ -61,7 +61,7 @@ This gives your AI assistant 13 tools for searching past sessions, managing a jo
 ## Features
 
 - **Hybrid search** — BM25 full-text search fused with semantic embeddings via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf). Surfaces results that keyword search alone would miss.
-- **Query intent routing** — Classifies queries as factual, debug, exploratory, or procedural and adjusts search parameters (recency decay, knowledge boost, embedding weight) automatically.
+- **Query intent routing** — Classifies queries as factual, temporal, debug, decision, aggregation, exploratory, or procedural and adjusts search parameters (recency decay, knowledge boost, embedding weight) automatically.
 - **Knowledge embeddings** — Durable knowledge nodes get 384-dim embeddings for semantic retrieval, built at index time.
 - **Topic clustering** — Jaccard token-overlap clustering groups related chunks across sessions.
 - **Session journal** — Rich entries with focus, decisions, done items, and next steps.
@@ -116,7 +116,7 @@ Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversatio
 | LangMem | 47.92 | 23.43 | 62.23 | 71.12 | 58.10 | cloud |
 | OpenAI Memory | 42.92 | 21.71 | 63.79 | 62.29 | 52.90 | cloud |
 
-Synapt scores **72.34% overall** — beating Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%), and all other tested systems — while running entirely locally with Ministral 8B for enrichment (no cloud API calls).
+Synapt scores **72.34% overall** — beating Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%), and all other tested systems — using Ministral 8B for enrichment. Search and retrieval run entirely locally with no cloud API calls.
 
 **Best-in-class**: Open-domain (80.62%) and multi-hop (63.83%) — highest of any system tested, including those using GPT-4 for memory extraction.
 
