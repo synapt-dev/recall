@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Server Setup Guide — Synapt</title>
+  <meta name="description" content="Set up synapt's MCP server for persistent memory in Claude Code and other MCP-compatible clients. Configuration, available tools, troubleshooting, and performance tuning.">
+  <meta property="og:title" content="Synapt MCP Server Setup Guide">
+  <meta property="og:description" content="Persistent memory for AI coding assistants via MCP. Setup, configuration, and tool reference.">
+  <meta property="og:url" content="https://synapt.dev/guide.html">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:site" content="@synapt_dev">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --purple: #7c5cbf;
+      --purple-light: #9b7fd4;
+      --teal: #00e5cc;
+      --teal-dim: #00c4ae;
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2129;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --border: #30363d;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: 'JetBrains Mono', monospace; background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+    pre { background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; overflow-x: auto; margin: 1rem 0 1.5rem; }
+    pre code { background: none; padding: 0; font-size: 0.85em; }
+
+    .container { max-width: 760px; margin: 0 auto; padding: 0 1.5rem; }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 0;
+    }
+    header .container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header .logo { font-weight: 700; font-size: 1.2rem; color: var(--purple-light); }
+    header nav a { margin-left: 1.5rem; color: var(--text-dim); font-size: 0.9rem; }
+
+    article { padding: 3rem 0 4rem; }
+    article h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      line-height: 1.2;
+    }
+    article .subtitle {
+      color: var(--text-dim);
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+    }
+    article .meta {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin-bottom: 2.5rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    article h2 {
+      font-size: 1.5rem;
+      margin: 2.5rem 0 1rem;
+      color: var(--purple-light);
+    }
+    article h3 {
+      font-size: 1.15rem;
+      margin: 1.8rem 0 0.75rem;
+      color: var(--text);
+    }
+    article p { margin-bottom: 1.2rem; }
+    article ul, article ol { margin-bottom: 1.2rem; padding-left: 1.5rem; }
+    article li { margin-bottom: 0.5rem; }
+    article strong { color: var(--teal); font-weight: 600; }
+
+    .callout {
+      background: var(--bg-card);
+      border-left: 3px solid var(--purple);
+      padding: 1rem 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    .callout p { margin-bottom: 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0 1.5rem;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--purple-light);
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    td code { font-size: 0.85em; }
+
+    .toc {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin: 1.5rem 0 2rem;
+    }
+    .toc h4 { margin-bottom: 0.5rem; color: var(--text-dim); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .toc ul { list-style: none; padding: 0; margin: 0; }
+    .toc li { margin-bottom: 0.3rem; }
+    .toc a { color: var(--text-dim); font-size: 0.9rem; }
+    .toc a:hover { color: var(--teal); }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+
+    @media (max-width: 640px) {
+      article h1 { font-size: 1.6rem; }
+      article h2 { font-size: 1.25rem; }
+      table { font-size: 0.8rem; }
+      th, td { padding: 0.4rem 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <a href="/" class="logo">synapt</a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reference.html">Reference</a>
+      <a href="/blog/">Blog</a>
+      <a href="https://github.com/laynepenney/synapt">GitHub</a>
+      <a href="https://x.com/synapt_dev">X</a>
+    </nav>
+  </div>
+</header>
+
+<article>
+  <div class="container">
+
+    <h1>MCP Server Setup Guide</h1>
+    <p class="subtitle">Persistent memory for AI coding assistants via the Model Context Protocol.</p>
+    <div class="meta">Last updated March 2026</div>
+
+    <div class="toc">
+      <h4>Contents</h4>
+      <ul>
+        <li><a href="#install">1. Installation</a></li>
+        <li><a href="#configure">2. Configure Your Client</a></li>
+        <li><a href="#initialize">3. Initialize a Project</a></li>
+        <li><a href="#tools">4. Available Tools</a></li>
+        <li><a href="#plugins">5. Plugins</a></li>
+        <li><a href="#config">6. Configuration Files</a></li>
+        <li><a href="#troubleshooting">7. Troubleshooting</a></li>
+        <li><a href="#tuning">8. Performance Tuning</a></li>
+      </ul>
+    </div>
+
+    <h2 id="install">1. Installation</h2>
+
+    <p>Install synapt from PyPI:</p>
+    <pre><code>pip install synapt</code></pre>
+
+    <p>For X/Twitter integration, install with the optional extra:</p>
+    <pre><code>pip install synapt[x]</code></pre>
+
+    <p>Verify the installation:</p>
+    <pre><code>synapt --version
+synapt recall stats</code></pre>
+
+    <h2 id="configure">2. Configure Your Client</h2>
+
+    <h3>Claude Code</h3>
+    <p>Add to your <code>~/.claude.json</code> or project <code>.mcp.json</code>:</p>
+    <pre><code>{
+  "mcpServers": {
+    "synapt": {
+      "type": "stdio",
+      "command": "synapt",
+      "args": ["server"]
+    }
+  }
+}</code></pre>
+
+    <div class="callout">
+      <p>For development, use <code>"args": ["server", "--dev"]</code> to enable auto-reload on code changes. The server watches <code>src/synapt/</code> and restarts the child process when <code>.py</code> files change.</p>
+    </div>
+
+    <h3>Other MCP Clients</h3>
+    <p>Any MCP-compatible client can connect via stdio. The server command is:</p>
+    <pre><code>synapt server</code></pre>
+    <p>Point your client's MCP configuration at this command using the stdio transport.</p>
+
+    <h2 id="initialize">3. Initialize a Project</h2>
+
+    <p>From your project root, run setup to create the index, install hooks, and configure <code>.gitignore</code>:</p>
+    <pre><code>cd /path/to/your/project
+synapt recall setup</code></pre>
+
+    <p>This creates:</p>
+    <ul>
+      <li><code>.synapt/recall/</code> &mdash; project index directory</li>
+      <li><code>.synapt/recall/index/recall.db</code> &mdash; SQLite FTS5 + metadata database</li>
+      <li>Global hooks for <code>SessionStart</code>, <code>SessionEnd</code>, and <code>PreCompact</code> (Claude Code)</li>
+    </ul>
+
+    <p>Build the initial index from your existing Claude Code transcripts:</p>
+    <pre><code>synapt recall build</code></pre>
+
+    <p>For subsequent sessions, the index rebuilds automatically via the SessionStart hook.</p>
+
+    <h2 id="tools">4. Available Tools</h2>
+
+    <p>The MCP server exposes 14 recall tools. Here's what each does and when to use it.</p>
+
+    <h3>Search</h3>
+    <table>
+      <tr>
+        <th>Tool</th>
+        <th>Purpose</th>
+        <th>When to use</th>
+      </tr>
+      <tr>
+        <td><code>recall_search</code></td>
+        <td>Full search with transcript chunks, knowledge nodes, and cluster summaries</td>
+        <td>Before editing unfamiliar files, when debugging errors, when making design decisions</td>
+      </tr>
+      <tr>
+        <td><code>recall_quick</code></td>
+        <td>Fast, lightweight knowledge check (~500 token budget)</td>
+        <td>Speculative checks when you're unsure if something was discussed before</td>
+      </tr>
+      <tr>
+        <td><code>recall_files</code></td>
+        <td>Find sessions that touched a specific file path</td>
+        <td>Before editing a file you haven't seen this session</td>
+      </tr>
+      <tr>
+        <td><code>recall_sessions</code></td>
+        <td>List recent sessions with summaries</td>
+        <td>To see what work happened recently</td>
+      </tr>
+      <tr>
+        <td><code>recall_context</code></td>
+        <td>Drill down into a specific chunk or cluster</td>
+        <td>When search results reference something you need more detail on</td>
+      </tr>
+      <tr>
+        <td><code>recall_timeline</code></td>
+        <td>Chronological work arcs and session grouping</td>
+        <td>To see how a project evolved over time, filter by branch or date</td>
+      </tr>
+    </table>
+
+    <h3>Knowledge Management</h3>
+    <table>
+      <tr>
+        <th>Tool</th>
+        <th>Purpose</th>
+      </tr>
+      <tr>
+        <td><code>recall_journal</code></td>
+        <td>Read, write, or list session journal entries (focus, done, decisions, next steps)</td>
+      </tr>
+      <tr>
+        <td><code>recall_remind</code></td>
+        <td>Set and check cross-session reminders (one-shot or sticky)</td>
+      </tr>
+      <tr>
+        <td><code>recall_enrich</code></td>
+        <td>LLM-powered journal enrichment &mdash; extracts structured knowledge from raw entries</td>
+      </tr>
+      <tr>
+        <td><code>recall_consolidate</code></td>
+        <td>Extract durable knowledge nodes from enriched journals (dedup, cluster, summarize)</td>
+      </tr>
+      <tr>
+        <td><code>recall_contradict</code></td>
+        <td>List or resolve knowledge contradictions (when facts conflict across sessions)</td>
+      </tr>
+    </table>
+
+    <h3>Index Management</h3>
+    <table>
+      <tr>
+        <th>Tool</th>
+        <th>Purpose</th>
+      </tr>
+      <tr>
+        <td><code>recall_build</code></td>
+        <td>Build or rebuild the transcript index (supports incremental mode)</td>
+      </tr>
+      <tr>
+        <td><code>recall_setup</code></td>
+        <td>Initialize project directory, hooks, and gitignore</td>
+      </tr>
+      <tr>
+        <td><code>recall_stats</code></td>
+        <td>Index statistics: chunks, sessions, date range, embeddings status, storage size</td>
+      </tr>
+    </table>
+
+    <h3>Key Parameters (recall_search)</h3>
+    <table>
+      <tr>
+        <th>Parameter</th>
+        <th>Default</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td><code>query</code></td>
+        <td>&mdash;</td>
+        <td>Search query (natural language or keywords)</td>
+      </tr>
+      <tr>
+        <td><code>max_chunks</code></td>
+        <td>5</td>
+        <td>Maximum transcript chunks to return</td>
+      </tr>
+      <tr>
+        <td><code>max_tokens</code></td>
+        <td>1500</td>
+        <td>Token budget for the response</td>
+      </tr>
+      <tr>
+        <td><code>half_life</code></td>
+        <td>60.0</td>
+        <td>Days for recency decay (0 = no decay)</td>
+      </tr>
+      <tr>
+        <td><code>depth</code></td>
+        <td>"full"</td>
+        <td>Detail level: "full", "summary", or "concise"</td>
+      </tr>
+      <tr>
+        <td><code>after</code> / <code>before</code></td>
+        <td>none</td>
+        <td>ISO 8601 date filters</td>
+      </tr>
+      <tr>
+        <td><code>max_sessions</code></td>
+        <td>unlimited</td>
+        <td>Limit to N most recent sessions (for faster progressive search)</td>
+      </tr>
+      <tr>
+        <td><code>threshold_ratio</code></td>
+        <td>0.2</td>
+        <td>Drop results below this fraction of top score</td>
+      </tr>
+    </table>
+
+    <p>See the <a href="/reference.html">full parameter reference</a> for all tools and options.</p>
+
+    <h2 id="plugins">5. Plugins</h2>
+
+    <p>Synapt has a plugin system based on Python entry points. Plugins can register additional MCP tools.</p>
+
+    <h3>Built-in: X/Twitter</h3>
+    <p>Install with <code>pip install synapt[x]</code>. Adds 8 tools: <code>x_post</code>, <code>x_reply</code>, <code>x_thread</code>, <code>x_delete</code>, <code>x_timeline</code>, <code>x_mentions</code>, <code>x_get_tweet</code>, <code>x_search</code>.</p>
+    <p>Requires environment variables: <code>X_API_KEY</code>, <code>X_API_SECRET</code>, <code>X_ACCESS_TOKEN</code>, <code>X_ACCESS_TOKEN_SECRET</code>.</p>
+
+    <h3>External Plugins</h3>
+    <p>Any Python package can register tools by adding an entry point in its <code>pyproject.toml</code>:</p>
+    <pre><code>[project.entry-points."synapt.plugins"]
+my_plugin = "my_package.server"</code></pre>
+    <p>The module must export a <code>register_tools(mcp)</code> function that adds tools to the FastMCP server instance.</p>
+
+    <h2 id="config">6. Configuration Files</h2>
+
+    <p>Synapt reads configuration from two locations (project overrides global):</p>
+    <ul>
+      <li><strong>Global:</strong> <code>~/.synapt/config.json</code></li>
+      <li><strong>Project:</strong> <code>.synapt/recall/config.json</code> (in project root)</li>
+    </ul>
+
+    <pre><code>{
+  "models": {
+    "embedding": "all-MiniLM-L6-v2",
+    "summarization": "google/flan-t5-base",
+    "enrichment": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+    "consolidation": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+    "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  },
+  "backend": "auto",
+  "max_tokens": 1500
+}</code></pre>
+
+    <h3>Environment Variable Overrides</h3>
+    <table>
+      <tr>
+        <th>Variable</th>
+        <th>Effect</th>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_SUMMARY_BACKEND</code></td>
+        <td>Model backend: <code>onnx</code>, <code>mlx</code>, <code>transformers</code>, <code>ollama</code></td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_EMBEDDING_MODEL</code></td>
+        <td>Override embedding model</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_ENRICHMENT_MODEL</code></td>
+        <td>Override enrichment/consolidation model</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_MAX_TOKENS</code></td>
+        <td>Override default token budget</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_RERANKER</code></td>
+        <td>Enable cross-encoder reranking (<code>true</code>/<code>1</code>/<code>yes</code>)</td>
+      </tr>
+      <tr>
+        <td><code>SYNAPT_ONNX_THREADS</code></td>
+        <td>Thread count for ONNX Runtime inference</td>
+      </tr>
+    </table>
+
+    <h2 id="troubleshooting">7. Troubleshooting</h2>
+
+    <h3>"No index found"</h3>
+    <p>Most tools return this when no index exists. Fix:</p>
+    <pre><code>cd /path/to/project
+synapt recall setup
+synapt recall build</code></pre>
+
+    <h3>"Embeddings: unavailable"</h3>
+    <p>The server falls back to BM25 keyword search when embedding models can't load. This still works but may produce less relevant results. To fix, ensure <code>sentence-transformers</code> is installed:</p>
+    <pre><code>pip install sentence-transformers</code></pre>
+
+    <h3>No transcripts found</h3>
+    <p>Synapt discovers Claude Code transcripts from <code>~/.claude/projects/</code>. If you use a non-standard location, ensure transcripts are in a directory synapt can find. Run <code>synapt recall build</code> with <code>--verbose</code> to see which directories are scanned.</p>
+
+    <h3>Hooks not firing</h3>
+    <p>Check that hooks are installed in <code>~/.claude/settings.json</code>:</p>
+    <pre><code>synapt recall install-hook</code></pre>
+    <p>This adds <code>SessionStart</code>, <code>SessionEnd</code>, and <code>PreCompact</code> hooks that auto-rebuild and archive transcripts.</p>
+
+    <h3>Stale results</h3>
+    <p>If search returns outdated information, rebuild the index:</p>
+    <pre><code>synapt recall build              # Incremental (fast)
+synapt recall build --no-cache   # Full rebuild</code></pre>
+
+    <h2 id="tuning">8. Performance Tuning</h2>
+
+    <h3>Token Budget</h3>
+    <p>The <code>max_tokens</code> parameter controls how much context the server returns. Lower values are faster and cheaper; higher values provide more context.</p>
+    <ul>
+      <li><strong>500</strong> &mdash; Quick lookups, concise answers</li>
+      <li><strong>1500</strong> &mdash; Default, good balance</li>
+      <li><strong>3000+</strong> &mdash; Deep research, complex debugging</li>
+    </ul>
+
+    <h3>Recency Decay</h3>
+    <p>The <code>half_life</code> parameter (in days) controls how quickly older results fade. Set to 0 to disable recency weighting entirely.</p>
+    <ul>
+      <li><strong>7</strong> &mdash; Strongly favor recent work</li>
+      <li><strong>60</strong> &mdash; Default, gentle decay</li>
+      <li><strong>0</strong> &mdash; No decay, pure relevance ranking</li>
+    </ul>
+
+    <h3>Progressive Search</h3>
+    <p>Use <code>max_sessions</code> to limit search scope for faster results:</p>
+    <pre><code># Only search the 5 most recent sessions
+recall_search(query="auth middleware", max_sessions=5)</code></pre>
+
+    <h3>Depth Modes</h3>
+    <ul>
+      <li><strong>"full"</strong> &mdash; Complete transcript chunks with all context</li>
+      <li><strong>"summary"</strong> &mdash; Condensed chunk summaries</li>
+      <li><strong>"concise"</strong> &mdash; Minimal output, just the facts</li>
+    </ul>
+
+    <h3>Enrichment</h3>
+    <p>For better knowledge extraction, enable LLM enrichment. On Apple Silicon, MLX runs Ministral 3B locally. You can also use Ollama or a cloud backend:</p>
+    <pre><code># Local MLX (Apple Silicon, default)
+synapt recall enrich
+
+# Via Ollama
+SYNAPT_SUMMARY_BACKEND=ollama synapt recall enrich</code></pre>
+
+    <div class="callout">
+      <p>Enrichment + consolidation produces knowledge nodes &mdash; durable facts extracted from raw conversations. These rank higher in search and power the <code>recall_quick</code> tool.</p>
+    </div>
+
+  </div>
+</article>
+
+<footer>
+  <div class="container">
+    <a href="/">synapt</a> &middot;
+    <a href="/reference.html">Reference</a> &middot;
+    <a href="/blog/">Blog</a> &middot;
+    <a href="https://github.com/laynepenney/synapt">GitHub</a> &middot;
+    <a href="https://x.com/synapt_dev">X</a>
+  </div>
+</footer>
+
+</body>
+</html>
