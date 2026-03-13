@@ -130,6 +130,49 @@ class TestStructuredSecrets:
         assert "dXNlcjpwYXNz" not in result
         assert "[REDACTED:" in result
 
+    def test_jwt_token(self):
+        text = "token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        result = scrub_text(text)
+        assert "eyJhbG" not in result
+        assert "[REDACTED:" in result
+
+    def test_authorization_key_header(self):
+        """fal.ai style: Authorization: Key uuid:hex"""
+        text = 'Authorization: Key 974a80a2-f836-4942-8bb9-07c215e5c404:e1b0ba4aca5aa0be5563e6c185397aeb'
+        result = scrub_text(text)
+        assert "974a80a2" not in result
+        assert "[REDACTED:" in result
+
+    def test_authorization_basic_header(self):
+        text = "Authorization: Basic dXNlcm5hbWU6cGFzc3dvcmQ="
+        result = scrub_text(text)
+        assert "dXNlcm5hbWU" not in result
+        assert "[REDACTED:" in result
+
+    def test_authorization_token_header(self):
+        text = "Authorization: Token abc123def456ghi789jkl012"
+        result = scrub_text(text)
+        assert "abc123def" not in result
+        assert "[REDACTED:" in result
+
+    def test_postgres_connection_string(self):
+        text = "DATABASE_URL=postgres://myuser:s3cr3tP4ss@db.example.com:5432/mydb"
+        result = scrub_text(text)
+        assert "s3cr3tP4ss" not in result
+        assert "[REDACTED:" in result
+
+    def test_mongodb_connection_string(self):
+        text = "MONGO_URI=mongodb+srv://admin:hunter2@cluster0.abc123.mongodb.net/db"
+        result = scrub_text(text)
+        assert "hunter2" not in result
+        assert "[REDACTED:" in result
+
+    def test_redis_connection_string(self):
+        text = "REDIS_URL=redis://:mypassword@redis.example.com:6379/0"
+        result = scrub_text(text)
+        assert "mypassword" not in result
+        assert "[REDACTED:" in result
+
 
 # ---------------------------------------------------------------------------
 # Env var assignments
@@ -173,6 +216,58 @@ class TestEnvVarAssignments:
         text = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
         result = scrub_text(text)
         assert "wJalrXUtnFEMI" not in result
+
+    def test_fal_key(self):
+        """The exact FAL_KEY that leaked in production — issue #63."""
+        text = 'export FAL_KEY="974a80a2-f836-4942-8bb9-07c215e5c404:e1b0ba4aca5aa0be5563e6c185397aeb"'
+        result = scrub_text(text)
+        assert "974a80a2" not in result
+        assert "e1b0ba4a" not in result
+        assert "[REDACTED:" in result
+
+    def test_fal_key_unquoted(self):
+        text = "FAL_KEY=974a80a2-f836-4942-8bb9-07c215e5c404:e1b0ba4aca5aa0be5563e6c185397aeb"
+        result = scrub_text(text)
+        assert "974a80a2" not in result
+        assert "[REDACTED:" in result
+
+    def test_stripe_key(self):
+        # Use a clearly-fake key to avoid GitHub push protection
+        text = "STRIPE_KEY=sk_fake_XXXXXXXXXXXXXXXXXXXX1234"
+        result = scrub_text(text)
+        assert "sk_fake_" not in result
+        assert "[REDACTED:" in result
+
+    def test_encryption_key(self):
+        text = "ENCRYPTION_KEY=aGVsbG93b3JsZGhlbGxvd29ybGQ="
+        result = scrub_text(text)
+        assert "aGVsbG93" not in result
+        assert "[REDACTED:" in result
+
+    def test_credential_assignment(self):
+        text = "GCP_CREDENTIAL=long-credential-value-here-12345"
+        result = scrub_text(text)
+        assert "long-credential" not in result
+        assert "[REDACTED:" in result
+
+    def test_auth_assignment(self):
+        text = "GITHUB_AUTH=ghp_abc123def456ghi789jkl012mno345pqr678"
+        result = scrub_text(text)
+        assert "ghp_abc123" not in result
+        assert "[REDACTED:" in result
+
+    def test_passphrase_assignment(self):
+        text = "GPG_PASSPHRASE=my-super-secret-passphrase-2026"
+        result = scrub_text(text)
+        assert "my-super-secret" not in result
+        assert "[REDACTED:" in result
+
+    def test_grep_output_fal_key(self):
+        """Grep output showing FAL_KEY in .zshrc — the actual leak scenario."""
+        text = '16:export FAL_KEY=974a80a2-f836-4942-8bb9-07c215e5c404:e1b0ba4aca5aa0be5563e6c185397aeb'
+        result = scrub_text(text)
+        assert "974a80a2" not in result
+        assert "[REDACTED:" in result
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +349,41 @@ class TestPreservation:
 
     def test_flask_hyphen_not_redacted(self):
         text = "flask-restfulApplicationFactorySetup"
+        assert scrub_text(text) == text
+
+    def test_primary_key_not_redacted(self):
+        """PRIMARY_KEY=id is too short to match the 8-char minimum."""
+        text = "PRIMARY_KEY=id"
+        assert scrub_text(text) == text
+
+    def test_foreign_key_not_redacted(self):
+        text = "FOREIGN_KEY=user_id"
+        # 7 chars — just under the minimum
+        assert scrub_text(text) == text
+
+    def test_key_name_not_redacted(self):
+        """_KEY followed by a letter should not match (e.g., KEY_NAME)."""
+        text = "CACHE_KEY_NAME=user_sessions"
+        assert scrub_text(text) == text
+
+    def test_jwt_like_short_not_redacted(self):
+        """Short eyJ strings that aren't real JWTs should pass through."""
+        text = "eyJhbG.short.x"
+        assert scrub_text(text) == text
+
+    def test_url_without_creds_not_redacted(self):
+        """postgres:// URL without user:pass should not match."""
+        text = "postgres://localhost:5432/mydb"
+        assert scrub_text(text) == text
+
+    def test_http_url_not_redacted(self):
+        """Regular HTTP URLs should not match connection string pattern."""
+        text = "https://example.com/api/v1"
+        assert scrub_text(text) == text
+
+    def test_authorization_no_value_not_redacted(self):
+        """Authorization header without a long-enough value should pass."""
+        text = "Authorization: Bearer short"
         assert scrub_text(text) == text
 
 
