@@ -289,6 +289,10 @@
         Results are merged via RRF (rank-based fusion, no score normalization needed), then interleaved with knowledge nodes and deduplicated. Query intent classification adjusts parameters automatically &mdash; debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes.
       </p>
 
+      <p>
+        <strong>Why this matters in practice:</strong> During a project, your assistant might discuss multiple options across sessions &mdash; approach A in session 3, approach B in session 5, then settle on B-with-modifications in session 7. Raw transcripts contain all three discussions equally. A naive search returns the most recent or most keyword-dense match, which may not be the decision. The knowledge layer extracts the final decision as a durable fact with source attribution, so when you search &ldquo;what did we decide?&rdquo;, the decision surfaces first &mdash; not the earlier deliberation that was superseded.
+      </p>
+
       <h2>The metric problem in memory benchmarks</h2>
 
       <p>
