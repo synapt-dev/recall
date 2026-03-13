@@ -40,6 +40,7 @@ Repository = "https://github.com/laynepenney/synapt"
 hf = ["huggingface_hub>=0.20"]
 onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
 transformers = ["transformers>=4.30", "peft>=0.7"]
+x = ["tweepy>=4.14"]
 dev = ["watchfiles>=0.20"]
 test = ["pytest>=7.0", "numpy", "pytest-benchmark>=4.0"]
 
@@ -47,10 +48,12 @@ test = ["pytest>=7.0", "numpy", "pytest-benchmark>=4.0"]
 synapt = "synapt.cli:main"
 synapt-recall = "synapt.recall.cli:main"
 synapt-recall-server = "synapt.recall.server:main"
+synapt-x-server = "synapt.x.server:main"
 synapt-convert = "synapt._models.convert:main"
 
 [project.entry-points."synapt.plugins"]
-# Plugins register MCP tools via their own pyproject.toml. Example:
+x = "synapt.x.server"
+# External plugins register via their own pyproject.toml. Example:
 # repair = "synapt_repair.server"
 
 [project.entry-points."synapt.backends"]
