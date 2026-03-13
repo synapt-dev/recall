@@ -187,9 +187,9 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             specificity_threshold=10000,    # Effectively disabled
             generic_filter_enabled=False,   # Personal facts look "generic" to code filters
             garbled_filter_enabled=True,    # Still catch LLM artifacts
-            dedup_jaccard=0.75,             # More lenient — rephrased personal facts carry unique info
-            max_knowledge_default=7,        # Higher cap — multi-hop needs more nodes
-            knowledge_boost_adjust=-0.5,    # Slightly less knowledge boost — raw chunks matter more
+            dedup_jaccard=0.6,              # Keep code default — don't change retrieval
+            max_knowledge_default=0,        # Disable knowledge in retrieval — raw chunks only
+            knowledge_boost_adjust=0.0,     # N/A with max_knowledge=0
         )
     else:  # mixed
         return AdaptiveParams(
