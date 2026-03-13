@@ -922,6 +922,9 @@ def _apply_consolidation_result(
 
         if action == "corroborate":
             existing_id = raw_node.get("existing_id", "")
+            # 3B models sometimes return a list instead of a string
+            if isinstance(existing_id, list):
+                existing_id = existing_id[0] if existing_id else ""
             target = existing_by_id.get(existing_id)
             if target:
                 # Add new source sessions, bump confidence
@@ -954,6 +957,8 @@ def _apply_consolidation_result(
 
         if action == "contradict":
             existing_id = raw_node.get("existing_id", "")
+            if isinstance(existing_id, list):
+                existing_id = existing_id[0] if existing_id else ""
             contradiction_note = scrub_text(
                 _tw(str(raw_node.get("contradiction_note", "")), 200)
             )
