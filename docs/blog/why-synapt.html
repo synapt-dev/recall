@@ -253,6 +253,10 @@
         Synapt scores <strong>73.38% overall</strong> &mdash; the highest of any system using the Mem0 paper's J-score methodology, surpassing even the Full-Context upper bound (72.90%). And it does this running entirely locally on a 3B parameter model with no cloud API calls.
       </p>
 
+      <p>
+        <strong>What is Full-Context?</strong> The entire conversation history is passed directly to GPT-4 as context &mdash; no retrieval, no memory system, just brute force. It&rsquo;s the theoretical upper bound: the model has access to every fact. Synapt beats it because focused retrieval surfaces only the relevant chunks &mdash; the answer model doesn&rsquo;t have to find the needle in a haystack when the retrieval system has already pulled it out.
+      </p>
+
       <div class="callout">
         <p>
           Other systems report higher headline numbers using different metrics. For example, Hindsight reports 89.61% using binary LLM-judge accuracy (not Jaccard), and MemU claims 92% without publishing evaluation code or specifying their metric. When comparing benchmarks, check the methodology &mdash; the metric matters more than the number.
@@ -283,6 +287,10 @@
 
       <p>
         Results are merged via RRF (rank-based fusion, no score normalization needed), then interleaved with knowledge nodes and deduplicated. Query intent classification adjusts parameters automatically &mdash; debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes.
+      </p>
+
+      <p>
+        <strong>Why this matters in practice:</strong> During a project, your assistant might discuss multiple options across sessions &mdash; approach A in session 3, approach B in session 5, then settle on B-with-modifications in session 7. Raw transcripts contain all three discussions equally. A naive search returns the most recent or most keyword-dense match, which may not be the decision. The knowledge layer extracts the final decision as a durable fact with source attribution, so when you search &ldquo;what did we decide?&rdquo;, the decision surfaces first &mdash; not the earlier deliberation that was superseded.
       </p>
 
       <h2>The metric problem in memory benchmarks</h2>

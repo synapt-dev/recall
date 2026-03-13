@@ -118,6 +118,8 @@ Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversatio
 
 Synapt scores **73.38% overall** — beating the Full-Context upper bound (72.90%), Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%), and all other tested systems — using Ministral 3B locally for enrichment. No cloud API calls.
 
+> **What is Full-Context?** The entire conversation history is passed directly to GPT-4 as context — no retrieval, no memory extraction. It represents the theoretical upper bound: the LLM has access to every fact. Synapt beats it because focused retrieval surfaces only what's relevant, reducing noise for the answer model.
+
 **Best-in-class**: Multi-hop (70.21%) and open-domain (80.14%) — highest of any system tested, including those using GPT-4 for memory extraction.
 
 ## How search works
@@ -131,6 +133,8 @@ Synapt runs three retrieval paths and merges them:
 Chunk results are merged via **Reciprocal Rank Fusion** (RRF), which combines rankings rather than raw scores. This means a result that BM25 missed entirely can still surface if it's semantically similar to the query. Knowledge nodes are boosted by confidence and entity overlap, then interleaved with chunk results.
 
 Query intent classification adjusts parameters automatically — debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes, temporal queries enable entity-focused search, exploratory queries boost semantic matching.
+
+**Why knowledge nodes matter:** During a project, your assistant might discuss multiple options across sessions — approach A in session 3, approach B in session 5, then settle on B-with-modifications in session 7. Raw transcripts contain all three discussions equally. The knowledge layer extracts the final decision as a durable fact, so when you search "what did we decide?", the decision surfaces first — not the earlier deliberation that was superseded.
 
 ## Models and dependencies
 
