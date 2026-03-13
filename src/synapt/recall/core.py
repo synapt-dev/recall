@@ -465,6 +465,16 @@ def _extract_assistant_content(
     return "\n".join(texts), tools, files, tool_uses
 
 
+def _short_sid(session_id: str) -> str:
+    """Shorten a session ID for display.
+
+    UUID-style IDs (32+ hex chars) have unique 8-char prefixes.
+    Shorter IDs (e.g. "session_001") are kept in full to avoid
+    collisions where all sessions truncate to the same prefix.
+    """
+    return session_id[:8] if len(session_id) >= 16 else session_id
+
+
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
@@ -530,7 +540,7 @@ def parse_transcript(
         # Short prefix for chunk IDs. UUID session IDs (32+ hex chars)
         # always have unique 8-char prefixes. For shorter/synthetic IDs
         # (e.g. "session_001"), use the full ID to avoid collisions.
-        short_id = session_id[:8] if len(session_id) >= 16 else session_id
+        short_id = _short_sid(session_id)
         chunk = TranscriptChunk(
             id=f"{short_id}:t{turn_index}",
             session_id=session_id,
@@ -2273,7 +2283,7 @@ class TranscriptIndex:
                         continue
                     # Compact snippet block with source attribution
                     block = (
-                        f"--- [source: {sid[:8]} turn {tidx}] ---\n"
+                        f"--- [source: {_short_sid(sid)} turn {tidx}] ---\n"
                         f"{snippet}"
                     )
                     source_score = base_score * 0.6
@@ -2570,7 +2580,7 @@ class TranscriptIndex:
             raw_ts = raw_ts[:16]
         ts_display = raw_ts.replace("T", " ")
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
-        header = f"--- [{ts_display} session {chunk.session_id[:8]}] {turn_label} ---"
+        header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label} ---"
 
         parts = [header]
         prev = self._get_preceding_turn(chunk)
@@ -2658,7 +2668,7 @@ class TranscriptIndex:
         parts = []
         ts = chunk.timestamp[:19] if chunk.timestamp else "unknown"
         parts.append(
-            f"=== Full context: session {chunk.session_id[:8]} "
+            f"=== Full context: session {_short_sid(chunk.session_id)} "
             f"turn {chunk.turn_index} [{ts}] ==="
         )
 
@@ -3283,7 +3293,7 @@ def _journal_entry_to_chunk(entry, scrub_text) -> TranscriptChunk:
         pass  # Use unscrubbed text rather than losing the entry
 
     # Stable content-based ID: hash of session_id + timestamp
-    session_short = entry.session_id[:8] if entry.session_id else entry.timestamp[:10]
+    session_short = _short_sid(entry.session_id) if entry.session_id else entry.timestamp[:10]
     ts_hash = hashlib.sha256(
         f"{entry.session_id}:{entry.timestamp}".encode()
     ).hexdigest()[:8]
