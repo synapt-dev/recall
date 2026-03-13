@@ -543,6 +543,24 @@ def cmd_build(args: argparse.Namespace) -> None:
     project = Path.cwd().resolve()
     use_emb = not args.no_embeddings
 
+    # Re-scrub archives if requested
+    if getattr(args, "rescrub", False):
+        from synapt.recall.scrub import scrub_jsonl as _rescrub_jsonl
+
+        archive_dirs = list(all_worktree_archive_dirs(project))
+        archive_dir = project_archive_dir(project)
+        if archive_dir.exists() and archive_dir.resolve() not in {p.resolve() for p in archive_dirs}:
+            archive_dirs.append(archive_dir)
+
+        total = 0
+        for ad in archive_dirs:
+            for jsonl_file in sorted(ad.glob("*.jsonl")):
+                _rescrub_jsonl(jsonl_file)
+                total += 1
+        if total:
+            print(f"[build] Re-scrubbed {total} archived transcript(s)")
+            args.incremental = False  # Force full rebuild after rescrub
+
     # Check for legacy index
     legacy = _check_legacy_index()
     if legacy:
@@ -762,6 +780,50 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
                     print(f"  Enriched {count} journal stub(s)", file=sys.stderr)
         except Exception:
             pass  # Enrichment is best-effort; don't break the hook
+
+
+def cmd_rescrub(args: argparse.Namespace) -> None:
+    """Re-scrub archived transcripts with updated secret patterns.
+
+    Runs scrub_jsonl() on all archived transcript files in-place, then
+    does a full (non-incremental) rebuild so the index reflects the
+    cleaned transcripts. Use after updating scrub patterns to retroactively
+    remove secrets that slipped through earlier builds.
+    """
+    from synapt.recall.scrub import scrub_jsonl
+
+    project = Path.cwd().resolve()
+    archive_dirs = list(all_worktree_archive_dirs(project))
+    archive_dir = project_archive_dir(project)
+    if archive_dir.exists() and archive_dir.resolve() not in {p.resolve() for p in archive_dirs}:
+        archive_dirs.append(archive_dir)
+
+    if not archive_dirs:
+        print("No archived transcripts found.", file=sys.stderr)
+        sys.exit(1)
+
+    total = 0
+    for ad in archive_dirs:
+        for jsonl_file in sorted(ad.glob("*.jsonl")):
+            scrub_jsonl(jsonl_file)  # in-place
+            total += 1
+    print(f"[rescrub] Scrubbed {total} archived transcript(s)")
+
+    if not args.no_rebuild:
+        print("[rescrub] Rebuilding index from scrubbed transcripts ...")
+        use_emb = not getattr(args, "no_embeddings", False)
+        final_index = _archive_and_build(
+            project,
+            use_embeddings=use_emb,
+            incremental=False,  # Full rebuild — must re-index everything
+        )
+        if final_index:
+            stats = final_index.stats()
+            print(f"[rescrub] Done! {stats['chunk_count']} chunks, {stats['session_count']} sessions")
+        else:
+            print("[rescrub] Warning: rebuild produced no chunks", file=sys.stderr)
+    else:
+        print("[rescrub] Skipping rebuild (--no-rebuild). Run 'synapt recall build' manually.")
 
 
 def _sync_after_rebuild(project: Path) -> None:
@@ -1725,6 +1787,7 @@ def main():
     build_parser.add_argument("--out", default=None, help="Output directory for index (default: per-project)")
     build_parser.add_argument("--no-embeddings", action="store_true", help="Skip embeddings (BM25-only, faster build)")
     build_parser.add_argument("--incremental", action="store_true", help="Skip already-indexed files")
+    build_parser.add_argument("--rescrub", action="store_true", help="Re-scrub archived transcripts with latest patterns before building")
 
     # Search
     search_parser = subparsers.add_parser("search", help="Search transcript index")
@@ -1826,6 +1889,10 @@ def main():
     # Install hook (legacy — kept for backward compat)
     subparsers.add_parser("install-hook", help="Install global hooks (SessionStart, SessionEnd, PreCompact)")
 
+    rescrub_parser = subparsers.add_parser("rescrub", help="Re-scrub archived transcripts with latest secret patterns")
+    rescrub_parser.add_argument("--no-rebuild", action="store_true", help="Scrub transcripts but skip index rebuild")
+    rescrub_parser.add_argument("--no-embeddings", action="store_true", help="Skip embeddings during rebuild")
+
     args = parser.parse_args()
 
     if args.command == "setup":
@@ -1858,6 +1925,8 @@ def main():
         cmd_hook(args)
     elif args.command == "install-hook":
         cmd_install_hook(args)
+    elif args.command == "rescrub":
+        cmd_rescrub(args)
 
 
 if __name__ == "__main__":

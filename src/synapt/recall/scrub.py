@@ -38,22 +38,34 @@ PATTERNS: list[re.Pattern] = [
     re.compile(r"AKIA[0-9A-Z]{16}"),                   # AWS access key ID
 
     # ── Structured secrets ────────────────────────────────────────────
-    re.compile(r"Bearer\s+[A-Za-z0-9._/+:=-]{20,}"),    # Bearer tokens
+    re.compile(                                         # JWT tokens (3 base64url segments)
+        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+    ),
+    re.compile(                                         # Authorization headers
+        r"Authorization:\s*(?:Bearer|Key|Basic|Token)\s+[A-Za-z0-9._/+:=-]{8,}",
+        re.IGNORECASE,
+    ),
     re.compile(                                         # PEM private key blocks
         r"-----BEGIN[A-Z \t]*PRIVATE KEY-----"
         r"[\s\S]*?"
         r"-----END[A-Z \t]*PRIVATE KEY-----",
     ),
     re.compile(r"-----BEGIN[A-Z \t]*PRIVATE KEY-----"), # PEM header (standalone)
+    re.compile(                                         # Connection strings with creds
+        r"(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://"
+        r"[^@\s]{0,64}:[^@\s]{1,128}@[^\s]+",
+        re.IGNORECASE,
+    ),
 
     # ── Env var assignments ───────────────────────────────────────────
-    # Matches: HF_TOKEN=abc123..., export API_KEY="secret", PASSWORD: "val"
+    # Matches: HF_TOKEN=abc123..., export FAL_KEY="uuid:hex", PASSWORD: "val"
     # The (?![A-Za-z_]) lookahead prevents matching partial identifiers
-    # like TOKEN_TYPE or SECRET_MANAGER.
+    # like TOKEN_TYPE or SECRET_MANAGER or KEY_NAME.
     re.compile(
-        r"(?:API_KEY|SECRET_KEY|_TOKEN|_SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)"
+        r"(?:API_KEY|SECRET_KEY|_TOKEN|_SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY"
+        r"|_KEY|_CREDENTIAL|_CREDENTIALS|_AUTH|_PASS|_PASSPHRASE)"
         r"(?![A-Za-z_])"
-        r"""[=:]\s*['"]?[A-Za-z0-9_/+.=-]{8,}['"]?""",
+        r"""[=:]\s*['"]?[A-Za-z0-9_/+.:=-]{8,}['"]?""",
         re.IGNORECASE,
     ),
 ]
