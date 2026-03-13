@@ -255,6 +255,12 @@
 
       <div class="callout">
         <p>
+          <strong>What is Full-Context?</strong> The entire conversation history is passed directly to GPT-4 as context &mdash; no retrieval, no memory system, just brute force. It&rsquo;s the theoretical upper bound: the model has access to every fact. Synapt beats it because focused retrieval reduces noise &mdash; the model doesn&rsquo;t have to find the needle in a haystack when the retrieval system has already pulled out the relevant needles.
+        </p>
+      </div>
+
+      <div class="callout">
+        <p>
           Other systems report higher headline numbers using different metrics. For example, Hindsight reports 89.61% using binary LLM-judge accuracy (not Jaccard), and MemU claims 92% without publishing evaluation code or specifying their metric. When comparing benchmarks, check the methodology &mdash; the metric matters more than the number.
         </p>
       </div>
