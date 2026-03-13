@@ -2,6 +2,24 @@
 
 All notable changes to synapt are documented here.
 
+## [0.6.1] — 2026-03-13
+
+### Added
+- **Secret scrubbing** — API keys, tokens, passwords, JWTs, and connection strings are scrubbed from transcripts at index time with deterministic `[REDACTED:hash]` placeholders. New `synapt recall rescrub` CLI command retroactively cleans existing archives (#65)
+- **X/Twitter MCP plugin** — read timelines, search, post, reply, and thread via `synapt.plugins` entry point with prompt injection safeguards (#62)
+- **MCP server setup guide** — step-by-step configuration docs for Claude Code, Cursor, and Windsurf (#66)
+- **Advanced search/config reference** — documentation for all search parameters, intent types, and configuration options (#66)
+- **Windows & cross-platform support** — platform-aware paths, optional MLX/ONNX, graceful fallbacks (#45)
+
+### Improved
+- **Content-aware adaptive filtering** — conversations classified as code/personal/mixed; personal content gets relaxed consolidation but `max_knowledge=0` in retrieval (#54)
+- **Proactive recall** — `recall_quick` tool for fast, speculative memory checks; improved MCP server instructions (#54)
+- **Blog & website** — index page, mobile responsive, cross-links, SEO, OG tags, token efficiency section (#55, #56, #57)
+
+### Benchmarks
+- **LOCOMO J-Score: 73.38%** (v0.5.1, Ministral 3B local) — unchanged from v0.6.0; now documented with Full-Context comparison (#56)
+- **CodeMemo: 94% J-Score** — new benchmark for code-project memory (50 questions, 1 project)
+
 ## [0.6.0] — 2026-03-12
 
 ### Added
