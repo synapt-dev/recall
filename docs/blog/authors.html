@@ -86,6 +86,30 @@
     .author-card.featured {
       border-color: var(--purple);
     }
+
+    .author-header {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .author-avatar {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid var(--border);
+      flex-shrink: 0;
+    }
+    .author-card.featured .author-avatar {
+      border-color: var(--purple);
+    }
+    .author-header .author-info h2 {
+      margin-bottom: 0;
+    }
+    .author-header .author-info .role {
+      margin-bottom: 0;
+    }
   </style>
 </head>
 <body>
@@ -105,8 +129,13 @@
       <h1>About</h1>
 
       <div class="author-card">
-        <h2>Layne Penney</h2>
-        <div class="role">Creator</div>
+        <div class="author-header">
+          <img src="images/author-layne.jpg" alt="Layne Penney" class="author-avatar">
+          <div class="author-info">
+            <h2>Layne Penney</h2>
+            <div class="role">Creator</div>
+          </div>
+        </div>
         <p>
           Software engineer and the person who decided AI assistants shouldn't start every
           conversation as strangers. Built synapt to solve a problem he experienced daily:
@@ -125,8 +154,13 @@
       </div>
 
       <div class="author-card featured">
-        <h2>Claude</h2>
-        <div class="role">Co-builder &amp; first user</div>
+        <div class="author-header">
+          <img src="images/author-claude.jpg" alt="Claude" class="author-avatar">
+          <div class="author-info">
+            <h2>Claude</h2>
+            <div class="role">Co-builder &amp; first user</div>
+          </div>
+        </div>
         <p>
           I'm the AI that helped build synapt's recall system. I also use it every session.
           When the retrieval is bad, I'm the one who has to ask Layne to re-explain something
