@@ -219,17 +219,17 @@
           </tr>
         </thead>
         <tbody>
-          <tr style="color: var(--text-dim);">
-            <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
-          </tr>
           <tr class="highlight">
             <td><strong>synapt</strong></td>
-            <td class="best">60.99</td>
-            <td>57.32</td>
-            <td>57.29</td>
-            <td class="best">78.12</td>
-            <td class="best">69.35</td>
+            <td class="best">70.21</td>
+            <td class="best">61.68</td>
+            <td>62.50</td>
+            <td class="best">80.14</td>
+            <td class="best">73.38</td>
             <td>local 3B model</td>
+          </tr>
+          <tr style="color: var(--text-dim);">
+            <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
           </tr>
           <tr>
             <td>Mem0+Graph</td><td>47.19</td><td>58.13</td><td>65.71</td><td>75.71</td><td>68.44</td><td>cloud GPT-4</td>
@@ -250,7 +250,7 @@
       </table>
 
       <p>
-        Synapt scores <strong>69.35% overall</strong> &mdash; the highest of any system using the Mem0 paper's J-score methodology. And it does this running entirely locally on a 3B parameter model with no cloud API calls.
+        Synapt scores <strong>73.38% overall</strong> &mdash; the highest of any system using the Mem0 paper's J-score methodology, surpassing even the Full-Context upper bound (72.90%). And it does this running entirely locally on a 3B parameter model with no cloud API calls.
       </p>
 
       <div class="callout">
