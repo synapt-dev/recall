@@ -820,6 +820,190 @@ class TranscriptIndex:
             logger.warning("Reranking failed, using original order: %s", e)
             return candidates
 
+    # ------------------------------------------------------------------
+    # Cross-session threading
+    # ------------------------------------------------------------------
+
+    # Build-time constants
+    CROSS_LINK_MAX_PER_CHUNK = 3    # top-K neighbors per chunk
+    CROSS_LINK_MIN_SIM = 0.35      # minimum cosine similarity for a link
+    # Query-time constants
+    CROSS_LINK_DISCOUNT = 0.7      # score multiplier for expanded results
+    CROSS_LINK_MAX_EXPAND = 3      # max chunks to add via expansion
+    CROSS_LINK_DIVERSITY = 0.5     # trigger if top session > 50% of results
+
+    def build_cross_session_links(self) -> int:
+        """Compute and store cross-session nearest-neighbor links.
+
+        For each chunk, find its top-K most similar chunks from OTHER sessions
+        using cosine similarity on pre-computed embeddings. Links are stored in
+        the SQLite chunk_links table.
+
+        Returns the number of links created.
+        """
+        if not self._db or not self._all_embeddings:
+            return 0
+        import numpy as np
+
+        rowids = list(self._all_embeddings.keys())
+        if len(rowids) < 2:
+            return 0
+
+        # Build session map: rowid -> session_id
+        session_map = self._db.chunk_session_map()
+        sessions = [session_map.get(r, "") for r in rowids]
+
+        # Build embedding matrix (N, D)
+        matrix = np.array(
+            [self._all_embeddings[r] for r in rowids], dtype=np.float32,
+        )
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normed = matrix / norms
+
+        # Full pairwise cosine similarity
+        sim_matrix = normed @ normed.T
+
+        # Zero out self-similarity and same-session pairs
+        for i in range(len(rowids)):
+            sim_matrix[i, i] = -1.0
+            for j in range(i + 1, len(rowids)):
+                if sessions[i] == sessions[j]:
+                    sim_matrix[i, j] = -1.0
+                    sim_matrix[j, i] = -1.0
+
+        links: list[tuple[int, int, float]] = []
+        k = self.CROSS_LINK_MAX_PER_CHUNK
+        min_sim = self.CROSS_LINK_MIN_SIM
+
+        for i in range(len(rowids)):
+            row = sim_matrix[i]
+            # Get top-K indices
+            if len(rowids) > k:
+                top_idx = np.argpartition(row, -k)[-k:]
+            else:
+                top_idx = np.arange(len(rowids))
+            for j in top_idx:
+                if row[j] >= min_sim:
+                    links.append((rowids[i], rowids[int(j)], float(row[j])))
+
+        self._db.save_chunk_links(links)
+        logger.info("Built %d cross-session links for %d chunks", len(links), len(rowids))
+        return len(links)
+
+    def _expand_cross_session(
+        self,
+        candidates: list[tuple[int, float]],
+        max_chunks: int,
+    ) -> list[tuple[int, float]]:
+        """Expand retrieval with cross-session linked chunks via interleaving.
+
+        Problem: pure score-based ranking clusters results in 1-2 dominant
+        sessions. Cross-session questions need evidence from many sessions.
+
+        Strategy: interleave by session — take the best chunk from each session
+        in round-robin order, then follow cross-session links to pull in related
+        chunks from sessions not yet represented. This guarantees session
+        diversity in the final result without relying on score ordering.
+        """
+        if not self._db or not self._db.has_chunk_links():
+            return candidates
+        if len(candidates) < 2:
+            return candidates
+
+        from collections import Counter, defaultdict
+
+        # Group candidates by session
+        by_session: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        for idx, score in candidates:
+            sid = self.chunks[idx].session_id
+            by_session[sid].append((idx, score))
+
+        n_sessions = len(by_session)
+        if n_sessions < 2:
+            # Only one session — try to expand via links
+            pass
+        else:
+            # Check if already diverse enough
+            top_n = candidates[:max_chunks]
+            session_counts = Counter(
+                self.chunks[idx].session_id for idx, _ in top_n
+            )
+            top_share = max(session_counts.values()) / len(top_n)
+            if top_share < self.CROSS_LINK_DIVERSITY:
+                return candidates  # already diverse
+
+        # Phase 1: Interleave existing candidates by session (round-robin)
+        # Sort sessions by their best chunk's score (descending)
+        session_order = sorted(
+            by_session.keys(),
+            key=lambda s: by_session[s][0][1] if by_session[s] else 0,
+            reverse=True,
+        )
+        interleaved: list[tuple[int, float]] = []
+        seen = set()
+        pointers = {s: 0 for s in session_order}
+
+        for _ in range(max_chunks + self.CROSS_LINK_MAX_EXPAND):
+            added_this_round = False
+            for sid in session_order:
+                p = pointers[sid]
+                bucket = by_session[sid]
+                if p < len(bucket):
+                    idx, score = bucket[p]
+                    if idx not in seen:
+                        interleaved.append((idx, score))
+                        seen.add(idx)
+                        added_this_round = True
+                    pointers[sid] = p + 1
+            if not added_this_round:
+                break
+
+        # Phase 2: Follow cross-session links from top results to find
+        # chunks in sessions not yet represented
+        represented_sessions = {
+            self.chunks[idx].session_id for idx, _ in interleaved
+        }
+        source_rowids = []
+        for idx, _ in interleaved[:5]:
+            rowid = self._idx_to_rowid.get(idx)
+            if rowid is not None:
+                source_rowids.append(rowid)
+
+        if source_rowids:
+            neighbors = self._db.get_cross_links_batch(source_rowids)
+            expansions = 0
+            for src_rowid in source_rowids:
+                src_idx = self._rowid_to_idx.get(src_rowid)
+                if src_idx is None:
+                    continue
+                src_score = next(
+                    (s for i, s in interleaved if i == src_idx), 0.0,
+                )
+                for tgt_rowid, sim in neighbors.get(src_rowid, []):
+                    tgt_idx = self._rowid_to_idx.get(tgt_rowid)
+                    if tgt_idx is None or tgt_idx in seen:
+                        continue
+                    tgt_session = self.chunks[tgt_idx].session_id
+                    if tgt_session in represented_sessions:
+                        continue
+                    # Insert expansion after its source (not at the end)
+                    exp_score = src_score * sim * self.CROSS_LINK_DISCOUNT
+                    src_pos = next(
+                        (i for i, (ci, _) in enumerate(interleaved) if ci == src_idx),
+                        len(interleaved),
+                    )
+                    interleaved.insert(src_pos + 1, (tgt_idx, exp_score))
+                    seen.add(tgt_idx)
+                    represented_sessions.add(tgt_session)
+                    expansions += 1
+                    if expansions >= self.CROSS_LINK_MAX_EXPAND:
+                        break
+                if expansions >= self.CROSS_LINK_MAX_EXPAND:
+                    break
+
+        return interleaved
+
     def _refresh_rowid_map(self) -> None:
         """Build rowid <-> chunk-index mappings from the database."""
         if not self._db:
@@ -1473,6 +1657,10 @@ class TranscriptIndex:
         # logits which can be negative and break ratio-based filtering.
         top = self._rerank_candidates(query, top)
 
+        # Cross-session expansion: follow pre-computed links to ensure
+        # results span multiple sessions when initial retrieval clusters.
+        top = self._expand_cross_session(top, max_chunks)
+
         # Pass extra candidates to _format_results to compensate for
         # near-duplicate filtering — the token budget is the real limiter.
         dedup_headroom = _dedup_limit(max_chunks)
@@ -1652,6 +1840,7 @@ class TranscriptIndex:
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
         top = self._rerank_candidates(query, top)
+        top = self._expand_cross_session(top, max_chunks)
 
         dedup_headroom = _dedup_limit(max_chunks)
         return self._format_results(top[:dedup_headroom], max_tokens, query=query)
@@ -1806,6 +1995,7 @@ class TranscriptIndex:
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
         hits = self._rerank_candidates(query, hits)
+        hits = self._expand_cross_session(hits, max_chunks)
 
         return self._format_results(
             hits[:max_chunks], max_tokens,
@@ -1880,6 +2070,7 @@ class TranscriptIndex:
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
         hits = self._rerank_candidates(query, hits)
+        hits = self._expand_cross_session(hits, max_chunks)
 
         return self._format_results(
             hits[:max_chunks], max_tokens,

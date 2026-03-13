@@ -503,6 +503,15 @@ def _archive_and_build_locked(
     except Exception as exc:
         logger.debug("Knowledge dedup failed: %s", exc)
 
+    # Build cross-session links (pre-computed nearest neighbors across sessions)
+    if use_embeddings and final_index._all_embeddings:
+        try:
+            n_links = final_index.build_cross_session_links()
+            if n_links:
+                print(f"  Cross-session links: {n_links} links across {len(set(c.session_id for c in deduped))} sessions")
+        except Exception as exc:
+            logger.debug("Cross-session linking failed: %s", exc)
+
     # Store source file info in DB metadata
     source_files = []
     for build_source in build_sources:

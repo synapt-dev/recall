@@ -174,6 +174,18 @@ CREATE TABLE IF NOT EXISTS access_stats (
     PRIMARY KEY (item_type, item_id)
 );
 
+-- Cross-session threading: pre-computed nearest-neighbor links between
+-- chunks in different sessions.  Built during recall build; used at query
+-- time to expand results with related chunks from underrepresented sessions.
+CREATE TABLE IF NOT EXISTS chunk_links (
+    source_rowid INTEGER NOT NULL,
+    target_rowid INTEGER NOT NULL,
+    similarity   REAL NOT NULL,
+    PRIMARY KEY (source_rowid, target_rowid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_links_source ON chunk_links(source_rowid);
+
 CREATE TABLE IF NOT EXISTS access_log_archive (
     item_type    TEXT NOT NULL,
     item_id      TEXT NOT NULL,
@@ -750,6 +762,65 @@ class RecallDB:
         """Number of chunks in the database."""
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return row[0] if row else 0
+
+    # ------------------------------------------------------------------
+    # Cross-session chunk links
+    # ------------------------------------------------------------------
+
+    def save_chunk_links(self, links: list[tuple[int, int, float]]) -> None:
+        """Replace all cross-session links.
+
+        Each tuple is (source_rowid, target_rowid, similarity).
+        """
+        self._conn.execute("DELETE FROM chunk_links")
+        self._conn.executemany(
+            "INSERT INTO chunk_links (source_rowid, target_rowid, similarity) "
+            "VALUES (?, ?, ?)",
+            links,
+        )
+        self._conn.commit()
+
+    def get_cross_links_batch(
+        self, source_rowids: list[int], limit_per: int = 3,
+    ) -> dict[int, list[tuple[int, float]]]:
+        """Get cross-session neighbors for multiple chunks at once.
+
+        Returns {source_rowid: [(target_rowid, similarity), ...]}.
+        """
+        if not source_rowids:
+            return {}
+        placeholders = ",".join("?" * len(source_rowids))
+        rows = self._conn.execute(
+            f"SELECT source_rowid, target_rowid, similarity "
+            f"FROM chunk_links WHERE source_rowid IN ({placeholders}) "
+            f"ORDER BY source_rowid, similarity DESC",
+            source_rowids,
+        ).fetchall()
+        result: dict[int, list[tuple[int, float]]] = {}
+        for src, tgt, sim in rows:
+            bucket = result.setdefault(src, [])
+            if len(bucket) < limit_per:
+                bucket.append((tgt, sim))
+        return result
+
+    def has_chunk_links(self) -> bool:
+        """True if cross-session links have been built."""
+        row = self._conn.execute(
+            "SELECT 1 FROM chunk_links LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def chunk_link_count(self) -> int:
+        """Number of cross-session links."""
+        row = self._conn.execute("SELECT COUNT(*) FROM chunk_links").fetchone()
+        return row[0] if row else 0
+
+    def chunk_session_map(self) -> dict[int, str]:
+        """Return {rowid: session_id} for all chunks."""
+        rows = self._conn.execute(
+            "SELECT rowid, session_id FROM chunks"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def sample_chunk_texts(self, limit: int = 100) -> list[str]:
         """Return a sample of chunk texts for content profile detection.
