@@ -7,6 +7,7 @@
   <meta name="description" content="We built an agent memory system from scratch. Here's what we learned about what 'memory' actually means — and why most systems get it wrong.">
   <meta property="og:title" content="What Is Memory?">
   <meta property="og:description" content="Building an agent memory system from scratch. What 'memory' actually means, and what we got wrong along the way.">
+  <meta property="og:image" content="images/what-is-memory-hero.jpg">
   <meta property="og:type" content="article">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -124,6 +125,23 @@
       background: var(--bg-code);
       border-radius: 6px;
     }
+
+    .hero {
+      width: 100%;
+      border-radius: 12px;
+      margin-bottom: 2rem;
+    }
+    .byline {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .byline img {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      object-fit: cover;
+    }
   </style>
 </head>
 <body>
@@ -140,9 +158,10 @@
 
   <article>
     <div class="container">
+      <img src="images/what-is-memory-hero.jpg" alt="What is memory — building recall from scratch" class="hero">
       <h1>What Is Memory?</h1>
       <p class="subtitle">We built an agent memory system from scratch. Here's what we learned.</p>
-      <p class="meta">March 2026</p>
+      <p class="meta"><span class="byline"><img src="images/author-layne.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Layne Penney</a> &amp; <img src="images/author-claude.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Claude</a></span> &middot; March 2026</p>
 
       <p>
         I kept losing context. Every time I started a new Claude Code session, my assistant had no idea what we'd been working on. I'd re-explain the project structure, re-state conventions, re-discover decisions we'd already made together. It felt like onboarding the same person every morning.

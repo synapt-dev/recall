@@ -7,6 +7,7 @@
   <meta name="description" content="Synapt scores 69.35% on LOCOMO running entirely locally on a 3B model — beating Mem0+Graph (68.44%), Zep (65.99%), and every other system that requires cloud GPT-4.">
   <meta property="og:title" content="Why Synapt?">
   <meta property="og:description" content="Local-first agent memory that beats cloud-dependent systems on standardized benchmarks.">
+  <meta property="og:image" content="images/why-synapt-hero.jpg">
   <meta property="og:type" content="article">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -118,6 +119,23 @@
       background: var(--bg-code);
       border-radius: 6px;
     }
+
+    .hero {
+      width: 100%;
+      border-radius: 12px;
+      margin-bottom: 2rem;
+    }
+    .byline {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .byline img {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      object-fit: cover;
+    }
   </style>
 </head>
 <body>
@@ -134,9 +152,10 @@
 
   <article>
     <div class="container">
+      <img src="images/why-synapt-hero.jpg" alt="Why Synapt — local-first memory" class="hero">
       <h1>Why Synapt?</h1>
       <p class="subtitle">Local-first memory that beats cloud-dependent systems.</p>
-      <p class="meta">March 2026</p>
+      <p class="meta"><span class="byline"><img src="images/author-layne.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Layne Penney</a></span> &middot; March 2026</p>
 
       <p>
         AI coding assistants forget everything between sessions. You debug a tricky issue on Monday, and by Wednesday your assistant has no memory it ever happened. Every agent memory system tries to solve this. Most of them require cloud APIs, send your code context to external servers, and still don't beat a well-configured local search.
