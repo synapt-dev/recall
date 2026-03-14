@@ -831,6 +831,9 @@ class TranscriptIndex:
     CROSS_LINK_DISCOUNT = 0.7      # score multiplier for expanded results
     CROSS_LINK_MAX_EXPAND = 3      # max chunks to add via expansion
     CROSS_LINK_DIVERSITY = 0.5     # trigger if top session > 50% of results
+    # Segment constants (overlapping windows for temporal diversity)
+    SEGMENT_WINDOW = 50            # turns per segment
+    SEGMENT_STRIDE = 25            # overlap stride (50% overlap)
 
     def build_cross_session_links(self) -> int:
         """Compute and store cross-session nearest-neighbor links.
@@ -891,118 +894,155 @@ class TranscriptIndex:
         logger.info("Built %d cross-session links for %d chunks", len(links), len(rowids))
         return len(links)
 
+    def _chunk_segment(self, idx: int) -> str:
+        """Assign a chunk to a temporal segment (overlapping window).
+
+        Each chunk maps to its primary segment based on turn_index.
+        Windows overlap by SEGMENT_STRIDE to prevent boundary artifacts.
+        """
+        c = self.chunks[idx]
+        window_num = c.turn_index // self.SEGMENT_STRIDE
+        return f"{c.session_id}_w{window_num}"
+
     def _expand_cross_session(
         self,
         candidates: list[tuple[int, float]],
         max_chunks: int,
     ) -> list[tuple[int, float]]:
-        """Expand retrieval with cross-session linked chunks via interleaving.
+        """Dual-view diversity expansion via segment + cluster RRF.
 
         Problem: pure score-based ranking clusters results in 1-2 dominant
-        sessions. Cross-session questions need evidence from many sessions.
+        sessions and topics. Cross-session questions need evidence spanning
+        multiple time periods and topics.
 
-        Strategy: interleave by session — take the best chunk from each session
-        in round-robin order, then follow cross-session links to pull in related
-        chunks from sessions not yet represented. This guarantees session
-        diversity in the final result without relying on score ordering.
+        Strategy: build two diversity-aware rankings and merge with RRF:
+          View 1 (temporal): round-robin by overlapping time segments
+          View 2 (topical):  round-robin by topic cluster
+        Then follow cross-session links to pull in chunks from sessions
+        not yet represented.
+
+        The overlapping segments (window=50, stride=25) prevent boundary
+        effects — a chunk at turn 49 appears near windows for both
+        segments 0 and 1.
         """
-        if not self._db or not self._db.has_chunk_links():
+        if not self._db:
             return candidates
-        if len(candidates) < 2:
+        if len(candidates) < 3:
             return candidates
 
         from collections import Counter, defaultdict
 
-        # Group candidates by session
-        by_session: dict[str, list[tuple[int, float]]] = defaultdict(list)
-        for idx, score in candidates:
-            sid = self.chunks[idx].session_id
-            by_session[sid].append((idx, score))
-
-        n_sessions = len(by_session)
-        if n_sessions < 2:
-            # Only one session — try to expand via links
-            pass
-        else:
-            # Check if already diverse enough
-            top_n = candidates[:max_chunks]
-            session_counts = Counter(
-                self.chunks[idx].session_id for idx, _ in top_n
-            )
+        # Check if diversity expansion is needed
+        top_n = candidates[:max_chunks]
+        session_counts = Counter(
+            self.chunks[idx].session_id for idx, _ in top_n
+        )
+        if session_counts:
             top_share = max(session_counts.values()) / len(top_n)
             if top_share < self.CROSS_LINK_DIVERSITY:
                 return candidates  # already diverse
 
-        # Phase 1: Interleave existing candidates by session (round-robin)
-        # Sort sessions by their best chunk's score (descending)
-        session_order = sorted(
-            by_session.keys(),
-            key=lambda s: by_session[s][0][1] if by_session[s] else 0,
+        # Load cluster map (lazy, cached)
+        if not hasattr(self, '_chunk_cluster_map'):
+            self._chunk_cluster_map = self._db.get_chunk_cluster_map()
+
+        # --- View 1: Temporal segments (overlapping windows) ---
+        by_segment: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        for idx, score in candidates:
+            seg = self._chunk_segment(idx)
+            by_segment[seg].append((idx, score))
+
+        seg_order = sorted(
+            by_segment.keys(),
+            key=lambda s: by_segment[s][0][1] if by_segment[s] else 0,
             reverse=True,
         )
-        interleaved: list[tuple[int, float]] = []
-        seen = set()
-        pointers = {s: 0 for s in session_order}
-
-        for _ in range(max_chunks + self.CROSS_LINK_MAX_EXPAND):
-            added_this_round = False
-            for sid in session_order:
-                p = pointers[sid]
-                bucket = by_session[sid]
-                if p < len(bucket):
-                    idx, score = bucket[p]
-                    if idx not in seen:
-                        interleaved.append((idx, score))
-                        seen.add(idx)
-                        added_this_round = True
-                    pointers[sid] = p + 1
-            if not added_this_round:
+        seg_ranked: list[tuple[int, float]] = []
+        seg_ptrs = {s: 0 for s in seg_order}
+        for _ in range(len(candidates)):
+            added = False
+            for seg in seg_order:
+                p = seg_ptrs[seg]
+                if p < len(by_segment[seg]):
+                    seg_ranked.append(by_segment[seg][p])
+                    seg_ptrs[seg] = p + 1
+                    added = True
+            if not added:
                 break
 
-        # Phase 2: Follow cross-session links from top results to find
-        # chunks in sessions not yet represented
-        represented_sessions = {
-            self.chunks[idx].session_id for idx, _ in interleaved
-        }
-        source_rowids = []
-        for idx, _ in interleaved[:5]:
-            rowid = self._idx_to_rowid.get(idx)
-            if rowid is not None:
-                source_rowids.append(rowid)
+        # --- View 2: Topic clusters ---
+        by_cluster: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        for idx, score in candidates:
+            cid = self._chunk_cluster_map.get(self.chunks[idx].id, f"unclustered_{idx}")
+            by_cluster[cid].append((idx, score))
 
-        if source_rowids:
-            neighbors = self._db.get_cross_links_batch(source_rowids)
-            expansions = 0
-            for src_rowid in source_rowids:
-                src_idx = self._rowid_to_idx.get(src_rowid)
-                if src_idx is None:
-                    continue
-                src_score = next(
-                    (s for i, s in interleaved if i == src_idx), 0.0,
-                )
-                for tgt_rowid, sim in neighbors.get(src_rowid, []):
-                    tgt_idx = self._rowid_to_idx.get(tgt_rowid)
-                    if tgt_idx is None or tgt_idx in seen:
+        cl_order = sorted(
+            by_cluster.keys(),
+            key=lambda c: by_cluster[c][0][1] if by_cluster[c] else 0,
+            reverse=True,
+        )
+        cl_ranked: list[tuple[int, float]] = []
+        cl_ptrs = {c: 0 for c in cl_order}
+        for _ in range(len(candidates)):
+            added = False
+            for cid in cl_order:
+                p = cl_ptrs[cid]
+                if p < len(by_cluster[cid]):
+                    cl_ranked.append(by_cluster[cid][p])
+                    cl_ptrs[cid] = p + 1
+                    added = True
+            if not added:
+                break
+
+        # --- RRF merge of the two diversity views ---
+        from synapt.recall.hybrid import rrf_merge
+        merged = rrf_merge(seg_ranked, cl_ranked)
+
+        # --- Phase 2: Cross-session link expansion ---
+        if self._db.has_chunk_links():
+            seen = {idx for idx, _ in merged}
+            represented_sessions = {
+                self.chunks[idx].session_id for idx, _ in merged[:max_chunks]
+            }
+            source_rowids = []
+            for idx, _ in merged[:5]:
+                rowid = self._idx_to_rowid.get(idx)
+                if rowid is not None:
+                    source_rowids.append(rowid)
+
+            if source_rowids:
+                neighbors = self._db.get_cross_links_batch(source_rowids)
+                expansions = 0
+                for src_rowid in source_rowids:
+                    src_idx = self._rowid_to_idx.get(src_rowid)
+                    if src_idx is None:
                         continue
-                    tgt_session = self.chunks[tgt_idx].session_id
-                    if tgt_session in represented_sessions:
-                        continue
-                    # Insert expansion after its source (not at the end)
-                    exp_score = src_score * sim * self.CROSS_LINK_DISCOUNT
-                    src_pos = next(
-                        (i for i, (ci, _) in enumerate(interleaved) if ci == src_idx),
-                        len(interleaved),
+                    src_score = next(
+                        (s for i, s in merged if i == src_idx), 0.0,
                     )
-                    interleaved.insert(src_pos + 1, (tgt_idx, exp_score))
-                    seen.add(tgt_idx)
-                    represented_sessions.add(tgt_session)
-                    expansions += 1
+                    for tgt_rowid, sim in neighbors.get(src_rowid, []):
+                        tgt_idx = self._rowid_to_idx.get(tgt_rowid)
+                        if tgt_idx is None or tgt_idx in seen:
+                            continue
+                        tgt_session = self.chunks[tgt_idx].session_id
+                        if tgt_session in represented_sessions:
+                            continue
+                        exp_score = src_score * sim * self.CROSS_LINK_DISCOUNT
+                        # Insert after source position
+                        src_pos = next(
+                            (i for i, (ci, _) in enumerate(merged) if ci == src_idx),
+                            len(merged),
+                        )
+                        merged.insert(src_pos + 1, (tgt_idx, exp_score))
+                        seen.add(tgt_idx)
+                        represented_sessions.add(tgt_session)
+                        expansions += 1
+                        if expansions >= self.CROSS_LINK_MAX_EXPAND:
+                            break
                     if expansions >= self.CROSS_LINK_MAX_EXPAND:
                         break
-                if expansions >= self.CROSS_LINK_MAX_EXPAND:
-                    break
 
-        return interleaved
+        return merged
 
     def _refresh_rowid_map(self) -> None:
         """Build rowid <-> chunk-index mappings from the database."""

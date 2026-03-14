@@ -1463,6 +1463,13 @@ class RecallDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_chunk_cluster_map(self) -> dict[str, str]:
+        """Return {chunk_id: cluster_id} for all clustered chunks."""
+        rows = self._conn.execute(
+            "SELECT chunk_id, cluster_id FROM cluster_chunks"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
     def get_chunk_cluster_id(self, chunk_id: str) -> str | None:
         """Find the cluster a chunk belongs to, if any."""
         row = self._conn.execute(
