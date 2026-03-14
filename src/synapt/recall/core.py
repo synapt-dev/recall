@@ -475,14 +475,22 @@ def _short_sid(session_id: str) -> str:
     return session_id[:8] if len(session_id) >= 16 else session_id
 
 
+    # Minimum total text length to trigger sub-chunk splitting.
+    # Below this, the turn is small enough that one chunk is fine.
+
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
 ) -> list[TranscriptChunk]:
     """Parse a Claude Code transcript JSONL file into semantic chunks.
 
-    Each chunk represents one user->assistant turn. Streams line-by-line to
-    handle large files (100K+ lines, 800MB+) without loading into memory.
+    Each chunk represents one user->assistant turn, or a sub-chunk of a turn
+    when the turn spans multiple tool-use cycles with distinct topics.
+
+    Large turns (>1200 chars) with multiple tool cycles are split at tool
+    boundaries — where the assistant processes tool output and begins a new
+    action.  This prevents topical dilution in embeddings (e.g., coverage
+    numbers buried in a lint-fix chunk).
 
     Args:
         path: Path to a .jsonl transcript file.
@@ -490,7 +498,7 @@ def parse_transcript(
                     Mutated in-place to add new entries.
 
     Returns:
-        List of TranscriptChunk objects, one per turn.
+        List of TranscriptChunk objects.
     """
     if seen_uuids is None:
         seen_uuids = set()
@@ -499,7 +507,7 @@ def parse_transcript(
     session_id = path.stem  # UUID from filename
     transcript_path = str(path)
 
-    # Accumulator for current turn
+    # Accumulator for current turn — segments track tool-boundary splits
     current_user_text = ""
     current_assistant_texts: list[str] = []
     current_tools: list[str] = []
@@ -512,52 +520,125 @@ def parse_transcript(
     turn_start_offset = 0
     current_offset = 0
 
+    # --- Sub-chunk segment tracking ---
+    # Each segment represents one coherent work unit within a turn.
+    # A new segment starts when assistant text follows a tool_result,
+    # indicating the assistant processed output and shifted topics.
+    _Seg = lambda: {"texts": [], "tools": [], "files": [], "summaries": []}
+    current_segments: list[dict] = [_Seg()]
+    saw_tool_result = False
+
     def _flush_turn(end_offset: int | None = None):
-        nonlocal turn_index
+        nonlocal turn_index, current_segments, saw_tool_result
         if not current_user_text and not current_assistant_texts:
             return
         _end = end_offset if end_offset is not None else current_offset
-        assistant_text = "\n".join(current_assistant_texts).strip()
-        # Truncate very long assistant texts (code dumps, etc.)
-        # 5000 chars gives ~1250 tokens — enough for a full detailed response
-        # while keeping DB size reasonable. recall_context drill-down has no cap.
-        if len(assistant_text) > 5000:
-            assistant_text = assistant_text[:5000] + "..."
-        tools_deduped = list(dict.fromkeys(current_tools))
-        # Detect decision signals and inject searchable markers
-        decision_markers = _detect_decision_markers(current_user_text, tools_deduped)
-        if decision_markers:
-            tools_deduped.extend(decision_markers)
-        # Build tool_content from accumulated summaries, scrubbing secrets
-        tool_content = "\n".join(s for s in current_tool_summaries if s)
-        if tool_content:
-            try:
-                tool_content = scrub_text(tool_content)
-            except Exception:
-                logger.debug("scrub_text failed on tool content, using raw", exc_info=True)
-        if len(tool_content) > 3000:
-            tool_content = tool_content[:3000] + "..."
-        # Short prefix for chunk IDs. UUID session IDs (32+ hex chars)
-        # always have unique 8-char prefixes. For shorter/synthetic IDs
-        # (e.g. "session_001"), use the full ID to avoid collisions.
+
         short_id = _short_sid(session_id)
-        chunk = TranscriptChunk(
-            id=f"{short_id}:t{turn_index}",
-            session_id=session_id,
-            timestamp=current_timestamp,
-            turn_index=turn_index,
-            user_text=(current_user_text[:1500] + "..." if len(current_user_text) > 1500
-                      else current_user_text),
-            assistant_text=assistant_text,
-            tools_used=tools_deduped,
-            files_touched=list(dict.fromkeys(current_files)),
-            tool_content=tool_content,
-            transcript_path=transcript_path,
-            byte_offset=turn_start_offset,
-            byte_length=_end - turn_start_offset,
+
+        # Decide whether to sub-chunk: need ≥2 non-empty segments
+        # and enough total text to justify splitting.
+        nonempty_segs = [s for s in current_segments
+                         if s["texts"] or s["summaries"]]
+
+        total_text = sum(
+            sum(len(t) for t in s["texts"]) +
+            sum(len(t) for t in s["summaries"])
+            for s in nonempty_segs
         )
-        chunks.append(chunk)
-        turn_index += 1
+
+        if len(nonempty_segs) >= 2 and total_text > 1200:
+            # --- Sub-chunk mode ---
+            for seg_i, seg in enumerate(nonempty_segs):
+                a_text = "\n".join(seg["texts"]).strip()
+                if len(a_text) > 5000:
+                    a_text = a_text[:5000] + "..."
+
+                seg_tools = list(dict.fromkeys(seg["tools"]))
+                seg_files = list(dict.fromkeys(seg["files"]))
+
+                tc = "\n".join(s for s in seg["summaries"] if s)
+                if tc:
+                    try:
+                        tc = scrub_text(tc)
+                    except Exception:
+                        logger.debug("scrub_text failed on tool content, using raw", exc_info=True)
+                if len(tc) > 3000:
+                    tc = tc[:3000] + "..."
+
+                # First sub-chunk gets the full user question;
+                # subsequent ones get a brief context prefix.
+                if seg_i == 0:
+                    u_text = (current_user_text[:1500] + "..."
+                              if len(current_user_text) > 1500
+                              else current_user_text)
+                else:
+                    abbrev = current_user_text[:100]
+                    if len(current_user_text) > 100:
+                        abbrev += "..."
+                    u_text = f"(context: User previously asked: {abbrev})"
+
+                # Decision markers only on first sub-chunk
+                if seg_i == 0:
+                    dm = _detect_decision_markers(current_user_text, seg_tools)
+                    if dm:
+                        seg_tools.extend(dm)
+
+                chunk = TranscriptChunk(
+                    id=f"{short_id}:t{turn_index}",
+                    session_id=session_id,
+                    timestamp=current_timestamp,
+                    turn_index=turn_index,
+                    user_text=u_text,
+                    assistant_text=a_text,
+                    tools_used=seg_tools,
+                    files_touched=seg_files,
+                    tool_content=tc,
+                    transcript_path=transcript_path,
+                    byte_offset=turn_start_offset,
+                    byte_length=_end - turn_start_offset,
+                )
+                chunks.append(chunk)
+                turn_index += 1
+        else:
+            # --- Single-chunk mode (original behavior) ---
+            assistant_text = "\n".join(current_assistant_texts).strip()
+            if len(assistant_text) > 5000:
+                assistant_text = assistant_text[:5000] + "..."
+            tools_deduped = list(dict.fromkeys(current_tools))
+            decision_markers = _detect_decision_markers(current_user_text, tools_deduped)
+            if decision_markers:
+                tools_deduped.extend(decision_markers)
+            tool_content = "\n".join(s for s in current_tool_summaries if s)
+            if tool_content:
+                try:
+                    tool_content = scrub_text(tool_content)
+                except Exception:
+                    logger.debug("scrub_text failed on tool content, using raw", exc_info=True)
+            if len(tool_content) > 3000:
+                tool_content = tool_content[:3000] + "..."
+            chunk = TranscriptChunk(
+                id=f"{short_id}:t{turn_index}",
+                session_id=session_id,
+                timestamp=current_timestamp,
+                turn_index=turn_index,
+                user_text=(current_user_text[:1500] + "..."
+                          if len(current_user_text) > 1500
+                          else current_user_text),
+                assistant_text=assistant_text,
+                tools_used=tools_deduped,
+                files_touched=list(dict.fromkeys(current_files)),
+                tool_content=tool_content,
+                transcript_path=transcript_path,
+                byte_offset=turn_start_offset,
+                byte_length=_end - turn_start_offset,
+            )
+            chunks.append(chunk)
+            turn_index += 1
+
+        # Reset segment tracking
+        current_segments = [_Seg()]
+        saw_tool_result = False
 
     with open(path, encoding="utf-8", newline="") as f:
         for raw_line in f:
@@ -602,6 +683,8 @@ def parse_transcript(
                 current_tool_summaries = []
                 current_tool_use_map = {}
                 current_timestamp = entry.get("timestamp", "")
+                current_segments = [_Seg()]
+                saw_tool_result = False
 
             elif entry_type == "user":
                 # Tool-result-only entry — capture AskUserQuestion responses
@@ -610,6 +693,7 @@ def parse_transcript(
                     result_text = _extract_tool_result_text(entry)
                     if result_text:
                         current_assistant_texts.append(f"User selected: {result_text}")
+                        current_segments[-1]["texts"].append(f"User selected: {result_text}")
                 # Summarize tool results
                 content = entry.get("message", {}).get("content")
                 if isinstance(content, list):
@@ -641,6 +725,8 @@ def parse_transcript(
                             )
                             if summary:
                                 current_tool_summaries.append(summary)
+                                current_segments[-1]["summaries"].append(summary)
+                saw_tool_result = True
 
             elif entry_type == "assistant":
                 text, tools, files, tool_uses = _extract_assistant_content(entry)
@@ -649,15 +735,25 @@ def parse_transcript(
                         text = scrub_text(text)
                     except Exception:
                         logger.debug("scrub_text failed on assistant text, using raw", exc_info=True)
+                    # Start a new segment when assistant text follows a tool
+                    # result — the assistant has processed output and is likely
+                    # shifting to a new action or topic.
+                    if saw_tool_result and text.strip():
+                        current_segments.append(_Seg())
+                        saw_tool_result = False
                     current_assistant_texts.append(text)
+                    current_segments[-1]["texts"].append(text)
                 current_tools.extend(tools)
                 current_files.extend(files)
+                current_segments[-1]["tools"].extend(tools)
+                current_segments[-1]["files"].extend(files)
                 # Track tool invocations for matching with results
                 for tu_id, tu_name, tu_input in tool_uses:
                     current_tool_use_map[tu_id] = (tu_name, tu_input)
                     input_summary = _summarize_tool_input(tu_name, tu_input)
                     if input_summary:
                         current_tool_summaries.append(input_summary)
+                        current_segments[-1]["summaries"].append(input_summary)
 
     # Flush last turn
     _flush_turn()
@@ -830,10 +926,9 @@ class TranscriptIndex:
     # Query-time constants
     CROSS_LINK_DISCOUNT = 0.7      # score multiplier for expanded results
     CROSS_LINK_MAX_EXPAND = 3      # max chunks to add via expansion
-    CROSS_LINK_DIVERSITY = 0.5     # trigger if top session > 50% of results
-    # Segment constants (overlapping windows for temporal diversity)
-    SEGMENT_WINDOW = 50            # turns per segment
-    SEGMENT_STRIDE = 25            # overlap stride (50% overlap)
+    # CROSS_LINK_DIVERSITY and SEGMENT_* removed — dual-view RRF was
+    # hurting non-cross-session queries.  Link expansion alone is simpler
+    # and doesn't disrupt the natural search ordering.
 
     def build_cross_session_links(self) -> int:
         """Compute and store cross-session nearest-neighbor links.
@@ -894,155 +989,75 @@ class TranscriptIndex:
         logger.info("Built %d cross-session links for %d chunks", len(links), len(rowids))
         return len(links)
 
-    def _chunk_segment(self, idx: int) -> str:
-        """Assign a chunk to a temporal segment (overlapping window).
-
-        Each chunk maps to its primary segment based on turn_index.
-        Windows overlap by SEGMENT_STRIDE to prevent boundary artifacts.
-        """
-        c = self.chunks[idx]
-        window_num = c.turn_index // self.SEGMENT_STRIDE
-        return f"{c.session_id}_w{window_num}"
-
     def _expand_cross_session(
         self,
         candidates: list[tuple[int, float]],
         max_chunks: int,
     ) -> list[tuple[int, float]]:
-        """Dual-view diversity expansion via segment + cluster RRF.
+        """Expand results via pre-computed cross-session similarity links.
 
-        Problem: pure score-based ranking clusters results in 1-2 dominant
-        sessions and topics. Cross-session questions need evidence spanning
-        multiple time periods and topics.
+        Follows the top-K nearest-neighbor links from the best results to
+        inject related chunks — including from already-represented sessions.
+        This addresses the "right session, wrong chunk" problem where
+        evidence is buried in a chunk whose primary topic differs from
+        the query (e.g., coverage numbers in a lint-fix chunk).
 
-        Strategy: build two diversity-aware rankings and merge with RRF:
-          View 1 (temporal): round-robin by overlapping time segments
-          View 2 (topical):  round-robin by topic cluster
-        Then follow cross-session links to pull in chunks from sessions
-        not yet represented.
-
-        The overlapping segments (window=50, stride=25) prevent boundary
-        effects — a chunk at turn 49 appears near windows for both
-        segments 0 and 1.
+        Preserves the original search ordering — only appends linked chunks
+        after their source position.
         """
         if not self._db:
             return candidates
         if len(candidates) < 3:
             return candidates
 
-        from collections import Counter, defaultdict
+        # --- Cross-link expansion only ---
+        # Don't re-rank candidates (dual-view RRF hurt non-cross-session
+        # queries by disrupting the natural search order).  Instead, follow
+        # pre-computed similarity links from top results to inject related
+        # chunks — even from already-represented sessions, because the
+        # problem is often having the RIGHT session but WRONG chunk.
+        if not self._db.has_chunk_links():
+            return candidates
 
-        # Check if diversity expansion is needed
-        top_n = candidates[:max_chunks]
-        session_counts = Counter(
-            self.chunks[idx].session_id for idx, _ in top_n
-        )
-        if session_counts:
-            top_share = max(session_counts.values()) / len(top_n)
-            if top_share < self.CROSS_LINK_DIVERSITY:
-                return candidates  # already diverse
+        result = list(candidates)
+        seen = {idx for idx, _ in result}
+        source_rowids = []
+        for idx, _ in result[:5]:
+            rowid = self._idx_to_rowid.get(idx)
+            if rowid is not None:
+                source_rowids.append(rowid)
 
-        # Load cluster map (lazy, cached)
-        if not hasattr(self, '_chunk_cluster_map'):
-            self._chunk_cluster_map = self._db.get_chunk_cluster_map()
+        if not source_rowids:
+            return candidates
 
-        # --- View 1: Temporal segments (overlapping windows) ---
-        by_segment: dict[str, list[tuple[int, float]]] = defaultdict(list)
-        for idx, score in candidates:
-            seg = self._chunk_segment(idx)
-            by_segment[seg].append((idx, score))
-
-        seg_order = sorted(
-            by_segment.keys(),
-            key=lambda s: by_segment[s][0][1] if by_segment[s] else 0,
-            reverse=True,
-        )
-        seg_ranked: list[tuple[int, float]] = []
-        seg_ptrs = {s: 0 for s in seg_order}
-        for _ in range(len(candidates)):
-            added = False
-            for seg in seg_order:
-                p = seg_ptrs[seg]
-                if p < len(by_segment[seg]):
-                    seg_ranked.append(by_segment[seg][p])
-                    seg_ptrs[seg] = p + 1
-                    added = True
-            if not added:
+        neighbors = self._db.get_cross_links_batch(source_rowids)
+        expansions = 0
+        for src_rowid in source_rowids:
+            src_idx = self._rowid_to_idx.get(src_rowid)
+            if src_idx is None:
+                continue
+            src_score = next(
+                (s for i, s in result if i == src_idx), 0.0,
+            )
+            for tgt_rowid, sim in neighbors.get(src_rowid, []):
+                tgt_idx = self._rowid_to_idx.get(tgt_rowid)
+                if tgt_idx is None or tgt_idx in seen:
+                    continue
+                exp_score = src_score * sim * self.CROSS_LINK_DISCOUNT
+                # Insert after source position
+                src_pos = next(
+                    (i for i, (ci, _) in enumerate(result) if ci == src_idx),
+                    len(result),
+                )
+                result.insert(src_pos + 1, (tgt_idx, exp_score))
+                seen.add(tgt_idx)
+                expansions += 1
+                if expansions >= self.CROSS_LINK_MAX_EXPAND:
+                    break
+            if expansions >= self.CROSS_LINK_MAX_EXPAND:
                 break
 
-        # --- View 2: Topic clusters ---
-        by_cluster: dict[str, list[tuple[int, float]]] = defaultdict(list)
-        for idx, score in candidates:
-            cid = self._chunk_cluster_map.get(self.chunks[idx].id, f"unclustered_{idx}")
-            by_cluster[cid].append((idx, score))
-
-        cl_order = sorted(
-            by_cluster.keys(),
-            key=lambda c: by_cluster[c][0][1] if by_cluster[c] else 0,
-            reverse=True,
-        )
-        cl_ranked: list[tuple[int, float]] = []
-        cl_ptrs = {c: 0 for c in cl_order}
-        for _ in range(len(candidates)):
-            added = False
-            for cid in cl_order:
-                p = cl_ptrs[cid]
-                if p < len(by_cluster[cid]):
-                    cl_ranked.append(by_cluster[cid][p])
-                    cl_ptrs[cid] = p + 1
-                    added = True
-            if not added:
-                break
-
-        # --- RRF merge of the two diversity views ---
-        from synapt.recall.hybrid import rrf_merge
-        merged = rrf_merge(seg_ranked, cl_ranked)
-
-        # --- Phase 2: Cross-session link expansion ---
-        if self._db.has_chunk_links():
-            seen = {idx for idx, _ in merged}
-            represented_sessions = {
-                self.chunks[idx].session_id for idx, _ in merged[:max_chunks]
-            }
-            source_rowids = []
-            for idx, _ in merged[:5]:
-                rowid = self._idx_to_rowid.get(idx)
-                if rowid is not None:
-                    source_rowids.append(rowid)
-
-            if source_rowids:
-                neighbors = self._db.get_cross_links_batch(source_rowids)
-                expansions = 0
-                for src_rowid in source_rowids:
-                    src_idx = self._rowid_to_idx.get(src_rowid)
-                    if src_idx is None:
-                        continue
-                    src_score = next(
-                        (s for i, s in merged if i == src_idx), 0.0,
-                    )
-                    for tgt_rowid, sim in neighbors.get(src_rowid, []):
-                        tgt_idx = self._rowid_to_idx.get(tgt_rowid)
-                        if tgt_idx is None or tgt_idx in seen:
-                            continue
-                        tgt_session = self.chunks[tgt_idx].session_id
-                        if tgt_session in represented_sessions:
-                            continue
-                        exp_score = src_score * sim * self.CROSS_LINK_DISCOUNT
-                        # Insert after source position
-                        src_pos = next(
-                            (i for i, (ci, _) in enumerate(merged) if ci == src_idx),
-                            len(merged),
-                        )
-                        merged.insert(src_pos + 1, (tgt_idx, exp_score))
-                        seen.add(tgt_idx)
-                        represented_sessions.add(tgt_session)
-                        expansions += 1
-                        if expansions >= self.CROSS_LINK_MAX_EXPAND:
-                            break
-                    if expansions >= self.CROSS_LINK_MAX_EXPAND:
-                        break
-
-        return merged
+        return result
 
     def _refresh_rowid_map(self) -> None:
         """Build rowid <-> chunk-index mappings from the database."""
@@ -2553,16 +2568,22 @@ class TranscriptIndex:
             block = self._format_cluster_block(cluster_id, cluster_info)
             emit_items.append((max_score, block, "cluster", cluster_id))
 
+        # Track which chunk IDs are sub-chunks (fragments of a split turn).
+        # Used below for per-session sub-chunk capping.
+        _subchunk_ids: set[str] = set()
+
         for idx, score in ungrouped:
+            chunk = self.chunks[idx]
+            if chunk.user_text.startswith("(context:"):
+                _subchunk_ids.add(chunk.id)
             # Journal decision boost: journal chunks with "Decisions:" content
             # rank higher for decision-intent queries. This surfaces the raw
             # rationale instead of distilled knowledge nodes.
             if intent == "decision":
-                chunk = self.chunks[idx]
                 if chunk.turn_index < 0 and "Decisions:" in chunk.assistant_text:
                     score *= 1.3
             block = self._format_chunk_block(idx)
-            emit_items.append((score, block, "chunk", self.chunks[idx].id))
+            emit_items.append((score, block, "chunk", chunk.id))
 
         # Apply adaptive score boosts before final sort:
         # 1. Working memory: items seen recently this session (1.5x / 2.0x)
@@ -2585,12 +2606,33 @@ class TranscriptIndex:
         emitted_token_sets: list[set[str]] = []
         knowledge_emitted = 0
 
+        # Per-session cap: prevent one session (especially after sub-chunk
+        # splitting) from flooding the output and crowding out other sessions.
+        # Sub-chunks get a tighter cap (2) since they're fragments of one turn
+        # and shouldn't monopolize a session's budget over full evidence turns.
+        _MAX_PER_SESSION = 4
+        _MAX_SUBCHUNKS_PER_SESSION = 2
+        session_emit_counts: dict[str, int] = {}
+        session_subchunk_counts: dict[str, int] = {}
+
         emitted_access: list[dict] = []
         for score, block, item_type, item_id in emit_items:
             # Cap knowledge blocks to prevent them from crowding out raw chunks
             if item_type == "knowledge" and max_knowledge is not None:
                 if knowledge_emitted >= max_knowledge:
                     continue
+            # Per-session cap for chunks — two-tier:
+            # 1. Sub-chunks capped at _MAX_SUBCHUNKS_PER_SESSION (fragments
+            #    of one split turn shouldn't crowd out full evidence turns)
+            # 2. Total chunks capped at _MAX_PER_SESSION
+            if item_type == "chunk":
+                sid = item_id.split(":")[0] if ":" in item_id else ""
+                if sid:
+                    is_sub = item_id in _subchunk_ids
+                    if is_sub and session_subchunk_counts.get(sid, 0) >= _MAX_SUBCHUNKS_PER_SESSION:
+                        continue
+                    if session_emit_counts.get(sid, 0) >= _MAX_PER_SESSION:
+                        continue
             block_tokens_set = set(_tokenize(block))
             dedup_threshold = getattr(
                 getattr(self, "_adaptive", None), "dedup_jaccard",
@@ -2606,6 +2648,13 @@ class TranscriptIndex:
             lines.append(block)
             token_count += block_tokens
             emitted_token_sets.append(block_tokens_set)
+            # Track session counts (total + sub-chunk separately)
+            if item_type == "chunk":
+                sid = item_id.split(":")[0] if ":" in item_id else ""
+                if sid:
+                    session_emit_counts[sid] = session_emit_counts.get(sid, 0) + 1
+                    if item_id in _subchunk_ids:
+                        session_subchunk_counts[sid] = session_subchunk_counts.get(sid, 0) + 1
             if item_type == "knowledge":
                 knowledge_emitted += 1
             access_entry: dict = {
@@ -2814,12 +2863,16 @@ class TranscriptIndex:
         header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label} ---"
 
         parts = [header]
-        prev = self._get_preceding_turn(chunk)
-        if prev and prev.user_text:
-            ctx = prev.user_text[:200]
-            if len(prev.user_text) > 200:
-                ctx += "..."
-            parts.append(f"  (context: User previously asked: {ctx})")
+        # Sub-chunks already embed context in their user_text — skip
+        # the preceding turn context to save tokens.
+        is_subchunk = chunk.user_text.startswith("(context:")
+        if not is_subchunk:
+            prev = self._get_preceding_turn(chunk)
+            if prev and prev.user_text:
+                ctx = prev.user_text[:200]
+                if len(prev.user_text) > 200:
+                    ctx += "..."
+                parts.append(f"  (context: User previously asked: {ctx})")
         if chunk.user_text:
             ut = chunk.user_text[:500]
             if len(chunk.user_text) > 500:
@@ -2830,9 +2883,11 @@ class TranscriptIndex:
             if len(chunk.assistant_text) > 1500:
                 asst += "..."
             parts.append(f"Assistant: {asst}")
-        if chunk.files_touched:
+        if chunk.files_touched and not is_subchunk:
             parts.append(f"[Files: {', '.join(chunk.files_touched[:5])}]")
-        if chunk.tool_content:
+        # Skip tool_content for sub-chunks — assistant_text already
+        # summarizes the action, and tool details are noise.
+        if chunk.tool_content and not is_subchunk:
             tc = chunk.tool_content[:400]
             if len(chunk.tool_content) > 400:
                 tc += "..."
