@@ -14,7 +14,15 @@
   remembers what you worked on, decisions you made, and patterns you established.
 </p>
 
+<p align="center">
+  <a href="https://synapt.dev">Website</a> &middot;
+  <a href="https://synapt.dev/blog/">Blog</a> &middot;
+  <a href="https://x.com/synapt_dev">@synapt_dev</a>
+</p>
+
 ---
+
+**#1 on LOCOMO** (76.04%) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
 
 Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code and other MCP-compatible tools.
 
@@ -60,16 +68,20 @@ This gives your AI assistant 13 tools for searching past sessions, managing a jo
 
 ## Features
 
-- **Hybrid search** — BM25 full-text search fused with semantic embeddings via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf). Surfaces results that keyword search alone would miss.
+- **FTS5 + embedding hybrid search** — BM25 full-text search fused with semantic embeddings via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf), plus cross-encoder reranking. Surfaces results that keyword search alone would miss.
+- **Sub-chunk splitting** — Splits transcripts at tool-use boundaries so each chunk captures a coherent action (code edit, test run, error trace) rather than arbitrary fixed-length windows.
+- **Cross-session link expansion** — When retrieving a chunk, automatically surfaces related chunks from other sessions, enabling multi-hop reasoning across your project history.
+- **Content-aware adaptive filtering** — Classifies conversations as code/personal/mixed and adjusts consolidation filters and retrieval parameters per content type.
 - **Query intent routing** — Classifies queries as factual, temporal, debug, decision, aggregation, exploratory, or procedural and adjusts search parameters (recency decay, knowledge boost, embedding weight) automatically.
+- **Enrichment + consolidation + knowledge graph** — Optional LLM-powered session summaries, durable knowledge extraction, and a knowledge graph that connects facts across sessions.
 - **Knowledge embeddings** — Durable knowledge nodes get 384-dim embeddings for semantic retrieval, built at index time.
 - **Topic clustering** — Jaccard token-overlap clustering groups related chunks across sessions.
 - **Session journal** — Rich entries with focus, decisions, done items, and next steps.
 - **Reminders** — Cross-session sticky reminders that surface at session start.
 - **Timeline** — Chronological work arcs showing project narrative.
 - **Working memory** — Frequency-boosted search results for active topics.
-- **LLM enrichment** — Optional LLM-powered summaries and cluster upgrades.
-- **Knowledge consolidation** — Extracts durable knowledge from session journals.
+- **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
+- **MCP server** — 13 tools for Claude Code integration: search, journal, reminders, knowledge, and more.
 - **Plugin system** — Extend with additional tools via entry-point discovery.
 
 ## MCP tools
@@ -104,23 +116,38 @@ synapt server                    # Start MCP server
 
 ## Benchmarks
 
-Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversational Memory) — 10 conversations, 1540 QA pairs — following [Mem0's methodology](https://arxiv.org/abs/2504.19413) (J-score via LLM-as-Judge).
+### LOCOMO — Conversational Memory
+
+Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversational Memory) — 10 conversations, 1540 QA pairs — following [Mem0's methodology](https://arxiv.org/abs/2504.19413) (J-score via LLM-as-Judge). Competitor data from the [Mem0 paper](https://arxiv.org/abs/2504.19413) and [Memobase benchmark](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md).
 
 | System | Multi-Hop | Temporal | Single-Hop | Open-Domain | **Overall** | Infra |
 |--------|-----------|----------|------------|-------------|-------------|-------|
-| **synapt** | **70.21** | **61.68** | **62.50** | **80.14** | **73.38** | **local 3B model** |
+| **synapt (8B cloud)** | **70.92** | 66.36 | 65.62 | **82.64** | **76.04** | Ministral 8B |
+| Memobase | 46.88 | **85.05** | **70.92** | 77.17 | 75.78 | cloud |
+| Zep | — | — | — | — | 75.14 | cloud service |
+| **synapt (3B local)** | 70.21 | 61.68 | 62.50 | 80.14 | **73.38** | **local 3B model** |
 | Full-Context | — | — | — | — | 72.90 | upper bound |
 | Mem0+Graph | 47.19 | 58.13 | 65.71 | 75.71 | 68.44 | cloud GPT-4 |
 | Mem0 | 51.15 | 55.51 | 67.13 | 72.93 | 66.88 | cloud GPT-4 |
-| Zep | 41.35 | 49.31 | 61.70 | 76.60 | 65.99 | cloud service |
 | LangMem | 47.92 | 23.43 | 62.23 | 71.12 | 58.10 | cloud |
 | OpenAI Memory | 42.92 | 21.71 | 63.79 | 62.29 | 52.90 | cloud |
 
-Synapt scores **73.38% overall** — beating the Full-Context upper bound (72.90%), Mem0+Graph (68.44%), Mem0 (66.88%), Zep (65.99%), and all other tested systems — using Ministral 3B locally for enrichment. No cloud API calls.
+Synapt is **#1 on LOCOMO** at 76.04% — beating Memobase (75.78%), Zep (75.14%), the Full-Context upper bound (72.90%), Mem0+Graph (68.44%), and all other tested systems. The 3B local configuration (73.38%) also beats the Full-Context upper bound using only a Ministral 3B model running on an M2 MacBook Air.
 
 > **What is Full-Context?** The entire conversation history is passed directly to GPT-4 as context — no retrieval, no memory extraction. It represents the theoretical upper bound: the LLM has access to every fact. Synapt beats it because focused retrieval surfaces only what's relevant, reducing noise for the answer model.
 
-**Best-in-class**: Multi-hop (70.21%) and open-domain (80.14%) — highest of any system tested, including those using GPT-4 for memory extraction.
+**Best-in-class**: Multi-hop (70.92%) and open-domain (82.64%) — highest of any system tested, including those using GPT-4 for memory extraction.
+
+### CodeMemo — Coding Memory
+
+First benchmark specifically testing coding session memory — 158 questions across 3 projects, 6 categories. Same gpt-4o-mini judge and answer model for both systems.
+
+| System | Factual | Debug | Architecture | Temporal | Convention | Cross-Session | **Overall** |
+|--------|---------|-------|-------------|----------|------------|---------------|-------------|
+| **synapt v0.6** | **97.14** | **100.0** | 92.86 | **90.91** | **80.0** | **86.36** | **90.51** |
+| Mem0 (OSS) | 72.73 | 77.78 | **100.0** | 87.50 | 42.86 | 71.43 | 76.0 |
+
+Synapt leads by **+14.51pp overall**. The biggest gaps are in convention (+37pp), factual (+24pp), and debug (+22pp) — categories that depend on raw evidence preservation. Synapt runs entirely locally; Mem0 requires OpenAI API calls for memory extraction, embedding, and search.
 
 ## How search works
 
@@ -190,6 +217,13 @@ cd synapt
 pip install -e ".[test]"
 pytest tests/ -v
 ```
+
+## Links
+
+- [synapt.dev](https://synapt.dev) — Website
+- [synapt.dev/blog](https://synapt.dev/blog/) — Blog
+- [@synapt_dev](https://x.com/synapt_dev) — X / Twitter
+- [PyPI](https://pypi.org/project/synapt/) — `pip install synapt`
 
 ## License
 
