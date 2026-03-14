@@ -122,10 +122,10 @@ Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversatio
 
 | System | Multi-Hop | Temporal | Single-Hop | Open-Domain | **Overall** | Infra |
 |--------|-----------|----------|------------|-------------|-------------|-------|
-| **synapt (8B cloud)** | **70.92** | 66.36 | 65.62 | **82.64** | **76.04** | Ministral 8B |
+| **synapt v0.6.1 (8B cloud)** | **70.92** | 66.36 | 65.62 | **82.64** | **76.04** | Ministral 8B |
 | Memobase | 46.88 | **85.05** | **70.92** | 77.17 | 75.78 | cloud |
 | Zep | — | — | — | — | 75.14 | cloud service |
-| **synapt (3B local)** | 70.21 | 61.68 | 62.50 | 80.14 | **73.38** | **local 3B model** |
+| **synapt v0.6.1 (3B local)** | 70.21 | 61.68 | 62.50 | 80.14 | **73.38** | **local 3B model** |
 | Full-Context | — | — | — | — | 72.90 | upper bound |
 | Mem0+Graph | 47.19 | 58.13 | 65.71 | 75.71 | 68.44 | cloud GPT-4 |
 | Mem0 | 51.15 | 55.51 | 67.13 | 72.93 | 66.88 | cloud GPT-4 |
@@ -144,7 +144,7 @@ First benchmark specifically testing coding session memory — 158 questions acr
 
 | System | Factual | Debug | Architecture | Temporal | Convention | Cross-Session | **Overall** |
 |--------|---------|-------|-------------|----------|------------|---------------|-------------|
-| **synapt v0.6** | **97.14** | **100.0** | 92.86 | **90.91** | **80.0** | **86.36** | **90.51** |
+| **synapt v0.6.2** | **97.14** | **100.0** | 92.86 | **90.91** | **80.0** | **86.36** | **90.51** |
 | Mem0 (OSS) | 72.73 | 77.78 | **100.0** | 87.50 | 42.86 | 71.43 | 76.0 |
 
 Synapt leads by **+14.51pp overall**. The biggest gaps are in convention (+37pp), factual (+24pp), and debug (+22pp) — categories that depend on raw evidence preservation. Synapt runs entirely locally; Mem0 requires OpenAI API calls for memory extraction, embedding, and search.
