@@ -475,9 +475,6 @@ def _short_sid(session_id: str) -> str:
     return session_id[:8] if len(session_id) >= 16 else session_id
 
 
-    # Minimum total text length to trigger sub-chunk splitting.
-    # Below this, the turn is small enough that one chunk is fine.
-
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
