@@ -242,7 +242,9 @@ _TEMPORAL_PATTERNS = re.compile(
     r"ago|yesterday|today|recently|lately|"
     r"last\s+(week|month|year|time)|next\s+(week|month)|this\s+(week|month|year)|"
     r"what\s+(date|day|month|year|time)|"
-    r"chronolog|timeline|at\s+what\s+point)\b",
+    r"chronolog|timeline|at\s+what\s+point|"
+    r"evolv\w*|progression|progressed|"
+    r"recurring|across\s+sessions?|across\s+conversations?|over\s+time)\b",
     re.IGNORECASE,
 )
 
