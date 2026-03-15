@@ -532,13 +532,34 @@
         </thead>
         <tbody>
           <tr class="highlight-row">
-            <td><strong>synapt v0.6</strong></td>
-            <td class="best">70.21</td>
-            <td class="best">61.68</td>
+            <td><strong>synapt v0.6.1 (8B cloud)</strong></td>
+            <td class="best">70.92</td>
+            <td>66.36</td>
+            <td>65.62</td>
+            <td class="best">82.64</td>
+            <td class="best"><strong>76.04</strong></td>
+            <td>Ministral 8B cloud</td>
+          </tr>
+          <tr class="highlight-row">
+            <td><strong>synapt v0.6.1 (3B local)</strong></td>
+            <td>70.21</td>
+            <td>61.68</td>
             <td>62.50</td>
-            <td class="best">80.14</td>
-            <td class="best"><strong>73.38</strong></td>
+            <td>80.14</td>
+            <td><strong>73.38</strong></td>
             <td>local 3B model</td>
+          </tr>
+          <tr>
+            <td>Memobase</td>
+            <td>46.88</td>
+            <td class="best">85.05</td>
+            <td class="best">70.92</td>
+            <td>77.17</td>
+            <td>75.78</td>
+            <td>cloud service</td>
+          </tr>
+          <tr>
+            <td>Zep</td><td>41.35</td><td>49.31</td><td>61.70</td><td>76.60</td><td>65.99</td><td>cloud service</td>
           </tr>
           <tr style="color: var(--text-dim);">
             <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
@@ -548,9 +569,6 @@
           </tr>
           <tr>
             <td>Mem0</td><td>51.15</td><td>55.51</td><td>67.13</td><td>72.93</td><td>66.88</td><td>cloud GPT-4</td>
-          </tr>
-          <tr>
-            <td>Zep</td><td>41.35</td><td>49.31</td><td>61.70</td><td>76.60</td><td>65.99</td><td>cloud service</td>
           </tr>
           <tr>
             <td>LangMem</td><td>47.92</td><td>23.43</td><td>62.23</td><td>71.12</td><td>58.10</td><td>cloud</td>
@@ -564,10 +582,51 @@
         <img src="assets/locomo_radar.svg" alt="LOCOMO benchmark radar chart — synapt vs Mem0, Mem0+Graph, Zep"
              style="max-width: 550px; width: 100%;">
       </div>
+      <h3 style="text-align: center; font-size: 1.4rem; margin: 3rem 0 1rem;">CodeMemo &mdash; Coding Memory</h3>
+      <p style="text-align: center; color: var(--text-dim); margin-bottom: 2rem; max-width: 650px; margin-left: auto; margin-right: auto;">
+        <a href="https://github.com/laynepenney/synapt/tree/main/evaluation/codememo">CodeMemo</a> evaluates memory systems on realistic coding assistant tasks:
+        factual recall, debugging context, architecture decisions, temporal ordering, coding conventions, and cross-session continuity.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>System</th>
+            <th>Factual</th>
+            <th>Debug</th>
+            <th>Architecture</th>
+            <th>Temporal</th>
+            <th>Convention</th>
+            <th>Cross-Session</th>
+            <th>Overall</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="highlight-row">
+            <td><strong>synapt v0.6.2</strong></td>
+            <td class="best">97.14</td>
+            <td class="best">100.0</td>
+            <td>92.86</td>
+            <td class="best">90.91</td>
+            <td class="best">80.0</td>
+            <td class="best">86.36</td>
+            <td class="best"><strong>90.51</strong></td>
+          </tr>
+          <tr>
+            <td>Mem0</td>
+            <td>72.73</td>
+            <td>77.78</td>
+            <td class="best">100.0</td>
+            <td>87.50</td>
+            <td>42.86</td>
+            <td>71.43</td>
+            <td>76.0</td>
+          </tr>
+        </tbody>
+      </table>
       <p class="footnote">
+        #1 on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> at 76.04% overall, beating all cloud memory systems and the full-context upper bound (72.90%).
+        On <a href="https://github.com/laynepenney/synapt/tree/main/evaluation/codememo">CodeMemo</a>, synapt scores 90.51% &mdash; +14.51pp over Mem0 (76.0%) &mdash; with perfect debugging recall and near-perfect factual accuracy.
         Competitor data from <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a>.
-        Synapt runs entirely locally with a 3B model &mdash; beating cloud systems that use GPT-4 for memory extraction, and surpassing the full-context upper bound (72.90%).
-        Full-Context passes the entire conversation to GPT-4 with no retrieval &mdash; synapt beats it by surfacing only what matters.
         Don't waste your tokens on memory.
       </p>
     </div>
