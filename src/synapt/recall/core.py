@@ -475,6 +475,57 @@ def _short_sid(session_id: str) -> str:
     return session_id[:8] if len(session_id) >= 16 else session_id
 
 
+def _extract_snippet(text: str, query: str, context_lines: int = 1) -> str:
+    """Extract the most query-relevant sentence from *text* with surrounding context.
+
+    Inspired by grep's ``-C`` flag: scores each sentence by token overlap with
+    the query, returns the best match plus *context_lines* sentences on each side.
+
+    Falls back to the first 200 characters if no sentence scores above zero.
+    """
+    if not text or not query:
+        return text[:200] if text else ""
+
+    # Split into sentences. Use period/exclamation/question + space, or newlines.
+    sentences = re.split(r'(?<=[.!?])\s+|\n+', text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return text[:200]
+
+    if len(sentences) == 1:
+        return sentences[0]
+
+    # Score each sentence by token overlap with the query
+    query_tokens = set(_tokenize(query))
+    best_idx = 0
+    best_score = -1
+
+    for i, sentence in enumerate(sentences):
+        sent_tokens = set(_tokenize(sentence))
+        overlap = len(query_tokens & sent_tokens)
+        if overlap > best_score:
+            best_score = overlap
+            best_idx = i
+
+    # No overlap at all — return first N chars as fallback
+    if best_score <= 0:
+        return text[:200] + ("..." if len(text) > 200 else "")
+
+    # Extract the window: best sentence +/- context_lines
+    start = max(0, best_idx - context_lines)
+    end = min(len(sentences), best_idx + context_lines + 1)
+    snippet = " ".join(sentences[start:end])
+
+    # Add ellipsis markers when we're not at the boundaries
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(sentences):
+        snippet = snippet + "..."
+
+    return snippet
+
+
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
@@ -1779,12 +1830,12 @@ class TranscriptIndex:
             access_items.append({"item_type": "knowledge", "item_id": item_id})
             wm.record("knowledge", item_id, node.get("content", ""))
 
-        # Cluster summaries
+        # Cluster summaries — pass query for snippet extraction
         for cluster_id, score in cluster_hits:
             info = self._db.get_cluster(cluster_id)
             if info is None:
                 continue
-            block = self._format_cluster_block(cluster_id, info)
+            block = self._format_cluster_block(cluster_id, info, query=query)
             block_tokens = len(block) // 4
             if token_count + block_tokens > max_tokens and len(lines) > 1:
                 break
@@ -2578,7 +2629,7 @@ class TranscriptIndex:
                     ranked_indices.add(i)
 
         for cluster_id, (cluster_info, member_indices, max_score) in cluster_groups.items():
-            block = self._format_cluster_block(cluster_id, cluster_info)
+            block = self._format_cluster_block(cluster_id, cluster_info, query=query)
             emit_items.append((max_score, block, "cluster", cluster_id))
 
         # Track which chunk IDs are sub-chunks (fragments of a split turn).
@@ -2601,13 +2652,21 @@ class TranscriptIndex:
         # Apply adaptive score boosts before final sort:
         # 1. Working memory: items seen recently this session (1.5x / 2.0x)
         # 2. Access frequency: items drilled into in past sessions (up to 1.3x)
+        #
+        # IMPORTANT: boosts are capped so they can never promote a result above
+        # the top unboosted score. This prevents working memory contamination
+        # from previous queries from overriding relevance — boosts act as a
+        # tiebreaker between similarly-scored results, not a rank override.
         wm = self._working_memory
         _disable_boosts = os.environ.get("SYNAPT_DISABLE_BOOSTS")
-        for i, (score, block, item_type, item_id) in enumerate(emit_items):
-            if not _disable_boosts:
+        if not _disable_boosts and emit_items:
+            top_unboosted = max(s for s, _, _, _ in emit_items)
+            boost_ceiling = top_unboosted * 0.95  # never exceed 95% of top score
+            for i, (score, block, item_type, item_id) in enumerate(emit_items):
                 boosted = wm.boost_score(score, item_id)
                 boosted = self._access_frequency_boost(boosted, item_type, item_id)
                 if boosted != score:
+                    boosted = min(boosted, max(score, boost_ceiling))
                     emit_items[i] = (boosted, block, item_type, item_id)
 
         # Sort by score descending (highest relevance first)
@@ -2816,8 +2875,14 @@ class TranscriptIndex:
         self,
         cluster_id: str,
         cluster_info: dict,
+        query: str = "",
     ) -> str:
-        """Format a cluster as a summary block."""
+        """Format a cluster as a summary block.
+
+        When *query* is provided, the summary text is snippet-extracted to show
+        only the most query-relevant sentence plus surrounding context, rather
+        than the full (often noisy) cluster summary.
+        """
         topic = cluster_info.get("topic", "unknown")
         date_start = (cluster_info.get("date_start") or "")[:10]
         date_end = (cluster_info.get("date_end") or "")[:10]
@@ -2850,6 +2915,10 @@ class TranscriptIndex:
             summary = self._generate_cluster_summary(cluster_id)
 
         if summary:
+            # Snippet extraction: when a query is provided, pull the most
+            # relevant sentence + context instead of the full summary.
+            if query:
+                summary = _extract_snippet(summary, query, context_lines=1)
             parts.append(summary)
 
         # Session references

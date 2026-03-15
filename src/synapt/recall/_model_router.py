@@ -255,7 +255,8 @@ def _get_ollama_client(max_tokens: int) -> object | None:
 
     try:
         from synapt._models.ollama_client import OllamaClient
-        client = OllamaClient(max_tokens=max_tokens)
+        client = OllamaClient()
+        client.max_tokens = max_tokens
         _client_cache[key] = client
         logger.debug("OllamaClient available for decoder-only inference")
         return client
