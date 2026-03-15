@@ -4,17 +4,19 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Why Synapt? — Local-First Memory That Beats Cloud Systems</title>
-  <meta name="description" content="Synapt scores 73.38% on LOCOMO running entirely locally on a 3B model — beating the Full-Context upper bound (72.90%), Mem0+Graph (68.44%), Zep (65.99%), and every cloud system using GPT-4.">
+  <meta name="description" content="Synapt scores 76.04% on LOCOMO — #1 on the benchmark, beating Memobase (75.78%), Zep (75.14%), and all cloud systems. Runs entirely locally on a 3B model.">
   <meta property="og:title" content="Why Synapt?">
   <meta property="og:description" content="Local-first agent memory that beats cloud-dependent systems on standardized benchmarks.">
   <meta property="og:image" content="https://synapt.dev/blog/images/why-synapt-hero.jpg">
   <meta property="og:url" content="https://synapt.dev/blog/why-synapt.html">
   <meta property="og:type" content="article">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:site" content="@claude_synapt">
+  <meta name="twitter:site" content="@laynepenney">
   <meta name="twitter:title" content="Why Synapt?">
   <meta name="twitter:description" content="Local-first agent memory that beats cloud-dependent systems on standardized benchmarks.">
   <meta name="twitter:image" content="https://synapt.dev/blog/images/why-synapt-hero.jpg">
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -227,13 +229,25 @@
         </thead>
         <tbody>
           <tr class="highlight">
-            <td><strong>synapt</strong></td>
-            <td class="best">70.21</td>
-            <td class="best">61.68</td>
+            <td><strong>synapt v0.6.1 (8B cloud)</strong></td>
+            <td class="best">70.92</td>
+            <td>66.36</td>
+            <td>65.62</td>
+            <td class="best">82.64</td>
+            <td class="best">76.04</td>
+            <td>Ministral 8B cloud</td>
+          </tr>
+          <tr class="highlight">
+            <td><strong>synapt v0.6.1 (3B local)</strong></td>
+            <td>70.21</td>
+            <td>61.68</td>
             <td>62.50</td>
-            <td class="best">80.14</td>
-            <td class="best">73.38</td>
+            <td>80.14</td>
+            <td>73.38</td>
             <td>local 3B model</td>
+          </tr>
+          <tr>
+            <td>Memobase</td><td>46.88</td><td class="best">85.05</td><td class="best">70.92</td><td>77.17</td><td>75.78</td><td>cloud service</td>
           </tr>
           <tr style="color: var(--text-dim);">
             <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
@@ -257,7 +271,7 @@
       </table>
 
       <p>
-        Synapt scores <strong>73.38% overall</strong> &mdash; the highest of any system using the Mem0 paper's J-score methodology, surpassing even the Full-Context upper bound (72.90%). And it does this running entirely locally on a 3B parameter model with no cloud API calls.
+        Synapt scores <strong>76.04% overall</strong> with an 8B enrichment model &mdash; the highest of any system on LOCOMO. Even the local 3B version (73.38%) surpasses the Full-Context upper bound (72.90%), beating every cloud system while running entirely on a laptop.
       </p>
 
       <p>
@@ -316,6 +330,33 @@
 
       <p>
         Synapt's evaluation follows the Mem0 paper's methodology exactly: 10 LOCOMO conversations, 1540 QA pairs (categories 1-4), J-score via gpt-4o-mini judge. The evaluation code is in the repository.
+      </p>
+
+      <h2>Coding memory: where the gap widens</h2>
+      <p>
+        LOCOMO tests personal conversation memory — two friends discussing life events. But coding assistants need to remember tool output, error traces, debugging steps, and architectural decisions across sessions. We built <strong>CodeMemo</strong> to test this.
+      </p>
+      <p>
+        158 questions across 3 coding projects, 6 categories (factual, debug, architecture, temporal, convention, cross-session). Same gpt-4o-mini judge. Synapt leads Mem0 by <strong>+14.51 percentage points</strong>:
+      </p>
+      <table>
+        <thead>
+          <tr><th>System</th><th>Factual</th><th>Debug</th><th>Architecture</th><th>Temporal</th><th>Convention</th><th>Cross-Session</th><th>Overall</th></tr>
+        </thead>
+        <tbody>
+          <tr class="highlight">
+            <td><strong>synapt</strong></td><td class="best">97.14</td><td class="best">100.0</td><td>92.86</td><td class="best">90.91</td><td class="best">80.0</td><td class="best">86.36</td><td class="best">90.51</td>
+          </tr>
+          <tr>
+            <td>Mem0</td><td>72.73</td><td>77.78</td><td class="best">100.0</td><td>87.50</td><td>42.86</td><td>71.43</td><td>76.0</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        The biggest gap is <strong>convention</strong> (+37pp) — implicit patterns across sessions that Mem0's fact extraction abstracts away. Debug (+22pp) and factual (+24pp) follow — categories that require exact tool output and implementation details, not summaries.
+      </p>
+      <p>
+        The dataset and evaluation code are open source: <a href="https://huggingface.co/datasets/laynepro/codememo-benchmark">HuggingFace</a> and <a href="https://github.com/laynepenney/codememo-benchmark">benchmark gripspace</a>.
       </p>
 
       <h2>Get started</h2>
