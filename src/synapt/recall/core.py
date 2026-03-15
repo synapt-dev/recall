@@ -837,7 +837,7 @@ class TranscriptIndex:
         if os.environ.get("SYNAPT_DISABLE_CONTENT_PROFILE"):
             from synapt.recall.content_profile import ContentProfile
             self.content_profile = ContentProfile(
-                content_type="code", file_refs=0, personal_refs=0, total_chunks=len(self.chunks)
+                _type="code", file_refs=0, personal_refs=0, total_chunks=len(self.chunks)
             )
         else:
             self.content_profile = detect_content_profile(self.chunks)
