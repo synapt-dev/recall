@@ -544,7 +544,8 @@ def parse_transcript(
             for s in nonempty_segs
         )
 
-        if len(nonempty_segs) >= 2 and total_text > 1200:
+        _sub_chunk_min_text = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
+        if len(nonempty_segs) >= 2 and total_text > _sub_chunk_min_text and _sub_chunk_min_text > 0:
             # --- Sub-chunk mode ---
             for seg_i, seg in enumerate(nonempty_segs):
                 a_text = "\n".join(seg["texts"]).strip()
@@ -782,7 +783,13 @@ class TranscriptIndex:
 
         # Content profile — adapts filters and retrieval to content type
         from synapt.recall.content_profile import detect_content_profile, adaptive_params
-        self.content_profile = detect_content_profile(self.chunks)
+        if os.environ.get("SYNAPT_DISABLE_CONTENT_PROFILE"):
+            from synapt.recall.content_profile import ContentProfile
+            self.content_profile = ContentProfile(
+                content_type="code", file_refs=0, personal_refs=0, total_chunks=len(self.chunks)
+            )
+        else:
+            self.content_profile = detect_content_profile(self.chunks)
         self._adaptive = adaptive_params(self.content_profile)
         if self.content_profile.content_type != "code":
             logger.info(
@@ -904,6 +911,8 @@ class TranscriptIndex:
         candidates: list[tuple[int, float]],
     ) -> list[tuple[int, float]]:
         """Apply cross-encoder reranking if enabled."""
+        if os.environ.get("SYNAPT_DISABLE_RERANKER"):
+            return candidates
         if not self._use_reranker:
             return candidates
         try:
@@ -922,7 +931,7 @@ class TranscriptIndex:
     CROSS_LINK_MIN_SIM = 0.35      # minimum cosine similarity for a link
     # Query-time constants
     CROSS_LINK_DISCOUNT = 0.7      # score multiplier for expanded results
-    CROSS_LINK_MAX_EXPAND = 3      # max chunks to add via expansion
+    CROSS_LINK_MAX_EXPAND = int(os.environ.get("SYNAPT_CROSS_LINK_MAX_EXPAND", "3"))
     # CROSS_LINK_DIVERSITY and SEGMENT_* removed — dual-view RRF was
     # hurting non-cross-session queries.  Link expansion alone is simpler
     # and doesn't disrupt the natural search ordering.
@@ -1390,7 +1399,11 @@ class TranscriptIndex:
                 classify_query_intent, intent_search_params,
                 extract_temporal_range,
             )
-            intent = classify_query_intent(query)
+            # Ablation toggle: disable intent classification
+            if os.environ.get("SYNAPT_DISABLE_INTENT"):
+                intent = "general"
+            else:
+                intent = classify_query_intent(query)
             params = intent_search_params(intent)
             emb_weight = params.get("emb_weight", emb_weight)
             kb_default = params.get("knowledge_boost", kb_default)
@@ -2440,7 +2453,10 @@ class TranscriptIndex:
         token_count = 0
 
         # Build cluster grouping and interleave by relevance score
-        cluster_groups, ungrouped = self._group_by_cluster(ranked)
+        if os.environ.get("SYNAPT_DISABLE_CLUSTERS"):
+            cluster_groups, ungrouped = {}, ranked
+        else:
+            cluster_groups, ungrouped = self._group_by_cluster(ranked)
 
         # Build a unified emit list sorted by relevance.
         # Knowledge nodes, clusters, and raw chunks all compete on score.
@@ -2586,11 +2602,13 @@ class TranscriptIndex:
         # 1. Working memory: items seen recently this session (1.5x / 2.0x)
         # 2. Access frequency: items drilled into in past sessions (up to 1.3x)
         wm = self._working_memory
+        _disable_boosts = os.environ.get("SYNAPT_DISABLE_BOOSTS")
         for i, (score, block, item_type, item_id) in enumerate(emit_items):
-            boosted = wm.boost_score(score, item_id)
-            boosted = self._access_frequency_boost(boosted, item_type, item_id)
-            if boosted != score:
-                emit_items[i] = (boosted, block, item_type, item_id)
+            if not _disable_boosts:
+                boosted = wm.boost_score(score, item_id)
+                boosted = self._access_frequency_boost(boosted, item_type, item_id)
+                if boosted != score:
+                    emit_items[i] = (boosted, block, item_type, item_id)
 
         # Sort by score descending (highest relevance first)
         emit_items.sort(key=lambda x: x[0], reverse=True)
@@ -2607,8 +2625,21 @@ class TranscriptIndex:
         # splitting) from flooding the output and crowding out other sessions.
         # Sub-chunks get a tighter cap (2) since they're fragments of one turn
         # and shouldn't monopolize a session's budget over full evidence turns.
-        _MAX_PER_SESSION = 4
-        _MAX_SUBCHUNKS_PER_SESSION = 2
+        _cap_override = os.environ.get("SYNAPT_MAX_PER_SESSION")
+        if _cap_override:
+            _MAX_PER_SESSION = int(_cap_override)
+            _MAX_SUBCHUNKS_PER_SESSION = int(os.environ.get("SYNAPT_MAX_SUBCHUNKS_PER_SESSION", str(max(1, int(_cap_override) // 2))))
+        else:
+            _chunk_sessions = set()
+            for _, _, itype, iid in emit_items:
+                if itype == "chunk":
+                    sid = iid.split(":")[0] if ":" in iid else ""
+                    if sid:
+                        _chunk_sessions.add(sid)
+            _n_sessions = max(1, len(_chunk_sessions))
+            _budget = sum(1 for _, _, t, _ in emit_items if t == "chunk")
+            _MAX_PER_SESSION = max(2, _budget // _n_sessions)
+            _MAX_SUBCHUNKS_PER_SESSION = max(1, _MAX_PER_SESSION // 2)
         session_emit_counts: dict[str, int] = {}
         session_subchunk_counts: dict[str, int] = {}
 
@@ -2635,10 +2666,11 @@ class TranscriptIndex:
                 getattr(self, "_adaptive", None), "dedup_jaccard",
                 _DEDUP_JACCARD_THRESHOLD,
             )
-            if block_tokens_set and emitted_token_sets:
-                if any(_jaccard(block_tokens_set, prev) > dedup_threshold
-                       for prev in emitted_token_sets):
-                    continue  # Skip near-duplicate
+            if not os.environ.get("SYNAPT_DISABLE_DEDUP"):
+                if block_tokens_set and emitted_token_sets:
+                    if any(_jaccard(block_tokens_set, prev) > dedup_threshold
+                           for prev in emitted_token_sets):
+                        continue  # Skip near-duplicate
             block_tokens = len(block) // 4
             if token_count + block_tokens > max_tokens and len(lines) > 1:
                 break
