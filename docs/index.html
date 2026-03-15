@@ -499,14 +499,32 @@
 <span class="dim">          |</span> <span class="hl">Reciprocal Rank</span>  <span class="dim">|               |</span>
 <span class="dim">          |</span> <span class="hl">Fusion (k=60)</span>    <span class="dim">|               |</span>
 <span class="dim">          +------------------+               |</span>
-<span class="dim">                    \                        /</span>
+<span class="dim">                    |                        |</span>
+<span class="dim">          +------------------+               |</span>
+<span class="dim">          |</span> <span class="hl">cross-encoder</span>    <span class="dim">|               |</span>
+<span class="dim">          |</span> <span class="hl">rerank (top 20)</span>  <span class="dim">|               |</span>
+<span class="dim">          +------------------+               |</span>
+<span class="dim">                    |                        /</span>
+<span class="dim">          +------------------+              /</span>
+<span class="dim">          |</span> <span class="hl">cross-session</span>    <span class="dim">|             /</span>
+<span class="dim">          |</span> <span class="hl">link expansion</span>   <span class="dim">|            /</span>
+<span class="dim">          +------------------+           /</span>
+<span class="dim">                    \                   /</span>
 <span class="dim">                 +---------------------------+</span>
 <span class="dim">                 |</span> <span class="hl2">interleave + dedup + boost</span>  <span class="dim">|</span>
+<span class="dim">                 |</span> <span class="hl2">+ adaptive per-session cap</span>  <span class="dim">|</span>
 <span class="dim">                 +---------------------------+</span>
 <span class="dim">                              |</span>
 <span class="dim">                    +-----------------+</span>
 <span class="dim">                    |</span> <span class="hl">ranked context</span>   <span class="dim">|</span>
 <span class="dim">                    +-----------------+</span></div>
+      <h3>v0.6.2 pipeline features</h3>
+      <ul>
+        <li>Sub-chunk splitting at tool-use boundaries</li>
+        <li>Cross-session link expansion via pre-computed cosine neighbors</li>
+        <li>Adaptive proportional per-session cap</li>
+        <li>Content-aware adaptive filtering (code/personal/mixed)</li>
+      </ul>
     </div>
   </section>
 
