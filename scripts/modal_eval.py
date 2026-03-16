@@ -132,11 +132,91 @@ CONFIGS = {
 
 
 # ---------------------------------------------------------------------------
-# Shared eval logic
+# GPU function — enrichment only (Ministral-8B via vLLM on A10G)
+#
+# Runs --retrieval-only --full-pipeline to ingest + enrich + build index
+# without any OpenAI API calls. Saves work dir to volume so the CPU step
+# can reuse the enriched index.
 # ---------------------------------------------------------------------------
 
-def _run_eval(name, desc, env_overrides, extra_args, benchmark):
-    """Core eval logic shared by CPU and GPU functions."""
+@app.function(
+    image=gpu_image,
+    secrets=[modal.Secret.from_name("openai-secret")],
+    volumes={RESULTS_DIR: volume},
+    timeout=3600 * 2,
+    gpu="A10G",
+    memory=32768,
+)
+def run_enrich(name: str, benchmark: str, env_overrides: dict,
+               enrich_model: str, extra_args: list[str] | None = None) -> None:
+    """Run enrichment on GPU, persist work dir to volume for CPU eval step."""
+    import subprocess
+    import sys
+
+    os.environ.update(env_overrides)
+
+    output_dir = Path(RESULTS_DIR) / name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = output_dir / "work"
+
+    # Check if enrichment already completed
+    if (work_dir / "index").exists():
+        print(f"SKIP enrichment for {name}: cached at {work_dir}")
+        volume.commit()
+        return
+
+    volume.reload()
+
+    print(f"=== ENRICH {name} ({benchmark}) on GPU ===")
+    print(f"Model: {enrich_model}")
+
+    if benchmark == "codememo":
+        cmd = [
+            sys.executable, "-m", "evaluation.codememo.eval",
+            "--full-pipeline", "--retrieval-only",
+            "--enrich-model", enrich_model,
+            "--work-dir", str(work_dir),
+            "--output", str(output_dir),
+        ]
+    else:
+        cmd = [
+            sys.executable, "-m", "evaluation.locomo_eval",
+            "--full-pipeline", "--retrieval-only",
+            "--enrich-model", enrich_model,
+            "--output", str(output_dir),
+        ]
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd="/root/synapt")
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    proc.wait()
+    stderr = proc.stderr.read()
+    if proc.returncode != 0:
+        print(f"STDERR: {stderr[-2000:]}")
+
+    volume.commit()
+    print(f"Enrichment saved to {work_dir}")
+
+
+# ---------------------------------------------------------------------------
+# CPU function — eval (retrieve + generate + judge via OpenAI API)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("openai-secret")],
+    volumes={RESULTS_DIR: volume},
+    timeout=3600 * 8,  # 8 hours — rate limits make it slow
+    cpu=1,
+    memory=2048,
+)
+def run_ablation(
+    name: str, desc: str, env_overrides: dict,
+    extra_args: list[str] | None = None, benchmark: str = "codememo",
+    use_work_dir: bool = False,
+) -> dict:
+    """Run a single ablation config (CodeMemo or LOCOMO)."""
     import subprocess
     import sys
 
@@ -172,6 +252,10 @@ def _run_eval(name, desc, env_overrides, extra_args, benchmark):
     cmd = [sys.executable, "-m", module, "--recalldb", "--output", str(output_dir)]
     if benchmark == "codememo":
         cmd += ["--model", "gpt-5-mini"]
+    # Point at the persistent work dir from GPU enrichment step
+    if use_work_dir and benchmark == "codememo":
+        work_dir = output_dir / "work"
+        cmd += ["--work-dir", str(work_dir)]
     cmd += extra_args or []
 
     checkpoint_path = output_dir / checkpoint_file
@@ -195,38 +279,6 @@ def _run_eval(name, desc, env_overrides, extra_args, benchmark):
     if summary_path.exists():
         return json.loads(summary_path.read_text())
     return {"error": f"No summary produced, exit={proc.returncode}"}
-
-
-# ---------------------------------------------------------------------------
-# CPU function — standard ablations (no enrichment)
-# ---------------------------------------------------------------------------
-
-@app.function(
-    image=image,
-    secrets=[modal.Secret.from_name("openai-secret")],
-    volumes={RESULTS_DIR: volume},
-    timeout=3600 * 8,
-    cpu=1,
-    memory=2048,
-)
-def run_ablation(name, desc, env_overrides, extra_args=None, benchmark="codememo"):
-    return _run_eval(name, desc, env_overrides, extra_args, benchmark)
-
-
-# ---------------------------------------------------------------------------
-# GPU function — full-pipeline with vLLM enrichment (Ministral-8B on A10G)
-# ---------------------------------------------------------------------------
-
-@app.function(
-    image=gpu_image,
-    secrets=[modal.Secret.from_name("openai-secret")],
-    volumes={RESULTS_DIR: volume},
-    timeout=3600 * 8,
-    gpu="A10G",
-    memory=32768,
-)
-def run_ablation_gpu(name, desc, env_overrides, extra_args=None, benchmark="codememo"):
-    return _run_eval(name, desc, env_overrides, extra_args, benchmark)
 
 
 # ---------------------------------------------------------------------------
@@ -256,11 +308,16 @@ def run_all(config_filter: str | None = None):
     results = {}
     for name, (desc, env, extra, bench, needs_gpu) in configs_to_run.items():
         print(f"\n{'='*60}")
-        print(f"Launching: {name} — {desc} {'[GPU]' if needs_gpu else '[CPU]'}")
+        print(f"Launching: {name} — {desc} {'[GPU→CPU]' if needs_gpu else '[CPU]'}")
         print(f"{'='*60}")
 
         if needs_gpu:
-            result = run_ablation_gpu.remote(name, desc, env, extra, bench)
+            # Step 1: GPU enrichment (minutes, no OpenAI calls)
+            print(f"  Step 1: GPU enrichment ({ENRICH_MODEL})")
+            run_enrich.remote(name, bench, env, ENRICH_MODEL, extra)
+            print(f"  Step 1: done — enrichment cached on volume")
+            # Step 2: CPU eval reusing enriched work dir (hours, OpenAI calls only)
+            result = run_ablation.remote(name, desc, env, extra, bench, use_work_dir=True)
         else:
             result = run_ablation.remote(name, desc, env, extra, bench)
         results[name] = result
