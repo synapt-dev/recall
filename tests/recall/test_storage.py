@@ -808,3 +808,63 @@ class TestAccessTracking:
         assert stats["last_accessed"] is not None
         # first and last should be equal on first access
         assert stats["first_accessed"] == stats["last_accessed"]
+
+    def test_weighted_count_accumulates_score(self, db):
+        """weighted_count accumulates the relevance score from each access."""
+        db.record_access(
+            [{"item_type": "chunk", "item_id": "s1:t0", "score": 0.9}],
+            context="search",
+        )
+        stats = db.get_access_stats("chunk", "s1:t0")
+        assert abs(stats["weighted_count"] - 0.9) < 0.001
+
+        # Second access with a lower score adds to the weighted count
+        db.record_access(
+            [{"item_type": "chunk", "item_id": "s1:t0", "score": 0.2}],
+            context="search",
+        )
+        stats = db.get_access_stats("chunk", "s1:t0")
+        assert abs(stats["weighted_count"] - 1.1) < 0.001
+        assert stats["explicit_count"] == 2
+
+    def test_weighted_count_zero_for_hook(self, db):
+        """Hook accesses do not contribute to weighted_count."""
+        db.record_access(
+            [{"item_type": "chunk", "item_id": "s1:t0", "score": 5.0}],
+            context="hook",
+        )
+        stats = db.get_access_stats("chunk", "s1:t0")
+        assert stats["weighted_count"] == 0.0
+        assert stats["explicit_count"] == 0
+
+    def test_weighted_count_missing_score_defaults_zero(self, db):
+        """Access without a score key contributes 0.0 to weighted_count."""
+        db.record_access(
+            [{"item_type": "chunk", "item_id": "s1:t0"}],
+            context="search",
+        )
+        stats = db.get_access_stats("chunk", "s1:t0")
+        assert stats["weighted_count"] == 0.0
+        assert stats["explicit_count"] == 1
+
+    def test_high_score_contributes_more_than_low_score(self, db):
+        """A high-relevance access contributes more to weighted_count."""
+        # Item A: 3 high-score accesses
+        for _ in range(3):
+            db.record_access(
+                [{"item_type": "chunk", "item_id": "high:t0", "score": 0.9}],
+                context="search",
+            )
+        # Item B: 3 low-score accesses
+        for _ in range(3):
+            db.record_access(
+                [{"item_type": "chunk", "item_id": "low:t0", "score": 0.2}],
+                context="search",
+            )
+        stats_high = db.get_access_stats("chunk", "high:t0")
+        stats_low = db.get_access_stats("chunk", "low:t0")
+        # Same explicit_count, but weighted_count differs
+        assert stats_high["explicit_count"] == stats_low["explicit_count"] == 3
+        assert stats_high["weighted_count"] > stats_low["weighted_count"]
+        assert abs(stats_high["weighted_count"] - 2.7) < 0.001
+        assert abs(stats_low["weighted_count"] - 0.6) < 0.001
