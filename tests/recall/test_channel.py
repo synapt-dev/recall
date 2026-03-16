@@ -107,7 +107,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM presence WHERE agent = 'agent-a'"
+                "SELECT * FROM presence WHERE agent_id ='agent-a'"
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "online")
@@ -119,7 +119,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM memberships WHERE agent = 'agent-a' AND channel = 'dev'"
+                "SELECT * FROM memberships WHERE agent_id ='agent-a' AND channel = 'dev'"
             ).fetchone()
             self.assertIsNotNone(row)
         finally:
@@ -130,7 +130,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM cursors WHERE agent = 'agent-a' AND channel = 'dev'"
+                "SELECT * FROM cursors WHERE agent_id ='agent-a' AND channel = 'dev'"
             ).fetchone()
             self.assertIsNotNone(row)
         finally:
@@ -142,7 +142,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM memberships WHERE agent = 'agent-a' AND channel = 'dev'"
+                "SELECT * FROM memberships WHERE agent_id ='agent-a' AND channel = 'dev'"
             ).fetchone()
             self.assertIsNone(row)
         finally:
@@ -154,7 +154,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM presence WHERE agent = 'agent-a'"
+                "SELECT * FROM presence WHERE agent_id ='agent-a'"
             ).fetchone()
             self.assertIsNone(row)
         finally:
@@ -167,12 +167,12 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM presence WHERE agent = 'agent-a'"
+                "SELECT * FROM presence WHERE agent_id ='agent-a'"
             ).fetchone()
             self.assertIsNotNone(row)
             # Still has eval membership
             mem = conn.execute(
-                "SELECT channel FROM memberships WHERE agent = 'agent-a'"
+                "SELECT channel FROM memberships WHERE agent_id ='agent-a'"
             ).fetchall()
             self.assertEqual(len(mem), 1)
             self.assertEqual(mem[0]["channel"], "eval")
@@ -186,7 +186,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row1 = conn.execute(
-                "SELECT last_seen FROM presence WHERE agent = 'agent-a'"
+                "SELECT last_seen FROM presence WHERE agent_id ='agent-a'"
             ).fetchone()
         finally:
             conn.close()
@@ -198,7 +198,7 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
         conn = _open_db()
         try:
             row2 = conn.execute(
-                "SELECT last_seen FROM presence WHERE agent = 'agent-a'"
+                "SELECT last_seen FROM presence WHERE agent_id ='agent-a'"
             ).fetchone()
         finally:
             conn.close()
@@ -269,12 +269,12 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         conn = _open_db()
         try:
             conn.execute(
-                "INSERT INTO presence (agent, status, last_seen, joined_at) "
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
                 "VALUES ('stale-bot', 'online', ?, ?)",
                 (stale_time, stale_time),
             )
             conn.execute(
-                "INSERT INTO memberships (agent, channel, joined_at) "
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
                 "VALUES ('stale-bot', 'dev', ?)",
                 (stale_time,),
             )
@@ -285,13 +285,13 @@ class TestAutoLeaveTimeout(unittest.TestCase):
 
             # Verify presence status updated
             row = conn.execute(
-                "SELECT status FROM presence WHERE agent = 'stale-bot'"
+                "SELECT status FROM presence WHERE agent_id ='stale-bot'"
             ).fetchone()
             self.assertEqual(row["status"], "offline")
 
             # Verify membership removed
             mem = conn.execute(
-                "SELECT * FROM memberships WHERE agent = 'stale-bot'"
+                "SELECT * FROM memberships WHERE agent_id ='stale-bot'"
             ).fetchone()
             self.assertIsNone(mem)
         finally:
@@ -304,12 +304,12 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         conn = _open_db()
         try:
             conn.execute(
-                "INSERT INTO presence (agent, status, last_seen, joined_at) "
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
                 "VALUES ('stale-bot', 'online', ?, ?)",
                 (stale_time, stale_time),
             )
             conn.execute(
-                "INSERT INTO memberships (agent, channel, joined_at) "
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
                 "VALUES ('stale-bot', 'dev', ?)",
                 (stale_time,),
             )
@@ -329,12 +329,12 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         conn = _open_db()
         try:
             conn.execute(
-                "INSERT INTO presence (agent, status, last_seen, joined_at) "
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
                 "VALUES ('stale-bot', 'online', ?, ?)",
                 (stale_time, stale_time),
             )
             conn.execute(
-                "INSERT INTO memberships (agent, channel, joined_at) "
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
                 "VALUES ('stale-bot', 'dev', ?)",
                 (stale_time,),
             )
@@ -353,12 +353,12 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         conn = _open_db()
         try:
             conn.execute(
-                "INSERT INTO presence (agent, status, last_seen, joined_at) "
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
                 "VALUES ('stale-bot', 'online', ?, ?)",
                 (stale_time, stale_time),
             )
             conn.execute(
-                "INSERT INTO memberships (agent, channel, joined_at) "
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
                 "VALUES ('stale-bot', 'dev', ?)",
                 (stale_time,),
             )
@@ -374,7 +374,7 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT status FROM presence WHERE agent = 'stale-bot'"
+                "SELECT status FROM presence WHERE agent_id ='stale-bot'"
             ).fetchone()
             self.assertEqual(row["status"], "offline")
         finally:
@@ -460,13 +460,24 @@ class TestPins(unittest.TestCase):
     def tearDown(self):
         self._patcher.stop()
 
+    def _post_and_get_id(self, channel, body, agent="bot"):
+        """Post a message and return its ID from the JSONL."""
+        channel_post(channel, body, agent_name=agent)
+        msgs = _read_messages(_channels_dir() / f"{channel}.jsonl")
+        for m in reversed(msgs):
+            if m.body == body:
+                return m.id
+        return ""
+
     def test_pin_standalone(self):
-        result = channel_pin("dev", "important rule", agent_name="admin")
+        msg_id = self._post_and_get_id("dev", "important rule")
+        result = channel_pin("dev", msg_id, agent_name="admin")
         self.assertIn("Pinned", result)
         self.assertIn("important rule", result)
 
     def test_pin_stored_in_db(self):
-        channel_pin("dev", "rule 1", agent_name="admin")
+        msg_id = self._post_and_get_id("dev", "rule 1")
+        channel_pin("dev", msg_id, agent_name="admin")
         conn = _open_db()
         try:
             row = conn.execute(
@@ -474,6 +485,7 @@ class TestPins(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["body"], "rule 1")
+            self.assertEqual(row["message_id"], msg_id)
             self.assertEqual(row["pinned_by"], "admin")
         finally:
             conn.close()
@@ -487,22 +499,24 @@ class TestPins(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["body"], "pinned msg")
+            self.assertTrue(row["message_id"].startswith("m_"))
         finally:
             conn.close()
 
     def test_pins_shown_in_read(self):
-        channel_pin("dev", "important: follow the rules", agent_name="admin")
+        msg_id = self._post_and_get_id("dev", "important: follow the rules")
+        channel_pin("dev", msg_id, agent_name="admin")
         channel_post("dev", "hello", agent_name="bot")
 
         result = channel_read("dev")
         self.assertIn("Pinned", result)
         self.assertIn("[pin]", result)
         self.assertIn("follow the rules", result)
-        # Regular message should also appear
         self.assertIn("hello", result)
 
     def test_pins_appear_before_messages(self):
-        channel_pin("dev", "pin content", agent_name="admin")
+        msg_id = self._post_and_get_id("dev", "pin content")
+        channel_pin("dev", msg_id, agent_name="admin")
         channel_post("dev", "regular content", agent_name="bot")
 
         result = channel_read("dev")
@@ -511,8 +525,10 @@ class TestPins(unittest.TestCase):
         self.assertLess(pin_pos, msg_pos)
 
     def test_multiple_pins(self):
-        channel_pin("dev", "rule 1", agent_name="admin")
-        channel_pin("dev", "rule 2", agent_name="admin")
+        id1 = self._post_and_get_id("dev", "rule 1")
+        id2 = self._post_and_get_id("dev", "rule 2")
+        channel_pin("dev", id1, agent_name="admin")
+        channel_pin("dev", id2, agent_name="admin")
         channel_post("dev", "hello", agent_name="bot")
 
         result = channel_read("dev")
@@ -534,7 +550,6 @@ class TestPostAndRead(unittest.TestCase):
     def test_post_creates_channel(self):
         result = channel_post("dev", "hello world", agent_name="agent-a")
         self.assertIn("hello world", result)
-        self.assertIn("agent-a", result)
         # Verify JSONL file was created
         data_dir = Path(self.tmpdir) / "project" / ".synapt" / "recall"
         channel_file = data_dir / "channels" / "dev.jsonl"
@@ -625,9 +640,9 @@ class TestJoinLeave(unittest.TestCase):
         conn = _open_db()
         try:
             rows = conn.execute(
-                "SELECT agent FROM memberships WHERE channel = 'dev'"
+                "SELECT agent_id FROM memberships WHERE channel = 'dev'"
             ).fetchall()
-            agents = {r["agent"] for r in rows}
+            agents = {r["agent_id"] for r in rows}
             self.assertIn("agent-a", agents)
             self.assertIn("agent-b", agents)
         finally:
@@ -664,12 +679,12 @@ class TestWho(unittest.TestCase):
         conn = _open_db()
         try:
             conn.execute(
-                "INSERT INTO presence (agent, status, last_seen, joined_at) "
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
                 "VALUES ('idle-agent', 'online', ?, ?)",
                 (idle_time, idle_time),
             )
             conn.execute(
-                "INSERT INTO memberships (agent, channel, joined_at) "
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
                 "VALUES ('idle-agent', 'dev', ?)",
                 (idle_time,),
             )
@@ -689,12 +704,12 @@ class TestWho(unittest.TestCase):
         conn = _open_db()
         try:
             conn.execute(
-                "INSERT INTO presence (agent, status, last_seen, joined_at) "
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
                 "VALUES ('away-agent', 'online', ?, ?)",
                 (away_time, away_time),
             )
             conn.execute(
-                "INSERT INTO memberships (agent, channel, joined_at) "
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
                 "VALUES ('away-agent', 'dev', ?)",
                 (away_time,),
             )
@@ -751,13 +766,13 @@ class TestLegacyMigration(unittest.TestCase):
         conn = _open_db()
         try:
             row = conn.execute(
-                "SELECT * FROM presence WHERE agent = 'agent-old'"
+                "SELECT * FROM presence WHERE agent_id ='agent-old'"
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["last_seen"], "2026-03-16T09:00:00Z")
 
             mems = conn.execute(
-                "SELECT channel FROM memberships WHERE agent = 'agent-old' "
+                "SELECT channel FROM memberships WHERE agent_id ='agent-old' "
                 "ORDER BY channel"
             ).fetchall()
             channels = [r["channel"] for r in mems]
@@ -928,7 +943,7 @@ class TestConcurrentAccess(unittest.TestCase):
             conn = _open_db()
             try:
                 row = conn.execute(
-                    "SELECT * FROM presence WHERE agent = 'agent-a'"
+                    "SELECT * FROM presence WHERE agent_id ='agent-a'"
                 ).fetchone()
                 self.assertIsNotNone(row)
             finally:

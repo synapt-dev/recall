@@ -2,17 +2,25 @@
 
 Storage layout (all under .synapt/recall/channels/):
   <name>.jsonl    -- append-only message log (the open protocol)
-  channels.db     -- SQLite for state: presence, memberships, cursors, pins
+  channels.db     -- SQLite for state: presence, memberships, cursors, pins, mutes
 
 Any process that can append/read files can participate -- no daemon required.
 External agents that cannot use SQLite can still write JSONL lines directly;
 the SQLite layer is used by agents that import this module.
+
+Agent identity: every agent has three layers, but only `id` is passed around.
+  - id:           session hash (s_xxxxxxxx), primary key everywhere
+  - griptree:     auto-detected (gripspace/repo), stored on join
+  - display_name: configurable alias, stored on join, resolved at render time
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sqlite3
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -55,8 +63,65 @@ def _presence_path(project_dir: Path | None = None) -> Path:
 
 
 def _agent_name(agent_name: str | None = None, project_dir: Path | None = None) -> str:
-    """Resolve agent name: explicit > worktree name."""
-    return agent_name or _worktree_name(project_dir)
+    """Resolve agent name: explicit > worktree name. Legacy compat wrapper."""
+    return agent_name or _agent_id(project_dir)
+
+
+# ---------------------------------------------------------------------------
+# Agent identity
+# ---------------------------------------------------------------------------
+
+_CACHED_AGENT_ID: str | None = None
+
+
+def _agent_id(project_dir: Path | None = None) -> str:
+    """Return a stable session-scoped agent ID (s_xxxxxxxx).
+
+    Cached for the lifetime of the process. Based on griptree + PID + monotonic
+    time so each session gets a unique ID.
+    """
+    global _CACHED_AGENT_ID
+    if _CACHED_AGENT_ID is None:
+        gt = _resolve_griptree(project_dir)
+        seed = f"{gt}:{os.getpid()}:{time.monotonic_ns()}"
+        _CACHED_AGENT_ID = "s_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+    return _CACHED_AGENT_ID
+
+
+def _resolve_griptree(project_dir: Path | None = None) -> str:
+    """Auto-detect griptree identity: gripspace_name/repo_name."""
+    try:
+        data_dir = project_data_dir(project_dir)
+        # data_dir is <gripspace>/.synapt/recall — go up 2 for gripspace root
+        gripspace = data_dir.parents[1]
+        repo = Path.cwd()
+        # If cwd is inside gripspace, use relative path
+        try:
+            rel = repo.relative_to(gripspace)
+            return f"{gripspace.name}/{rel}"
+        except ValueError:
+            return gripspace.name
+    except Exception:
+        return _worktree_name(project_dir)
+
+
+def _resolve_display_name(project_dir: Path | None = None) -> str:
+    """Resolve display name: env var > griptree fallback."""
+    name = os.environ.get("SYNAPT_AGENT_NAME", "")
+    if name:
+        return name
+    return _resolve_griptree(project_dir)
+
+
+# ---------------------------------------------------------------------------
+# Message ID generation
+# ---------------------------------------------------------------------------
+
+
+def _generate_msg_id(timestamp: str, agent_id: str, body: str) -> str:
+    """Generate a short deterministic message ID."""
+    seed = f"{timestamp}{agent_id}{body}"
+    return "m_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
 
 
 def _now_iso() -> str:
@@ -83,15 +148,22 @@ class ChannelMessage:
 
     timestamp: str
     channel: str
-    type: str  # "message", "join", "leave"
+    type: str  # "message", "join", "leave", "directive"
     body: str = ""
     # Use field name "from_agent" in Python to avoid shadowing builtin "from".
     # Serialized as "from" in JSON for protocol compatibility.
     from_agent: str = ""
+    id: str = ""       # auto-generated message ID (m_xxxxxxxx)
+    to: str = ""       # directive target agent (optional)
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["from"] = d.pop("from_agent")
+        # Omit empty optional fields to keep JSONL clean
+        if not d.get("id"):
+            d.pop("id", None)
+        if not d.get("to"):
+            d.pop("to", None)
         return d
 
     @classmethod
@@ -110,32 +182,43 @@ class ChannelMessage:
 
 _CHANNEL_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS presence (
-    agent TEXT PRIMARY KEY,
+    agent_id TEXT PRIMARY KEY,
+    griptree TEXT NOT NULL DEFAULT '',
+    display_name TEXT DEFAULT '',
     status TEXT DEFAULT 'online',
     last_seen TEXT NOT NULL,
     joined_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS memberships (
-    agent TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
     channel TEXT NOT NULL,
     joined_at TEXT NOT NULL,
-    PRIMARY KEY (agent, channel)
+    PRIMARY KEY (agent_id, channel)
 );
 
 CREATE TABLE IF NOT EXISTS cursors (
-    agent TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
     channel TEXT NOT NULL,
     last_read_at TEXT NOT NULL,
-    PRIMARY KEY (agent, channel)
+    PRIMARY KEY (agent_id, channel)
 );
 
 CREATE TABLE IF NOT EXISTS pins (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel TEXT NOT NULL,
     body TEXT NOT NULL,
+    message_id TEXT DEFAULT '',
     pinned_by TEXT NOT NULL,
     pinned_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mutes (
+    agent_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    muted_by TEXT NOT NULL,
+    muted_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, channel)
 );
 """
 
@@ -149,10 +232,49 @@ def _open_db(project_dir: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
+    # Migrate old schema (agent → agent_id) before creating new tables
+    _migrate_schema(conn)
     conn.executescript(_CHANNEL_SCHEMA_SQL)
     # Migrate legacy _presence.json if it exists
     _migrate_legacy_presence(conn, project_dir)
     return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Migrate old schema columns if needed."""
+    # Check if presence table exists with old 'agent' column
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(presence)").fetchall()]
+    except sqlite3.OperationalError:
+        return  # Table doesn't exist yet, CREATE will handle it
+    if not cols:
+        return
+    if "agent" in cols and "agent_id" not in cols:
+        # Old schema — recreate tables with new column names
+        conn.executescript("""
+            ALTER TABLE presence RENAME COLUMN agent TO agent_id;
+            ALTER TABLE memberships RENAME COLUMN agent TO agent_id;
+            ALTER TABLE cursors RENAME COLUMN agent TO agent_id;
+        """)
+    # Add new columns if missing
+    if "griptree" not in cols:
+        try:
+            conn.execute("ALTER TABLE presence ADD COLUMN griptree TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    if "display_name" not in cols:
+        try:
+            conn.execute("ALTER TABLE presence ADD COLUMN display_name TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    # Add message_id to pins if missing
+    try:
+        pin_cols = [r[1] for r in conn.execute("PRAGMA table_info(pins)").fetchall()]
+        if pin_cols and "message_id" not in pin_cols:
+            conn.execute("ALTER TABLE pins ADD COLUMN message_id TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
 
 
 def _migrate_legacy_presence(conn: sqlite3.Connection, project_dir: Path | None = None) -> None:
@@ -182,17 +304,14 @@ def _migrate_legacy_presence(conn: sqlite3.Connection, project_dir: Path | None 
         last_seen = info.get("last_seen", joined_at)
         channels = info.get("channels", [])
 
-        # Insert into presence (skip if already exists)
         conn.execute(
-            "INSERT OR IGNORE INTO presence (agent, status, last_seen, joined_at) "
+            "INSERT OR IGNORE INTO presence (agent_id, status, last_seen, joined_at) "
             "VALUES (?, 'online', ?, ?)",
             (agent, last_seen, joined_at),
         )
-
-        # Insert memberships
         for ch in channels:
             conn.execute(
-                "INSERT OR IGNORE INTO memberships (agent, channel, joined_at) "
+                "INSERT OR IGNORE INTO memberships (agent_id, channel, joined_at) "
                 "VALUES (?, ?, ?)",
                 (agent, ch, joined_at),
             )
@@ -238,44 +357,38 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
 
     # Find stale agents
     rows = conn.execute(
-        "SELECT agent, last_seen FROM presence WHERE last_seen < ?",
+        "SELECT agent_id, last_seen FROM presence WHERE last_seen < ?",
         (cutoff,),
     ).fetchall()
 
     reaped = []
     for row in rows:
-        agent = row["agent"]
+        aid = row["agent_id"]
         last_seen = row["last_seen"]
 
         if _agent_status(last_seen) != "offline":
             continue
 
-        # Get their channel memberships
         channels = [
             r["channel"]
             for r in conn.execute(
-                "SELECT channel FROM memberships WHERE agent = ?", (agent,)
+                "SELECT channel FROM memberships WHERE agent_id = ?", (aid,)
             ).fetchall()
         ]
 
-        # Post leave messages to each channel
         leave_time = _now_iso()
         for ch in channels:
             msg = ChannelMessage(
-                timestamp=leave_time,
-                from_agent=agent,
-                channel=ch,
-                type="leave",
-                body=f"{agent} timed out from #{ch}",
+                timestamp=leave_time, from_agent=aid, channel=ch,
+                type="leave", body=f"{aid} timed out from #{ch}",
             )
             _append_message(msg, project_dir)
 
-        # Remove memberships and update presence
-        conn.execute("DELETE FROM memberships WHERE agent = ?", (agent,))
+        conn.execute("DELETE FROM memberships WHERE agent_id = ?", (aid,))
         conn.execute(
-            "UPDATE presence SET status = 'offline' WHERE agent = ?", (agent,)
+            "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
         )
-        reaped.append(agent)
+        reaped.append(aid)
 
     if reaped:
         conn.commit()
@@ -287,7 +400,12 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
 # ---------------------------------------------------------------------------
 
 def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> None:
-    """Append a message to a channel's JSONL log with file locking."""
+    """Append a message to a channel's JSONL log with file locking.
+
+    Auto-generates a message ID if not already set.
+    """
+    if not msg.id:
+        msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     path = _channel_path(msg.channel, project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     from synapt.recall._filelock import lock_exclusive
@@ -350,13 +468,14 @@ def channel_join(
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> str:
-    """Join a channel. Auto-detects agent name from worktree name if not provided."""
-    agent = _agent_name(agent_name, project_dir)
+    """Join a channel. Registers agent identity on first join."""
+    aid = agent_name or _agent_id(project_dir)
+    griptree = _resolve_griptree(project_dir)
+    display = _resolve_display_name(project_dir)
     now = _now_iso()
 
     # Determine cursor initial value: the timestamp of the last message
     # currently in the channel (so only future messages are unread).
-    # If no messages exist, use the join timestamp.
     path = _channel_path(channel, project_dir)
     cursor_init = now
     if path.exists():
@@ -366,26 +485,27 @@ def channel_join(
 
     conn = _open_db(project_dir)
     try:
-        # Upsert presence
+        # Upsert presence with identity
         conn.execute(
-            "INSERT INTO presence (agent, status, last_seen, joined_at) "
-            "VALUES (?, 'online', ?, ?) "
-            "ON CONFLICT(agent) DO UPDATE SET status='online', last_seen=?",
-            (agent, now, now, now),
+            "INSERT INTO presence (agent_id, griptree, display_name, status, last_seen, joined_at) "
+            "VALUES (?, ?, ?, 'online', ?, ?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
+            "griptree=?, display_name=?",
+            (aid, griptree, display, now, now, now, griptree, display),
         )
 
         # Add membership
         conn.execute(
-            "INSERT OR IGNORE INTO memberships (agent, channel, joined_at) "
+            "INSERT OR IGNORE INTO memberships (agent_id, channel, joined_at) "
             "VALUES (?, ?, ?)",
-            (agent, channel, now),
+            (aid, channel, now),
         )
 
-        # Initialize cursor to last message in channel (only new messages are unread)
+        # Initialize cursor to last message in channel
         conn.execute(
-            "INSERT OR IGNORE INTO cursors (agent, channel, last_read_at) "
+            "INSERT OR IGNORE INTO cursors (agent_id, channel, last_read_at) "
             "VALUES (?, ?, ?)",
-            (agent, channel, cursor_init),
+            (aid, channel, cursor_init),
         )
 
         conn.commit()
@@ -395,14 +515,14 @@ def channel_join(
     # Append join event to channel log
     msg = ChannelMessage(
         timestamp=now,
-        from_agent=agent,
+        from_agent=aid,
         channel=channel,
         type="join",
-        body=f"{agent} joined #{channel}",
+        body=f"{display} joined #{channel}",
     )
     _append_message(msg, project_dir)
 
-    return f"Joined #{channel} as {agent}"
+    return f"Joined #{channel} as {display} ({aid})"
 
 
 def channel_leave(
@@ -412,54 +532,40 @@ def channel_leave(
     reason: str = "",
 ) -> str:
     """Leave a channel."""
-    agent = _agent_name(agent_name, project_dir)
+    aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
     conn = _open_db(project_dir)
     try:
-        # Remove membership
         conn.execute(
-            "DELETE FROM memberships WHERE agent = ? AND channel = ?",
-            (agent, channel),
+            "DELETE FROM memberships WHERE agent_id = ? AND channel = ?",
+            (aid, channel),
         )
-
-        # Update last_seen
         conn.execute(
-            "UPDATE presence SET last_seen = ? WHERE agent = ?",
-            (now, agent),
+            "UPDATE presence SET last_seen = ? WHERE agent_id = ?",
+            (now, aid),
         )
-
-        # Check if agent has any remaining memberships
         remaining = conn.execute(
-            "SELECT COUNT(*) FROM memberships WHERE agent = ?",
-            (agent,),
+            "SELECT COUNT(*) FROM memberships WHERE agent_id = ?",
+            (aid,),
         ).fetchone()[0]
-
-        # If no channels left, remove presence entirely
         if remaining == 0:
-            conn.execute("DELETE FROM presence WHERE agent = ?", (agent,))
-
-        # Remove cursor for this channel
+            conn.execute("DELETE FROM presence WHERE agent_id = ?", (aid,))
         conn.execute(
-            "DELETE FROM cursors WHERE agent = ? AND channel = ?",
-            (agent, channel),
+            "DELETE FROM cursors WHERE agent_id = ? AND channel = ?",
+            (aid, channel),
         )
-
         conn.commit()
     finally:
         conn.close()
 
-    # Append leave event to channel log
-    body = reason if reason else f"{agent} left #{channel}"
+    display = _resolve_display_name(project_dir)
+    body = reason if reason else f"{display} left #{channel}"
     msg = ChannelMessage(
-        timestamp=now,
-        from_agent=agent,
-        channel=channel,
-        type="leave",
-        body=body,
+        timestamp=now, from_agent=aid, channel=channel,
+        type="leave", body=body,
     )
     _append_message(msg, project_dir)
-
     return f"Left #{channel}"
 
 
@@ -471,38 +577,33 @@ def channel_post(
     pin: bool = False,
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message."""
-    agent = _agent_name(agent_name, project_dir)
+    aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
     msg = ChannelMessage(
-        timestamp=now,
-        from_agent=agent,
-        channel=channel,
-        type="message",
-        body=message,
+        timestamp=now, from_agent=aid, channel=channel,
+        type="message", body=message,
     )
     _append_message(msg, project_dir)
 
-    # Update last_seen via heartbeat
     conn = _open_db(project_dir)
     try:
         conn.execute(
-            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent = ?",
-            (now, agent),
+            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
+            (now, aid),
         )
-
         if pin:
             conn.execute(
-                "INSERT INTO pins (channel, body, pinned_by, pinned_at) "
-                "VALUES (?, ?, ?, ?)",
-                (channel, message, agent, now),
+                "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (channel, message, msg.id, aid, now),
             )
-
         conn.commit()
     finally:
         conn.close()
 
-    result = f"[#{channel}] {agent}: {message}"
+    display = _resolve_display_name(project_dir)
+    result = f"[#{channel}] {display}: {message}"
     if pin:
         result += " (pinned)"
     return result
@@ -517,17 +618,46 @@ def channel_read(
 ) -> str:
     """Read recent messages from a channel.
 
-    Args:
-        channel: Channel name to read.
-        limit: Maximum messages to return.
-        since: Optional ISO 8601 timestamp -- only return messages after this time.
-        agent_name: Agent reading (for cursor update). Auto-detected if omitted.
-        project_dir: Override project directory for path resolution.
+    Filters muted agents, highlights directives targeted at the reader.
+    Uses a single DB connection for all operations.
     """
-    # Reap stale agents on read
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
     conn = _open_db(project_dir)
     try:
+        # Reap stale agents
         _reap_stale_agents(conn, project_dir)
+
+        # Get muted agents for this channel
+        muted = {
+            r["agent_id"]
+            for r in conn.execute(
+                "SELECT agent_id FROM mutes WHERE channel = ? AND muted_by = ?",
+                (channel, aid),
+            ).fetchall()
+        }
+
+        # Get pins
+        pins = conn.execute(
+            "SELECT body, message_id, pinned_by, pinned_at FROM pins WHERE channel = ? "
+            "ORDER BY pinned_at",
+            (channel,),
+        ).fetchall()
+
+        # Resolve display names for rendering
+        display_map = {}
+        for r in conn.execute("SELECT agent_id, display_name, griptree FROM presence").fetchall():
+            display_map[r["agent_id"]] = r["display_name"] or r["griptree"] or r["agent_id"]
+
+        # Update read cursor
+        conn.execute(
+            "INSERT INTO cursors (agent_id, channel, last_read_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(agent_id, channel) DO UPDATE SET last_read_at = ?",
+            (aid, channel, now, now),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -536,118 +666,96 @@ def channel_read(
         return f"Channel #{channel} has no messages yet."
 
     messages = _read_messages(path, since=since)
-
     if not messages:
         if since:
             return f"No messages in #{channel} since {since}."
         return f"Channel #{channel} has no messages yet."
 
+    # Filter muted agents
+    if muted:
+        messages = [m for m in messages if m.from_agent not in muted]
+
     # Take last N messages
     messages = messages[-limit:]
 
-    # Get pins for this channel
-    conn = _open_db(project_dir)
-    try:
-        pins = conn.execute(
-            "SELECT body, pinned_by, pinned_at FROM pins WHERE channel = ? "
-            "ORDER BY pinned_at",
-            (channel,),
-        ).fetchall()
-    finally:
-        conn.close()
-
     lines = []
 
-    # Show pins at the top if any
+    # Pins at top
     if pins:
         lines.append(f"## Pinned in #{channel}")
         for pin in pins:
             ts = pin["pinned_at"][:16]
-            lines.append(f"  [pin] {ts}  {pin['pinned_by']}: {pin['body']}")
+            by = display_map.get(pin["pinned_by"], pin["pinned_by"])
+            mid = f" [{pin['message_id']}]" if pin["message_id"] else ""
+            lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
         lines.append("")
 
     lines.append(f"## #{channel} ({len(messages)} messages)")
     for msg in messages:
-        ts = msg.timestamp[:16]  # Trim to minute precision
+        ts = msg.timestamp[:16]
+        display = display_map.get(msg.from_agent, msg.from_agent)
+        mid = f" [{msg.id}]" if msg.id else ""
         if msg.type in ("join", "leave"):
-            lines.append(f"  {ts}  -- {msg.body}")
+            lines.append(f"  {ts}{mid}  -- {msg.body}")
+        elif msg.type == "directive":
+            target = f" @{msg.to}" if msg.to else ""
+            prefix = "[DIRECTIVE]" if msg.to == aid else "[directive]"
+            lines.append(f"  {ts}{mid}  {prefix}{target} {display}: {msg.body}")
         else:
-            lines.append(f"  {ts}  {msg.from_agent}: {msg.body}")
-
-    # Update read cursor for this agent
-    agent = _agent_name(agent_name, project_dir)
-    now = _now_iso()
-    conn = _open_db(project_dir)
-    try:
-        conn.execute(
-            "INSERT INTO cursors (agent, channel, last_read_at) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(agent, channel) DO UPDATE SET last_read_at = ?",
-            (agent, channel, now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+            lines.append(f"  {ts}{mid}  {display}: {msg.body}")
 
     return "\n".join(lines)
 
 
 def channel_who(project_dir: Path | None = None) -> str:
-    """Show which agents are currently online and in which channels."""
+    """Show which agents are currently online and in which channels.
+
+    Displays all three identity layers: display_name, griptree, agent_id.
+    """
     conn = _open_db(project_dir)
     try:
-        # Reap stale agents first
         _reap_stale_agents(conn, project_dir)
 
-        # Get all agents with their presence info
         agents = conn.execute(
-            "SELECT agent, status, last_seen, joined_at FROM presence"
+            "SELECT agent_id, griptree, display_name, status, last_seen FROM presence"
         ).fetchall()
 
         if not agents:
             return "No agents online."
 
         lines = ["## Agents"]
-        for row in sorted(agents, key=lambda r: r["agent"]):
-            agent = row["agent"]
+        for row in sorted(agents, key=lambda r: r["display_name"] or r["griptree"] or r["agent_id"]):
+            aid = row["agent_id"]
             last_seen = row["last_seen"]
-
-            # Compute live status from last_seen (more accurate than stored status)
             status = _agent_status(last_seen)
 
-            # Skip offline agents in the display
             if status == "offline":
                 continue
 
-            # Get channels for this agent
             channels = [
                 r["channel"]
                 for r in conn.execute(
-                    "SELECT channel FROM memberships WHERE agent = ? ORDER BY channel",
-                    (agent,),
+                    "SELECT channel FROM memberships WHERE agent_id = ? ORDER BY channel",
+                    (aid,),
                 ).fetchall()
             ]
             channels_str = ", ".join(f"#{c}" for c in channels) if channels else "(no channels)"
 
+            # Display name with fallback chain
+            display = row["display_name"] or row["griptree"] or aid
+            identity = f" ({row['griptree']}, {aid})" if row["display_name"] else f" ({aid})"
+
             if status == "online":
                 status_label = "online"
-            elif status == "idle":
-                delta = datetime.now(timezone.utc) - _parse_iso(last_seen)
-                mins = int(delta.total_seconds() / 60)
-                status_label = f"idle ({mins}m)"
-            elif status == "away":
-                delta = datetime.now(timezone.utc) - _parse_iso(last_seen)
-                mins = int(delta.total_seconds() / 60)
-                status_label = f"away ({mins}m)"
             else:
-                status_label = status
+                delta = datetime.now(timezone.utc) - _parse_iso(last_seen)
+                mins = int(delta.total_seconds() / 60)
+                status_label = f"{status} ({mins}m)"
 
-            lines.append(f"  {agent}  [{status_label}]  {channels_str}")
+            lines.append(f"  {display}{identity}  [{status_label}]  {channels_str}")
 
         if len(lines) == 1:
-            # Only header, no visible agents (all offline)
             return "No agents online."
-
         return "\n".join(lines)
     finally:
         conn.close()
@@ -657,23 +765,20 @@ def channel_heartbeat(
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> str:
-    """Update last_seen for an agent. Lightweight -- one UPDATE statement.
-
-    Called by hooks (SessionStart, PreCompact) to keep presence fresh.
-    """
-    agent = _agent_name(agent_name, project_dir)
+    """Update last_seen for an agent. Lightweight -- one UPDATE statement."""
+    aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
     conn = _open_db(project_dir)
     try:
         result = conn.execute(
-            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent = ?",
-            (now, agent),
+            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
+            (now, aid),
         )
         conn.commit()
         if result.rowcount == 0:
-            return f"Agent {agent} not in any channel (heartbeat skipped)."
-        return f"Heartbeat: {agent} at {now}"
+            return f"Agent {aid} not in any channel (heartbeat skipped)."
+        return f"Heartbeat: {aid} at {now}"
     finally:
         conn.close()
 
@@ -682,44 +787,28 @@ def channel_unread(
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> dict[str, int]:
-    """Return unread message counts per channel for the given agent.
-
-    Returns dict like {"dev": 3, "eval": 0}.
-    """
-    agent = _agent_name(agent_name, project_dir)
+    """Return unread message counts per channel for the given agent."""
+    aid = agent_name or _agent_id(project_dir)
 
     conn = _open_db(project_dir)
     try:
-        # Get all channels this agent is a member of
         memberships = conn.execute(
-            "SELECT channel FROM memberships WHERE agent = ?",
-            (agent,),
+            "SELECT channel FROM memberships WHERE agent_id = ?",
+            (aid,),
         ).fetchall()
-
         if not memberships:
             return {}
 
         result = {}
         for row in memberships:
             ch = row["channel"]
-
-            # Get cursor for this channel
             cursor_row = conn.execute(
-                "SELECT last_read_at FROM cursors WHERE agent = ? AND channel = ?",
-                (agent, ch),
+                "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = ?",
+                (aid, ch),
             ).fetchone()
-
-            if cursor_row:
-                last_read = cursor_row["last_read_at"]
-            else:
-                # No cursor -- count all messages as unread
-                last_read = "1970-01-01T00:00:00Z"
-
-            # Count messages in JSONL after the cursor
+            last_read = cursor_row["last_read_at"] if cursor_row else "1970-01-01T00:00:00Z"
             path = _channel_path(ch, project_dir)
-            count = _count_messages_since(path, last_read) if path.exists() else 0
-            result[ch] = count
-
+            result[ch] = _count_messages_since(path, last_read) if path.exists() else 0
         return result
     finally:
         conn.close()
@@ -727,23 +816,177 @@ def channel_unread(
 
 def channel_pin(
     channel: str,
-    message: str,
+    message_id: str,
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> str:
-    """Pin a message in a channel (without posting to the JSONL log)."""
-    agent = _agent_name(agent_name, project_dir)
+    """Pin a message by its ID. Looks up the message in the JSONL log."""
+    aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
+
+    # Find the message in the JSONL
+    path = _channel_path(channel, project_dir)
+    body = ""
+    if path.exists():
+        for msg in _read_messages(path):
+            if msg.id == message_id:
+                body = msg.body
+                break
+    if not body:
+        return f"Message {message_id} not found in #{channel}."
 
     conn = _open_db(project_dir)
     try:
         conn.execute(
-            "INSERT INTO pins (channel, body, pinned_by, pinned_at) "
-            "VALUES (?, ?, ?, ?)",
-            (channel, message, agent, now),
+            "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel, body, message_id, aid, now),
         )
         conn.commit()
     finally:
         conn.close()
 
-    return f"Pinned in #{channel}: {message}"
+    return f"Pinned [{message_id}] in #{channel}: {body}"
+
+
+# ---------------------------------------------------------------------------
+# New operations: directive, mute, kick, broadcast, list
+# ---------------------------------------------------------------------------
+
+
+def channel_directive(
+    channel: str,
+    message: str,
+    to: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+    remind: bool = False,
+) -> str:
+    """Post a directive message targeted at a specific agent."""
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
+    msg = ChannelMessage(
+        timestamp=now, from_agent=aid, channel=channel,
+        type="directive", body=message, to=to,
+    )
+    _append_message(msg, project_dir)
+
+    # Optionally bridge to reminders
+    if remind:
+        try:
+            from synapt.recall.reminders import add_reminder
+            add_reminder(f"[directive from {aid}] {message}")
+        except Exception:
+            pass
+
+    display = _resolve_display_name(project_dir)
+    return f"[#{channel}] {display} → @{to}: {message}"
+
+
+def channel_mute(
+    target_id: str,
+    channel: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Mute an agent in a channel. Their messages won't appear in your reads."""
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
+    conn = _open_db(project_dir)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO mutes (agent_id, channel, muted_by, muted_at) "
+            "VALUES (?, ?, ?, ?)",
+            (target_id, channel, aid, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return f"Muted {target_id} in #{channel}."
+
+
+def channel_unmute(
+    target_id: str,
+    channel: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Unmute an agent in a channel."""
+    aid = agent_name or _agent_id(project_dir)
+
+    conn = _open_db(project_dir)
+    try:
+        conn.execute(
+            "DELETE FROM mutes WHERE agent_id = ? AND channel = ? AND muted_by = ?",
+            (target_id, channel, aid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return f"Unmuted {target_id} in #{channel}."
+
+
+def channel_kick(
+    target_id: str,
+    channel: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Remove an agent from a channel (admin action)."""
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
+    conn = _open_db(project_dir)
+    try:
+        conn.execute(
+            "DELETE FROM memberships WHERE agent_id = ? AND channel = ?",
+            (target_id, channel),
+        )
+        conn.execute(
+            "DELETE FROM cursors WHERE agent_id = ? AND channel = ?",
+            (target_id, channel),
+        )
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM memberships WHERE agent_id = ?",
+            (target_id,),
+        ).fetchone()[0]
+        if remaining == 0:
+            conn.execute("DELETE FROM presence WHERE agent_id = ?", (target_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Post kick event
+    display = _resolve_display_name(project_dir)
+    msg = ChannelMessage(
+        timestamp=now, from_agent=aid, channel=channel,
+        type="leave", body=f"{target_id} kicked from #{channel} by {display}",
+    )
+    _append_message(msg, project_dir)
+    return f"Kicked {target_id} from #{channel}."
+
+
+def channel_broadcast(
+    message: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Post a message to ALL active channels."""
+    channels = channel_list_channels(project_dir)
+    if not channels:
+        return "No channels to broadcast to."
+    for ch in channels:
+        channel_post(ch, message, agent_name=agent_name, project_dir=project_dir)
+    return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+
+
+def channel_list_channels(project_dir: Path | None = None) -> list[str]:
+    """Return list of all channel names (from JSONL files)."""
+    ch_dir = _channels_dir(project_dir)
+    if not ch_dir.exists():
+        return []
+    return sorted(
+        p.stem for p in ch_dir.glob("*.jsonl")
+    )
