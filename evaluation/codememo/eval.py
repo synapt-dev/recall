@@ -40,7 +40,25 @@ from evaluation.codememo.schema import CATEGORY_NAMES, ALL_CATEGORIES
 # ---------------------------------------------------------------------------
 
 CODEMEMO_DIR = Path(__file__).parent
-DATA_DIR = CODEMEMO_DIR / "data"
+_LOCAL_DATA = CODEMEMO_DIR / "data"
+
+# HuggingFace dataset ID — auto-downloaded if no local data/ directory exists
+HF_DATASET_ID = "laynepro/codememo-benchmark"
+
+
+def _resolve_data_dir() -> Path:
+    """Return data directory, downloading from HuggingFace if needed."""
+    if _LOCAL_DATA.is_dir() and any(_LOCAL_DATA.iterdir()):
+        return _LOCAL_DATA
+    try:
+        from huggingface_hub import snapshot_download
+        path = snapshot_download(HF_DATASET_ID, repo_type="dataset")
+        return Path(path)
+    except ImportError:
+        return _LOCAL_DATA  # fall back, will error later if empty
+
+
+DATA_DIR = _resolve_data_dir()
 
 
 # ---------------------------------------------------------------------------
