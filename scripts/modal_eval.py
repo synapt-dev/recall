@@ -10,6 +10,9 @@ Usage:
     # Run all LOCOMO configs
     modal run scripts/modal_eval.py --config lm_
 
+    # Run full-pipeline with GPU enrichment
+    modal run scripts/modal_eval.py --config full_pipeline
+
     # Check results
     modal volume get synapt-eval-vol results/ablation_results.json /tmp/results.json
 """
@@ -34,7 +37,8 @@ app = modal.App("synapt-eval")
 
 volume = modal.Volume.from_name("synapt-eval-vol", create_if_missing=True)
 
-_image = (
+# CPU image — search + judge via OpenAI API
+image = (
     modal.Image.debian_slim(python_version="3.13")
     .add_local_dir(
         REPO_ROOT,
@@ -49,17 +53,38 @@ _image = (
     .run_commands("pip install -q /root/synapt")
 )
 
+# GPU image — vLLM + Ministral-8B for enrichment
+gpu_image = (
+    modal.Image.debian_slim(python_version="3.13")
+    .add_local_dir(
+        REPO_ROOT,
+        remote_path="/root/synapt",
+        copy=True,
+        ignore=[".git", "__pycache__", "*.egg-info", ".claude/worktrees"],
+    )
+    .pip_install(
+        "openai>=1.0",
+        "huggingface_hub",
+        "vllm",
+    )
+    .run_commands("pip install -q /root/synapt")
+)
+
 # Bundle LOCOMO dataset if available (lives in private repo)
 if LOCOMO_DATASET.exists():
-    image = _image.add_local_file(
+    image = image.add_local_file(
         LOCOMO_DATASET,
         remote_path="/root/synapt/evaluation/dataset/locomo10.json",
         copy=True,
     )
-else:
-    image = _image
+    gpu_image = gpu_image.add_local_file(
+        LOCOMO_DATASET,
+        remote_path="/root/synapt/evaluation/dataset/locomo10.json",
+        copy=True,
+    )
 
 RESULTS_DIR = "/results"
+ENRICH_MODEL = "mistralai/Ministral-8B-Instruct-2410"
 
 # ---------------------------------------------------------------------------
 # Environment configs (subtractive ablations)
@@ -79,61 +104,47 @@ def minus(feature: str) -> dict:
     return env
 
 
-# (description, env_overrides, extra_args, benchmark)
-# benchmark: "codememo" or "locomo"
+# (description, env_overrides, extra_args, benchmark, gpu)
 CONFIGS = {
     # CodeMemo ablations
-    "cm_full": ("Full (all features ON)", FULL, [], "codememo"),
-    "cm_-reranker": ("- reranker", minus("reranker"), [], "codememo"),
-    "cm_-intent": ("- intent classification", minus("intent"), [], "codememo"),
-    "cm_-dedup": ("- deduplication", minus("dedup"), [], "codememo"),
-    "cm_-boosts": ("- working memory boosts", minus("boosts"), [], "codememo"),
-    "cm_-clusters": ("- cluster summaries", minus("clusters"), [], "codememo"),
-    "cm_-content_profile": ("- content profile", minus("content_profile"), [], "codememo"),
-    "cm_-subchunks": ("- sub-chunk splitting", {**FULL, "SYNAPT_SUBCHUNK_MIN_TEXT": "999999999"}, [], "codememo"),
-    "cm_-links": ("- cross-session links", {**FULL, "SYNAPT_CROSS_LINK_MAX_EXPAND": "0"}, [], "codememo"),
-    "cm_full_pipeline": ("Full pipeline (+ enrich)", FULL, ["--full-pipeline"], "codememo"),
+    "cm_full": ("Full (all features ON)", FULL, [], "codememo", False),
+    "cm_-reranker": ("- reranker", minus("reranker"), [], "codememo", False),
+    "cm_-intent": ("- intent classification", minus("intent"), [], "codememo", False),
+    "cm_-dedup": ("- deduplication", minus("dedup"), [], "codememo", False),
+    "cm_-boosts": ("- working memory boosts", minus("boosts"), [], "codememo", False),
+    "cm_-clusters": ("- cluster summaries", minus("clusters"), [], "codememo", False),
+    "cm_-content_profile": ("- content profile", minus("content_profile"), [], "codememo", False),
+    "cm_-subchunks": ("- sub-chunk splitting", {**FULL, "SYNAPT_SUBCHUNK_MIN_TEXT": "999999999"}, [], "codememo", False),
+    "cm_-links": ("- cross-session links", {**FULL, "SYNAPT_CROSS_LINK_MAX_EXPAND": "0"}, [], "codememo", False),
+    "cm_full_pipeline": ("Full pipeline (+ enrich)", {**FULL, "SYNAPT_SUMMARY_BACKEND": "vllm"}, ["--full-pipeline", "--enrich-model", ENRICH_MODEL], "codememo", True),
     # LOCOMO ablations
-    "lm_full": ("Full (all features ON)", FULL, [], "locomo"),
-    "lm_-reranker": ("- reranker", minus("reranker"), [], "locomo"),
-    "lm_-intent": ("- intent classification", minus("intent"), [], "locomo"),
-    "lm_-dedup": ("- deduplication", minus("dedup"), [], "locomo"),
-    "lm_-boosts": ("- working memory boosts", minus("boosts"), [], "locomo"),
-    "lm_-clusters": ("- cluster summaries", minus("clusters"), [], "locomo"),
-    "lm_-content_profile": ("- content profile", minus("content_profile"), [], "locomo"),
-    "lm_-subchunks": ("- sub-chunk splitting", {**FULL, "SYNAPT_SUBCHUNK_MIN_TEXT": "999999999"}, [], "locomo"),
-    "lm_-links": ("- cross-session links", {**FULL, "SYNAPT_CROSS_LINK_MAX_EXPAND": "0"}, [], "locomo"),
-    "lm_full_pipeline": ("Full pipeline (+ enrich)", FULL, ["--full-pipeline"], "locomo"),
+    "lm_full": ("Full (all features ON)", FULL, [], "locomo", False),
+    "lm_-reranker": ("- reranker", minus("reranker"), [], "locomo", False),
+    "lm_-intent": ("- intent classification", minus("intent"), [], "locomo", False),
+    "lm_-dedup": ("- deduplication", minus("dedup"), [], "locomo", False),
+    "lm_-boosts": ("- working memory boosts", minus("boosts"), [], "locomo", False),
+    "lm_-clusters": ("- cluster summaries", minus("clusters"), [], "locomo", False),
+    "lm_-content_profile": ("- content profile", minus("content_profile"), [], "locomo", False),
+    "lm_-subchunks": ("- sub-chunk splitting", {**FULL, "SYNAPT_SUBCHUNK_MIN_TEXT": "999999999"}, [], "locomo", False),
+    "lm_-links": ("- cross-session links", {**FULL, "SYNAPT_CROSS_LINK_MAX_EXPAND": "0"}, [], "locomo", False),
+    "lm_full_pipeline": ("Full pipeline (+ enrich)", {**FULL, "SYNAPT_SUMMARY_BACKEND": "vllm"}, ["--full-pipeline", "--enrich-model", ENRICH_MODEL], "locomo", True),
 }
 
 
 # ---------------------------------------------------------------------------
-# Modal function — runs a single ablation config
+# Shared eval logic
 # ---------------------------------------------------------------------------
 
-@app.function(
-    image=image,
-    secrets=[modal.Secret.from_name("openai-secret")],
-    volumes={RESULTS_DIR: volume},
-    timeout=3600 * 8,  # 8 hours — rate limits make it slow
-    cpu=1,
-    memory=2048,
-)
-def run_ablation(
-    name: str, desc: str, env_overrides: dict,
-    extra_args: list[str] | None = None, benchmark: str = "codememo",
-) -> dict:
-    """Run a single ablation config (CodeMemo or LOCOMO)."""
+def _run_eval(name, desc, env_overrides, extra_args, benchmark):
+    """Core eval logic shared by CPU and GPU functions."""
     import subprocess
     import sys
 
-    # Apply env overrides
     os.environ.update(env_overrides)
 
     output_dir = Path(RESULTS_DIR) / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Benchmark-specific settings
     if benchmark == "locomo":
         module = "evaluation.locomo_eval"
         summary_file = "locomo_summary.json"
@@ -145,7 +156,6 @@ def run_ablation(
         checkpoint_file = "codememo_checkpoint.json"
         score_key = "j_score_overall"
 
-    # Check for existing final results (skip if already complete)
     summary_path = output_dir / summary_file
     if summary_path.exists():
         result = json.loads(summary_path.read_text())
@@ -154,17 +164,14 @@ def run_ablation(
             volume.commit()
             return result
 
-    # Reload volume to pick up checkpoints from preempted runs
     volume.reload()
 
     print(f"=== {name}: {desc} ({benchmark}) ===")
     print(f"Env: {json.dumps(env_overrides, indent=2)}")
 
-    # Run the eval, committing volume after each checkpoint write
-    # so preemption doesn't lose progress
     cmd = [sys.executable, "-m", module, "--recalldb", "--output", str(output_dir)]
     if benchmark == "codememo":
-        cmd += ["--model", "gpt-4o-mini"]
+        cmd += ["--model", "gpt-5-mini"]
     cmd += extra_args or []
 
     checkpoint_path = output_dir / checkpoint_file
@@ -172,11 +179,8 @@ def run_ablation(
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, cwd="/root/synapt")
-    stdout_lines = []
     for line in proc.stdout:
-        stdout_lines.append(line)
         print(line, end="", flush=True)
-        # Commit volume whenever the checkpoint file grows (new answer saved)
         if checkpoint_path.exists():
             cur_size = checkpoint_path.stat().st_size
             if cur_size != last_size:
@@ -187,32 +191,62 @@ def run_ablation(
     if proc.returncode != 0:
         print(f"STDERR: {stderr[-1000:]}")
 
-    # Read and return results
     volume.commit()
     if summary_path.exists():
         return json.loads(summary_path.read_text())
-    return {"error": f"No summary produced, exit={result.returncode}"}
+    return {"error": f"No summary produced, exit={proc.returncode}"}
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator — runs all configs serially
+# CPU function — standard ablations (no enrichment)
 # ---------------------------------------------------------------------------
 
 @app.function(
     image=image,
     secrets=[modal.Secret.from_name("openai-secret")],
     volumes={RESULTS_DIR: volume},
-    timeout=3600 * 24,  # 24 hours
+    timeout=3600 * 8,
+    cpu=1,
+    memory=2048,
+)
+def run_ablation(name, desc, env_overrides, extra_args=None, benchmark="codememo"):
+    return _run_eval(name, desc, env_overrides, extra_args, benchmark)
+
+
+# ---------------------------------------------------------------------------
+# GPU function — full-pipeline with vLLM enrichment (Ministral-8B on A10G)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=gpu_image,
+    secrets=[modal.Secret.from_name("openai-secret")],
+    volumes={RESULTS_DIR: volume},
+    timeout=3600 * 8,
+    gpu="A10G",
+    memory=32768,
+)
+def run_ablation_gpu(name, desc, env_overrides, extra_args=None, benchmark="codememo"):
+    return _run_eval(name, desc, env_overrides, extra_args, benchmark)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("openai-secret")],
+    volumes={RESULTS_DIR: volume},
+    timeout=3600 * 24,
     cpu=1,
     memory=512,
 )
 def run_all(config_filter: str | None = None):
-    """Run all ablation configs serially."""
+    """Run ablation configs serially, dispatching to CPU or GPU as needed."""
     t_start = time.time()
 
     configs_to_run = CONFIGS
     if config_filter:
-        # Support comma-separated filters: "subchunks,links,full_pipeline"
         filters = [f.strip() for f in config_filter.split(",")]
         configs_to_run = {
             k: v for k, v in CONFIGS.items()
@@ -220,12 +254,15 @@ def run_all(config_filter: str | None = None):
         }
 
     results = {}
-    for name, (desc, env, extra, bench) in configs_to_run.items():
+    for name, (desc, env, extra, bench, needs_gpu) in configs_to_run.items():
         print(f"\n{'='*60}")
-        print(f"Launching: {name} — {desc}")
+        print(f"Launching: {name} — {desc} {'[GPU]' if needs_gpu else '[CPU]'}")
         print(f"{'='*60}")
 
-        result = run_ablation.remote(name, desc, env, extra, bench)
+        if needs_gpu:
+            result = run_ablation_gpu.remote(name, desc, env, extra, bench)
+        else:
+            result = run_ablation.remote(name, desc, env, extra, bench)
         results[name] = result
 
         j = result.get("j_score_overall", "?")
@@ -250,7 +287,6 @@ def run_all(config_filter: str | None = None):
         json.dump(combined, f, indent=2)
     volume.commit()
 
-    # Print summary
     print(f"\n\n{'='*70}")
     print(f"ABLATION RESULTS ({elapsed/60:.0f}min)")
     print(f"{'='*70}")

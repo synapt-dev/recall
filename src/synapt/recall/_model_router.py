@@ -144,6 +144,8 @@ def get_client(
         return _get_transformers_client(max_tokens)
     elif override == "ollama":
         return _get_ollama_client(max_tokens)
+    elif override == "vllm":
+        return _get_vllm_client(max_tokens)
     elif override in _extra_backends:
         key = (override, max_tokens)
         cached = _client_cache.get(key, _NOT_FOUND)
@@ -262,6 +264,23 @@ def _get_ollama_client(max_tokens: int) -> object | None:
         return client
     except ImportError:
         logger.debug("OllamaClient not available")
+        return None
+
+
+def _get_vllm_client(max_tokens: int) -> object | None:
+    """Try to create a VLLMClient. Returns None if unavailable."""
+    key = ("vllm", max_tokens)
+    if key in _client_cache:
+        return _client_cache[key]
+
+    try:
+        from synapt._models.vllm_client import VLLMClient
+        client = VLLMClient(max_tokens=max_tokens)
+        _client_cache[key] = client
+        logger.debug("VLLMClient available for decoder-only inference")
+        return client
+    except ImportError:
+        logger.debug("VLLMClient not available (vllm not installed)")
         return None
 
 
