@@ -454,6 +454,7 @@ def _api_call_with_retry(client, messages, max_tokens=100, retries=10, model="gp
                     messages=messages,
                     temperature=0.0,
                     max_tokens=max_tokens,
+                    seed=42,
                 )
                 return response.choices[0].message.content.strip()
         except Exception as e:
