@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS access_stats (
     item_id           TEXT NOT NULL,
     access_count      INTEGER NOT NULL DEFAULT 0,  -- total accesses (search + context + hook)
     explicit_count    INTEGER NOT NULL DEFAULT 0,  -- user-initiated (search + context), not hook
+    weighted_count    REAL NOT NULL DEFAULT 0.0,    -- relevance-weighted explicit access sum
     last_accessed     TEXT NOT NULL,
     first_accessed    TEXT NOT NULL,
     promotion_tier    TEXT NOT NULL DEFAULT 'raw',  -- raw|clustered|summarized|promoted|knowledge
@@ -598,6 +599,7 @@ class RecallDB:
             ("distinct_sessions", "INTEGER NOT NULL DEFAULT 0"),
             ("distinct_queries", "INTEGER NOT NULL DEFAULT 0"),
             ("decay_score", "REAL NOT NULL DEFAULT 1.0"),
+            ("weighted_count", "REAL NOT NULL DEFAULT 0.0"),
         ]
         for col_name, col_def in migrations:
             if col_name not in cols:
@@ -1759,17 +1761,22 @@ class RecallDB:
                 # Upsert access_stats: increment counts, update timestamps.
                 # "search" and "context" are user-initiated (explicit);
                 # "hook" is automated and does not count toward promotions.
+                # weighted_count accumulates the relevance score for explicit
+                # accesses — high-relevance results contribute more to the
+                # frequency boost than low-relevance ones.
                 is_explicit = 1 if context in ("search", "context") else 0
+                score = item.get("score", 0.0) if is_explicit else 0.0
                 self._conn.execute(
                     "INSERT INTO access_stats "
                     "(item_type, item_id, access_count, explicit_count, "
-                    " first_accessed, last_accessed) "
-                    "VALUES (?, ?, 1, ?, ?, ?) "
+                    " weighted_count, first_accessed, last_accessed) "
+                    "VALUES (?, ?, 1, ?, ?, ?, ?) "
                     "ON CONFLICT(item_type, item_id) DO UPDATE SET "
                     "access_count = access_count + 1, "
                     "explicit_count = explicit_count + excluded.explicit_count, "
+                    "weighted_count = weighted_count + excluded.weighted_count, "
                     "last_accessed = excluded.last_accessed",
-                    (item_type, item_id, is_explicit, now, now),
+                    (item_type, item_id, is_explicit, score, now, now),
                 )
                 # Update distinct session/query counts from the log
                 if is_explicit:
@@ -1816,6 +1823,7 @@ class RecallDB:
             ("distinct_sessions", 0),
             ("distinct_queries", 0),
             ("decay_score", 1.0),
+            ("weighted_count", 0.0),
         ]:
             try:
                 result[col] = row[col]

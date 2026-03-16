@@ -1827,7 +1827,11 @@ class TranscriptIndex:
             lines.append(block)
             token_count += block_tokens
             item_id = node.get("id", "")
-            access_items.append({"item_type": "knowledge", "item_id": item_id})
+            access_items.append({
+                "item_type": "knowledge",
+                "item_id": item_id,
+                "score": node.get("score", 0.0),
+            })
             wm.record("knowledge", item_id, node.get("content", ""))
 
         # Cluster summaries — pass query for snippet extraction
@@ -1841,7 +1845,11 @@ class TranscriptIndex:
                 break
             lines.append(block)
             token_count += block_tokens
-            access_items.append({"item_type": "cluster", "item_id": cluster_id})
+            access_items.append({
+                "item_type": "cluster",
+                "item_id": cluster_id,
+                "score": score,
+            })
             wm.record("cluster", cluster_id, info.get("topic", ""))
 
         # Record access (fire-and-forget)
@@ -2807,12 +2815,14 @@ class TranscriptIndex:
     ) -> float:
         """Apply a frequency boost based on persistent access history.
 
-        Uses explicit_count (search + context) as the signal — only hook
-        accesses are excluded. Both search results and drill-downs indicate
-        deliberate user interest.
+        Uses weighted_count (relevance-weighted sum of explicit accesses)
+        as the signal. Each access contributes its unboosted relevance
+        score instead of a flat +1, so high-relevance accesses count more
+        than low-relevance ones. Falls back to explicit_count for old DBs
+        that lack the weighted_count column.
 
-        Boost: 1 + min(log2(explicit_count + 1), 0.3) → capped at 1.3x.
-        This is intentionally mild — access history should nudge ranking,
+        Boost: 1 + min(log2(count + 1) * 0.15, 0.3) -> capped at 1.3x.
+        This is intentionally mild -- access history should nudge ranking,
         not dominate it. BM25 relevance remains the primary signal.
         """
         if not self._db:
@@ -2820,7 +2830,11 @@ class TranscriptIndex:
         stats = self._db.get_access_stats(item_type, item_id)
         if stats is None or stats["explicit_count"] == 0:
             return score
-        boost = 1.0 + min(math.log2(stats["explicit_count"] + 1) * 0.15, 0.3)
+        # Prefer weighted_count; fall back to explicit_count for un-migrated DBs
+        count = stats.get("weighted_count", 0.0)
+        if count <= 0:
+            count = float(stats["explicit_count"])
+        boost = 1.0 + min(math.log2(count + 1) * 0.15, 0.3)
         return score * boost
 
     def _group_by_cluster(

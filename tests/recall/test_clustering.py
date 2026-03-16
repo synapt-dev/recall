@@ -1008,24 +1008,101 @@ class TestClusterFTSSearch:
         import math
         idx, db = self._build_index_with_search_text(tmp_path)
 
-        # No access history → no boost
+        # No access history -> no boost
         score = idx._access_frequency_boost(10.0, "chunk", "nonexistent")
         assert score == 10.0
 
-        # Simulate explicit access (drill-down)
+        # Simulate explicit access with a relevance score
         db.record_access(
-            [{"item_type": "chunk", "item_id": "s1:t0"}], context="context",
+            [{"item_type": "chunk", "item_id": "s1:t0", "score": 0.8}],
+            context="context",
         )
         boosted = idx._access_frequency_boost(10.0, "chunk", "s1:t0")
-        expected_boost = 1.0 + min(math.log2(1 + 1) * 0.15, 0.3)
+        # weighted_count is 0.8
+        expected_boost = 1.0 + min(math.log2(0.8 + 1) * 0.15, 0.3)
         assert abs(boosted - 10.0 * expected_boost) < 0.001
 
-        # Hook access → no boost (hook is not explicit)
+        # Hook access -> no boost (hook is not explicit)
         db.record_access(
-            [{"item_type": "chunk", "item_id": "s2:t0"}], context="hook",
+            [{"item_type": "chunk", "item_id": "s2:t0", "score": 5.0}],
+            context="hook",
         )
         no_boost = idx._access_frequency_boost(10.0, "chunk", "s2:t0")
         assert no_boost == 10.0
+
+        db.close()
+
+    def test_access_boost_weighted_high_vs_low(self, tmp_path):
+        """High-score accesses produce a larger boost than low-score accesses."""
+        import math
+        idx, db = self._build_index_with_search_text(tmp_path)
+
+        # 3 high-score accesses for s1:t0
+        for _ in range(3):
+            db.record_access(
+                [{"item_type": "chunk", "item_id": "s1:t0", "score": 0.9}],
+                context="search",
+            )
+        # 3 low-score accesses for s2:t0
+        for _ in range(3):
+            db.record_access(
+                [{"item_type": "chunk", "item_id": "s2:t0", "score": 0.2}],
+                context="search",
+            )
+
+        boost_high = idx._access_frequency_boost(10.0, "chunk", "s1:t0")
+        boost_low = idx._access_frequency_boost(10.0, "chunk", "s2:t0")
+
+        # Both get boosted, but high-score access gets more
+        assert boost_high > 10.0
+        assert boost_low > 10.0
+        assert boost_high > boost_low
+
+        # Verify the weighted formula: 3*0.9 = 2.7 vs 3*0.2 = 0.6
+        expected_high = 10.0 * (1.0 + min(math.log2(2.7 + 1) * 0.15, 0.3))
+        expected_low = 10.0 * (1.0 + min(math.log2(0.6 + 1) * 0.15, 0.3))
+        assert abs(boost_high - expected_high) < 0.001
+        assert abs(boost_low - expected_low) < 0.001
+
+        db.close()
+
+    def test_access_boost_cap_at_1_3x(self, tmp_path):
+        """The boost caps at 1.3x regardless of access history."""
+        idx, db = self._build_index_with_search_text(tmp_path)
+
+        # Many high-score accesses to push weighted_count very high
+        for _ in range(100):
+            db.record_access(
+                [{"item_type": "chunk", "item_id": "s1:t0", "score": 1.0}],
+                context="search",
+            )
+
+        boosted = idx._access_frequency_boost(10.0, "chunk", "s1:t0")
+        # Cap is 1.3x -> max 13.0
+        assert boosted <= 10.0 * 1.3 + 0.001
+        assert boosted > 10.0  # But it is boosted
+
+        db.close()
+
+    def test_access_boost_fallback_to_explicit_count(self, tmp_path):
+        """Falls back to explicit_count when weighted_count is 0 (no score)."""
+        import math
+        idx, db = self._build_index_with_search_text(tmp_path)
+
+        # Access without a score -> weighted_count stays 0, explicit_count = 1
+        db.record_access(
+            [{"item_type": "chunk", "item_id": "s1:t0"}],
+            context="search",
+        )
+
+        stats = db.get_access_stats("chunk", "s1:t0")
+        assert stats["explicit_count"] == 1
+        assert stats["weighted_count"] == 0.0
+
+        # Should fall back to explicit_count
+        boosted = idx._access_frequency_boost(10.0, "chunk", "s1:t0")
+        expected = 10.0 * (1.0 + min(math.log2(1 + 1) * 0.15, 0.3))
+        assert abs(boosted - expected) < 0.001
 
         db.close()
 
