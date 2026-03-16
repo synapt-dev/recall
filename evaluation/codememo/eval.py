@@ -642,6 +642,26 @@ def run_evaluation(
     total_knowledge = 0
     total_questions = 0
 
+    # Resume from checkpoint if available
+    checkpoint_dir = output_path if output_path else Path("evaluation/codememo/results")
+    checkpoint_path = checkpoint_dir / "codememo_checkpoint.json"
+    completed_ids: set[str] = set()
+    if checkpoint_path.exists():
+        with open(checkpoint_path) as f:
+            checkpoint_data = json.load(f)
+        all_results = checkpoint_data
+        for r in all_results:
+            completed_ids.add(r["id"])
+            cat = r["category"]
+            if "j_score" in r:
+                category_scores[cat].append(r["j_score"])
+            if "f1" in r:
+                category_f1[cat].append(r["f1"])
+            if "retrieval_recall" in r:
+                category_recall[cat].append(r["retrieval_recall"])
+        total_questions = len(completed_ids)
+        print(f"  Resumed from checkpoint: {len(completed_ids)} questions already evaluated")
+
     for project_dir in project_dirs:
         project_id = project_dir.name
         print(f"\n{'='*60}")
@@ -695,6 +715,9 @@ def run_evaluation(
             evidence = qa.get("evidence", [])
 
             if category not in ALL_CATEGORIES:
+                continue
+
+            if qid in completed_ids:
                 continue
 
             # Retrieve
@@ -764,6 +787,11 @@ def run_evaluation(
                 else:
                     print(f"  [{i+1}/{len(questions)}] retrieval done "
                           f"({elapsed:.0f}s elapsed)")
+
+                # Save checkpoint so progress isn't lost on crash/rate-limit
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                with open(checkpoint_path, "w") as f:
+                    json.dump(all_results, f)
 
     # ---------------------------------------------------------------------------
     # Aggregate scores
