@@ -1222,6 +1222,84 @@ def recall_timeline(
         return f"Timeline query failed: {exc}"
 
 
+def recall_channel(
+    action: str = "read",
+    channel: str = "dev",
+    message: str | None = None,
+    limit: int = 20,
+    pin: bool = False,
+) -> str:
+    """Cross-worktree communication channels for multi-agent coordination.
+
+    Channels are append-only JSONL files in the shared .synapt/recall/ directory.
+    Any agent (worktree) can post and read messages. No daemon needed.
+    State (presence, cursors, pins) is stored in SQLite.
+
+    Args:
+        action: "join" (enter channel), "leave" (exit channel), "post" (send message),
+                "read" (recent messages), "who" (show online agents),
+                "heartbeat" (update presence), "unread" (get unread counts),
+                "pin" (pin a message to a channel).
+        channel: Channel name (default "dev"). Any name works -- created on first post.
+        message: Message body (required for "post" and "pin" actions).
+        limit: Max messages to return for "read" action (default 20).
+        pin: If True with "post" action, also pin the message.
+    """
+    try:
+        from synapt.recall.channel import (
+            channel_join,
+            channel_leave,
+            channel_post,
+            channel_read,
+            channel_who,
+            channel_heartbeat,
+            channel_unread,
+            channel_pin,
+        )
+
+        if action == "join":
+            return channel_join(channel=channel)
+
+        if action == "leave":
+            return channel_leave(channel=channel)
+
+        if action == "post":
+            if not message:
+                return "Error: message is required for 'post' action."
+            return channel_post(channel=channel, message=message, pin=pin)
+
+        if action == "read":
+            return channel_read(channel=channel, limit=limit)
+
+        if action == "who":
+            return channel_who()
+
+        if action == "heartbeat":
+            return channel_heartbeat()
+
+        if action == "unread":
+            counts = channel_unread()
+            if not counts:
+                return "No channel memberships -- join a channel first."
+            lines = ["## Unread messages"]
+            for ch, count in sorted(counts.items()):
+                marker = f" ({count} new)" if count > 0 else ""
+                lines.append(f"  #{ch}: {count}{marker}")
+            return "\n".join(lines)
+
+        if action == "pin":
+            if not message:
+                return "Error: message is required for 'pin' action."
+            return channel_pin(channel=channel, message=message)
+
+        return (
+            f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
+            f"'who', 'heartbeat', 'unread', or 'pin'."
+        )
+    except Exception as exc:
+        return f"Channel failed: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # MCP registration
 # ---------------------------------------------------------------------------
@@ -1247,6 +1325,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(recall_contradict)
     mcp.tool()(recall_context)
     mcp.tool()(recall_timeline)
+    mcp.tool()(recall_channel)
 
 
 def main():
