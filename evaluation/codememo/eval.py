@@ -437,8 +437,8 @@ def _is_anthropic_model(model: str) -> bool:
     return model.startswith("claude-")
 
 
-def _api_call_with_retry(client, messages, max_tokens=100, retries=3, model="gpt-4o-mini"):
-    """Call OpenAI or Anthropic API with exponential backoff retry."""
+def _api_call_with_retry(client, messages, max_tokens=100, retries=10, model="gpt-4o-mini"):
+    """Call OpenAI or Anthropic API with rate-limit-aware retry."""
     for attempt in range(retries):
         try:
             if _is_anthropic_model(model):
@@ -457,8 +457,16 @@ def _api_call_with_retry(client, messages, max_tokens=100, retries=3, model="gpt
                 )
                 return response.choices[0].message.content.strip()
         except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "rate" in err_str.lower()
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                if is_rate_limit:
+                    # RPD resets daily; wait longer and keep trying
+                    wait = min(30 * (attempt + 1), 300)
+                    print(f"    [rate limit] waiting {wait}s (attempt {attempt+1}/{retries})")
+                else:
+                    wait = 2 ** attempt
+                time.sleep(wait)
                 continue
             raise RuntimeError(f"API call failed after {retries} retries: {e}") from e
 
