@@ -24,12 +24,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -59,6 +62,101 @@ def _resolve_data_dir() -> Path:
 
 
 DATA_DIR = _resolve_data_dir()
+
+
+# ---------------------------------------------------------------------------
+# Provenance + audit
+# ---------------------------------------------------------------------------
+
+_AUDIT_FILE = CODEMEMO_DIR / "audit.jsonl"
+
+
+def _get_provenance() -> dict:
+    """Capture reproducibility metadata for this run."""
+    prov: dict = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "python": sys.executable,
+        "python_version": sys.version.split()[0],
+    }
+    # Synapt version + code ref
+    try:
+        import synapt
+        prov["synapt_version"] = synapt.__version__
+    except ImportError:
+        prov["synapt_version"] = "not installed"
+    # Git ref from synapt repo
+    synapt_repo = Path(__file__).resolve().parents[2]
+    try:
+        prov["code_ref"] = subprocess.run(
+            ["git", "-C", str(synapt_repo), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        prov["code_dirty"] = bool(subprocess.run(
+            ["git", "-C", str(synapt_repo), "diff", "--quiet"],
+            capture_output=True, timeout=5,
+        ).returncode)
+    except Exception:
+        prov["code_ref"] = "unknown"
+    # Relevant env vars
+    env_keys = [k for k in os.environ if k.startswith("SYNAPT_")]
+    if env_keys:
+        prov["env_overrides"] = {k: os.environ[k] for k in sorted(env_keys)}
+    return prov
+
+
+def _audit_log(entry: dict) -> None:
+    """Append a JSON entry to audit.jsonl."""
+    try:
+        _AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_AUDIT_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"  [audit] Warning: could not write audit log: {e}")
+
+
+def _audit_start(pipeline: str, model: str, provenance: dict) -> str:
+    """Log a RUNNING entry and return its timestamp (used as ID)."""
+    ts = provenance["timestamp"]
+    entry = {
+        "type": "eval",
+        "eval_type": "codememo",
+        "timestamp": ts,
+        "outcome": "RUNNING",
+        "pipeline": pipeline,
+        "model": model,
+        "code_ref": provenance.get("code_ref", "unknown"),
+        "synapt_version": provenance.get("synapt_version", "unknown"),
+        "env_overrides": provenance.get("env_overrides", {}),
+    }
+    _audit_log(entry)
+    print(f"  [audit] Logged RUNNING (ref={provenance.get('code_ref', '?')}, "
+          f"v={provenance.get('synapt_version', '?')})")
+    return ts
+
+
+def _audit_finish(start_ts: str, summary: dict, outcome: str = "SUCCESS") -> None:
+    """Log a completion entry with scores."""
+    entry = {
+        "type": "eval",
+        "eval_type": "codememo",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "start_timestamp": start_ts,
+        "outcome": outcome,
+        "pipeline": summary.get("pipeline_mode", "unknown"),
+        "model": summary.get("model", "unknown"),
+        "questions_evaluated": summary.get("questions_evaluated", 0),
+        "j_score_overall": summary.get("j_score_overall"),
+        "j_score_factual": summary.get("j_score_factual"),
+        "j_score_debug": summary.get("j_score_debug"),
+        "j_score_architecture": summary.get("j_score_architecture"),
+        "j_score_temporal": summary.get("j_score_temporal"),
+        "j_score_convention": summary.get("j_score_convention"),
+        "j_score_cross-session": summary.get("j_score_cross-session"),
+        "f1_overall": summary.get("f1_overall"),
+    }
+    _audit_log(entry)
+    j = summary.get("j_score_overall", "?")
+    print(f"  [audit] Logged {outcome} — J-Score: {j}%")
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +747,11 @@ def run_evaluation(
             print("Falling back to retrieval-only mode.")
             retrieval_only = True
 
+    # Provenance + audit
+    provenance = _get_provenance()
+    pipeline_mode = sut.mode if isinstance(sut, SynaptSUT) else "external"
+    audit_ts = _audit_start(pipeline_mode, model, provenance)
+
     all_results = []
     category_scores: dict[int, list] = defaultdict(list)
     category_f1: dict[int, list] = defaultdict(list)
@@ -834,6 +937,7 @@ def run_evaluation(
         "model": model,
         "enrichment_model": enrich_model_name or "none",
         "pipeline_mode": sut.mode if isinstance(sut, SynaptSUT) else "external",
+        "provenance": provenance,
     }
     if total_knowledge:
         summary["knowledge_nodes"] = total_knowledge
@@ -893,6 +997,8 @@ def run_evaluation(
     with open(output_path / "codememo_detailed.json", "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {output_path}/")
+
+    _audit_finish(audit_ts, summary)
 
     return summary
 
@@ -981,6 +1087,15 @@ def main():
             output_path=args.output,
             model=args.model,
         )
+    except Exception as e:
+        # Audit failure — find the most recent RUNNING entry's timestamp
+        _audit_log({
+            "type": "eval", "eval_type": "codememo",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "outcome": "FAILED",
+            "error": str(e)[:200],
+        })
+        raise
     finally:
         sut.close()
 
