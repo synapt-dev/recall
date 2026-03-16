@@ -2832,7 +2832,7 @@ class TranscriptIndex:
             return score
         # Prefer weighted_count; fall back to explicit_count for un-migrated DBs
         count = stats.get("weighted_count", 0.0)
-        if not count:
+        if count <= 0:
             count = float(stats["explicit_count"])
         boost = 1.0 + min(math.log2(count + 1) * 0.15, 0.3)
         return score * boost

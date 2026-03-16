@@ -874,7 +874,7 @@ def _record_context_access(idx, item_type: str, item_id: str) -> None:
     try:
         if idx._db:
             idx._db.record_access(
-                [{"item_type": item_type, "item_id": item_id}],
+                [{"item_type": item_type, "item_id": item_id, "score": 1.0}],
                 context="context",
             )
             from synapt.recall.promotion import (
