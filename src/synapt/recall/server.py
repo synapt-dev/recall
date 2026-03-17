@@ -1504,10 +1504,16 @@ def recall_channel(
             from synapt.recall.channel import channel_rename
             return channel_rename(new_name=message)
 
+        if action == "claim":
+            if not message:
+                return "Error: message is required for 'claim' action (the message_id to claim)."
+            from synapt.recall.channel import channel_claim
+            return channel_claim(message_id=message, channel=channel)
+
         return (
             f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
             f"'who', 'heartbeat', 'unread', 'pin', 'directive', 'mute', "
-            f"'unmute', 'kick', 'broadcast', 'list', 'search', or 'rename'."
+            f"'unmute', 'kick', 'broadcast', 'list', 'search', 'rename', or 'claim'."
         )
     except Exception as exc:
         return f"Channel failed: {exc}"

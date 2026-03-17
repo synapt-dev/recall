@@ -278,6 +278,13 @@ CREATE TABLE IF NOT EXISTS mutes (
     muted_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, channel, muted_by)
 );
+
+CREATE TABLE IF NOT EXISTS claims (
+    message_id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    claimed_by TEXT NOT NULL,
+    claimed_at TEXT NOT NULL
+);
 """
 
 
@@ -735,6 +742,14 @@ def channel_read(
         for r in conn.execute("SELECT agent_id, display_name, griptree FROM presence").fetchall():
             display_map[r["agent_id"]] = r["display_name"] or r["griptree"] or r["agent_id"]
 
+        # Load claims for this channel
+        claim_map = {}
+        for r in conn.execute(
+            "SELECT message_id, claimed_by FROM claims WHERE channel = ?",
+            (channel,),
+        ).fetchall():
+            claim_map[r["message_id"]] = r["claimed_by"]
+
         # Update read cursor
         conn.execute(
             "INSERT INTO cursors (agent_id, channel, last_read_at) "
@@ -780,14 +795,20 @@ def channel_read(
         ts = msg.timestamp[:16]
         display = display_map.get(msg.from_agent, msg.from_agent)
         mid = f" [{msg.id}]" if msg.id else ""
+        # Claim annotation
+        claimer_id = claim_map.get(msg.id)
+        claim_tag = ""
+        if claimer_id:
+            claimer_name = display_map.get(claimer_id, claimer_id)
+            claim_tag = f" [CLAIMED by {claimer_name}]"
         if msg.type in ("join", "leave"):
             lines.append(f"  {ts}{mid}  -- {msg.body}")
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
-            lines.append(f"  {ts}{mid}  {prefix}{target} {display}: {msg.body}")
+            lines.append(f"  {ts}{mid}  {prefix}{target} {display}: {msg.body}{claim_tag}")
         else:
-            lines.append(f"  {ts}{mid}  {display}: {msg.body}")
+            lines.append(f"  {ts}{mid}  {display}: {msg.body}{claim_tag}")
 
     return "\n".join(lines)
 
@@ -1130,6 +1151,64 @@ def channel_rename(
     return f"Display name set to '{new_name}'."
 
 
+def channel_claim(
+    message_id: str,
+    channel: str = "dev",
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Claim a message so other agents know you're handling it.
+
+    Uses INSERT OR IGNORE for atomic first-writer-wins semantics.
+    Returns success if you claimed it, or the existing claimant if
+    someone else already did.
+    """
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
+    conn = _open_db(project_dir)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO claims (message_id, channel, claimed_by, claimed_at) "
+            "VALUES (?, ?, ?, ?)",
+            (message_id, channel, aid, now),
+        )
+        conn.commit()
+
+        # Check who actually holds the claim
+        row = conn.execute(
+            "SELECT claimed_by FROM claims WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row and row["claimed_by"] == aid:
+            display = _resolve_display_name_for(aid, project_dir)
+            return f"Claimed {message_id} — you ({display}) own this task."
+        else:
+            claimer = row["claimed_by"] if row else "unknown"
+            display = _resolve_display_name_for(claimer, project_dir)
+            return f"Already claimed by {display} ({claimer})."
+    finally:
+        conn.close()
+
+
+def is_claimed(
+    message_id: str,
+    project_dir: Path | None = None,
+) -> dict | None:
+    """Check if a message is claimed. Returns claim dict or None."""
+    conn = _open_db(project_dir)
+    try:
+        row = conn.execute(
+            "SELECT claimed_by, claimed_at FROM claims WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row:
+            return {"claimed_by": row["claimed_by"], "claimed_at": row["claimed_at"]}
+        return None
+    finally:
+        conn.close()
+
+
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     """Return list of all channel names (from JSONL files)."""
     ch_dir = _channels_dir(project_dir)
@@ -1220,6 +1299,16 @@ def check_directives(
         conn.close()
 
     # Scan for unread directives (JSONL read, filtered by cursor)
+    # Also load claims to skip broadcast directives claimed by other agents
+    conn2 = _open_db(project_dir)
+    try:
+        all_claims = {
+            r["message_id"]: r["claimed_by"]
+            for r in conn2.execute("SELECT message_id, claimed_by FROM claims").fetchall()
+        }
+    finally:
+        conn2.close()
+
     pending: list[tuple[str, ChannelMessage]] = []
     for ch in channels:
         since = cursors.get(ch, "1970-01-01T00:00:00Z")
@@ -1228,6 +1317,10 @@ def check_directives(
             continue
         for msg in _read_messages(path, since=since):
             if msg.type == "directive" and (msg.to == aid or msg.to == "*"):
+                # Skip broadcast directives claimed by another agent
+                claimer = all_claims.get(msg.id)
+                if msg.to == "*" and claimer and claimer != aid:
+                    continue
                 pending.append((ch, msg))
 
     if not pending:
