@@ -762,6 +762,7 @@ def recall_contradict(
                 elif pending_row and not pending_row["old_node_id"]:
                     # Free-text claim confirmed — create a new knowledge node
                     _create_knowledge_from_claim(index._db, pending_row)
+                    return f"Contradiction #{contradiction_id} confirmed — new knowledge node created from claim."
                 return f"Contradiction #{contradiction_id} confirmed — old node superseded."
             return f"Contradiction #{contradiction_id} dismissed — old node retained."
 

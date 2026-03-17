@@ -731,10 +731,37 @@ class TestRecallContradictFlag:
                     resolution="confirmed",
                 )
         assert "confirmed" in result
+        assert "knowledge node created" in result
         # Verify a knowledge node was created
         nodes = db.load_knowledge_nodes(status="active")
         assert len(nodes) == 1
         assert nodes[0]["content"] == "API keys expire every 90 days"
+
+    def test_flag_fts_matches_existing_node(self, tmp_path):
+        """When no old_node_id given, flag searches FTS and matches best node."""
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="k1", content="deploy every Tuesday at 3pm")
+        db.save_knowledge_nodes([node])
+        # Rebuild FTS so the node is searchable
+        db._conn.execute(
+            "INSERT INTO knowledge_fts(rowid, content, category, tags) "
+            "SELECT rowid, content, category, tags FROM knowledge"
+        )
+        db._conn.commit()
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="flag",
+                    claim="deploy schedule changed to Thursday",
+                )
+        assert "flagged" in result
+        assert "k1" in result
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["old_node_id"] == "k1"
 
     def test_list_shows_free_text_claims(self, tmp_path):
         from synapt.recall.server import recall_contradict

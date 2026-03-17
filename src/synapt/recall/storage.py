@@ -620,17 +620,52 @@ class RecallDB:
         self._conn.commit()
 
     def _migrate_contradictions_table(self) -> None:
-        """Add columns that may be missing from an older pending_contradictions table."""
+        """Migrate pending_contradictions: add claim_text, make old_node_id nullable.
+
+        SQLite doesn't support ALTER COLUMN, so we recreate the table when
+        old_node_id has a NOT NULL constraint from the old schema.
+        """
         row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_contradictions'"
         ).fetchone()
         if row is None:
             return
-        cols = {
-            r[1]
-            for r in self._conn.execute("PRAGMA table_info(pending_contradictions)").fetchall()
-        }
-        if "claim_text" not in cols:
+
+        # Check if old_node_id is NOT NULL (old schema)
+        col_info = self._conn.execute("PRAGMA table_info(pending_contradictions)").fetchall()
+        col_map = {r[1]: r for r in col_info}
+        needs_recreate = col_map.get("old_node_id", (None,) * 6)[3] == 1  # notnull flag
+        has_claim_text = "claim_text" in col_map
+
+        if not needs_recreate and has_claim_text:
+            return  # Already migrated
+
+        if needs_recreate:
+            # Recreate table: old_node_id NOT NULL → nullable, add claim_text
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS _pc_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    old_node_id TEXT,
+                    new_content TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    source_sessions TEXT NOT NULL DEFAULT '[]',
+                    detected_at TEXT NOT NULL,
+                    detected_by TEXT NOT NULL DEFAULT 'co-retrieval',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    resolved_at TEXT,
+                    claim_text TEXT
+                );
+                INSERT INTO _pc_new (id, old_node_id, new_content, category, reason,
+                    source_sessions, detected_at, detected_by, status, resolved_at)
+                SELECT id, old_node_id, new_content, category, reason,
+                    source_sessions, detected_at, detected_by, status, resolved_at
+                FROM pending_contradictions;
+                DROP TABLE pending_contradictions;
+                ALTER TABLE _pc_new RENAME TO pending_contradictions;
+            """)
+            self._conn.commit()
+        elif not has_claim_text:
             self._conn.execute(
                 "ALTER TABLE pending_contradictions ADD COLUMN claim_text TEXT"
             )
