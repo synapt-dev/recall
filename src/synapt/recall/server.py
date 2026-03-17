@@ -1239,7 +1239,8 @@ def recall_channel(
 
     Args:
         action: "join", "leave", "post", "read", "who", "heartbeat", "unread",
-                "pin", "directive", "mute", "unmute", "kick", "broadcast", "list".
+                "pin", "directive", "mute", "unmute", "kick", "broadcast",
+                "list", "search".
         channel: Channel name (default "dev"). Any name works -- created on first post.
         message: Message body (required for "post", "directive", "broadcast" actions).
         to: Target agent for "directive" action.
@@ -1333,10 +1334,23 @@ def recall_channel(
                 return "No channels yet."
             return "Channels: " + ", ".join(f"#{c}" for c in channels)
 
+        if action == "search":
+            if not message:
+                return "Error: query is required for 'search' action."
+            from synapt.recall.channel import channel_search
+            results = channel_search(message)
+            if not results:
+                return "No matching channel messages."
+            lines = ["## Channel search results"]
+            for r in results:
+                ts = r["timestamp"][:16]
+                lines.append(f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {r['body']}")
+            return "\n".join(lines)
+
         return (
             f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
             f"'who', 'heartbeat', 'unread', 'pin', 'directive', 'mute', "
-            f"'unmute', 'kick', 'broadcast', or 'list'."
+            f"'unmute', 'kick', 'broadcast', 'list', or 'search'."
         )
     except Exception as exc:
         return f"Channel failed: {exc}"

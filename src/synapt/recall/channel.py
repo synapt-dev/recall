@@ -1053,3 +1053,40 @@ def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     return sorted(
         p.stem for p in ch_dir.glob("*.jsonl")
     )
+
+
+def channel_search(
+    query: str,
+    max_results: int = 10,
+    project_dir: Path | None = None,
+) -> list[dict]:
+    """Search all channels for messages matching a query.
+
+    Returns a list of dicts with channel, message_id, from, timestamp, body,
+    and a match_score (number of query terms found).
+    """
+    terms = query.lower().split()
+    if not terms:
+        return []
+
+    results: list[dict] = []
+    for ch in channel_list_channels(project_dir):
+        path = _channel_path(ch, project_dir)
+        for msg in _read_messages(path):
+            if msg.type not in ("message", "directive"):
+                continue
+            body_lower = msg.body.lower()
+            score = sum(1 for t in terms if t in body_lower)
+            if score > 0:
+                results.append({
+                    "channel": ch,
+                    "message_id": msg.id,
+                    "from": msg.from_agent,
+                    "timestamp": msg.timestamp,
+                    "body": msg.body,
+                    "score": score,
+                })
+
+    # Sort by score descending, then timestamp descending
+    results.sort(key=lambda r: (-r["score"], r["timestamp"]), reverse=False)
+    return results[:max_results]

@@ -32,6 +32,7 @@ from synapt.recall.channel import (
     channel_kick,
     channel_broadcast,
     channel_list_channels,
+    channel_search,
 )
 
 
@@ -1253,6 +1254,80 @@ class TestResolveTargetId(unittest.TestCase):
             self.assertEqual(result, "nobody")
         finally:
             conn.close()
+
+
+class TestChannelSearch(unittest.TestCase):
+    """Test channel_search keyword matching."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_search_finds_matching_messages(self):
+        channel_post("dev", "the eval is running", agent_name="bot")
+        channel_post("dev", "hello world", agent_name="bot")
+        channel_post("dev", "eval complete J=90%", agent_name="bot")
+        results = channel_search("eval")
+        self.assertEqual(len(results), 2)
+        bodies = [r["body"] for r in results]
+        self.assertIn("the eval is running", bodies)
+        self.assertIn("eval complete J=90%", bodies)
+
+    def test_search_no_results(self):
+        channel_post("dev", "hello world", agent_name="bot")
+        results = channel_search("nonexistent")
+        self.assertEqual(results, [])
+
+    def test_search_across_channels(self):
+        channel_post("dev", "deploy started", agent_name="bot")
+        channel_post("eval", "deploy complete", agent_name="bot")
+        results = channel_search("deploy")
+        self.assertEqual(len(results), 2)
+        channels = {r["channel"] for r in results}
+        self.assertEqual(channels, {"dev", "eval"})
+
+    def test_search_respects_max_results(self):
+        for i in range(20):
+            channel_post("dev", f"match keyword {i}", agent_name="bot")
+        results = channel_search("keyword", max_results=5)
+        self.assertEqual(len(results), 5)
+
+    def test_search_multi_term_scoring(self):
+        channel_post("dev", "eval running", agent_name="bot")
+        channel_post("dev", "eval running on modal", agent_name="bot")
+        results = channel_search("eval modal")
+        # "eval running on modal" matches both terms, should score higher
+        self.assertEqual(results[0]["body"], "eval running on modal")
+
+    def test_search_skips_join_leave(self):
+        channel_join("dev", agent_name="bot")
+        channel_post("dev", "hello", agent_name="bot")
+        channel_leave("dev", agent_name="bot")
+        results = channel_search("bot")
+        # Join/leave messages mention "bot" but should be skipped
+        # Only the "hello" message should NOT match "bot"
+        self.assertEqual(len(results), 0)
+
+    def test_search_includes_directives(self):
+        channel_directive("dev", "check the deploy logs", to="s_target", agent_name="admin")
+        results = channel_search("deploy")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["body"], "check the deploy logs")
+
+    def test_search_returns_message_ids(self):
+        channel_post("dev", "important message", agent_name="bot")
+        results = channel_search("important")
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["message_id"].startswith("m_"))
+
+    def test_search_empty_query(self):
+        channel_post("dev", "hello", agent_name="bot")
+        results = channel_search("")
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":
