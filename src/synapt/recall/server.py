@@ -58,6 +58,8 @@ MCP_INSTRUCTIONS = (
     "- When debugging an error -> recall_search for past fixes\n"
     "- When user references past work -> recall_search immediately\n"
     "- Starting a session -> recall_journal to read recent entries\n"
+    "- When unsure if something was discussed before -> recall_quick\n"
+    "- Before proposing a new approach -> recall_quick to check for prior attempts\n"
     "\n"
     "WHICH TOOL:\n"
     "- recall_quick: Fast, cheap knowledge check. Use speculatively when unsure.\n"
@@ -67,7 +69,11 @@ MCP_INSTRUCTIONS = (
     "- recall_remind: Set/check cross-session reminders.\n"
     "\n"
     "DO NOT search for: general programming questions, syntax help, "
-    "API docs, or anything not specific to this project's history."
+    "API docs, or anything not specific to this project's history.\n"
+    "\n"
+    "IMPORTANT: When in doubt, search. A quick recall_quick check costs ~500 tokens "
+    "and takes <100ms. Missing relevant past context costs far more in wasted work "
+    "and repeated mistakes. Err on the side of searching too much, not too little."
 )
 
 # ---------------------------------------------------------------------------
@@ -299,6 +305,9 @@ def recall_quick(query: str) -> str:
     Returns only knowledge nodes and cluster summaries (no raw transcript
     chunks), keeping output short and fast. If you find something relevant,
     follow up with recall_search or recall_context for full detail.
+
+    Cost: ~500 tokens, <100ms. Cheaper than guessing wrong.
+    Use BEFORE making assumptions about past work, decisions, or conventions.
 
     Args:
         query: Natural language query or keywords to search for.
