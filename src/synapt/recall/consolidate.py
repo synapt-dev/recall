@@ -773,16 +773,16 @@ def _detect_concurrent_agents(cluster: list[JournalEntry]) -> str:
     """Detect if a cluster contains concurrent sessions from different agents.
 
     Returns annotation text for the LLM prompt if concurrent agents are
-    detected, empty string otherwise.  Concurrent = timestamps within 30min
+    detected, empty string otherwise.  Concurrent = timestamps within ~1 hour
     of each other AND different griptree identities.
     """
-    agents = {e.griptree for e in cluster if getattr(e, "griptree", "")}
+    agents = {getattr(e, "griptree", "") for e in cluster if getattr(e, "griptree", "")}
     if len(agents) < 2:
         return ""
 
-    # Check timestamp overlap: sort by time, see if any pair is within 30min
+    # Check timestamp overlap: sort by time, see if any pair is within ~1 hour
     timed = sorted(
-        ((e.timestamp or "", e.griptree or e.session_id[:8]) for e in cluster if e.timestamp),
+        ((e.timestamp or "", getattr(e, "griptree", "") or e.session_id[:8]) for e in cluster if e.timestamp),
         key=lambda t: t[0],
     )
     concurrent_pairs: list[tuple[str, str]] = []
