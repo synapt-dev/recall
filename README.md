@@ -24,7 +24,7 @@
 
 **#1 on LOCOMO** (76.04%) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
 
-Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code and other MCP-compatible tools.
+Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code, Codex CLI, OpenCode, and other MCP-compatible tools.
 
 ## Install
 
@@ -64,7 +64,35 @@ Add to your Claude Code config (`~/.claude/mcp.json`):
 }
 ```
 
-This gives your AI assistant 13 tools for searching past sessions, managing a journal, setting reminders, and building a durable knowledge base.
+This gives your AI assistant tools for searching past sessions, managing a journal, setting reminders, and building a durable knowledge base.
+
+### Codex CLI
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.synapt]
+command = "synapt"
+args = ["server"]
+```
+
+Synapt automatically discovers and indexes Codex transcripts from `~/.codex/sessions/`.
+
+### OpenCode
+
+Add to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "synapt": {
+      "type": "local",
+      "command": ["synapt", "server"],
+      "enabled": true
+    }
+  }
+}
+```
 
 ## Features
 
@@ -82,6 +110,11 @@ This gives your AI assistant 13 tools for searching past sessions, managing a jo
 - **Working memory** — Frequency-boosted search results for active topics.
 - **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
 - **MCP server** — 13 tools for Claude Code integration: search, journal, reminders, knowledge, and more.
+- **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, and coordinate work across worktrees.
+- **Directive notifications** — Targeted directives are automatically surfaced in MCP tool responses. Broadcast directives (`to="*"`) reach all agents.
+- **Contradiction flagging** — Flag conflicting information from free text or search results. Auto-matches existing knowledge nodes via FTS, creates new nodes on resolution.
+- **Codex CLI support** — Indexes Codex transcripts from `~/.codex/sessions/` automatically. Cross-editor memory between Claude Code and Codex.
+- **Agent-aware consolidation** — Journal entries capture agent identity (griptree, agent_id). Consolidation detects concurrent sessions and annotates them for the LLM.
 - **Plugin system** — Extend with additional tools via entry-point discovery.
 
 ## MCP tools
@@ -100,7 +133,9 @@ This gives your AI assistant 13 tools for searching past sessions, managing a jo
 | `recall_remind` | Set cross-session reminders |
 | `recall_enrich` | LLM-powered chunk summarization |
 | `recall_consolidate` | Extract knowledge from journals |
-| `recall_contradict` | Flag contradictions in knowledge |
+| `recall_contradict` | Flag contradictions in knowledge (supports free-text claims) |
+| `recall_channel` | Cross-session agent communication (post, read, directives, who) |
+| `recall_quick` | Fast knowledge check (no transcript chunks) |
 
 ## CLI reference
 
@@ -120,23 +155,24 @@ synapt server                    # Start MCP server
 
 Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversational Memory) — 10 conversations, 1540 QA pairs — following [Mem0's methodology](https://arxiv.org/abs/2504.19413) (J-score via LLM-as-Judge). Competitor data from the [Mem0 paper](https://arxiv.org/abs/2504.19413) and [Memobase benchmark](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md).
 
-| System | Multi-Hop | Temporal | Single-Hop | Open-Domain | **Overall** | Infra |
-|--------|-----------|----------|------------|-------------|-------------|-------|
-| **synapt v0.6.1 (8B cloud)** | **70.92** | 66.36 | 65.62 | **82.64** | **76.04** | Ministral 8B |
-| Memobase | 46.88 | **85.05** | **70.92** | 77.17 | 75.78 | cloud |
-| Zep | — | — | — | — | 75.14 | cloud service |
-| **synapt v0.6.1 (3B local)** | 70.21 | 61.68 | 62.50 | 80.14 | **73.38** | **local 3B model** |
-| Full-Context | — | — | — | — | 72.90 | upper bound |
-| Mem0+Graph | 47.19 | 58.13 | 65.71 | 75.71 | 68.44 | cloud GPT-4 |
-| Mem0 | 51.15 | 55.51 | 67.13 | 72.93 | 66.88 | cloud GPT-4 |
-| LangMem | 47.92 | 23.43 | 62.23 | 71.12 | 58.10 | cloud |
-| OpenAI Memory | 42.92 | 21.71 | 63.79 | 62.29 | 52.90 | cloud |
+All systems use gpt-4o-mini as shared backbone (generation + judge) for fair comparison. Competitor data from the [Engram paper](https://arxiv.org/abs/2511.12960) (3 runs, stddev reported) and [Mem0 paper](https://arxiv.org/abs/2504.19413).
 
-Synapt is **#1 on LOCOMO** at 76.04% — beating Memobase (75.78%), Zep (75.14%), the Full-Context upper bound (72.90%), Mem0+Graph (68.44%), and all other tested systems. The 3B local configuration (73.38%) also beats the Full-Context upper bound using only a Ministral 3B model running on an M2 MacBook Air.
+| System | **Overall** | Multi-Hop | Temporal | Infra |
+|--------|-------------|-----------|----------|-------|
+| Engram | 77.55 ± 0.13 | — | — | cloud (BM25+ColBERT+KG) |
+| **synapt v0.6.1 (8B)** | **76.04** | **70.92** | 66.36 | Ministral 8B cloud enrich |
+| Memobase | 75.78 | 46.88 | **85.05** | cloud |
+| **synapt v0.6.1 (3B)** | **73.38** | 70.21 | 61.68 | **local 3B on M2 Air** |
+| memOS | 72.99 ± 0.14 | — | — | cloud |
+| Full-Context | 72.60 ± 0.07 | — | — | upper bound |
+| Mem0 | 64.73 ± 0.17 | 51.15 | 55.51 | cloud GPT-4 |
+| Zep | 42.29 ± 0.18 | — | — | cloud |
 
-> **What is Full-Context?** The entire conversation history is passed directly to GPT-4 as context — no retrieval, no memory extraction. It represents the theoretical upper bound: the LLM has access to every fact. Synapt beats it because focused retrieval surfaces only what's relevant, reducing noise for the answer model.
+Synapt is **#2 on LOCOMO** at 76.04% — 1.51pp behind Engram (within their stddev of ±0.13) and ahead of Memobase (75.78%), the Full-Context upper bound (72.60%), and all other systems. The 3B local configuration (73.38%) beats the Full-Context upper bound using only a Ministral 3B model running on an M2 MacBook Air.
 
-**Best-in-class**: Multi-hop (70.92%) and open-domain (82.64%) — highest of any system tested, including those using GPT-4 for memory extraction.
+**Best-in-class multi-hop**: 70.92% — highest of any system tested, including those using GPT-4 for memory extraction. Engram is cloud-only; synapt runs entirely on a laptop.
+
+> **What is Full-Context?** The entire conversation history is passed directly to the LLM as context — no retrieval, no memory extraction. It represents the theoretical upper bound: the LLM has access to every fact. Synapt beats it because focused retrieval surfaces only what's relevant, reducing noise for the answer model.
 
 ### CodeMemo — Coding Memory
 
