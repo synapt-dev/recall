@@ -1315,6 +1315,25 @@ def cmd_channel(args: argparse.Namespace) -> None:
             print("No channels yet.")
         else:
             print("Channels: " + ", ".join(f"#{c}" for c in channels))
+    elif action == "search":
+        if not args.message:
+            print("Usage: synapt recall channel search <channel> \"query\"", file=sys.stderr)
+            sys.exit(1)
+        from synapt.recall.channel import channel_search
+        results = channel_search(args.message)
+        if not results:
+            print("No matching messages.")
+        else:
+            for r in results:
+                ts = r["timestamp"][:16]
+                print(f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {r['body']}")
+    elif action == "chat":
+        from synapt.recall.channel_chat import main as chat_main
+        chat_main(
+            channel=channel,
+            name=args.target,  # reuse --target for --name
+            poll=float(args.limit) if args.limit != 20 else 1.0,
+        )
 
 
 _GLOBAL_HOOKS = {
@@ -2018,7 +2037,7 @@ def main():
                                 choices=["post", "read", "who", "join", "leave",
                                          "heartbeat", "unread", "pin",
                                          "directive", "mute", "unmute", "kick",
-                                         "broadcast", "list"],
+                                         "broadcast", "list", "search", "chat"],
                                 help="Channel action")
     channel_parser.add_argument("channel", nargs="?", default="dev",
                                 help="Channel name (default: dev)")
