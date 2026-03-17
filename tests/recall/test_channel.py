@@ -17,6 +17,7 @@ from synapt.recall.channel import (
     _read_messages,
     _agent_status,
     _reap_stale_agents,
+    _resolve_target_id,
     channel_join,
     channel_leave,
     channel_post,
@@ -25,6 +26,12 @@ from synapt.recall.channel import (
     channel_heartbeat,
     channel_unread,
     channel_pin,
+    channel_directive,
+    channel_mute,
+    channel_unmute,
+    channel_kick,
+    channel_broadcast,
+    channel_list_channels,
 )
 
 
@@ -948,6 +955,304 @@ class TestConcurrentAccess(unittest.TestCase):
                 self.assertIsNotNone(row)
             finally:
                 conn.close()
+
+
+class TestDirective(unittest.TestCase):
+    """Test directive messages targeted at specific agents."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_directive_posted(self):
+        result = channel_directive("dev", "please review PR #42", to="s_target01", agent_name="admin")
+        self.assertIn("PR #42", result)
+        self.assertIn("s_target01", result)
+
+    def test_directive_in_channel_read(self):
+        channel_directive("dev", "check logs", to="s_target01", agent_name="admin")
+        result = channel_read("dev", agent_name="s_target01")
+        self.assertIn("[DIRECTIVE]", result)
+        self.assertIn("check logs", result)
+
+    def test_directive_lowercase_for_other_agents(self):
+        channel_directive("dev", "check logs", to="s_target01", agent_name="admin")
+        result = channel_read("dev", agent_name="other-agent")
+        self.assertIn("[directive]", result)
+        self.assertNotIn("[DIRECTIVE]", result)
+
+    def test_directive_in_jsonl(self):
+        channel_directive("dev", "do the thing", to="s_target01", agent_name="admin")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        directive_msgs = [m for m in msgs if m.type == "directive"]
+        self.assertEqual(len(directive_msgs), 1)
+        self.assertEqual(directive_msgs[0].to, "s_target01")
+        self.assertEqual(directive_msgs[0].body, "do the thing")
+
+
+class TestMuteUnmute(unittest.TestCase):
+    """Test muting and unmuting agents."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_mute_filters_messages(self):
+        channel_join("dev", agent_name="reader")
+        channel_post("dev", "visible", agent_name="friend")
+        channel_post("dev", "hidden", agent_name="noisy")
+        channel_mute("noisy", "dev", agent_name="reader")
+        result = channel_read("dev", agent_name="reader")
+        self.assertIn("visible", result)
+        self.assertNotIn("hidden", result)
+
+    def test_unmute_restores_messages(self):
+        channel_join("dev", agent_name="reader")
+        channel_post("dev", "msg1", agent_name="noisy")
+        channel_mute("noisy", "dev", agent_name="reader")
+        channel_unmute("noisy", "dev", agent_name="reader")
+        result = channel_read("dev", agent_name="reader")
+        self.assertIn("msg1", result)
+
+    def test_mute_stored_in_db(self):
+        channel_mute("noisy", "dev", agent_name="reader")
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM mutes WHERE agent_id = 'noisy' AND channel = 'dev'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["muted_by"], "reader")
+        finally:
+            conn.close()
+
+    def test_mute_by_display_name(self):
+        """Muting by display name should resolve to the agent_id."""
+        channel_join("dev", agent_name="s_noisy01")
+        # Manually set display_name in presence
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET display_name = 'NoisyBot' WHERE agent_id = 's_noisy01'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = channel_mute("NoisyBot", "dev", agent_name="reader")
+        self.assertIn("s_noisy01", result)
+
+    def test_mute_unknown_target_uses_raw(self):
+        """Muting an unknown name stores it as-is (no crash)."""
+        result = channel_mute("ghost", "dev", agent_name="reader")
+        self.assertIn("ghost", result)
+
+    def test_multiple_agents_can_mute_same_target(self):
+        """Two agents muting the same target should not overwrite each other."""
+        channel_post("dev", "noise", agent_name="noisy")
+        channel_mute("noisy", "dev", agent_name="reader-a")
+        channel_mute("noisy", "dev", agent_name="reader-b")
+        # Both mutes should exist
+        conn = _open_db()
+        try:
+            rows = conn.execute(
+                "SELECT muted_by FROM mutes WHERE agent_id = 'noisy' AND channel = 'dev'"
+            ).fetchall()
+            muters = {r["muted_by"] for r in rows}
+            self.assertEqual(muters, {"reader-a", "reader-b"})
+        finally:
+            conn.close()
+        # Both readers should have noisy filtered
+        result_a = channel_read("dev", agent_name="reader-a")
+        self.assertNotIn("noise", result_a)
+        result_b = channel_read("dev", agent_name="reader-b")
+        self.assertNotIn("noise", result_b)
+
+
+class TestKick(unittest.TestCase):
+    """Test kicking agents from channels."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_kick_removes_membership(self):
+        channel_join("dev", agent_name="target")
+        channel_kick("target", "dev", agent_name="admin")
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM memberships WHERE agent_id = 'target' AND channel = 'dev'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+    def test_kick_posts_event(self):
+        channel_join("dev", agent_name="target")
+        channel_kick("target", "dev", agent_name="admin")
+        result = channel_read("dev")
+        self.assertIn("kicked", result)
+
+    def test_kick_last_channel_removes_presence(self):
+        channel_join("dev", agent_name="target")
+        channel_kick("target", "dev", agent_name="admin")
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM presence WHERE agent_id = 'target'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+    def test_kick_one_of_two_channels_keeps_presence(self):
+        channel_join("dev", agent_name="target")
+        channel_join("eval", agent_name="target")
+        channel_kick("target", "dev", agent_name="admin")
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM presence WHERE agent_id = 'target'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+        finally:
+            conn.close()
+
+    def test_kick_by_display_name(self):
+        channel_join("dev", agent_name="s_target01")
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET display_name = 'BadBot' WHERE agent_id = 's_target01'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = channel_kick("BadBot", "dev", agent_name="admin")
+        self.assertIn("s_target01", result)
+
+
+class TestBroadcast(unittest.TestCase):
+    """Test broadcasting to all channels."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_broadcast_to_multiple(self):
+        channel_post("dev", "setup", agent_name="bot")
+        channel_post("eval", "setup", agent_name="bot")
+        result = channel_broadcast("attention everyone", agent_name="admin")
+        self.assertIn("2 channel(s)", result)
+
+        dev_read = channel_read("dev")
+        self.assertIn("attention everyone", dev_read)
+        eval_read = channel_read("eval")
+        self.assertIn("attention everyone", eval_read)
+
+    def test_broadcast_no_channels(self):
+        result = channel_broadcast("hello?", agent_name="admin")
+        self.assertIn("No channels", result)
+
+
+class TestListChannels(unittest.TestCase):
+    """Test listing all channels."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_no_channels(self):
+        result = channel_list_channels()
+        self.assertEqual(result, [])
+
+    def test_channels_from_posts(self):
+        channel_post("dev", "hi", agent_name="bot")
+        channel_post("eval", "hi", agent_name="bot")
+        result = channel_list_channels()
+        self.assertEqual(result, ["dev", "eval"])
+
+    def test_channels_sorted(self):
+        channel_post("zeta", "hi", agent_name="bot")
+        channel_post("alpha", "hi", agent_name="bot")
+        result = channel_list_channels()
+        self.assertEqual(result, ["alpha", "zeta"])
+
+
+class TestResolveTargetId(unittest.TestCase):
+    """Test _resolve_target_id display name → agent_id resolution."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_passthrough_agent_id(self):
+        conn = _open_db()
+        try:
+            result = _resolve_target_id("s_abc12345", conn)
+            self.assertEqual(result, "s_abc12345")
+        finally:
+            conn.close()
+
+    def test_resolve_by_display_name(self):
+        channel_join("dev", agent_name="s_agent01")
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET display_name = 'MyBot' WHERE agent_id = 's_agent01'"
+            )
+            conn.commit()
+            result = _resolve_target_id("MyBot", conn)
+            self.assertEqual(result, "s_agent01")
+        finally:
+            conn.close()
+
+    def test_resolve_by_griptree(self):
+        channel_join("dev", agent_name="s_agent01")
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET griptree = 'synapt/synapt' WHERE agent_id = 's_agent01'"
+            )
+            conn.commit()
+            result = _resolve_target_id("synapt/synapt", conn)
+            self.assertEqual(result, "s_agent01")
+        finally:
+            conn.close()
+
+    def test_unknown_returns_raw(self):
+        conn = _open_db()
+        try:
+            result = _resolve_target_id("nobody", conn)
+            self.assertEqual(result, "nobody")
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

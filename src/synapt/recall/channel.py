@@ -21,7 +21,7 @@ import json
 import os
 import sqlite3
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -62,38 +62,41 @@ def _presence_path(project_dir: Path | None = None) -> Path:
     return _channels_dir(project_dir) / "_presence.json"
 
 
-def _agent_name(agent_name: str | None = None, project_dir: Path | None = None) -> str:
-    """Resolve agent name: explicit > worktree name. Legacy compat wrapper."""
-    return agent_name or _agent_id(project_dir)
-
-
 # ---------------------------------------------------------------------------
 # Agent identity
 # ---------------------------------------------------------------------------
 
-_CACHED_AGENT_ID: str | None = None
+_AGENT_ID_CACHE: dict[str, str] = {}
 
 
 def _agent_id(project_dir: Path | None = None) -> str:
     """Return a stable session-scoped agent ID (s_xxxxxxxx).
 
-    Cached for the lifetime of the process. Based on griptree + PID + monotonic
-    time so each session gets a unique ID.
+    Cached per resolved data directory so different project_dirs in tests
+    get distinct IDs, while production (single gripspace) gets one ID.
     """
-    global _CACHED_AGENT_ID
-    if _CACHED_AGENT_ID is None:
+    key = str(project_data_dir(project_dir))
+    if key not in _AGENT_ID_CACHE:
         gt = _resolve_griptree(project_dir)
         seed = f"{gt}:{os.getpid()}:{time.monotonic_ns()}"
-        _CACHED_AGENT_ID = "s_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
-    return _CACHED_AGENT_ID
+        _AGENT_ID_CACHE[key] = "s_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+    return _AGENT_ID_CACHE[key]
 
 
 def _resolve_griptree(project_dir: Path | None = None) -> str:
-    """Auto-detect griptree identity: gripspace_name/repo_name."""
+    """Auto-detect griptree identity: gripspace_name/repo_name.
+
+    Derives the gripspace root from project_data_dir() by verifying the
+    expected ``.synapt/recall`` suffix rather than blindly using parents[1].
+    """
     try:
         data_dir = project_data_dir(project_dir)
-        # data_dir is <gripspace>/.synapt/recall — go up 2 for gripspace root
-        gripspace = data_dir.parents[1]
+        # data_dir should be <gripspace>/.synapt/recall
+        # Verify the expected suffix before stripping
+        if data_dir.parent.name == ".synapt" and data_dir.name == "recall":
+            gripspace = data_dir.parent.parent
+        else:
+            return _worktree_name(project_dir)
         repo = Path.cwd()
         # If cwd is inside gripspace, use relative path
         try:
@@ -113,13 +116,34 @@ def _resolve_display_name(project_dir: Path | None = None) -> str:
     return _resolve_griptree(project_dir)
 
 
+def _resolve_target_id(target: str, conn: sqlite3.Connection) -> str:
+    """Resolve a target to an agent_id.
+
+    Accepts an ``s_*`` agent_id directly, or looks up by display_name/griptree
+    in the presence table. Returns the original string if no match is found.
+    """
+    if target.startswith("s_"):
+        return target
+    # Try display_name first, then griptree
+    row = conn.execute(
+        "SELECT agent_id FROM presence WHERE display_name = ? OR griptree = ? LIMIT 1",
+        (target, target),
+    ).fetchone()
+    return row["agent_id"] if row else target
+
+
 # ---------------------------------------------------------------------------
 # Message ID generation
 # ---------------------------------------------------------------------------
 
 
 def _generate_msg_id(timestamp: str, agent_id: str, body: str) -> str:
-    """Generate a short deterministic message ID."""
+    """Generate a short deterministic message ID (m_xxxxxxxx).
+
+    Uses 8 hex chars (32 bits) from SHA-256. Collision probability is ~50%
+    at ~65k messages per channel (birthday bound). Acceptable for channel
+    volumes; pins and directives reference IDs within a single channel.
+    """
     seed = f"{timestamp}{agent_id}{body}"
     return "m_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
 
@@ -218,7 +242,7 @@ CREATE TABLE IF NOT EXISTS mutes (
     channel TEXT NOT NULL,
     muted_by TEXT NOT NULL,
     muted_at TEXT NOT NULL,
-    PRIMARY KEY (agent_id, channel)
+    PRIMARY KEY (agent_id, channel, muted_by)
 );
 """
 
@@ -439,6 +463,34 @@ def _read_messages(
     return messages
 
 
+def _read_last_timestamp(path: Path) -> str | None:
+    """Read the timestamp of the last message in a JSONL file.
+
+    Seeks to near the end of the file and reads the last non-empty line,
+    avoiding a full O(n) scan.
+    """
+    try:
+        with open(path, "rb") as f:
+            # Seek to near the end — 4KB is plenty for one JSONL line
+            try:
+                f.seek(-4096, 2)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", errors="replace")
+        # Find last non-empty line
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line).get("timestamp")
+            except (json.JSONDecodeError, TypeError):
+                continue
+    except OSError:
+        pass
+    return None
+
+
 def _count_messages_since(path: Path, since: str) -> int:
     """Count JSONL lines with timestamp > since. Used for unread counts."""
     count = 0
@@ -478,10 +530,9 @@ def channel_join(
     # currently in the channel (so only future messages are unread).
     path = _channel_path(channel, project_dir)
     cursor_init = now
-    if path.exists():
-        msgs = _read_messages(path)
-        if msgs:
-            cursor_init = msgs[-1].timestamp
+    last_ts = _read_last_timestamp(path)
+    if last_ts:
+        cursor_init = last_ts
 
     conn = _open_db(project_dir)
     try:
@@ -885,17 +936,21 @@ def channel_directive(
 
 
 def channel_mute(
-    target_id: str,
+    target: str,
     channel: str,
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> str:
-    """Mute an agent in a channel. Their messages won't appear in your reads."""
+    """Mute an agent in a channel. Their messages won't appear in your reads.
+
+    ``target`` can be an agent_id (s_*), display_name, or griptree name.
+    """
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
     conn = _open_db(project_dir)
     try:
+        target_id = _resolve_target_id(target, conn)
         conn.execute(
             "INSERT OR REPLACE INTO mutes (agent_id, channel, muted_by, muted_at) "
             "VALUES (?, ?, ?, ?)",
@@ -908,16 +963,20 @@ def channel_mute(
 
 
 def channel_unmute(
-    target_id: str,
+    target: str,
     channel: str,
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> str:
-    """Unmute an agent in a channel."""
+    """Unmute an agent in a channel.
+
+    ``target`` can be an agent_id (s_*), display_name, or griptree name.
+    """
     aid = agent_name or _agent_id(project_dir)
 
     conn = _open_db(project_dir)
     try:
+        target_id = _resolve_target_id(target, conn)
         conn.execute(
             "DELETE FROM mutes WHERE agent_id = ? AND channel = ? AND muted_by = ?",
             (target_id, channel, aid),
@@ -929,17 +988,21 @@ def channel_unmute(
 
 
 def channel_kick(
-    target_id: str,
+    target: str,
     channel: str,
     agent_name: str | None = None,
     project_dir: Path | None = None,
 ) -> str:
-    """Remove an agent from a channel (admin action)."""
+    """Remove an agent from a channel (admin action).
+
+    ``target`` can be an agent_id (s_*), display_name, or griptree name.
+    """
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
     conn = _open_db(project_dir)
     try:
+        target_id = _resolve_target_id(target, conn)
         conn.execute(
             "DELETE FROM memberships WHERE agent_id = ? AND channel = ?",
             (target_id, channel),
