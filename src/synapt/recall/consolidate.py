@@ -769,13 +769,72 @@ def _format_existing_knowledge(
     return "\n".join(lines)
 
 
+def _detect_concurrent_agents(cluster: list[JournalEntry]) -> str:
+    """Detect if a cluster contains concurrent sessions from different agents.
+
+    Returns annotation text for the LLM prompt if concurrent agents are
+    detected, empty string otherwise.  Concurrent = timestamps within ~1 hour
+    of each other AND different griptree identities.
+    """
+    agents = {getattr(e, "griptree", "") for e in cluster if getattr(e, "griptree", "")}
+    if len(agents) < 2:
+        return ""
+
+    # Check timestamp overlap: sort by time, see if any pair is within ~1 hour
+    timed = sorted(
+        ((e.timestamp or "", getattr(e, "griptree", "") or e.session_id[:8]) for e in cluster if e.timestamp),
+        key=lambda t: t[0],
+    )
+    concurrent_pairs: list[tuple[str, str]] = []
+    for i in range(len(timed)):
+        for j in range(i + 1, len(timed)):
+            if timed[i][1] == timed[j][1]:
+                continue  # Same agent
+            # Quick ISO timestamp comparison: within ~30 min
+            # ISO 8601 sorts lexicographically, so we check the date+hour
+            t1, t2 = timed[i][0][:16], timed[j][0][:16]  # "YYYY-MM-DDTHH:MM"
+            if t1[:13] == t2[:13]:  # Same hour
+                concurrent_pairs.append((timed[i][1], timed[j][1]))
+            elif t1[:10] == t2[:10]:  # Same day, check if adjacent hours
+                try:
+                    h1, h2 = int(t1[11:13]), int(t2[11:13])
+                    if abs(h1 - h2) <= 1:
+                        concurrent_pairs.append((timed[i][1], timed[j][1]))
+                except (ValueError, IndexError):
+                    pass
+
+    if not concurrent_pairs:
+        return ""
+
+    agent_list = ", ".join(sorted(agents))
+    return (
+        f"NOTE: This cluster contains CONCURRENT sessions from {len(agents)} "
+        f"agents ({agent_list}) working in parallel on related tasks. "
+        f"These are collaborative, not sequential — facts may be corroborated "
+        f"across agents or represent parallel discoveries."
+    )
+
+
 def _format_journal_cluster(cluster: list[JournalEntry]) -> str:
-    """Format a cluster of journal entries for the consolidation prompt."""
+    """Format a cluster of journal entries for the consolidation prompt.
+
+    Includes agent identity when available and annotates concurrent
+    multi-agent sessions so the LLM understands collaborative context.
+    """
     lines = []
+
+    # Add concurrency annotation if multiple agents detected
+    concurrency_note = _detect_concurrent_agents(cluster)
+    if concurrency_note:
+        lines.append(concurrency_note)
+        lines.append("")
+
     for entry in sorted(cluster, key=lambda e: e.timestamp):
         sid = entry.session_id[:8] if entry.session_id else "unknown"
         date = entry.timestamp[:10] if entry.timestamp else "?"
-        parts = [f"[Session {sid}, {date}]"]
+        agent = getattr(entry, "griptree", "") or ""
+        agent_label = f" ({agent})" if agent else ""
+        parts = [f"[Session {sid}{agent_label}, {date}]"]
         if entry.focus:
             parts.append(f"Focus: {entry.focus}")
         if entry.done:
