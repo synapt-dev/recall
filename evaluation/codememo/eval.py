@@ -96,7 +96,7 @@ def _get_provenance() -> dict:
             capture_output=True, timeout=5,
         ).returncode)
     except Exception:
-        prov["code_ref"] = "unknown"
+        prov["code_ref"] = os.environ.get("SYNAPT_CODE_REF", "unknown")
     # Relevant env vars
     env_keys = [k for k in os.environ if k.startswith("SYNAPT_")]
     if env_keys:
@@ -189,6 +189,7 @@ class SynaptSUT:
         enrich_model: str = "",
         max_knowledge: int | None = None,
         knowledge_boost: float | None = None,
+        work_dir: str = "",
     ):
         self.mode = mode  # "baseline", "recalldb", "full-pipeline"
         self.enrich_model = enrich_model
@@ -197,15 +198,20 @@ class SynaptSUT:
         self._index = None
         self._db = None
         self._work_dir: Path | None = None
+        self._persistent_work_dir = work_dir  # if set, reuse instead of tmpdir
 
     def ingest(self, session_paths: list[Path]) -> None:
         """Build a synapt recall index from session transcripts."""
         from synapt.recall.core import build_index, parse_transcript
         from synapt.recall.storage import RecallDB
 
-        self._work_dir = Path(tempfile.mkdtemp(prefix="codememo_"))
+        if self._persistent_work_dir:
+            self._work_dir = Path(self._persistent_work_dir)
+            self._work_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self._work_dir = Path(tempfile.mkdtemp(prefix="codememo_"))
         index_dir = self._work_dir / "index"
-        index_dir.mkdir()
+        index_dir.mkdir(exist_ok=True)
 
         # Sessions are already in Claude Code JSONL format — no conversion
         # needed. Just point build_index at a directory containing them.
@@ -353,7 +359,7 @@ class SynaptSUT:
                 self._db.close()
             except Exception:
                 pass
-        if self._work_dir and self._work_dir.exists():
+        if self._work_dir and self._work_dir.exists() and not self._persistent_work_dir:
             shutil.rmtree(self._work_dir, ignore_errors=True)
 
 
@@ -1059,6 +1065,11 @@ def main():
         "--model", type=str, default="gpt-4o-mini",
         help="OpenAI model for answer generation and judging (default: gpt-4o-mini)",
     )
+    parser.add_argument(
+        "--work-dir", type=str, default="",
+        help="Persistent work directory for index/enrichment data. "
+             "If set, reused across runs (GPU enrich → CPU eval split).",
+    )
     args = parser.parse_args()
 
     # Discover projects
@@ -1085,6 +1096,7 @@ def main():
         enrich_model=args.enrich_model,
         max_knowledge=args.max_knowledge,
         knowledge_boost=args.knowledge_boost,
+        work_dir=args.work_dir,
     )
 
     try:
