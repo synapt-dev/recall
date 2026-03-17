@@ -297,6 +297,23 @@ def _archive_and_build_locked(
         print(f"[build] Parsed {len(chatgpt_chunks)} ChatGPT chunks")
         all_chunks.extend(chatgpt_chunks)
 
+    # Codex CLI transcripts (cross-editor memory)
+    try:
+        from synapt.recall.codex import discover_codex_sessions, list_codex_transcripts, parse_codex_transcript
+        codex_dir = discover_codex_sessions()
+        if codex_dir:
+            codex_files = list_codex_transcripts(codex_dir)
+            if codex_files:
+                codex_chunks = []
+                seen = set()
+                for cf in codex_files:
+                    codex_chunks.extend(parse_codex_transcript(cf, seen_uuids=seen))
+                if codex_chunks:
+                    all_chunks.extend(codex_chunks)
+                    print(f"  Codex: {len(codex_chunks)} chunks from {len(codex_files)} sessions")
+    except Exception as exc:
+        logger.debug("Codex transcript parsing failed: %s", exc)
+
     # Tier 1: Synthesize auto-journal stubs for sessions without entries
     from synapt.recall.journal import _journal_path, synthesize_journal_stubs
     from synapt.recall.core import parse_journal_entries
