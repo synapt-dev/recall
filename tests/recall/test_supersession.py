@@ -678,19 +678,16 @@ class TestContradictionSessionStart:
 
     def test_no_pending_returns_empty(self, tmp_path):
         from synapt.recall.server import format_contradictions_for_session_start
-        db = _make_db(tmp_path)
-        index = TranscriptIndex.__new__(TranscriptIndex)
-        index._db = db
-        index.chunks = []
-        index.sessions = {}
+        # Create DB as recall.db so the function finds it
+        db = RecallDB(tmp_path / "recall.db")
 
-        with patch("synapt.recall.server._get_index", return_value=index):
+        with patch("synapt.recall.server.project_index_dir", return_value=tmp_path):
             result = format_contradictions_for_session_start()
         assert result == ""
 
     def test_pending_formatted_for_model(self, tmp_path):
         from synapt.recall.server import format_contradictions_for_session_start
-        db = _make_db(tmp_path)
+        db = RecallDB(tmp_path / "recall.db")
         node = _make_knowledge_node(node_id="n1", content="old approach")
         db.save_knowledge_nodes([node])
         db.add_pending_contradiction(
@@ -698,12 +695,9 @@ class TestContradictionSessionStart:
             reason="benchmarks improved",
             detected_by="consolidation",
         )
-        index = TranscriptIndex.__new__(TranscriptIndex)
-        index._db = db
-        index.chunks = []
-        index.sessions = {}
+        db.close()
 
-        with patch("synapt.recall.server._get_index", return_value=index):
+        with patch("synapt.recall.server.project_index_dir", return_value=tmp_path):
             result = format_contradictions_for_session_start()
         assert "Pending contradictions (1)" in result
         assert "ask the user to resolve" in result
@@ -712,9 +706,10 @@ class TestContradictionSessionStart:
         assert "benchmarks improved" in result
         assert "recall_contradict" in result
 
-    def test_no_index_returns_empty(self):
+    def test_no_db_returns_empty(self, tmp_path):
         from synapt.recall.server import format_contradictions_for_session_start
-        with patch("synapt.recall.server._get_index", return_value=None):
+        # Point at empty dir — no recall.db exists
+        with patch("synapt.recall.server.project_index_dir", return_value=tmp_path):
             result = format_contradictions_for_session_start()
         assert result == ""
 
