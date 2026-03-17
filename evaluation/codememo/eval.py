@@ -96,7 +96,7 @@ def _get_provenance() -> dict:
             capture_output=True, timeout=5,
         ).returncode)
     except Exception:
-        prov["code_ref"] = "unknown"
+        prov["code_ref"] = os.environ.get("SYNAPT_CODE_REF", "unknown")
     # Relevant env vars
     env_keys = [k for k in os.environ if k.startswith("SYNAPT_")]
     if env_keys:

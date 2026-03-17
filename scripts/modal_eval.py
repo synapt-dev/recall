@@ -293,9 +293,11 @@ def run_ablation(
     cpu=1,
     memory=512,
 )
-def run_all(config_filter: str | None = None):
+def run_all(config_filter: str | None = None, code_ref: str = ""):
     """Run ablation configs serially, dispatching to CPU or GPU as needed."""
     t_start = time.time()
+    if code_ref:
+        os.environ["SYNAPT_CODE_REF"] = code_ref
 
     configs_to_run = CONFIGS
     if config_filter:
@@ -311,15 +313,20 @@ def run_all(config_filter: str | None = None):
         print(f"Launching: {name} — {desc} {'[GPU→CPU]' if needs_gpu else '[CPU]'}")
         print(f"{'='*60}")
 
+        # Inject code_ref into env overrides for provenance
+        run_env = {**env}
+        if code_ref:
+            run_env["SYNAPT_CODE_REF"] = code_ref
+
         if needs_gpu:
             # Step 1: GPU enrichment (minutes, no OpenAI calls)
             print(f"  Step 1: GPU enrichment ({ENRICH_MODEL})")
-            run_enrich.remote(name, bench, env, ENRICH_MODEL, extra)
+            run_enrich.remote(name, bench, run_env, ENRICH_MODEL, extra)
             print(f"  Step 1: done — enrichment cached on volume")
             # Step 2: CPU eval reusing enriched work dir (hours, OpenAI calls only)
-            result = run_ablation.remote(name, desc, env, extra, bench, use_work_dir=True)
+            result = run_ablation.remote(name, desc, run_env, extra, bench, use_work_dir=True)
         else:
-            result = run_ablation.remote(name, desc, env, extra, bench)
+            result = run_ablation.remote(name, desc, run_env, extra, bench)
         results[name] = result
 
         j = result.get("j_score_overall", "?")
@@ -364,19 +371,39 @@ def run_all(config_filter: str | None = None):
 # ---------------------------------------------------------------------------
 
 @app.local_entrypoint()
-def main(config: str = ""):
+def main(config: str = "", ref: str = ""):
     """Run ablations on Modal.
 
     Args:
         config: Optional filter — run only configs matching this string.
                 Empty = run all.
+        ref: Git commit SHA for provenance. Auto-detected if not set.
     """
+    # Auto-detect commit SHA from local repo
+    if not ref:
+        import subprocess
+        try:
+            ref = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            dirty = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "diff", "--quiet"],
+                capture_output=True, timeout=5,
+            ).returncode
+            if dirty:
+                ref += "-dirty"
+        except Exception:
+            ref = "unknown"
+
+    print(f"Code ref: {ref}")
+
     if config:
         print(f"Running configs matching: {config}")
-        result = run_all.remote(config_filter=config)
+        result = run_all.remote(config_filter=config, code_ref=ref)
     else:
         print("Running all ablation configs")
-        result = run_all.remote()
+        result = run_all.remote(code_ref=ref)
 
     print(f"\nDone! Results on Modal volume 'synapt-eval-vol'")
     print(f"  modal volume get synapt-eval-vol results/ablation_results.json ./results.json")
