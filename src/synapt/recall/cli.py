@@ -1244,6 +1244,12 @@ def cmd_channel(args: argparse.Namespace) -> None:
         channel_heartbeat,
         channel_unread,
         channel_pin,
+        channel_directive,
+        channel_mute,
+        channel_unmute,
+        channel_kick,
+        channel_broadcast,
+        channel_list_channels,
     )
 
     action = args.action
@@ -1275,9 +1281,40 @@ def cmd_channel(args: argparse.Namespace) -> None:
                 print(f"  #{ch}: {count}{marker}")
     elif action == "pin":
         if not args.message:
-            print("Usage: synapt recall channel pin <channel> \"message\"", file=sys.stderr)
+            print("Usage: synapt recall channel pin <channel> \"message_id\"", file=sys.stderr)
             sys.exit(1)
-        print(channel_pin(channel=channel, message=args.message))
+        print(channel_pin(channel=channel, message_id=args.message))
+    elif action == "directive":
+        if not args.message or not args.to:
+            print("Usage: synapt recall channel directive <channel> \"message\" --to <agent>", file=sys.stderr)
+            sys.exit(1)
+        print(channel_directive(channel=channel, message=args.message, to=args.to))
+    elif action == "mute":
+        if not args.target:
+            print("Usage: synapt recall channel mute <channel> --target <agent>", file=sys.stderr)
+            sys.exit(1)
+        print(channel_mute(target=args.target, channel=channel))
+    elif action == "unmute":
+        if not args.target:
+            print("Usage: synapt recall channel unmute <channel> --target <agent>", file=sys.stderr)
+            sys.exit(1)
+        print(channel_unmute(target=args.target, channel=channel))
+    elif action == "kick":
+        if not args.target:
+            print("Usage: synapt recall channel kick <channel> --target <agent>", file=sys.stderr)
+            sys.exit(1)
+        print(channel_kick(target=args.target, channel=channel))
+    elif action == "broadcast":
+        if not args.message:
+            print("Usage: synapt recall channel broadcast \"message\"", file=sys.stderr)
+            sys.exit(1)
+        print(channel_broadcast(message=args.message))
+    elif action == "list":
+        channels = channel_list_channels()
+        if not channels:
+            print("No channels yet.")
+        else:
+            print("Channels: " + ", ".join(f"#{c}" for c in channels))
 
 
 _GLOBAL_HOOKS = {
@@ -1489,6 +1526,18 @@ def cmd_hook(args: argparse.Namespace) -> None:
         except Exception:
             pass  # Contradiction surfacing is non-critical
 
+        # 8. Auto-join channel + surface unread counts
+        try:
+            from synapt.recall.channel import channel_join, channel_unread
+            channel_join("dev")
+            counts = channel_unread()
+            if counts:
+                unread_parts = [f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0]
+                if unread_parts:
+                    print(f"  Channel: {', '.join(unread_parts)} unread", file=sys.stderr)
+        except Exception:
+            pass  # Channel is non-critical
+
     elif event == "session-end":
         # 1. Archive transcripts locally
         cmd_archive(argparse.Namespace())
@@ -1496,6 +1545,13 @@ def cmd_hook(args: argparse.Namespace) -> None:
         # 2. Write auto-extracted journal entry
         cmd_journal(argparse.Namespace(read=False, write=True, list=False, show=None,
                                        focus=None, done=None, decisions=None, next=None))
+
+        # 3. Leave channel
+        try:
+            from synapt.recall.channel import channel_leave
+            channel_leave("dev", reason="session ended")
+        except Exception:
+            pass  # Channel is non-critical
 
     elif event == "precompact":
         # Rebuild with sync
@@ -1509,6 +1565,13 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # Write an interim journal entry so mid-session state is captured
             # even when SessionEnd never fires (crash, kill, etc.).
             _precompact_journal_write(project)
+
+        # Heartbeat to keep presence alive
+        try:
+            from synapt.recall.channel import channel_heartbeat
+            channel_heartbeat()
+        except Exception:
+            pass  # Channel is non-critical
 
 
 def _precompact_journal_write(project: Path) -> None:
@@ -1953,18 +2016,24 @@ def main():
     channel_parser = subparsers.add_parser("channel", help="Cross-worktree agent communication channels")
     channel_parser.add_argument("action",
                                 choices=["post", "read", "who", "join", "leave",
-                                         "heartbeat", "unread", "pin"],
+                                         "heartbeat", "unread", "pin",
+                                         "directive", "mute", "unmute", "kick",
+                                         "broadcast", "list"],
                                 help="Channel action")
     channel_parser.add_argument("channel", nargs="?", default="dev",
                                 help="Channel name (default: dev)")
     channel_parser.add_argument("message", nargs="?", default=None,
-                                help="Message body (for 'post' and 'pin' actions)")
+                                help="Message body (for post/pin/directive/broadcast)")
     channel_parser.add_argument("--limit", type=int, default=20,
                                 help="Max messages to return (for 'read' action, default: 20)")
     channel_parser.add_argument("--since", default=None,
                                 help="Only messages after this ISO timestamp (for 'read' action)")
     channel_parser.add_argument("--pin", action="store_true",
                                 help="Also pin the message (for 'post' action)")
+    channel_parser.add_argument("--to", default=None,
+                                help="Target agent for 'directive' action")
+    channel_parser.add_argument("--target", default=None,
+                                help="Agent to mute/unmute/kick (id, display name, or griptree)")
 
     args = parser.parse_args()
 
