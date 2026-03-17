@@ -1090,3 +1090,66 @@ def channel_search(
     # Sort by score descending, then timestamp descending
     results.sort(key=lambda r: (-r["score"], r["timestamp"]), reverse=False)
     return results[:max_results]
+
+
+def check_directives(
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Check for unread directives targeted at this agent. Fast path for hooks.
+
+    Scans only messages after this agent's cursor in channels it belongs to.
+    Returns formatted directives for stdout, or empty string if none pending.
+    Designed to complete in < 50ms for PostToolUse hook.
+    """
+    aid = agent_name or _agent_id(project_dir)
+
+    conn = _open_db(project_dir)
+    try:
+        # Get channels this agent is a member of
+        memberships = conn.execute(
+            "SELECT channel FROM memberships WHERE agent_id = ?",
+            (aid,),
+        ).fetchall()
+        if not memberships:
+            return ""
+
+        # Get cursors for all channels in one query
+        channels = [r["channel"] for r in memberships]
+        placeholders = ",".join("?" for _ in channels)
+        cursor_rows = conn.execute(
+            f"SELECT channel, last_read_at FROM cursors "
+            f"WHERE agent_id = ? AND channel IN ({placeholders})",
+            (aid, *channels),
+        ).fetchall()
+        cursors = {r["channel"]: r["last_read_at"] for r in cursor_rows}
+
+        # Also heartbeat while we're here (one UPDATE, already have the conn)
+        now = _now_iso()
+        conn.execute(
+            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
+            (now, aid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Scan for unread directives (JSONL read, filtered by cursor)
+    pending: list[tuple[str, ChannelMessage]] = []
+    for ch in channels:
+        since = cursors.get(ch, "1970-01-01T00:00:00Z")
+        path = _channel_path(ch, project_dir)
+        if not path.exists():
+            continue
+        for msg in _read_messages(path, since=since):
+            if msg.type == "directive" and msg.to == aid:
+                pending.append((ch, msg))
+
+    if not pending:
+        return ""
+
+    # Format for output (will appear as system reminder in context)
+    lines = [f"[channel] {len(pending)} pending directive(s):"]
+    for ch, msg in pending:
+        lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    return "\n".join(lines)

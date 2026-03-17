@@ -33,6 +33,7 @@ from synapt.recall.channel import (
     channel_broadcast,
     channel_list_channels,
     channel_search,
+    check_directives,
 )
 
 
@@ -1328,6 +1329,65 @@ class TestChannelSearch(unittest.TestCase):
         channel_post("dev", "hello", agent_name="bot")
         results = channel_search("")
         self.assertEqual(results, [])
+
+
+class TestCheckDirectives(unittest.TestCase):
+    """Tests for check_directives — fast PostToolUse hook function."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self._tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_returns_empty_when_not_joined(self):
+        """No memberships → empty string (no noise)."""
+        result = check_directives(agent_name="s_nobody")
+        self.assertEqual(result, "")
+
+    def test_returns_empty_when_no_directives(self):
+        """Joined but no directives → empty string."""
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "regular message", agent_name="s_other")
+        # Read to set cursor past existing messages
+        channel_read("dev", agent_name="s_agent1")
+        result = check_directives(agent_name="s_agent1")
+        self.assertEqual(result, "")
+
+    def test_surfaces_unread_directive(self):
+        """Directive targeted at agent appears in output."""
+        channel_join("dev", agent_name="s_agent1")
+        # Set cursor by reading
+        channel_read("dev", agent_name="s_agent1")
+        # Now post a directive after the cursor
+        channel_directive("dev", "please review PR #117", to="s_agent1", agent_name="s_sender")
+        result = check_directives(agent_name="s_agent1")
+        self.assertIn("pending directive", result)
+        self.assertIn("please review PR #117", result)
+        self.assertIn("s_sender", result)
+
+    def test_ignores_directive_for_other_agent(self):
+        """Directive targeted at someone else is not surfaced."""
+        channel_join("dev", agent_name="s_agent1")
+        channel_read("dev", agent_name="s_agent1")
+        channel_directive("dev", "not for you", to="s_other", agent_name="s_sender")
+        result = check_directives(agent_name="s_agent1")
+        self.assertEqual(result, "")
+
+    def test_heartbeat_updates_presence(self):
+        """check_directives piggybacks a heartbeat update."""
+        channel_join("dev", agent_name="s_agent1")
+        # Wait a moment so timestamps differ
+        time.sleep(0.01)
+        check_directives(agent_name="s_agent1")
+        conn = _open_db()
+        row = conn.execute(
+            "SELECT status FROM presence WHERE agent_id = ?", ("s_agent1",)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row["status"], "online")
 
 
 if __name__ == "__main__":

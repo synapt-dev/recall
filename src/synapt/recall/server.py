@@ -1376,27 +1376,54 @@ def recall_channel(
 # ---------------------------------------------------------------------------
 
 
+def _directive_suffix() -> str:
+    """Check for pending directives and return a suffix to append to tool results.
+
+    Returns empty string if nothing pending. Runs in ~20ms (no subprocess).
+    """
+    try:
+        from synapt.recall.channel import check_directives
+        return check_directives()
+    except Exception:
+        return ""
+
+
+def _with_directive_check(fn):
+    """Wrap a tool function to append pending directives to its result."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        suffix = _directive_suffix()
+        if suffix and isinstance(result, str):
+            return result + "\n\n" + suffix
+        return result
+
+    return wrapper
+
+
 def register_tools(mcp) -> None:
     """Register recall tools on the given FastMCP server instance.
 
     This allows the unified synapt server to compose recall tools alongside
     repair and watch tools on a single MCP server.
     """
-    mcp.tool()(recall_search)
-    mcp.tool()(recall_quick)
-    mcp.tool()(recall_files)
-    mcp.tool()(recall_sessions)
+    mcp.tool()(_with_directive_check(recall_search))
+    mcp.tool()(_with_directive_check(recall_quick))
+    mcp.tool()(_with_directive_check(recall_files))
+    mcp.tool()(_with_directive_check(recall_sessions))
     mcp.tool()(recall_build)
     mcp.tool()(recall_setup)
-    mcp.tool()(recall_stats)
-    mcp.tool()(recall_journal)
-    mcp.tool()(recall_remind)
+    mcp.tool()(_with_directive_check(recall_stats))
+    mcp.tool()(_with_directive_check(recall_journal))
+    mcp.tool()(_with_directive_check(recall_remind))
     mcp.tool()(recall_enrich)
     mcp.tool()(recall_consolidate)
-    mcp.tool()(recall_contradict)
-    mcp.tool()(recall_context)
-    mcp.tool()(recall_timeline)
-    mcp.tool()(recall_channel)
+    mcp.tool()(_with_directive_check(recall_contradict))
+    mcp.tool()(_with_directive_check(recall_context))
+    mcp.tool()(_with_directive_check(recall_timeline))
+    mcp.tool()(_with_directive_check(recall_channel))
 
 
 def main():

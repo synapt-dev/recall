@@ -1346,10 +1346,10 @@ def cmd_channel(args: argparse.Namespace) -> None:
         )
 
 
-_GLOBAL_HOOKS = {
-    "SessionStart": "synapt recall hook session-start",
-    "SessionEnd": "synapt recall hook session-end",
-    "PreCompact": "synapt recall hook precompact",
+_GLOBAL_HOOKS: dict[str, dict[str, str | int]] = {
+    "SessionStart": {"command": "synapt recall hook session-start", "timeout": 60},
+    "SessionEnd": {"command": "synapt recall hook session-end", "timeout": 60},
+    "PreCompact": {"command": "synapt recall hook precompact", "timeout": 300},
 }
 
 
@@ -1387,7 +1387,9 @@ def _install_global_hooks() -> int:
                 migrated += len(inner) - len(filtered)
             m["hooks"] = filtered
 
-    for event, command in _GLOBAL_HOOKS.items():
+    for event, hook_cfg in _GLOBAL_HOOKS.items():
+        command = hook_cfg["command"]
+        timeout = hook_cfg.get("timeout", 60)
         matchers = hooks.setdefault(event, [])
         # Check if our command is already registered
         already = any(
@@ -1407,7 +1409,7 @@ def _install_global_hooks() -> int:
             if isinstance(m, dict) and not m.get("matcher"):
                 target = m
                 break
-        entry = {"type": "command", "command": command, "timeout": 60}
+        entry = {"type": "command", "command": str(command), "timeout": int(timeout)}
         if target is None:
             matchers.append({"matcher": "", "hooks": [entry]})
         else:
@@ -1605,6 +1607,18 @@ def cmd_hook(args: argparse.Namespace) -> None:
             channel_heartbeat()
         except Exception:
             pass  # Channel is non-critical
+
+    elif event == "check-directives":
+        # Fast path: check for unread directives targeted at this agent.
+        # Output goes to stdout → appears as system reminder in context.
+        # Empty output = invisible (no noise when nothing pending).
+        try:
+            from synapt.recall.channel import check_directives
+            output = check_directives()
+            if output:
+                print(output)
+        except Exception:
+            pass  # Never block a tool call for channel issues
 
 
 def _precompact_journal_write(project: Path) -> None:
@@ -2044,8 +2058,8 @@ def main():
     remind_parser.add_argument("--pending", action="store_true", help="Show and mark pending reminders (for hooks)")
 
     # Hook (versioned hook commands — called directly from Claude Code hooks config)
-    hook_parser = subparsers.add_parser("hook", help="Run a Claude Code hook (session-start, session-end, precompact)")
-    hook_parser.add_argument("event", choices=["session-start", "session-end", "precompact"],
+    hook_parser = subparsers.add_parser("hook", help="Run a Claude Code hook (session-start, session-end, precompact, check-directives)")
+    hook_parser.add_argument("event", choices=["session-start", "session-end", "precompact", "check-directives"],
                              help="Hook event to handle")
 
     # Install hook (legacy — kept for backward compat)
