@@ -3413,10 +3413,15 @@ _GRIPSPACE_CACHE_TTL = 60.0  # seconds
 
 
 def _find_gripspace_root(path: Path) -> Path | None:
-    """Walk up from *path* to find a ``.gitgrip/`` directory (GitGrip gripspace root).
+    """Walk up from *path* to find the GitGrip **gripspace root**.
 
     Returns the gripspace root path, or *None* if not inside a gripspace.
     Analogous to ``_git_main_worktree_root`` but for multi-repo gripspaces.
+
+    Distinguishes between a **gripspace root** (has ``.gitgrip/griptrees.json``)
+    and a **linked griptree** (has ``.gitgrip/griptree.json`` — singular).
+    When a linked griptree is found, resolves back to the gripspace root via
+    the git worktree pointer in any sub-repo.
 
     Stops at ``$HOME`` to avoid matching stray ``.gitgrip/`` directories
     above the user's project hierarchy.  Results are cached per resolved path
@@ -3435,14 +3440,58 @@ def _find_gripspace_root(path: Path) -> Path | None:
 
     home = Path.home().resolve()
     while current != current.parent:
-        if (current / ".gitgrip").is_dir():
-            _gripspace_cache[cache_key] = (current, time.monotonic())
-            return current
+        gitgrip = current / ".gitgrip"
+        if gitgrip.is_dir():
+            # Gripspace root has griptrees.json (plural)
+            if (gitgrip / "griptrees.json").exists():
+                _gripspace_cache[cache_key] = (current, time.monotonic())
+                return current
+            # Linked griptree has griptree.json (singular) — resolve to parent
+            if (gitgrip / "griptree.json").exists():
+                root = _resolve_griptree_parent(current)
+                _gripspace_cache[cache_key] = (root, time.monotonic())
+                return root
         # Don't walk above $HOME
         if current == home:
             break
         current = current.parent
     _gripspace_cache[cache_key] = (None, time.monotonic())
+    return None
+
+
+def _resolve_griptree_parent(griptree_path: Path) -> Path | None:
+    """Resolve a linked griptree back to its parent gripspace root.
+
+    Uses the git worktree pointer in any sub-repo to find the main worktree,
+    then walks up from there to find the gripspace root.
+    """
+    # Find any sub-repo with a .git file (linked worktree pointer)
+    for child in griptree_path.iterdir():
+        git_path = child / ".git"
+        if git_path.is_file():
+            # .git file contains: "gitdir: /path/to/main/.git/worktrees/<name>/"
+            try:
+                content = git_path.read_text(encoding="utf-8").strip()
+                if content.startswith("gitdir:"):
+                    gitdir = Path(content.split(":", 1)[1].strip())
+                    # gitdir is <main-repo>/.git/worktrees/<name>/
+                    # Walk up to find .git/, then parent is the main repo root
+                    main_repo = gitdir
+                    while main_repo.name != ".git" and main_repo != main_repo.parent:
+                        main_repo = main_repo.parent
+                    if main_repo.name == ".git":
+                        main_repo_root = main_repo.parent
+                        # Walk up from main repo to find gripspace root
+                        candidate = main_repo_root
+                        home = Path.home().resolve()
+                        while candidate != candidate.parent:
+                            if (candidate / ".gitgrip" / "griptrees.json").exists():
+                                return candidate
+                            if candidate == home:
+                                break
+                            candidate = candidate.parent
+            except OSError:
+                continue
     return None
 
 
