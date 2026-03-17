@@ -257,6 +257,17 @@ def recall_search(
         if result:
             parts.append(result)
 
+        # Surface contradiction warnings from co-retrieval detection
+        conflicts = getattr(index, "_last_conflicts", [])
+        if conflicts:
+            warn_lines = [f"\n⚠ Conflicting information detected ({len(conflicts)} conflict(s)):"]
+            for old, new in conflicts[:3]:  # Cap at 3 to avoid noise
+                warn_lines.append(
+                    f"  • \"{old.get('content', '')[:80]}\" vs \"{new.get('content', '')[:80]}\""
+                )
+            warn_lines.append("Use recall_contradict(action='list') to review and resolve.")
+            parts.append("\n".join(warn_lines))
+
         # Surface embedding status when search is degraded
         if index._embedding_status == "unavailable":
             parts.append(
