@@ -673,9 +673,9 @@ def recall_contradict(
     contradiction_id: int | None = None,
     resolution: str = "confirmed",
     claim: str | None = None,
-    new_content: str | None = None,
     old_node_id: str | None = None,
     reason: str | None = None,
+    category: str | None = None,
 ) -> str:
     """Manage pending knowledge contradictions.
 
@@ -685,51 +685,39 @@ def recall_contradict(
 
     Args:
         action: "list" (show pending), "resolve" (confirm/dismiss one),
-                "flag" (report a new contradiction).
+                "flag" (flag a new contradiction from free text).
         contradiction_id: ID of the contradiction to resolve (required for "resolve").
         resolution: "confirmed" (supersede old node) or "dismissed" (keep old node).
-        claim: Free-text description of conflicting information (for "flag").
-               The system will search for matching knowledge nodes automatically.
-        new_content: The correct/updated information (for "flag"). If omitted,
-                     *claim* is used as both the description and the new content.
-        old_node_id: Optional knowledge node ID that the claim contradicts.
-                     If omitted, the system searches for matching nodes.
-        reason: Why this is a contradiction (for "flag").
+        claim: The correct/new fact as free text (required for "flag").
+        old_node_id: Knowledge node ID that the claim contradicts (optional for "flag" —
+                     if omitted, searches for a matching node automatically).
+        reason: Why this contradicts the old information (optional for "flag").
+        category: Category for the new claim, e.g. "personal", "technical" (optional for "flag").
     """
     index = _get_index()
     if index is None or not index._db:
         return "No index found. Run `synapt recall setup` first."
 
     try:
-        if action == "flag":
-            return _handle_flag(
-                index, claim=claim, new_content=new_content,
-                old_node_id=old_node_id, reason=reason,
-            )
-
         if action == "list":
             pending = index._db.list_pending_contradictions()
             if not pending:
                 return "No pending contradictions."
             # Build lookup dict once (not per-iteration)
-            old_ids = {c["old_node_id"] for c in pending if c["old_node_id"]}
+            old_ids = {c["old_node_id"] for c in pending}
             node_lookup = {
                 nid: index._db.get_knowledge_node(nid)
                 for nid in old_ids
             }
             lines = [f"Pending contradictions ({len(pending)}):"]
             for c in pending:
-                old_node = node_lookup.get(c["old_node_id"]) if c["old_node_id"] else None
+                old_node = node_lookup.get(c["old_node_id"])
                 old_content = old_node["content"] if old_node else ""
                 lines.append(
                     f"\n  #{c['id']} ({c['detected_by']}, {c['detected_at'][:10]})"
                 )
-                if c.get("claim_text"):
-                    lines.append(f"    Claim: {c['claim_text']}")
                 if old_content:
                     lines.append(f"    Old: {old_content}")
-                elif not c["old_node_id"]:
-                    lines.append("    Old: (no matching node — free-text claim)")
                 lines.append(f"    New: {c['new_content']}")
                 if c["reason"]:
                     lines.append(f"    Reason: {c['reason']}")
@@ -746,130 +734,101 @@ def recall_contradict(
                 # Read the now-resolved row (status='confirmed', not 'pending')
                 # to extract fields for supersession. This intentionally reads
                 # by id regardless of status — do not add a status filter here.
-                pending_row = index._db._conn.execute(
+                pending = index._db._conn.execute(
                     "SELECT * FROM pending_contradictions WHERE id = ?",
                     (contradiction_id,),
                 ).fetchone()
-                if pending_row and pending_row["old_node_id"]:
-                    _apply_supersession(
-                        index._db,
-                        old_node_id=pending_row["old_node_id"],
-                        new_content=pending_row["new_content"],
-                        category=pending_row["category"],
-                        reason=pending_row["reason"],
-                        source_sessions=json.loads(pending_row["source_sessions"]),
-                    )
-                elif pending_row and not pending_row["old_node_id"]:
-                    # Free-text claim confirmed — create a new knowledge node
-                    _create_knowledge_from_claim(index._db, pending_row)
-                    return f"Contradiction #{contradiction_id} confirmed — new knowledge node created from claim."
-                return f"Contradiction #{contradiction_id} confirmed — old node superseded."
+                if pending:
+                    if pending["old_node_id"]:
+                        _apply_supersession(
+                            index._db,
+                            old_node_id=pending["old_node_id"],
+                            new_content=pending["new_content"],
+                            category=pending["category"],
+                            reason=pending["reason"],
+                            source_sessions=json.loads(pending["source_sessions"]),
+                        )
+                        return f"Contradiction #{contradiction_id} confirmed — old node superseded."
+                    else:
+                        # No old node — create a new knowledge node from the claim
+                        import hashlib as _hashlib
+                        from synapt.recall.knowledge import append_node, KnowledgeNode
+                        node_id = "kn-" + _hashlib.sha256(
+                            pending["new_content"].encode()
+                        ).hexdigest()[:12]
+                        node = KnowledgeNode(
+                            id=node_id,
+                            content=pending["new_content"],
+                            category=pending["category"] or "general",
+                            confidence=0.8,
+                            source_sessions=json.loads(pending["source_sessions"]),
+                            created_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                        append_node(node)
+                        return (
+                            f"Contradiction #{contradiction_id} confirmed — "
+                            f"created knowledge node {node_id}: {pending['new_content']}"
+                        )
+                return f"Contradiction #{contradiction_id} confirmed."
             return f"Contradiction #{contradiction_id} dismissed — old node retained."
+
+        if action == "flag":
+            if not claim:
+                return "Error: claim is required for 'flag' action. Provide the correct fact as free text."
+
+            resolved_old_id = old_node_id or ""
+
+            # If no old_node_id given, search for a matching knowledge node
+            if not resolved_old_id:
+                from synapt.recall.knowledge import read_nodes
+                nodes = read_nodes()
+                if nodes:
+                    # Simple keyword match: find nodes whose content overlaps
+                    # with the claim. Use the top match by word overlap.
+                    claim_words = set(claim.lower().split())
+                    best_match = None
+                    best_score = 0
+                    for node in nodes:
+                        if node.get("status") in ("contradicted", "archived"):
+                            continue
+                        node_words = set(node.get("content", "").lower().split())
+                        overlap = len(claim_words & node_words)
+                        if overlap > best_score and overlap >= 2:
+                            best_score = overlap
+                            best_match = node
+                    if best_match:
+                        resolved_old_id = best_match["id"]
+
+            cid = index._db.add_pending_contradiction(
+                old_node_id=resolved_old_id,
+                new_content=claim,
+                category=category or "",
+                reason=reason or "",
+                source_sessions=[],
+                detected_by="manual",
+            )
+
+            if resolved_old_id:
+                old_node = index._db.get_knowledge_node(resolved_old_id)
+                old_text = old_node["content"][:100] if old_node else "(not found)"
+                return (
+                    f"Flagged contradiction #{cid}.\n"
+                    f"  Old: [{resolved_old_id}] {old_text}\n"
+                    f"  New: {claim}\n"
+                    f"Use recall_contradict(action='resolve', contradiction_id={cid}, resolution='confirmed') "
+                    f"to supersede the old node."
+                )
+            return (
+                f"Flagged contradiction #{cid} (no matching knowledge node found).\n"
+                f"  Claim: {claim}\n"
+                f"A knowledge node will be created when you resolve this as 'confirmed'."
+            )
 
         return f"Unknown action: {action}. Use 'list', 'resolve', or 'flag'."
     except Exception as exc:
         return f"Contradiction management failed: {exc}"
     finally:
         _invalidate_cache()
-
-
-def _handle_flag(
-    index,
-    claim: str | None,
-    new_content: str | None,
-    old_node_id: str | None,
-    reason: str | None,
-) -> str:
-    """Handle the 'flag' action for recall_contradict.
-
-    Accepts a free-text claim and optionally searches for matching knowledge
-    nodes.  If *old_node_id* is provided, uses it directly.  Otherwise,
-    searches the knowledge FTS index for candidates.
-    """
-    if not claim and not new_content:
-        return "Error: 'claim' or 'new_content' is required for 'flag' action."
-
-    effective_claim = claim or ""
-    effective_content = new_content or claim or ""
-    effective_reason = reason or ""
-
-    # If a specific node ID was provided, use it directly
-    if old_node_id:
-        node = index._db.get_knowledge_node(old_node_id)
-        if not node:
-            return f"Error: knowledge node '{old_node_id}' not found."
-        cid = index._db.add_pending_contradiction(
-            old_node_id=old_node_id,
-            new_content=effective_content,
-            reason=effective_reason,
-            detected_by="manual",
-            claim_text=effective_claim or None,
-        )
-        return (
-            f"Contradiction #{cid} flagged against node '{old_node_id}': "
-            f"\"{node['content'][:80]}\" → \"{effective_content[:80]}\". "
-            f"Use recall_contradict(action='resolve', contradiction_id={cid}) to confirm or dismiss."
-        )
-
-    # Search for matching knowledge nodes via FTS
-    search_text = effective_claim or effective_content
-    try:
-        fts_results = index._db.knowledge_fts_search(search_text, limit=3)
-        if fts_results:
-            rowids = [r[0] for r in fts_results]
-            node_map = index._db.knowledge_by_rowid(rowids)
-            matches = [node_map[rid] for rid in rowids if rid in node_map]
-        else:
-            matches = []
-    except Exception:
-        matches = []
-
-    if matches:
-        # Flag against the best match, mention alternatives
-        best = matches[0]
-        cid = index._db.add_pending_contradiction(
-            old_node_id=best["id"],
-            new_content=effective_content,
-            reason=effective_reason,
-            detected_by="manual",
-            claim_text=effective_claim or None,
-        )
-        lines = [
-            f"Contradiction #{cid} flagged against best-matching node '{best['id']}':",
-            f"  Old: \"{best['content'][:100]}\"",
-            f"  New: \"{effective_content[:100]}\"",
-        ]
-        if len(matches) > 1:
-            lines.append(f"  Other candidates: {', '.join(m['id'] for m in matches[1:])}")
-        lines.append(
-            f"Use recall_contradict(action='resolve', contradiction_id={cid}) to confirm or dismiss."
-        )
-        return "\n".join(lines)
-
-    # No matching nodes — store as free-text claim for review
-    cid = index._db.add_pending_contradiction(
-        old_node_id=None,
-        new_content=effective_content,
-        reason=effective_reason,
-        detected_by="manual",
-        claim_text=effective_claim or None,
-    )
-    return (
-        f"Contradiction #{cid} flagged as free-text claim (no matching knowledge node found). "
-        f"Claim: \"{effective_content[:100]}\". "
-        f"When confirmed, a new knowledge node will be created. "
-        f"Use recall_contradict(action='resolve', contradiction_id={cid}) to confirm or dismiss."
-    )
-
-
-def _create_knowledge_from_claim(db, pending_row) -> None:
-    """Create a new knowledge node from a confirmed free-text claim."""
-    from synapt.recall.knowledge import KnowledgeNode
-
-    content = pending_row["new_content"]
-    category = pending_row["category"] or "workflow"
-    node = KnowledgeNode.create(content, category)
-    db.upsert_knowledge_node(node.__dict__)
 
 
 def _apply_supersession(
