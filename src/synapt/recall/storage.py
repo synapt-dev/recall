@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
 
 CREATE TABLE IF NOT EXISTS pending_contradictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    old_node_id TEXT NOT NULL,
+    old_node_id TEXT,                                    -- NULL for free-text claims
     new_content TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT '',
@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS pending_contradictions (
     detected_at TEXT NOT NULL,
     detected_by TEXT NOT NULL DEFAULT 'co-retrieval',  -- 'co-retrieval', 'consolidation', 'manual'
     status TEXT NOT NULL DEFAULT 'pending',             -- 'pending', 'confirmed', 'dismissed'
-    resolved_at TEXT
+    resolved_at TEXT,
+    claim_text TEXT                                      -- free-text claim for manual contradictions
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge(status);
@@ -414,6 +415,7 @@ class RecallDB:
         self._migrate_knowledge_table()
         self._migrate_clusters_table()
         self._migrate_access_stats_table()
+        self._migrate_contradictions_table()
         # Check if FTS table exists (FTS5 virtual tables don't support
         # IF NOT EXISTS, so we check manually before creating)
         row = self._conn.execute(
@@ -616,6 +618,23 @@ class RecallDB:
             "ON access_stats(promotion_tier)"
         )
         self._conn.commit()
+
+    def _migrate_contradictions_table(self) -> None:
+        """Add columns that may be missing from an older pending_contradictions table."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_contradictions'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(pending_contradictions)").fetchall()
+        }
+        if "claim_text" not in cols:
+            self._conn.execute(
+                "ALTER TABLE pending_contradictions ADD COLUMN claim_text TEXT"
+            )
+            self._conn.commit()
 
     def _needs_clusters_fts_migration(self) -> bool:
         """Check if clusters_fts schema differs from current definition."""
@@ -1231,14 +1250,20 @@ class RecallDB:
 
     def add_pending_contradiction(
         self,
-        old_node_id: str,
+        old_node_id: str | None,
         new_content: str,
         category: str = "",
         reason: str = "",
         source_sessions: list[str] | None = None,
         detected_by: str = "co-retrieval",
+        claim_text: str | None = None,
     ) -> int:
         """Queue a potential contradiction for user review.
+
+        For system-detected contradictions, *old_node_id* references the
+        existing knowledge node.  For user-initiated (free-text) claims,
+        *old_node_id* may be ``None`` and *claim_text* contains the
+        user's description of the conflicting information.
 
         Returns the ID of the new pending contradiction.
         """
@@ -1246,11 +1271,12 @@ class RecallDB:
         cur = self._conn.execute(
             "INSERT INTO pending_contradictions "
             "(old_node_id, new_content, category, reason, "
-            " source_sessions, detected_at, detected_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " source_sessions, detected_at, detected_by, claim_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 old_node_id, new_content, category, reason,
                 json.dumps(source_sessions or []), now, detected_by,
+                claim_text,
             ),
         )
         self._conn.commit()
@@ -1262,8 +1288,10 @@ class RecallDB:
             "SELECT * FROM pending_contradictions "
             "WHERE status = 'pending' ORDER BY detected_at DESC"
         ).fetchall()
-        return [
-            {
+        result = []
+        for r in rows:
+            keys = r.keys()
+            result.append({
                 "id": r["id"],
                 "old_node_id": r["old_node_id"],
                 "new_content": r["new_content"],
@@ -1272,9 +1300,9 @@ class RecallDB:
                 "source_sessions": json.loads(r["source_sessions"]),
                 "detected_at": r["detected_at"],
                 "detected_by": r["detected_by"],
-            }
-            for r in rows
-        ]
+                "claim_text": r["claim_text"] if "claim_text" in keys else None,
+            })
+        return result
 
     def has_pending_contradiction_for(self, old_node_id: str) -> bool:
         """Check if a pending contradiction already exists for a node."""
