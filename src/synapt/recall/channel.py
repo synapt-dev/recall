@@ -1209,6 +1209,32 @@ def is_claimed(
         conn.close()
 
 
+def channel_unclaim(
+    message_id: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Release a claim on a message. Only the original claimant can unclaim."""
+    aid = agent_name or _agent_id(project_dir)
+
+    conn = _open_db(project_dir)
+    try:
+        row = conn.execute(
+            "SELECT claimed_by FROM claims WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if not row:
+            return f"Message {message_id} is not claimed."
+        if row["claimed_by"] != aid:
+            display = _resolve_display_name_for(row["claimed_by"], project_dir)
+            return f"Cannot unclaim — owned by {display} ({row['claimed_by']})."
+        conn.execute("DELETE FROM claims WHERE message_id = ?", (message_id,))
+        conn.commit()
+        return f"Released claim on {message_id}."
+    finally:
+        conn.close()
+
+
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     """Return list of all channel names (from JSONL files)."""
     ch_dir = _channels_dir(project_dir)

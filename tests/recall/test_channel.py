@@ -36,6 +36,7 @@ from synapt.recall.channel import (
     channel_search,
     channel_rename,
     channel_claim,
+    channel_unclaim,
     is_claimed,
     check_directives,
 )
@@ -1375,6 +1376,28 @@ class TestClaim(unittest.TestCase):
         result2 = check_directives(agent_name="s_agent2")
         self.assertIn("create an issue", result1)
         self.assertEqual(result2, "")
+
+    def test_unclaim_by_owner(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "task", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+
+        channel_claim(msg_id, "dev", agent_name="s_agent1")
+        result = channel_unclaim(msg_id, agent_name="s_agent1")
+        self.assertIn("Released", result)
+        self.assertIsNone(is_claimed(msg_id))
+
+    def test_unclaim_by_non_owner_rejected(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "task", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+
+        channel_claim(msg_id, "dev", agent_name="s_agent1")
+        result = channel_unclaim(msg_id, agent_name="s_agent2")
+        self.assertIn("Cannot unclaim", result)
+        self.assertIsNotNone(is_claimed(msg_id))
 
 
 class TestBroadcast(unittest.TestCase):
