@@ -58,6 +58,7 @@ def test_install_global_hooks_creates_entries(tmp_path):
     matchers = settings["hooks"]["PreCompact"]
     inner_hooks = matchers[0]["hooks"]
     assert inner_hooks[0]["command"] == "synapt recall hook precompact"
+    assert inner_hooks[0]["timeout"] == 300
 
 
 def test_install_global_hooks_idempotent(tmp_path):
