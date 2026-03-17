@@ -87,6 +87,8 @@ class JournalEntry:
     git_log: list[str] = field(default_factory=list)  # Recent commits
     auto: bool = False       # True if synthesized at build time
     enriched: bool = False   # True if LLM-enriched
+    griptree: str = ""       # Agent's griptree identity (e.g., "synapt/synapt")
+    agent_id: str = ""       # Agent's session-scoped ID (e.g., "s_a1b2c3d4")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -429,6 +431,16 @@ def auto_extract_entry(
                             files_set.add(fp)
         files_modified = _filter_project_files(files_set, project_root=cwd)
 
+    # Capture agent identity if channel system is available
+    griptree = ""
+    agent_id = ""
+    try:
+        from synapt.recall.channel import _resolve_griptree, _agent_id
+        griptree = _resolve_griptree()
+        agent_id = _agent_id()
+    except Exception:
+        pass  # Channel module may not be available
+
     return JournalEntry(
         timestamp=now.isoformat(),
         session_id=session_id,
@@ -436,6 +448,8 @@ def auto_extract_entry(
         files_modified=files_modified,
         git_log=_get_recent_commits(cwd),
         auto=True,  # Auto-extracted; cleared if user adds rich content
+        griptree=griptree,
+        agent_id=agent_id,
     )
 
 
