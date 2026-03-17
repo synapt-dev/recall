@@ -1420,6 +1420,7 @@ class TranscriptIndex:
             When empty, ``self._last_diagnostics`` explains why.
         """
         self._last_diagnostics = None
+        self._last_conflicts: list[tuple[dict, dict]] = []
 
         if not self.chunks:
             self._last_diagnostics = SearchDiagnostics(reason="empty_index")
