@@ -866,7 +866,8 @@ def _handle_flag(
         )
         return "\n".join(lines)
 
-    # No matching nodes — store as free-text claim for review
+    # No matching knowledge nodes — search transcript chunks for context
+    # so the agent can see what was discussed and extract properly.
     cid = index._db.add_pending_contradiction(
         old_node_id=None,
         new_content=effective_content,
@@ -874,12 +875,31 @@ def _handle_flag(
         detected_by="manual",
         claim_text=effective_claim or None,
     )
-    return (
-        f"Contradiction #{cid} flagged as free-text claim (no matching knowledge node found). "
-        f"Claim: \"{effective_content[:100]}\". "
-        f"When confirmed, a new knowledge node will be created. "
-        f"Use recall_contradict(action='resolve', contradiction_id={cid}) to confirm or dismiss."
+    lines = [
+        f"Contradiction #{cid} flagged as free-text claim (no matching knowledge node found).",
+        f"  Claim: \"{effective_content[:100]}\"",
+        f"  When confirmed, a new knowledge node will be created.",
+    ]
+
+    # Search transcripts for relevant context to help the agent extract
+    try:
+        transcript_results = index.lookup(
+            search_text,
+            max_chunks=3,
+            max_tokens=500,
+            depth="concise",
+        )
+        if transcript_results:
+            lines.append("")
+            lines.append("Related transcript context (for extraction):")
+            lines.append(transcript_results)
+    except Exception:
+        pass  # Transcript search is best-effort
+
+    lines.append(
+        f"\nUse recall_contradict(action='resolve', contradiction_id={cid}) to confirm or dismiss."
     )
+    return "\n".join(lines)
 
 
 def _create_knowledge_from_claim(db, pending_row) -> None:
