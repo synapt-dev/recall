@@ -1494,5 +1494,90 @@ class TestMinimalPrompt(unittest.TestCase):
             self.assertIn(cat, prompt)
 
 
+# ---------------------------------------------------------------------------
+# Agent-aware consolidation (#116 steps 3+4)
+# ---------------------------------------------------------------------------
+
+class TestAgentAwareConsolidation(unittest.TestCase):
+    """Test concurrent agent detection and prompt annotation."""
+
+    def _make_entry(self, session_id="s1", timestamp="2026-03-17T10:00:00Z",
+                    griptree="", agent_id="", focus="", done=None):
+        return JournalEntry(
+            timestamp=timestamp,
+            session_id=session_id,
+            griptree=griptree,
+            agent_id=agent_id,
+            focus=focus,
+            done=done or [],
+        )
+
+    def test_concurrent_agents_detected(self):
+        """Two agents with overlapping timestamps are detected as concurrent."""
+        from synapt.recall.consolidate import _detect_concurrent_agents
+        entries = [
+            self._make_entry("s1", "2026-03-17T10:00:00Z", griptree="synapt/main"),
+            self._make_entry("s2", "2026-03-17T10:15:00Z", griptree="synapt/feature"),
+        ]
+        note = _detect_concurrent_agents(entries)
+        self.assertIn("CONCURRENT", note)
+        self.assertIn("synapt/main", note)
+        self.assertIn("synapt/feature", note)
+
+    def test_same_agent_not_flagged(self):
+        """Two sessions from the same agent are not flagged as concurrent."""
+        from synapt.recall.consolidate import _detect_concurrent_agents
+        entries = [
+            self._make_entry("s1", "2026-03-17T10:00:00Z", griptree="synapt/main"),
+            self._make_entry("s2", "2026-03-17T10:15:00Z", griptree="synapt/main"),
+        ]
+        note = _detect_concurrent_agents(entries)
+        self.assertEqual(note, "")
+
+    def test_no_griptree_not_flagged(self):
+        """Entries without griptree metadata are not flagged."""
+        from synapt.recall.consolidate import _detect_concurrent_agents
+        entries = [
+            self._make_entry("s1", "2026-03-17T10:00:00Z"),
+            self._make_entry("s2", "2026-03-17T10:15:00Z"),
+        ]
+        note = _detect_concurrent_agents(entries)
+        self.assertEqual(note, "")
+
+    def test_non_overlapping_agents_not_flagged(self):
+        """Two agents hours apart are not flagged as concurrent."""
+        from synapt.recall.consolidate import _detect_concurrent_agents
+        entries = [
+            self._make_entry("s1", "2026-03-17T08:00:00Z", griptree="synapt/main"),
+            self._make_entry("s2", "2026-03-17T14:00:00Z", griptree="synapt/feature"),
+        ]
+        note = _detect_concurrent_agents(entries)
+        self.assertEqual(note, "")
+
+    def test_format_includes_agent_identity(self):
+        """Formatted cluster includes agent griptree labels."""
+        from synapt.recall.consolidate import _format_journal_cluster
+        entries = [
+            self._make_entry("s1", "2026-03-17T10:00:00Z", griptree="synapt/main",
+                             focus="fix auth bug"),
+        ]
+        text = _format_journal_cluster(entries)
+        self.assertIn("synapt/main", text)
+        self.assertIn("fix auth bug", text)
+
+    def test_format_includes_concurrency_note(self):
+        """Formatted cluster of concurrent agents includes annotation."""
+        from synapt.recall.consolidate import _format_journal_cluster
+        entries = [
+            self._make_entry("s1", "2026-03-17T10:00:00Z", griptree="synapt/main",
+                             focus="fix auth"),
+            self._make_entry("s2", "2026-03-17T10:10:00Z", griptree="synapt/feature",
+                             focus="add tests"),
+        ]
+        text = _format_journal_cluster(entries)
+        self.assertIn("CONCURRENT", text)
+        self.assertIn("collaborative", text)
+
+
 if __name__ == "__main__":
     unittest.main()
