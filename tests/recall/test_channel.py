@@ -995,6 +995,24 @@ class TestDirective(unittest.TestCase):
         self.assertEqual(directive_msgs[0].to, "s_target01")
         self.assertEqual(directive_msgs[0].body, "do the thing")
 
+    def test_directive_remind_bridges_to_reminders(self):
+        """When remind=True, directive also calls add_reminder."""
+        with patch("synapt.recall.reminders.add_reminder") as mock_add:
+            channel_directive(
+                "dev", "deploy by EOD", to="s_target01",
+                agent_name="admin", remind=True,
+            )
+            mock_add.assert_called_once()
+            call_text = mock_add.call_args[0][0]
+            self.assertIn("deploy by EOD", call_text)
+            self.assertIn("admin", call_text)
+
+    def test_directive_no_remind_by_default(self):
+        """Default remind=False should not call add_reminder."""
+        with patch("synapt.recall.reminders.add_reminder") as mock_add:
+            channel_directive("dev", "no reminder", to="s_target01", agent_name="admin")
+            mock_add.assert_not_called()
+
 
 class TestMuteUnmute(unittest.TestCase):
     """Test muting and unmuting agents."""
