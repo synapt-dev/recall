@@ -17,6 +17,7 @@ from synapt.recall.channel import (
     _read_messages,
     _agent_status,
     _reap_stale_agents,
+    _resolve_griptree,
     _resolve_target_id,
     channel_join,
     channel_leave,
@@ -44,6 +45,28 @@ def _patch_data_dir(tmpdir):
         "synapt.recall.channel.project_data_dir",
         return_value=data_dir,
     )
+
+
+class TestResolveGriptree(unittest.TestCase):
+    """Test _resolve_griptree edge cases."""
+
+    def test_cwd_at_gripspace_root_no_trailing_dot(self):
+        """When cwd IS the gripspace root, griptree should be just the name, not 'name/.'."""
+        tmpdir = tempfile.mkdtemp()
+        gripspace = Path(tmpdir) / "myproject"
+        data_dir = gripspace / ".synapt" / "recall"
+        data_dir.mkdir(parents=True)
+
+        with patch("synapt.recall.channel.project_data_dir", return_value=data_dir), \
+             patch("synapt.recall.channel.Path") as MockPath:
+            # Make Path.cwd() return the gripspace root
+            MockPath.cwd.return_value = gripspace
+            # Path(".") still needs to work for relative_to comparison
+            MockPath.side_effect = Path
+            result = _resolve_griptree()
+
+        self.assertEqual(result, gripspace.name)
+        self.assertNotIn("/.", result)
 
 
 class TestChannelMessage(unittest.TestCase):

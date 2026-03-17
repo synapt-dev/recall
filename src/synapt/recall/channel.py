@@ -101,6 +101,9 @@ def _resolve_griptree(project_dir: Path | None = None) -> str:
         # If cwd is inside gripspace, use relative path
         try:
             rel = repo.relative_to(gripspace)
+            # When cwd IS the gripspace root, relative_to returns Path(".")
+            if rel == Path("."):
+                return gripspace.name
             return f"{gripspace.name}/{rel}"
         except ValueError:
             return gripspace.name
