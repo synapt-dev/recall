@@ -1420,6 +1420,7 @@ class TranscriptIndex:
             When empty, ``self._last_diagnostics`` explains why.
         """
         self._last_diagnostics = None
+        self._last_conflicts: list[tuple[dict, dict]] = []
 
         if not self.chunks:
             self._last_diagnostics = SearchDiagnostics(reason="empty_index")
@@ -2344,7 +2345,7 @@ class TranscriptIndex:
             # nodes in the same category have divergent content, queue a
             # pending contradiction for user review. Has its own try/except
             # internally — never disrupts search results.
-            self._detect_co_retrieval_conflicts(results)
+            self._last_conflicts = self._detect_co_retrieval_conflicts(results)
 
             return results
         except Exception:
@@ -2370,15 +2371,19 @@ class TranscriptIndex:
                 lineage_best[lid] = node
         return no_lineage + list(lineage_best.values())
 
-    def _detect_co_retrieval_conflicts(self, results: list[dict]) -> None:
+    def _detect_co_retrieval_conflicts(self, results: list[dict]) -> list[tuple[dict, dict]]:
         """Detect conflicting knowledge nodes in the same result set.
 
         When two active nodes share a category but have low keyword overlap
         (Jaccard < 0.3), they may contradict each other. Queues a pending
         contradiction for user review. Best-effort: never fails the search.
+
+        Returns list of (old_node, new_node) pairs that were flagged, so
+        callers can surface warnings in search results.
         """
+        detected: list[tuple[dict, dict]] = []
         if not self._db or len(results) < 2:
-            return
+            return detected
         # Only consider active, confident nodes
         active = [
             n for n in results
@@ -2386,7 +2391,7 @@ class TranscriptIndex:
             and n.get("confidence", 0) >= 0.4
         ]
         if len(active) < 2:
-            return
+            return detected
         try:
             # Pre-compute token sets once per node (avoids redundant
             # _tokenize calls in the pairwise loop)
@@ -2442,6 +2447,7 @@ class TranscriptIndex:
                             reason=f"Co-retrieved with conflicting node [{new['id']}]",
                             detected_by="co-retrieval",
                         )
+                        detected.append((old, new))
                         pending_ids.add(old["id"])  # Prevent further dups this batch
                         logger.debug(
                             "Co-retrieval conflict: [%s] vs [%s] (jaccard=%.2f)",
@@ -2449,6 +2455,7 @@ class TranscriptIndex:
                         )
         except Exception:
             pass  # Best-effort — never disrupt search
+        return detected
 
     @staticmethod
     def _format_knowledge_block(node: dict) -> str:

@@ -1373,6 +1373,30 @@ class TestCoRetrievalConflictDetection:
 
         assert db.pending_contradiction_count() == 0
 
+    def test_returns_detected_pairs(self, tmp_path):
+        """_detect_co_retrieval_conflicts returns (old, new) tuples."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            {"id": "n1", "content": "deploy on tuesday", "category": "workflow",
+             "status": "active", "confidence": 0.6, "lineage_id": ""},
+            {"id": "n2", "content": "never use feature flags", "category": "workflow",
+             "status": "active", "confidence": 0.9, "lineage_id": ""},
+        ]
+        detected = index._detect_co_retrieval_conflicts(results)
+        assert len(detected) == 1
+        old, new = detected[0]
+        assert old["id"] == "n1"  # Lower confidence
+        assert new["id"] == "n2"
+
+    def test_last_conflicts_cleared_between_searches(self, tmp_path):
+        """_last_conflicts is reset at the start of each lookup call."""
+        index, db = self._make_index_with_db(tmp_path)
+        # Manually set stale conflicts
+        index._last_conflicts = [({}, {})]
+        # lookup() should clear it even if search returns nothing
+        index.lookup("nonexistent query that matches nothing")
+        assert index._last_conflicts == []
+
     def test_has_pending_contradiction_for(self, tmp_path):
         """Test the storage dedup helper."""
         db = _make_db(tmp_path)
