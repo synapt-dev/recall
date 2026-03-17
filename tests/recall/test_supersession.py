@@ -634,6 +634,153 @@ class TestRecallContradict:
 
 
 # ---------------------------------------------------------------------------
+# recall_contradict flag action (free-text claims) — #58
+# ---------------------------------------------------------------------------
+
+class TestRecallContradictFlag:
+    """Test the 'flag' action for user-initiated contradictions."""
+
+    def _make_index(self, db):
+        index = TranscriptIndex.__new__(TranscriptIndex)
+        index._db = db
+        index.chunks = []
+        index.sessions = {}
+        return index
+
+    def test_flag_with_explicit_node_id(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="n1", content="deploy on Fridays")
+        db.save_knowledge_nodes([node])
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="flag",
+                    claim="we should never deploy on Fridays",
+                    new_content="never deploy on Fridays",
+                    old_node_id="n1",
+                    reason="outage last Friday",
+                )
+        assert "flagged" in result
+        assert "n1" in result
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["old_node_id"] == "n1"
+        assert pending[0]["detected_by"] == "manual"
+        assert pending[0]["claim_text"] == "we should never deploy on Fridays"
+
+    def test_flag_free_text_no_matching_node(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="flag",
+                    claim="the API key expires monthly",
+                )
+        assert "free-text claim" in result
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["old_node_id"] is None
+        assert pending[0]["new_content"] == "the API key expires monthly"
+
+    def test_flag_requires_claim_or_content(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = recall_contradict(action="flag")
+        assert "required" in result.lower() or "error" in result.lower()
+
+    def test_flag_invalid_node_id(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = recall_contradict(
+                action="flag",
+                claim="something wrong",
+                old_node_id="nonexistent",
+            )
+        assert "not found" in result
+
+    def test_resolve_free_text_claim_creates_node(self, tmp_path):
+        """Confirming a free-text claim (no old_node_id) creates a knowledge node."""
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        cid = db.add_pending_contradiction(
+            old_node_id=None,
+            new_content="API keys expire every 90 days",
+            category="convention",
+            detected_by="manual",
+            claim_text="API key rotation policy",
+        )
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="resolve",
+                    contradiction_id=cid,
+                    resolution="confirmed",
+                )
+        assert "confirmed" in result
+        assert "knowledge node created" in result
+        # Verify a knowledge node was created
+        nodes = db.load_knowledge_nodes(status="active")
+        assert len(nodes) == 1
+        assert nodes[0]["content"] == "API keys expire every 90 days"
+
+    def test_flag_fts_matches_existing_node(self, tmp_path):
+        """When no old_node_id given, flag searches FTS and matches best node."""
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        node = _make_knowledge_node(node_id="k1", content="deploy every Tuesday at 3pm")
+        db.save_knowledge_nodes([node])
+        # Rebuild FTS so the node is searchable
+        db._conn.execute(
+            "INSERT INTO knowledge_fts(rowid, content, category, tags) "
+            "SELECT rowid, content, category, tags FROM knowledge"
+        )
+        db._conn.commit()
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                result = recall_contradict(
+                    action="flag",
+                    claim="deploy schedule changed to Thursday",
+                )
+        assert "flagged" in result
+        assert "k1" in result
+        pending = db.list_pending_contradictions()
+        assert len(pending) == 1
+        assert pending[0]["old_node_id"] == "k1"
+
+    def test_list_shows_free_text_claims(self, tmp_path):
+        from synapt.recall.server import recall_contradict
+        db = _make_db(tmp_path)
+        db.add_pending_contradiction(
+            old_node_id=None,
+            new_content="new policy",
+            detected_by="manual",
+            claim_text="policy changed last week",
+        )
+        index = self._make_index(db)
+
+        with patch("synapt.recall.server._get_index", return_value=index):
+            result = recall_contradict(action="list")
+        assert "free-text claim" in result
+        assert "policy changed last week" in result
+
+
+# ---------------------------------------------------------------------------
 # Server: recall_search include_historical
 # ---------------------------------------------------------------------------
 
