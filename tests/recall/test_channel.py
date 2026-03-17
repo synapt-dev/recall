@@ -766,6 +766,61 @@ class TestWho(unittest.TestCase):
         result = channel_who()
         self.assertIn("No agents", result)
 
+    def test_who_deduplicates_same_griptree_and_display_name(self):
+        """Multiple agents with same griptree+display_name show only the most recent."""
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        new_time = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        conn = _open_db()
+        try:
+            # Two agents, same griptree AND display_name (dead session scenario)
+            for aid, ts in [("s_old_session", old_time), ("s_new_session", new_time)]:
+                conn.execute(
+                    "INSERT INTO presence (agent_id, griptree, display_name, status, last_seen, joined_at) "
+                    "VALUES (?, 'synapt/synapt', 'synapt', 'online', ?, ?)",
+                    (aid, ts, ts),
+                )
+                conn.execute(
+                    "INSERT INTO memberships (agent_id, channel, joined_at) "
+                    "VALUES (?, 'dev', ?)",
+                    (aid, ts),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = channel_who()
+        # Only the newer session should appear
+        self.assertIn("s_new_session", result)
+        self.assertNotIn("s_old_session", result)
+
+    def test_who_keeps_different_display_names(self):
+        """Agents with same griptree but different display names should all show."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn = _open_db()
+        try:
+            for aid, name in [("s_agent1", "worker-1"), ("s_agent2", "worker-2")]:
+                conn.execute(
+                    "INSERT INTO presence (agent_id, griptree, display_name, status, last_seen, joined_at) "
+                    "VALUES (?, 'synapt/synapt', ?, 'online', ?, ?)",
+                    (aid, name, now, now),
+                )
+                conn.execute(
+                    "INSERT INTO memberships (agent_id, channel, joined_at) "
+                    "VALUES (?, 'dev', ?)",
+                    (aid, now),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = channel_who()
+        self.assertIn("worker-1", result)
+        self.assertIn("worker-2", result)
+
 
 class TestLegacyMigration(unittest.TestCase):
     """Test migration from _presence.json to SQLite."""
@@ -957,6 +1012,18 @@ class TestConcurrentAccess(unittest.TestCase):
         for i in range(5):
             channel_join("dev", agent_name=f"agent-{i}")
             channel_post("dev", f"hello from agent-{i}", agent_name=f"agent-{i}")
+
+        # Give each agent a distinct display_name so /who dedup doesn't collapse them
+        conn = _open_db()
+        try:
+            for i in range(5):
+                conn.execute(
+                    "UPDATE presence SET display_name = ? WHERE agent_id = ?",
+                    (f"agent-{i}", f"agent-{i}"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
         result = channel_read("dev", limit=50)
         for i in range(5):

@@ -777,8 +777,23 @@ def channel_who(project_dir: Path | None = None) -> str:
         if not agents:
             return "No agents online."
 
+        # Deduplicate by (griptree, display_name): when multiple agents share
+        # the same griptree AND display name (dead sessions from the same
+        # worktree that haven't been reaped yet), only show the most recently
+        # seen one to avoid noisy /who output. Agents with distinct display
+        # names (e.g., different worktrees) always appear separately.
+        best_by_identity: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in agents:
+            gt = row["griptree"] or row["agent_id"]
+            dn = row["display_name"] or ""
+            key = (gt, dn)
+            existing = best_by_identity.get(key)
+            if existing is None or row["last_seen"] > existing["last_seen"]:
+                best_by_identity[key] = row
+        deduped_agents = list(best_by_identity.values())
+
         lines = ["## Agents"]
-        for row in sorted(agents, key=lambda r: r["display_name"] or r["griptree"] or r["agent_id"]):
+        for row in sorted(deduped_agents, key=lambda r: r["display_name"] or r["griptree"] or r["agent_id"]):
             aid = row["agent_id"]
             last_seen = row["last_seen"]
             status = _agent_status(last_seen)
