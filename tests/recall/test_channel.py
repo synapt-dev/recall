@@ -34,6 +34,7 @@ from synapt.recall.channel import (
     channel_broadcast,
     channel_list_channels,
     channel_search,
+    channel_rename,
     check_directives,
 )
 
@@ -1187,6 +1188,57 @@ class TestKick(unittest.TestCase):
 
         result = channel_kick("BadBot", "dev", agent_name="admin")
         self.assertIn("s_target01", result)
+
+
+class TestRename(unittest.TestCase):
+    """Test display name rename action (#128)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_rename_sets_display_name(self):
+        channel_join("dev", agent_name="s_agent1")
+        result = channel_rename("Apollo", agent_name="s_agent1")
+        self.assertIn("Apollo", result)
+        # Verify in DB
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_agent1'"
+            ).fetchone()
+            self.assertEqual(row["display_name"], "Apollo")
+        finally:
+            conn.close()
+
+    def test_rename_reflected_in_who(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_rename("Apollo", agent_name="s_agent1")
+        result = channel_who()
+        self.assertIn("Apollo", result)
+
+    def test_rename_reflected_in_post_return(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_rename("Apollo", agent_name="s_agent1")
+        result = channel_post("dev", "hello world", agent_name="s_agent1")
+        self.assertIn("Apollo", result)
+
+    def test_rename_without_prior_join(self):
+        """Rename creates presence row if agent hasn't joined yet."""
+        result = channel_rename("Ghost", agent_name="s_new_agent")
+        self.assertIn("Ghost", result)
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_new_agent'"
+            ).fetchone()
+            self.assertEqual(row["display_name"], "Ghost")
+        finally:
+            conn.close()
 
 
 class TestBroadcast(unittest.TestCase):

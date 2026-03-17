@@ -111,6 +111,23 @@ def _resolve_griptree(project_dir: Path | None = None) -> str:
         return _worktree_name(project_dir)
 
 
+def _resolve_display_name_for(agent_id: str, project_dir: Path | None = None) -> str:
+    """Resolve display name for a specific agent_id from the presence DB."""
+    try:
+        conn = _open_db(project_dir)
+        try:
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            if row and row["display_name"]:
+                return row["display_name"]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return agent_id
+
+
 def _resolve_display_name(project_dir: Path | None = None) -> str:
     """Resolve display name: env var > presence DB > griptree fallback."""
     name = os.environ.get("SYNAPT_AGENT_NAME", "")
@@ -670,7 +687,7 @@ def channel_post(
     finally:
         conn.close()
 
-    display = _resolve_display_name(project_dir)
+    display = _resolve_display_name_for(aid, project_dir)
     result = f"[#{channel}] {display}: {message}"
     if pin:
         result += " (pinned)"
