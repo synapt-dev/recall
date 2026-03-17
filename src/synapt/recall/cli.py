@@ -1337,6 +1337,12 @@ def cmd_channel(args: argparse.Namespace) -> None:
             for r in results:
                 ts = r["timestamp"][:16]
                 print(f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {r['body']}")
+    elif action == "rename":
+        if not args.message:
+            print("Usage: synapt recall channel rename <channel> \"new name\"", file=sys.stderr)
+            sys.exit(1)
+        from synapt.recall.channel import channel_rename
+        print(channel_rename(new_name=args.message))
     elif action == "chat":
         from synapt.recall.channel_chat import main as chat_main
         chat_main(

@@ -112,10 +112,24 @@ def _resolve_griptree(project_dir: Path | None = None) -> str:
 
 
 def _resolve_display_name(project_dir: Path | None = None) -> str:
-    """Resolve display name: env var > griptree fallback."""
+    """Resolve display name: env var > presence DB > griptree fallback."""
     name = os.environ.get("SYNAPT_AGENT_NAME", "")
     if name:
         return name
+    # Check presence table for a display_name set via rename action
+    try:
+        aid = _agent_id(project_dir)
+        conn = _open_db(project_dir)
+        try:
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = ?", (aid,)
+            ).fetchone()
+            if row and row["display_name"]:
+                return row["display_name"]
+        finally:
+            conn.close()
+    except Exception:
+        pass
     return _resolve_griptree(project_dir)
 
 
@@ -1046,6 +1060,42 @@ def channel_broadcast(
     for ch in channels:
         channel_post(ch, message, agent_name=agent_name, project_dir=project_dir)
     return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+
+
+def channel_rename(
+    new_name: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Set or update the display name for this agent.
+
+    Persists in the presence table so future messages and /who output
+    use the new name. No env var or MCP restart required.
+    """
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
+    conn = _open_db(project_dir)
+    try:
+        row = conn.execute(
+            "SELECT agent_id FROM presence WHERE agent_id = ?", (aid,)
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE presence SET display_name = ?, last_seen = ? WHERE agent_id = ?",
+                (new_name, now, aid),
+            )
+        else:
+            griptree = _resolve_griptree(project_dir)
+            conn.execute(
+                "INSERT INTO presence (agent_id, griptree, display_name, status, last_seen, joined_at) "
+                "VALUES (?, ?, ?, 'online', ?, ?)",
+                (aid, griptree, new_name, now, now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return f"Display name set to '{new_name}'."
 
 
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:

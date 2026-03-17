@@ -1487,10 +1487,16 @@ def recall_channel(
                 lines.append(f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {r['body']}")
             return "\n".join(lines)
 
+        if action == "rename":
+            if not message:
+                return "Error: message is required for 'rename' action (the new display name)."
+            from synapt.recall.channel import channel_rename
+            return channel_rename(new_name=message)
+
         return (
             f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
             f"'who', 'heartbeat', 'unread', 'pin', 'directive', 'mute', "
-            f"'unmute', 'kick', 'broadcast', 'list', or 'search'."
+            f"'unmute', 'kick', 'broadcast', 'list', 'search', or 'rename'."
         )
     except Exception as exc:
         return f"Channel failed: {exc}"
