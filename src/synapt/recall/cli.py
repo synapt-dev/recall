@@ -216,9 +216,12 @@ def _archive_and_build_locked(
     chatgpt_archive: str | None,
 ) -> TranscriptIndex | None:
     """Inner build logic — caller must hold the build lock."""
+    import time as _time
+
     from synapt.recall.archive import archive_transcripts
     from synapt.recall.storage import RecallDB
 
+    build_t0 = _time.monotonic()
     index_dir = project_index_dir(project_dir)
     archive_dir = project_archive_dir(project_dir)
 
@@ -276,6 +279,7 @@ def _archive_and_build_locked(
     all_chunks = [c for c in existing_chunks if c.turn_index >= 0]
 
     # Build from archived transcripts (BM25-only, no DB needed for parsing)
+    logger.info("build: parsing transcripts from %d source(s)...", len(build_sources))
     for build_source in build_sources:
         index = build_index(
             build_source,
@@ -283,6 +287,7 @@ def _archive_and_build_locked(
             incremental_manifest=incremental_manifest,
         )
         all_chunks.extend(index.chunks)
+    logger.info("build: parsed %d chunks in %.1fs", len(all_chunks), _time.monotonic() - build_t0)
 
     # ChatGPT archive (separate source)
     if chatgpt_archive:
@@ -338,6 +343,8 @@ def _archive_and_build_locked(
             deduped.append(chunk)
 
     # Build final index with SQLite backend
+    logger.info("build: saving %d chunks to FTS5 index...", len(deduped))
+    save_t0 = _time.monotonic()
     final_index = TranscriptIndex(
         deduped,
         use_embeddings=use_embeddings,
@@ -345,8 +352,10 @@ def _archive_and_build_locked(
         db=db,
     )
     final_index.save(index_dir)
+    logger.info("build: FTS5 save complete in %.1fs", _time.monotonic() - save_t0)
 
     # Cluster chunks by topic similarity
+    logger.info("build: clustering %d transcript chunks...", sum(1 for c in deduped if c.turn_index >= 0))
     from synapt.recall.clustering import cluster_chunks as _cluster_chunks, generate_concat_summary
     transcript_only = [c for c in deduped if c.turn_index >= 0]
     if transcript_only:
@@ -524,6 +533,7 @@ def _archive_and_build_locked(
             })
     db.save_manifest({"source_files": source_files})
 
+    logger.info("build: complete in %.1fs (%d chunks)", _time.monotonic() - build_t0, len(deduped))
     return final_index
 
 
@@ -1904,6 +1914,16 @@ def _download_hf_transcripts(repo_id: str) -> Path | None:
 # ---------------------------------------------------------------------------
 
 def main():
+    # Configure logging so build progress is visible on stderr.
+    # Only set up if no handlers exist yet (avoid duplicate output when
+    # called from the MCP server, which configures its own logging).
+    if not logging.getLogger("synapt").handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(message)s",
+            stream=sys.stderr,
+        )
+
     parser = argparse.ArgumentParser(
         prog="synapt",
         description="Persistent conversational memory for Claude Code sessions (per-project)",

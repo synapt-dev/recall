@@ -98,7 +98,14 @@ def _get_index() -> TranscriptIndex | None:
             if _cached_index is not None and getattr(_cached_index, '_db', None) is not None:
                 with contextlib.suppress(Exception):
                     _cached_index._db.close()
+            import time as _time
+            _load_t0 = _time.monotonic()
+            logging.getLogger("synapt.recall").info("Loading index from %s ...", index_dir)
             _cached_index = TranscriptIndex.load(index_dir, use_embeddings=True)
+            logging.getLogger("synapt.recall").info(
+                "Index loaded: %d chunks in %.1fs",
+                len(_cached_index.chunks), _time.monotonic() - _load_t0,
+            )
             _cached_mtime = mtime
             _cached_dir = index_dir
             # Set current session ID for access tracking (distinct_sessions)

@@ -15,15 +15,19 @@ Schema:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import struct
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from synapt.recall.core import TranscriptChunk
+
+logger = logging.getLogger("synapt.recall.storage")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -705,7 +709,11 @@ class RecallDB:
 
         # Insert in order (rowid = insertion order, 1-based).
         # Carry over embeddings by matching chunk IDs.
-        for chunk in chunks:
+        total = len(chunks)
+        log_interval = max(500, total // 10)  # Every 500 or 10%, whichever is larger
+        t0 = time.monotonic()
+        last_log = t0
+        for i, chunk in enumerate(chunks, 1):
             emb_blob = existing_embs.get(chunk.id)
             cur.execute(
                 "INSERT INTO chunks "
@@ -729,7 +737,19 @@ class RecallDB:
                     emb_blob,
                 ),
             )
+            if i % log_interval == 0 or i == total:
+                now = time.monotonic()
+                elapsed = now - t0
+                rate = i / elapsed if elapsed > 0 else 0
+                eta = (total - i) / rate if rate > 0 else 0
+                logger.info(
+                    "FTS5 index: %d/%d chunks (%.0f/s, %.0fs remaining)",
+                    i, total, rate, eta,
+                )
+                last_log = now
         self._conn.commit()
+        elapsed = time.monotonic() - t0
+        logger.info("FTS5 index: committed %d chunks in %.1fs", total, elapsed)
 
     def load_chunks(self) -> list[TranscriptChunk]:
         """Load all chunks from the database, ordered by rowid."""
