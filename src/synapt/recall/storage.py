@@ -712,7 +712,6 @@ class RecallDB:
         total = len(chunks)
         log_interval = max(500, total // 10)  # Every 500 or 10%, whichever is larger
         t0 = time.monotonic()
-        last_log = t0
         for i, chunk in enumerate(chunks, 1):
             emb_blob = existing_embs.get(chunk.id)
             cur.execute(
@@ -746,7 +745,6 @@ class RecallDB:
                     "FTS5 index: %d/%d chunks (%.0f/s, %.0fs remaining)",
                     i, total, rate, eta,
                 )
-                last_log = now
         self._conn.commit()
         elapsed = time.monotonic() - t0
         logger.info("FTS5 index: committed %d chunks in %.1fs", total, elapsed)
