@@ -19,6 +19,8 @@ def _make_gripspace(tmp_path: Path) -> Path:
     grip = tmp_path / "workspace"
     grip.mkdir()
     (grip / ".gitgrip").mkdir()
+    # griptrees.json (plural) marks this as the gripspace root
+    (grip / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
     return grip
 
 
@@ -64,12 +66,82 @@ class TestFindGripspaceRoot:
         (repo / ".git").mkdir()
         assert _find_gripspace_root(repo) is None
 
+    def test_linked_griptree_resolves_to_parent_gripspace(self, tmp_path):
+        """A linked griptree (griptree.json singular) should resolve
+        to the parent gripspace via git worktree pointers."""
+        # Create main gripspace
+        grip = _make_gripspace(tmp_path)
+        main_repo = grip / "my-repo"
+        main_repo.mkdir()
+        git_dir = main_repo / ".git"
+        git_dir.mkdir()
+        worktrees_dir = git_dir / "worktrees" / "dev"
+        worktrees_dir.mkdir(parents=True)
+
+        # Create linked griptree (sibling of gripspace, NOT a child)
+        griptree = tmp_path / "dev-tree"
+        griptree.mkdir()
+        (griptree / ".gitgrip").mkdir()
+        # griptree.json (singular) = linked griptree, NOT a gripspace root
+        (griptree / ".gitgrip" / "griptree.json").write_text(
+            '{"branch": "dev", "path": "' + str(griptree) + '"}'
+        )
+        # Sub-repo with .git file pointing to main worktree
+        linked_repo = griptree / "my-repo"
+        linked_repo.mkdir()
+        (linked_repo / ".git").write_text(
+            f"gitdir: {worktrees_dir}\n"
+        )
+
+        result = _find_gripspace_root(griptree)
+        assert result == grip
+
+    def test_linked_griptree_data_dir_matches_parent(self, tmp_path):
+        """project_data_dir from a linked griptree should match the parent gripspace."""
+        grip = _make_gripspace(tmp_path)
+        main_repo = grip / "my-repo"
+        main_repo.mkdir()
+        git_dir = main_repo / ".git"
+        git_dir.mkdir()
+        worktrees_dir = git_dir / "worktrees" / "dev"
+        worktrees_dir.mkdir(parents=True)
+
+        griptree = tmp_path / "dev-tree"
+        griptree.mkdir()
+        (griptree / ".gitgrip").mkdir()
+        (griptree / ".gitgrip" / "griptree.json").write_text(
+            '{"branch": "dev", "path": "' + str(griptree) + '"}'
+        )
+        linked_repo = griptree / "my-repo"
+        linked_repo.mkdir()
+        (linked_repo / ".git").write_text(
+            f"gitdir: {worktrees_dir}\n"
+        )
+
+        result = project_data_dir(griptree)
+        assert result == grip / ".synapt" / "recall"
+
+    def test_linked_griptree_no_subrepos_returns_none(self, tmp_path):
+        """A linked griptree with no sub-repos can't resolve — returns None."""
+        griptree = tmp_path / "orphan-tree"
+        griptree.mkdir()
+        (griptree / ".gitgrip").mkdir()
+        (griptree / ".gitgrip" / "griptree.json").write_text(
+            '{"branch": "dev", "path": "' + str(griptree) + '"}'
+        )
+        # No sub-repos with .git files
+        (griptree / "docs").mkdir()
+
+        result = _find_gripspace_root(griptree)
+        assert result is None
+
     def test_stops_at_home_directory(self, tmp_path):
         """Should not walk above $HOME."""
         # Put a .gitgrip ABOVE the fake $HOME
         fake_root = tmp_path / "root"
         fake_root.mkdir()
         (fake_root / ".gitgrip").mkdir()
+        (fake_root / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
 
         fake_home = fake_root / "home" / "user"
         fake_home.mkdir(parents=True)
@@ -87,6 +159,7 @@ class TestFindGripspaceRoot:
         fake_home = tmp_path / "home" / "user"
         fake_home.mkdir(parents=True)
         (fake_home / ".gitgrip").mkdir()
+        (fake_home / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
 
         project = fake_home / "project"
         project.mkdir()
@@ -105,8 +178,9 @@ class TestFindGripspaceRoot:
         result1 = _find_gripspace_root(child)
         assert result1 == grip
 
-        # Second call should use cache (even if we remove .gitgrip)
-        (grip / ".gitgrip").rmdir()
+        # Second call should use cache (even if we remove griptrees.json)
+        import shutil
+        shutil.rmtree(grip / ".gitgrip")
         result2 = _find_gripspace_root(child)
         assert result2 == grip  # cached result
 
@@ -135,8 +209,9 @@ class TestFindGripspaceRoot:
         value, _ = _gripspace_cache[cache_key]
         _gripspace_cache[cache_key] = (value, time.monotonic() - _GRIPSPACE_CACHE_TTL - 1)
 
-        # Now add .gitgrip/ and call again — should find it
+        # Now add .gitgrip/ with griptrees.json and call again — should find it
         (plain / ".gitgrip").mkdir()
+        (plain / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
         result2 = _find_gripspace_root(plain)
         assert result2 == plain
 
