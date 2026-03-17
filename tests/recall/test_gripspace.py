@@ -121,6 +121,20 @@ class TestFindGripspaceRoot:
         result = project_data_dir(griptree)
         assert result == grip / ".synapt" / "recall"
 
+    def test_linked_griptree_no_subrepos_returns_none(self, tmp_path):
+        """A linked griptree with no sub-repos can't resolve — returns None."""
+        griptree = tmp_path / "orphan-tree"
+        griptree.mkdir()
+        (griptree / ".gitgrip").mkdir()
+        (griptree / ".gitgrip" / "griptree.json").write_text(
+            '{"branch": "dev", "path": "' + str(griptree) + '"}'
+        )
+        # No sub-repos with .git files
+        (griptree / "docs").mkdir()
+
+        result = _find_gripspace_root(griptree)
+        assert result is None
+
     def test_stops_at_home_directory(self, tmp_path):
         """Should not walk above $HOME."""
         # Put a .gitgrip ABOVE the fake $HOME

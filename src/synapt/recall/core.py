@@ -3466,7 +3466,11 @@ def _resolve_griptree_parent(griptree_path: Path) -> Path | None:
     then walks up from there to find the gripspace root.
     """
     # Find any sub-repo with a .git file (linked worktree pointer)
-    for child in griptree_path.iterdir():
+    try:
+        children = list(griptree_path.iterdir())
+    except OSError:
+        return None
+    for child in children:
         git_path = child / ".git"
         if git_path.is_file():
             # .git file contains: "gitdir: /path/to/main/.git/worktrees/<name>/"
