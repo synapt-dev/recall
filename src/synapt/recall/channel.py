@@ -1222,34 +1222,56 @@ def channel_list_channels(project_dir: Path | None = None) -> list[str]:
 def channel_search(
     query: str,
     max_results: int = 10,
+    msg_type: str | None = None,
     project_dir: Path | None = None,
 ) -> list[dict]:
     """Search all channels for messages matching a query.
 
+    Args:
+        query: Text to search for in message bodies.
+        max_results: Maximum results to return.
+        msg_type: Optional filter by message type (e.g. "directive",
+                  "message", "join", "leave"). When set, only messages
+                  of that type are searched.
+
     Returns a list of dicts with channel, message_id, from, timestamp, body,
-    and a match_score (number of query terms found).
+    type, and a match_score (number of query terms found).
     """
     terms = query.lower().split()
-    if not terms:
+    if not terms and not msg_type:
         return []
+
+    # When filtering by type with no query, match all messages of that type
+    match_all = not terms
 
     results: list[dict] = []
     for ch in channel_list_channels(project_dir):
         path = _channel_path(ch, project_dir)
         for msg in _read_messages(path):
-            if msg.type not in ("message", "directive"):
+            # Type filter
+            if msg_type:
+                if msg.type != msg_type:
+                    continue
+            elif msg.type not in ("message", "directive"):
                 continue
-            body_lower = msg.body.lower()
-            score = sum(1 for t in terms if t in body_lower)
-            if score > 0:
-                results.append({
-                    "channel": ch,
-                    "message_id": msg.id,
-                    "from": msg.from_agent,
-                    "timestamp": msg.timestamp,
-                    "body": msg.body,
-                    "score": score,
-                })
+
+            if match_all:
+                score = 1
+            else:
+                body_lower = msg.body.lower()
+                score = sum(1 for t in terms if t in body_lower)
+                if score == 0:
+                    continue
+
+            results.append({
+                "channel": ch,
+                "message_id": msg.id,
+                "from": msg.from_agent,
+                "timestamp": msg.timestamp,
+                "body": msg.body,
+                "type": msg.type,
+                "score": score,
+            })
 
     # Sort by score descending, then timestamp descending
     results.sort(key=lambda r: (-r["score"], r["timestamp"]), reverse=False)
