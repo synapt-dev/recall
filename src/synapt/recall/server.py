@@ -802,21 +802,29 @@ def format_contradictions_for_session_start() -> str:
     Returns a string to print to stdout (which becomes the system-reminder
     the model sees). The model should then ask the user about each one.
     Returns empty string if no pending contradictions.
+
+    Uses a lightweight DB connection instead of loading the full index,
+    since only SQL queries are needed (no chunk/embedding data).  Fixes #119.
     """
-    index = _get_index()
-    if index is None or not index._db:
+    from synapt.recall.storage import RecallDB
+
+    db_path = project_index_dir() / "recall.db"
+    if not db_path.exists():
         return ""
 
     try:
-        pending = index._db.list_pending_contradictions()
+        db = RecallDB(db_path)
+        pending = db.list_pending_contradictions()
         if not pending:
+            db.close()
             return ""
         # Build node lookup for old content
         old_ids = {c["old_node_id"] for c in pending}
         node_lookup = {
-            nid: index._db.get_knowledge_node(nid)
+            nid: db.get_knowledge_node(nid)
             for nid in old_ids
         }
+        db.close()
         lines = [f"Pending contradictions ({len(pending)}) — ask the user to resolve:"]
         for c in pending:
             old_node = node_lookup.get(c["old_node_id"])

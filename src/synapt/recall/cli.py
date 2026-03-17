@@ -1509,12 +1509,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
         for transcript_dir in transcript_all:
             _catchup_archive_and_journal(project, transcript_dir)
 
-        # 1. Incremental rebuild (also synthesizes journal stubs)
+        # 1. Defer the expensive incremental rebuild to a background process.
+        #    Parsing 28K+ chunks, re-clustering, and FTS rebuild can take >60s
+        #    which exceeds the hook timeout. Surface context from the existing
+        #    index instead — it's at most one session behind.  Fixes #119.
         if transcript_all:
-            final_index = _archive_and_build(project, use_embeddings=False, incremental=True)
-            if final_index:
-                stats = final_index.stats()
-                print(f"synapt: rebuilt index ({stats['chunk_count']} chunks)", file=sys.stderr)
+            subprocess.Popen(
+                [sys.executable, "-m", "synapt.recall.cli", "build", "--incremental"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
         # 2. Compact journal (dedup + sort) before surfacing context
         from synapt.recall.journal import compact_journal
