@@ -1226,6 +1226,8 @@ def recall_channel(
     action: str = "read",
     channel: str = "dev",
     message: str | None = None,
+    to: str | None = None,
+    target: str | None = None,
     limit: int = 20,
     pin: bool = False,
 ) -> str:
@@ -1236,12 +1238,12 @@ def recall_channel(
     State (presence, cursors, pins) is stored in SQLite.
 
     Args:
-        action: "join" (enter channel), "leave" (exit channel), "post" (send message),
-                "read" (recent messages), "who" (show online agents),
-                "heartbeat" (update presence), "unread" (get unread counts),
-                "pin" (pin a message to a channel).
+        action: "join", "leave", "post", "read", "who", "heartbeat", "unread",
+                "pin", "directive", "mute", "unmute", "kick", "broadcast", "list".
         channel: Channel name (default "dev"). Any name works -- created on first post.
-        message: Message body (required for "post" and "pin" actions).
+        message: Message body (required for "post", "directive", "broadcast" actions).
+        to: Target agent for "directive" action.
+        target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
         limit: Max messages to return for "read" action (default 20).
         pin: If True with "post" action, also pin the message.
     """
@@ -1255,6 +1257,12 @@ def recall_channel(
             channel_heartbeat,
             channel_unread,
             channel_pin,
+            channel_directive,
+            channel_mute,
+            channel_unmute,
+            channel_kick,
+            channel_broadcast,
+            channel_list_channels,
         )
 
         if action == "join":
@@ -1289,12 +1297,46 @@ def recall_channel(
 
         if action == "pin":
             if not message:
-                return "Error: message is required for 'pin' action."
-            return channel_pin(channel=channel, message=message)
+                return "Error: message_id is required for 'pin' action."
+            return channel_pin(channel=channel, message_id=message)
+
+        if action == "directive":
+            if not message:
+                return "Error: message is required for 'directive' action."
+            if not to:
+                return "Error: 'to' (target agent) is required for 'directive' action."
+            return channel_directive(channel=channel, message=message, to=to)
+
+        if action == "mute":
+            if not target:
+                return "Error: target agent is required for 'mute' action."
+            return channel_mute(target=target, channel=channel)
+
+        if action == "unmute":
+            if not target:
+                return "Error: target agent is required for 'unmute' action."
+            return channel_unmute(target=target, channel=channel)
+
+        if action == "kick":
+            if not target:
+                return "Error: target agent is required for 'kick' action."
+            return channel_kick(target=target, channel=channel)
+
+        if action == "broadcast":
+            if not message:
+                return "Error: message is required for 'broadcast' action."
+            return channel_broadcast(message=message)
+
+        if action == "list":
+            channels = channel_list_channels()
+            if not channels:
+                return "No channels yet."
+            return "Channels: " + ", ".join(f"#{c}" for c in channels)
 
         return (
             f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
-            f"'who', 'heartbeat', 'unread', or 'pin'."
+            f"'who', 'heartbeat', 'unread', 'pin', 'directive', 'mute', "
+            f"'unmute', 'kick', 'broadcast', or 'list'."
         )
     except Exception as exc:
         return f"Channel failed: {exc}"
