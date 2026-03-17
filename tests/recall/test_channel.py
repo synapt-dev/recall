@@ -1583,6 +1583,44 @@ class TestChannelSearch(unittest.TestCase):
         self.assertEqual(results, [])
 
 
+class TestChannelSearch(unittest.TestCase):
+    """Tests for channel_search with type filtering (#147)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_search_by_type_directive(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "regular message", agent_name="s_agent1")
+        channel_directive("dev", "do this task", to="s_agent2", agent_name="s_agent1")
+        results = channel_search("task", msg_type="directive")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["type"], "directive")
+
+    def test_search_type_only_no_query(self):
+        """Search with type filter but no query returns all of that type."""
+        channel_join("dev", agent_name="s_agent1")
+        channel_directive("dev", "first directive", to="*", agent_name="s_agent1")
+        channel_directive("dev", "second directive", to="*", agent_name="s_agent1")
+        channel_post("dev", "not a directive", agent_name="s_agent1")
+        # Empty query but type filter — should return all directives
+        results = channel_search("", msg_type="directive")
+        self.assertEqual(len(results), 2)
+
+    def test_search_includes_type_field(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "hello world", agent_name="s_agent1")
+        results = channel_search("hello")
+        self.assertEqual(len(results), 1)
+        self.assertIn("type", results[0])
+        self.assertEqual(results[0]["type"], "message")
+
+
 class TestCheckDirectives(unittest.TestCase):
     """Tests for check_directives — fast PostToolUse hook function."""
 
