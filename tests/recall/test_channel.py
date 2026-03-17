@@ -35,6 +35,8 @@ from synapt.recall.channel import (
     channel_list_channels,
     channel_search,
     channel_rename,
+    channel_claim,
+    is_claimed,
     check_directives,
 )
 
@@ -1306,6 +1308,73 @@ class TestRename(unittest.TestCase):
             self.assertEqual(row["display_name"], "Ghost")
         finally:
             conn.close()
+
+
+class TestClaim(unittest.TestCase):
+    """Test message claim mechanism (#141)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_first_claim_wins(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "create an issue", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+
+        result1 = channel_claim(msg_id, "dev", agent_name="s_agent1")
+        self.assertIn("you", result1.lower())
+
+        result2 = channel_claim(msg_id, "dev", agent_name="s_agent2")
+        self.assertIn("Already claimed", result2)
+
+    def test_is_claimed_returns_claimant(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "do something", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+
+        self.assertIsNone(is_claimed(msg_id))
+        channel_claim(msg_id, "dev", agent_name="s_agent1")
+        claim = is_claimed(msg_id)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim["claimed_by"], "s_agent1")
+
+    def test_claimed_shows_in_read(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "handle this", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+
+        channel_claim(msg_id, "dev", agent_name="s_agent1")
+        result = channel_read("dev", agent_name="s_agent2")
+        self.assertIn("[CLAIMED by", result)
+
+    def test_broadcast_directive_skipped_if_claimed_by_other(self):
+        """check_directives skips broadcast directives claimed by another agent."""
+        channel_join("dev", agent_name="s_agent1")
+        channel_join("dev", agent_name="s_agent2")
+        # Both read to set cursors
+        channel_read("dev", agent_name="s_agent1")
+        channel_read("dev", agent_name="s_agent2")
+
+        channel_directive("dev", "create an issue", to="*", agent_name="s_boss")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        directive_msg = [m for m in msgs if m.type == "directive"][-1]
+
+        # Agent1 claims it
+        channel_claim(directive_msg.id, "dev", agent_name="s_agent1")
+
+        # Agent1 still sees it, agent2 doesn't
+        result1 = check_directives(agent_name="s_agent1")
+        result2 = check_directives(agent_name="s_agent2")
+        self.assertIn("create an issue", result1)
+        self.assertEqual(result2, "")
 
 
 class TestBroadcast(unittest.TestCase):
