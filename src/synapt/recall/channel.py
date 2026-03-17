@@ -753,7 +753,7 @@ def channel_read(
             lines.append(f"  {ts}{mid}  -- {msg.body}")
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
-            prefix = "[DIRECTIVE]" if msg.to == aid else "[directive]"
+            prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
             lines.append(f"  {ts}{mid}  {prefix}{target} {display}: {msg.body}")
         else:
             lines.append(f"  {ts}{mid}  {display}: {msg.body}")
@@ -1160,7 +1160,7 @@ def check_directives(
         if not path.exists():
             continue
         for msg in _read_messages(path, since=since):
-            if msg.type == "directive" and msg.to == aid:
+            if msg.type == "directive" and (msg.to == aid or msg.to == "*"):
                 pending.append((ch, msg))
 
     if not pending:

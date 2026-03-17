@@ -1484,6 +1484,18 @@ class TestCheckDirectives(unittest.TestCase):
         result = check_directives(agent_name="s_agent1")
         self.assertEqual(result, "")
 
+    def test_broadcast_directive_reaches_all_agents(self):
+        """Directive with to='*' is surfaced for any agent."""
+        channel_join("dev", agent_name="s_agent1")
+        channel_join("dev", agent_name="s_agent2")
+        channel_read("dev", agent_name="s_agent1")
+        channel_read("dev", agent_name="s_agent2")
+        channel_directive("dev", "everyone stop", to="*", agent_name="s_boss")
+        result1 = check_directives(agent_name="s_agent1")
+        result2 = check_directives(agent_name="s_agent2")
+        self.assertIn("everyone stop", result1)
+        self.assertIn("everyone stop", result2)
+
     def test_heartbeat_updates_presence(self):
         """check_directives piggybacks a heartbeat update."""
         channel_join("dev", agent_name="s_agent1")
