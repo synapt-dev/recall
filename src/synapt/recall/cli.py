@@ -1233,6 +1233,53 @@ def cmd_remind(args: argparse.Namespace) -> None:
     print(f"Added reminder{sticky_label}: {reminder.text} (id: {reminder.id})")
 
 
+def cmd_channel(args: argparse.Namespace) -> None:
+    """Cross-worktree agent communication channels."""
+    from synapt.recall.channel import (
+        channel_join,
+        channel_leave,
+        channel_post,
+        channel_read,
+        channel_who,
+        channel_heartbeat,
+        channel_unread,
+        channel_pin,
+    )
+
+    action = args.action
+    channel = args.channel or "dev"
+
+    if action == "join":
+        print(channel_join(channel=channel))
+    elif action == "leave":
+        print(channel_leave(channel=channel))
+    elif action == "post":
+        if not args.message:
+            print("Usage: synapt recall channel post <channel> \"message\"", file=sys.stderr)
+            sys.exit(1)
+        print(channel_post(channel=channel, message=args.message, pin=args.pin))
+    elif action == "read":
+        print(channel_read(channel=channel, limit=args.limit, since=args.since))
+    elif action == "who":
+        print(channel_who())
+    elif action == "heartbeat":
+        print(channel_heartbeat())
+    elif action == "unread":
+        counts = channel_unread()
+        if not counts:
+            print("No channel memberships -- join a channel first.")
+        else:
+            print("## Unread messages")
+            for ch, count in sorted(counts.items()):
+                marker = f" ({count} new)" if count > 0 else ""
+                print(f"  #{ch}: {count}{marker}")
+    elif action == "pin":
+        if not args.message:
+            print("Usage: synapt recall channel pin <channel> \"message\"", file=sys.stderr)
+            sys.exit(1)
+        print(channel_pin(channel=channel, message=args.message))
+
+
 _GLOBAL_HOOKS = {
     "SessionStart": "synapt recall hook session-start",
     "SessionEnd": "synapt recall hook session-end",
@@ -1902,6 +1949,23 @@ def main():
     rescrub_parser.add_argument("--no-rebuild", action="store_true", help="Scrub transcripts but skip index rebuild")
     rescrub_parser.add_argument("--no-embeddings", action="store_true", help="Skip embeddings during rebuild")
 
+    # Channel (cross-worktree communication)
+    channel_parser = subparsers.add_parser("channel", help="Cross-worktree agent communication channels")
+    channel_parser.add_argument("action",
+                                choices=["post", "read", "who", "join", "leave",
+                                         "heartbeat", "unread", "pin"],
+                                help="Channel action")
+    channel_parser.add_argument("channel", nargs="?", default="dev",
+                                help="Channel name (default: dev)")
+    channel_parser.add_argument("message", nargs="?", default=None,
+                                help="Message body (for 'post' and 'pin' actions)")
+    channel_parser.add_argument("--limit", type=int, default=20,
+                                help="Max messages to return (for 'read' action, default: 20)")
+    channel_parser.add_argument("--since", default=None,
+                                help="Only messages after this ISO timestamp (for 'read' action)")
+    channel_parser.add_argument("--pin", action="store_true",
+                                help="Also pin the message (for 'post' action)")
+
     args = parser.parse_args()
 
     if args.command == "setup":
@@ -1934,6 +1998,8 @@ def main():
         cmd_hook(args)
     elif args.command == "install-hook":
         cmd_install_hook(args)
+    elif args.command == "channel":
+        cmd_channel(args)
     elif args.command == "rescrub":
         cmd_rescrub(args)
 
