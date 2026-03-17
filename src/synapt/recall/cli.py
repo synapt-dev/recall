@@ -1563,28 +1563,20 @@ def cmd_hook(args: argparse.Namespace) -> None:
             from synapt.recall.journal import _get_branch
             branch = _get_branch(str(project))
             if branch and branch not in ("main", "master"):
-                from synapt.recall.core import project_index_dir, TranscriptIndex
-                from synapt.recall.storage import RecallDB
-                idx_dir = project_index_dir(project)
-                db_path = idx_dir / "recall.db"
-                if db_path.exists():
-                    db = RecallDB(db_path)
-                    # Search journal entries for this branch
-                    from synapt.recall.journal import _read_all_entries, _journal_path
-                    all_entries = []
-                    for jf in [_journal_path(project)]:
-                        if jf.exists():
-                            all_entries.extend(_read_all_entries(jf))
-                    branch_entries = [e for e in all_entries if e.branch == branch]
-                    if branch_entries:
-                        latest = sorted(branch_entries, key=lambda e: e.timestamp)[-1]
-                        if latest.focus:
-                            print(f"Branch context ({branch}): {latest.focus}")
-                            if latest.decisions:
-                                print(f"  Decisions: {'; '.join(latest.decisions[:3])}")
-                            if latest.next_steps:
-                                print(f"  Next steps: {'; '.join(latest.next_steps[:3])}")
-                    db.close()
+                from synapt.recall.journal import _read_all_entries, _journal_path
+                all_entries = []
+                jf = _journal_path(project)
+                if jf.exists():
+                    all_entries.extend(_read_all_entries(jf))
+                branch_entries = [e for e in all_entries if e.branch == branch]
+                if branch_entries:
+                    latest = sorted(branch_entries, key=lambda e: e.timestamp)[-1]
+                    if latest.focus:
+                        print(f"Branch context ({branch}): {latest.focus}")
+                        if latest.decisions:
+                            print(f"  Decisions: {'; '.join(latest.decisions[:3])}")
+                        if latest.next_steps:
+                            print(f"  Next steps: {'; '.join(latest.next_steps[:3])}")
         except Exception:
             pass  # Branch context is non-critical
 
