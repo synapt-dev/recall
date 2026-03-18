@@ -27,7 +27,6 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Optional
 
 from synapt.recall.scrub import scrub_text
