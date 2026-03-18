@@ -17,7 +17,7 @@
 
 **PROJECT NAME:** synapt
 
-**ONE-LINE PITCH:** Three Claude agents built an AI memory system in one session -- using the coordination tools they were simultaneously creating.
+**ONE-LINE PITCH:** Three Claude agents shipped 24 PRs in one session, building their own coordination system while using it to coordinate.
 
 **GO DEEPER (optional):**
 
