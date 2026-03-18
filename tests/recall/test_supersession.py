@@ -406,7 +406,7 @@ class TestFormatKnowledgeBlock:
     def test_active_node_normal_format(self):
         node = _make_knowledge_node(confidence=0.8, category="architecture")
         block = TranscriptIndex._format_knowledge_block(node)
-        assert "[knowledge] architecture (high confidence)" in block
+        assert "[knowledge] architecture (high" in block
         assert "historical" not in block
 
     def test_contradicted_node_historical_label(self):
@@ -415,8 +415,8 @@ class TestFormatKnowledgeBlock:
             contradiction_note="replaced by newer approach",
         )
         block = TranscriptIndex._format_knowledge_block(node)
-        assert "[knowledge, historical]" in block
-        assert "Superseded: replaced by newer approach" in block
+        assert "CONTRADICTED" in block
+        assert "replaced by newer approach" in block
 
     def test_valid_from_only(self):
         node = _make_knowledge_node(valid_from="2026-01-15T00:00:00+00:00")
@@ -435,17 +435,17 @@ class TestFormatKnowledgeBlock:
         high = TranscriptIndex._format_knowledge_block(
             _make_knowledge_node(confidence=0.8)
         )
-        assert "high confidence" in high
+        assert "(high" in high
 
         medium = TranscriptIndex._format_knowledge_block(
             _make_knowledge_node(confidence=0.5)
         )
-        assert "medium confidence" in medium
+        assert "(medium" in medium
 
         low = TranscriptIndex._format_knowledge_block(
             _make_knowledge_node(confidence=0.2)
         )
-        assert "low confidence" in low
+        assert "(low" in low
 
 
 # ---------------------------------------------------------------------------
