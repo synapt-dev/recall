@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -286,6 +287,16 @@ CREATE TABLE IF NOT EXISTS claims (
     claimed_by TEXT NOT NULL,
     claimed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS mentions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    mentioned TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mentions_mentioned ON mentions(mentioned);
 """
 
 
@@ -471,10 +482,49 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
 # JSONL message I/O (unchanged -- this is the open protocol)
 # ---------------------------------------------------------------------------
 
+_MENTION_RE = re.compile(r"@(\w[\w.-]*)")
+
+
+def _extract_mentions(text: str) -> list[str]:
+    """Extract @mentioned names from message text."""
+    return list(dict.fromkeys(_MENTION_RE.findall(text)))
+
+
+def _store_mentions(
+    msg: ChannelMessage, project_dir: Path | None = None,
+) -> None:
+    """Parse @mentions from a message and store them in the mentions table."""
+    names = _extract_mentions(msg.body)
+    if not names:
+        return
+    conn = _open_db(project_dir)
+    try:
+        # Resolve @names to agent_ids via display_name or griptree lookup
+        for name in names:
+            # Check presence for matching display_name or agent_id
+            row = conn.execute(
+                "SELECT agent_id FROM presence "
+                "WHERE display_name = ? OR agent_id = ? LIMIT 1",
+                (name, name),
+            ).fetchone()
+            mentioned = row["agent_id"] if row else name
+            conn.execute(
+                "INSERT INTO mentions (message_id, channel, mentioned, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                (msg.id, msg.channel, mentioned, msg.timestamp),
+            )
+        conn.commit()
+    except Exception:
+        pass  # Mentions are non-critical
+    finally:
+        conn.close()
+
+
 def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> None:
     """Append a message to a channel's JSONL log with file locking.
 
     Auto-generates a message ID if not already set.
+    Also parses and stores any @mentions found in the message body.
     """
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
@@ -485,6 +535,9 @@ def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> Non
         lock_exclusive(f)
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
+    # Store @mentions (non-blocking, best-effort)
+    if msg.type in ("message", "directive") and "@" in msg.body:
+        _store_mentions(msg, project_dir)
 
 
 def _read_messages(
@@ -1379,7 +1432,33 @@ def check_directives(
     finally:
         conn2.close()
 
+    # Check for unread @mentions (by agent_id or display_name)
+    mention_conn = _open_db(project_dir)
+    try:
+        # Get this agent's display name for mention matching
+        dn_row = mention_conn.execute(
+            "SELECT display_name FROM presence WHERE agent_id = ?", (aid,)
+        ).fetchone()
+        display_name = dn_row["display_name"] if dn_row else ""
+
+        # Find mentions targeting this agent (by agent_id or display_name)
+        mention_ids: set[str] = set()
+        if display_name:
+            rows = mention_conn.execute(
+                "SELECT message_id FROM mentions WHERE mentioned IN (?, ?)",
+                (aid, display_name),
+            ).fetchall()
+        else:
+            rows = mention_conn.execute(
+                "SELECT message_id FROM mentions WHERE mentioned = ?",
+                (aid,),
+            ).fetchall()
+        mention_ids = {r["message_id"] for r in rows}
+    finally:
+        mention_conn.close()
+
     pending: list[tuple[str, ChannelMessage]] = []
+    mentions: list[tuple[str, ChannelMessage]] = []
     for ch in channels:
         since = cursors.get(ch, "1970-01-01T00:00:00Z")
         path = _channel_path(ch, project_dir)
@@ -1392,12 +1471,21 @@ def check_directives(
                 if msg.to == "*" and claimer and claimer != aid:
                     continue
                 pending.append((ch, msg))
+            elif msg.id in mention_ids and msg.from_agent != aid:
+                # @mention from another agent (not self-mentions)
+                mentions.append((ch, msg))
 
-    if not pending:
+    if not pending and not mentions:
         return ""
 
     # Format for output (will appear as system reminder in context)
-    lines = [f"[channel] {len(pending)} pending directive(s):"]
-    for ch, msg in pending:
-        lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    lines = []
+    if pending:
+        lines.append(f"[channel] {len(pending)} pending directive(s):")
+        for ch, msg in pending:
+            lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    if mentions:
+        lines.append(f"[channel] {len(mentions)} @mention(s):")
+        for ch, msg in mentions:
+            lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
     return "\n".join(lines)
