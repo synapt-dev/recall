@@ -1,50 +1,53 @@
-# Agent Madness Submission — synapt
+# Agent Madness 2026 Submission
 
 **Deadline: March 18, 2026**
 **Submit at: https://www.agentmadness.ai/**
 
 ---
 
-## Project name
+## ABOUT YOU
 
-synapt
+**YOUR NAME:** Layne Penney
 
-## URL
+**EMAIL:** claude@synapt.dev
 
-https://github.com/laynepenney/synapt
+---
 
-## Demo / Blog
+## THE BUILD
 
-https://synapt.dev/blog/multi-agent-synergy.html
+**PROJECT NAME:** synapt
 
-## Category
+**ONE-LINE PITCH:** Three Claude agents built an AI memory system in one session -- using the coordination tools they were simultaneously creating.
 
-Agent teams
+**GO DEEPER (optional):**
 
-## Description
+Three Claude agents (opus, apollo, sentinel) shipped 24 PRs in an 18-hour session, building an open-source AI memory system for coding assistants. The meta-circularity: the channel system they used to coordinate (@mentions, claims, directives) is itself a feature of the product they were building. The claim mechanism that prevents duplicate work was itself duplicated by two agents racing to build it. A memory system that remembers what you worked on, built by agents that kept forgetting to check what each other was working on.
 
-Three Claude agents (opus, apollo, sentinel) built an open-source AI memory system — using the coordination tools they were simultaneously creating. One 18-hour session: 24 PRs merged, 3 version releases (v0.7.0→v0.7.2), tree-structured database shipped from design doc to CLI, temporal reasoning pipeline, and a collaborative blog post. The claim mechanism that prevents duplicate work was itself duplicated by two agents racing to build it. A memory system that remembers what you worked on, built by agents that kept forgetting to check what each other was working on.
+Key stats: 24 PRs merged, 3 version releases (v0.7.0-v0.7.2), tree-structured database shipped from design doc to CLI in 8 PRs, full temporal reasoning pipeline, collaborative blog post, and #2 on LOCOMO benchmark (76.04%). Runs entirely on a laptop.
 
-## Key Stats
+**PRIMARY TYPE:** Agent Team
 
-- 24 PRs merged in one session across 2 repos
-- 3 version releases (v0.7.0 → v0.7.2) published to PyPI
-- Tree-structured DB: 7 PRs from design doc to CLI command
-- Full temporal reasoning pipeline (extraction → validation → filtering)
-- Claim mechanism invented BECAUSE agents kept duplicating work
-- Blog post "Three Agents, One Codebase" written collaboratively by all 3 agents
-- 16+ issues closed, 5 new features shipped
-- #2 on LOCOMO benchmark (76.04%), #1 on CodeMemo (90.51%)
-- Runs entirely on a laptop — no cloud dependency for memory
+**WHAT DOES YOUR BUILD PRIMARILY DO (pick up to 3):**
+1. Coding / Dev
+2. Search / Retrieval
+3. Automation
 
-## The Meta-Circularity
+**LEAD IMAGE:** Use the synapt hero image from docs/blog/images/synapt-header.jpg or the owl logo
 
-The @mentions feature that lets agents tag each other was reviewed using @mentions. The claim mechanism that prevents duplicate work was itself duplicated. The version warning that tells agents to restart was tested by agents who needed to restart. Every friction point we hit was a bug report against our own product.
+**PROJECT LINK:** https://github.com/laynepenney/synapt
 
-## Contact
+**DEMO LINK:** https://synapt.dev/blog/multi-agent-synergy.html
 
-claude@synapt.dev
+---
 
-## Website
+## TECHNICAL
 
-https://synapt.dev
+**STACK:** Claude Opus 4.6, Claude Code, Python, SQLite FTS5, MCP (Model Context Protocol), sentence-transformers (MiniLM), HuggingFace (flan-t5), PyPI
+
+**CURRENT STATUS:** Live
+
+---
+
+## CONFIRM
+
+Check: "I give permission to feature this project publicly on Agent Madness if selected for the bracket."
