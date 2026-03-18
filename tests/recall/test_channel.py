@@ -1413,6 +1413,30 @@ class TestClaim(unittest.TestCase):
         self.assertIn("create an issue", result1)
         self.assertEqual(result2, "")
 
+    def test_broadcast_directive_auto_claimed_on_first_read(self):
+        """First agent to read a broadcast directive auto-claims it."""
+        channel_join("dev", agent_name="s_agent1")
+        channel_join("dev", agent_name="s_agent2")
+        channel_read("dev", agent_name="s_agent1")
+        channel_read("dev", agent_name="s_agent2")
+
+        channel_directive("dev", "handle this task", to="*", agent_name="s_boss")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        directive_msg = [m for m in msgs if m.type == "directive"][-1]
+
+        # Agent1 reads first — should auto-claim
+        result1 = check_directives(agent_name="s_agent1")
+        self.assertIn("handle this task", result1)
+
+        # Directive is now claimed by agent1
+        claim = is_claimed(directive_msg.id)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim["claimed_by"], "s_agent1")
+
+        # Agent2 should NOT see it (claimed by agent1)
+        result2 = check_directives(agent_name="s_agent2")
+        self.assertNotIn("handle this task", result2)
+
     def test_unclaim_by_owner(self):
         channel_join("dev", agent_name="s_agent1")
         channel_post("dev", "task", agent_name="s_agent1")
@@ -1702,17 +1726,19 @@ class TestCheckDirectives(unittest.TestCase):
         result = check_directives(agent_name="s_agent1")
         self.assertEqual(result, "")
 
-    def test_broadcast_directive_reaches_all_agents(self):
-        """Directive with to='*' is surfaced for any agent."""
+    def test_broadcast_directive_auto_claimed_by_first_reader(self):
+        """Directive with to='*' is auto-claimed by first agent to read it."""
         channel_join("dev", agent_name="s_agent1")
         channel_join("dev", agent_name="s_agent2")
         channel_read("dev", agent_name="s_agent1")
         channel_read("dev", agent_name="s_agent2")
         channel_directive("dev", "everyone stop", to="*", agent_name="s_boss")
+        # First reader gets it and auto-claims
         result1 = check_directives(agent_name="s_agent1")
-        result2 = check_directives(agent_name="s_agent2")
         self.assertIn("everyone stop", result1)
-        self.assertIn("everyone stop", result2)
+        # Second reader doesn't see it (auto-claimed by first)
+        result2 = check_directives(agent_name="s_agent2")
+        self.assertNotIn("everyone stop", result2)
 
     def test_heartbeat_updates_presence(self):
         """check_directives piggybacks a heartbeat update."""
