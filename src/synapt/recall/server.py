@@ -30,7 +30,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import synapt as _synapt_pkg
 from synapt.recall.config import load_config
+
+# Capture version at server startup for stale-process detection
+_STARTUP_VERSION = getattr(_synapt_pkg, "__version__", "unknown")
 from synapt.recall.core import (
     TranscriptIndex,
     format_size,
@@ -1559,16 +1563,42 @@ def recall_channel(
 # ---------------------------------------------------------------------------
 
 
+def _check_version_stale() -> str:
+    """Check if installed synapt version differs from what this process loaded.
+
+    Returns a warning string if stale, empty string if current.
+    """
+    try:
+        from importlib.metadata import version as pkg_version
+        installed = pkg_version("synapt")
+        if installed != _STARTUP_VERSION:
+            return (
+                f"[synapt] Server running v{_STARTUP_VERSION} but v{installed} is installed. "
+                f"Restart the MCP server to pick up changes (/mcp or kill the synapt server process)."
+            )
+    except Exception:
+        pass
+    return ""
+
+
 def _directive_suffix() -> str:
     """Check for pending directives and return a suffix to append to tool results.
 
     Returns empty string if nothing pending. Runs in ~20ms (no subprocess).
+    Also warns if the server is running stale code.
     """
+    parts = []
     try:
         from synapt.recall.channel import check_directives
-        return check_directives()
+        result = check_directives()
+        if result:
+            parts.append(result)
     except Exception:
-        return ""
+        pass
+    stale = _check_version_stale()
+    if stale:
+        parts.append(stale)
+    return "\n\n".join(parts)
 
 
 def _with_directive_check(fn):
