@@ -12,6 +12,7 @@ from synapt.recall.sharding import (
     group_chunks_by_quarter,
     estimate_split,
     is_sharded,
+    split_monolithic_db,
 )
 
 
@@ -137,6 +138,85 @@ class TestIsSharded(unittest.TestCase):
         (d / "index.db").touch()
         (d / "data_2025_q1.db").touch()
         self.assertTrue(is_sharded(d))
+
+
+class TestSplitMonolithicDb(unittest.TestCase):
+    """Test the migration from monolithic to sharded layout."""
+
+    def _create_monolithic(self, tmpdir):
+        """Create a minimal monolithic recall.db with test data."""
+        from synapt.recall.storage import RecallDB
+        db = RecallDB(Path(tmpdir) / "recall.db")
+        # Insert some knowledge
+        db._conn.execute(
+            "INSERT INTO knowledge (id, content, category, confidence, status, "
+            "source_sessions, source_turns, source_offsets, created_at, updated_at, "
+            "superseded_by, contradiction_note, tags, valid_from, valid_until, version, lineage_id) "
+            "VALUES ('k1', 'test fact', 'workflow', 0.8, 'active', '[]', '[]', '[]', "
+            "'2025-01-01', '2025-01-01', '', '', '', NULL, NULL, 1, '')"
+        )
+        # Insert chunks across two quarters
+        for i, ts in enumerate([
+            "2025-01-10T10:00:00Z", "2025-02-15T10:00:00Z",  # Q1
+            "2025-04-05T10:00:00Z",  # Q2
+        ]):
+            db._conn.execute(
+                "INSERT INTO chunks (id, session_id, timestamp, turn_index, user_text, "
+                "assistant_text, tools_used, files_touched, tool_content, transcript_path, "
+                "byte_offset, byte_length) "
+                f"VALUES ('c{i}', 's1', '{ts}', {i}, 'user', 'assistant', '[]', '[]', '', '', 0, 0)"
+            )
+        db._conn.commit()
+        db.close()
+
+    def test_split_creates_index_and_shards(self):
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir)
+        d = Path(tmpdir)
+
+        plan = split_monolithic_db(d)
+
+        self.assertIn("index.db", plan)
+        self.assertTrue((d / "index.db").exists())
+        self.assertTrue((d / "data_2025_q1.db").exists())
+        self.assertTrue((d / "data_2025_q2.db").exists())
+        self.assertEqual(plan["data_2025_q1.db"], 2)
+        self.assertEqual(plan["data_2025_q2.db"], 1)
+
+    def test_split_preserves_knowledge_in_index(self):
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir)
+        d = Path(tmpdir)
+        split_monolithic_db(d)
+
+        conn = sqlite3.connect(str(d / "index.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM knowledge WHERE id = 'k1'").fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["content"], "test fact")
+
+    def test_dry_run_doesnt_write(self):
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir)
+        d = Path(tmpdir)
+
+        plan = split_monolithic_db(d, dry_run=True)
+        self.assertIn("2025_q1", plan)
+        self.assertFalse((d / "index.db").exists())
+
+    def test_already_sharded_raises(self):
+        tmpdir = tempfile.mkdtemp()
+        d = Path(tmpdir)
+        (d / "index.db").touch()
+        (d / "recall.db").touch()
+        with self.assertRaises(RuntimeError):
+            split_monolithic_db(d)
+
+    def test_no_recall_db_raises(self):
+        tmpdir = tempfile.mkdtemp()
+        with self.assertRaises(FileNotFoundError):
+            split_monolithic_db(Path(tmpdir))
 
 
 if __name__ == "__main__":
