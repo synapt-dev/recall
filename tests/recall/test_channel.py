@@ -38,6 +38,7 @@ from synapt.recall.channel import (
     channel_claim,
     channel_unclaim,
     is_claimed,
+    extract_mentions,
     check_directives,
 )
 
@@ -1655,6 +1656,55 @@ class TestChannelSearch(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertIn("type", results[0])
         self.assertEqual(results[0]["type"], "message")
+
+
+class TestMentions(unittest.TestCase):
+    """Tests for @mention parsing and notification (#153)."""
+
+    def test_extract_mentions(self):
+        self.assertEqual(extract_mentions("hey @opus review this"), ["opus"])
+        self.assertEqual(extract_mentions("@apollo @opus both look"), ["apollo", "opus"])
+        self.assertEqual(extract_mentions("no mentions here"), [])
+        self.assertEqual(extract_mentions("email@test.com"), ["test.com"])
+
+    def test_mention_surfaces_in_check_directives(self):
+        """Messages with @mention show up in check_directives."""
+        tmpdir = tempfile.mkdtemp()
+        patcher = _patch_data_dir(tmpdir)
+        patcher.start()
+        try:
+            channel_join("dev", agent_name="s_agent1")
+            channel_rename("apollo", agent_name="s_agent1")
+            channel_join("dev", agent_name="s_agent2")
+            # Both read to set cursors
+            channel_read("dev", agent_name="s_agent1")
+            channel_read("dev", agent_name="s_agent2")
+            # Agent2 posts mentioning agent1 by display name
+            channel_post("dev", "hey @apollo review my PR", agent_name="s_agent2")
+            result = check_directives(agent_name="s_agent1")
+            self.assertIn("@mention", result)
+            self.assertIn("review my PR", result)
+        finally:
+            patcher.stop()
+
+    def test_non_mentioned_agent_doesnt_see_it(self):
+        """Agent not @mentioned doesn't get notified."""
+        tmpdir = tempfile.mkdtemp()
+        patcher = _patch_data_dir(tmpdir)
+        patcher.start()
+        try:
+            channel_join("dev", agent_name="s_agent1")
+            channel_rename("apollo", agent_name="s_agent1")
+            channel_join("dev", agent_name="s_agent2")
+            channel_rename("opus", agent_name="s_agent2")
+            channel_join("dev", agent_name="s_agent3")
+            channel_read("dev", agent_name="s_agent3")
+            channel_post("dev", "hey @apollo review this", agent_name="s_agent2")
+            # agent3 is not mentioned
+            result = check_directives(agent_name="s_agent3")
+            self.assertEqual(result, "")
+        finally:
+            patcher.stop()
 
 
 class TestCheckDirectives(unittest.TestCase):

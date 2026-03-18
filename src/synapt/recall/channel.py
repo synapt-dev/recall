@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -148,6 +149,55 @@ def _resolve_display_name(project_dir: Path | None = None) -> str:
     except Exception:
         pass
     return _resolve_griptree(project_dir)
+
+
+_MENTION_RE = re.compile(r"@(\w[\w.-]*)")
+
+
+def extract_mentions(text: str) -> list[str]:
+    """Extract @mention names from message text.
+
+    Returns list of mentioned names (without the @ prefix).
+
+    >>> extract_mentions("hey @opus review this @apollo")
+    ['opus', 'apollo']
+    """
+    return _MENTION_RE.findall(text)
+
+
+def _mentions_agent(
+    text: str,
+    agent_id: str,
+    conn: sqlite3.Connection,
+) -> bool:
+    """Check if a message text @mentions a specific agent.
+
+    Resolves the agent's display_name and griptree from the presence
+    table, then checks if any @mention in the text matches.
+    """
+    mentions = extract_mentions(text)
+    if not mentions:
+        return False
+
+    row = conn.execute(
+        "SELECT display_name, griptree FROM presence WHERE agent_id = ?",
+        (agent_id,),
+    ).fetchone()
+    if not row:
+        return False
+
+    # Match against display_name, griptree, or agent_id itself
+    names = {agent_id.lower()}
+    if row["display_name"]:
+        names.add(row["display_name"].lower())
+    if row["griptree"]:
+        names.add(row["griptree"].lower())
+        # Also match the last segment (e.g., "synapt" from "synapt/synapt")
+        parts = row["griptree"].split("/")
+        if len(parts) > 1:
+            names.add(parts[-1].lower())
+
+    return any(m.lower() in names for m in mentions)
 
 
 def _resolve_target_id(target: str, conn: sqlite3.Connection) -> str:
@@ -1379,25 +1429,48 @@ def check_directives(
     finally:
         conn2.close()
 
+    # Load presence data for @mention resolution
+    conn3 = _open_db(project_dir)
+    try:
+        mention_conn = conn3
+    except Exception:
+        mention_conn = None
+
     pending: list[tuple[str, ChannelMessage]] = []
-    for ch in channels:
-        since = cursors.get(ch, "1970-01-01T00:00:00Z")
-        path = _channel_path(ch, project_dir)
-        if not path.exists():
-            continue
-        for msg in _read_messages(path, since=since):
-            if msg.type == "directive" and (msg.to == aid or msg.to == "*"):
-                # Skip broadcast directives claimed by another agent
-                claimer = all_claims.get(msg.id)
-                if msg.to == "*" and claimer and claimer != aid:
-                    continue
-                pending.append((ch, msg))
+    try:
+        for ch in channels:
+            since = cursors.get(ch, "1970-01-01T00:00:00Z")
+            path = _channel_path(ch, project_dir)
+            if not path.exists():
+                continue
+            for msg in _read_messages(path, since=since):
+                if msg.type == "directive" and (msg.to == aid or msg.to == "*"):
+                    # Skip broadcast directives claimed by another agent
+                    claimer = all_claims.get(msg.id)
+                    if msg.to == "*" and claimer and claimer != aid:
+                        continue
+                    pending.append((ch, msg))
+                elif msg.type == "message" and mention_conn:
+                    # Check if this message @mentions us
+                    if _mentions_agent(msg.body, aid, mention_conn):
+                        pending.append((ch, msg))
+    finally:
+        if mention_conn:
+            conn3.close()
 
     if not pending:
         return ""
 
     # Format for output (will appear as system reminder in context)
-    lines = [f"[channel] {len(pending)} pending directive(s):"]
-    for ch, msg in pending:
-        lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
-    return "\n".join(lines)
+    directives = [(ch, m) for ch, m in pending if m.type == "directive"]
+    mentions = [(ch, m) for ch, m in pending if m.type != "directive"]
+    parts = []
+    if directives:
+        parts.append(f"[channel] {len(directives)} pending directive(s):")
+        for ch, msg in directives:
+            parts.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    if mentions:
+        parts.append(f"[channel] {len(mentions)} @mention(s):")
+        for ch, msg in mentions:
+            parts.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    return "\n".join(parts)
