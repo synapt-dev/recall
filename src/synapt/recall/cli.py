@@ -1620,9 +1620,27 @@ def cmd_hook(args: argparse.Namespace) -> None:
         except Exception:
             pass  # Branch context is non-critical
 
-        # 5. Surface journal context (stdout → system-reminder)
-        cmd_journal(argparse.Namespace(read=True, write=False, list=False, show=None,
-                                       focus=None, done=None, decisions=None, next=None))
+        # 5. Surface journal context — show last 3 entries for continuity
+        try:
+            from synapt.recall.journal import _read_all_entries, _journal_path, _dedup_entries
+            from synapt.recall.journal import format_for_session_start
+            jf = _journal_path(project)
+            if jf.exists():
+                all_entries = _dedup_entries(_read_all_entries(jf))
+                # Filter to entries with real content, sort by timestamp
+                rich = [e for e in all_entries if e.has_rich_content()]
+                rich.sort(key=lambda e: e.timestamp, reverse=True)
+                # Show up to 3 most recent rich entries
+                for entry in rich[:3]:
+                    print(format_for_session_start(entry))
+            else:
+                # Fallback to single-entry display
+                cmd_journal(argparse.Namespace(read=True, write=False, list=False, show=None,
+                                               focus=None, done=None, decisions=None, next=None))
+        except Exception:
+            # Fallback on any error
+            cmd_journal(argparse.Namespace(read=True, write=False, list=False, show=None,
+                                           focus=None, done=None, decisions=None, next=None))
 
         # 5. Surface knowledge nodes (if any exist)
         try:
@@ -1646,15 +1664,21 @@ def cmd_hook(args: argparse.Namespace) -> None:
         except Exception:
             pass  # Contradiction surfacing is non-critical
 
-        # 8. Auto-join channel + surface unread counts
+        # 8. Auto-join channel + surface unread summary
         try:
-            from synapt.recall.channel import channel_join, channel_unread
+            from synapt.recall.channel import channel_join, channel_unread, channel_read
             channel_join("dev", role="human")
             counts = channel_unread()
             if counts:
                 unread_parts = [f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0]
                 if unread_parts:
                     print(f"  Channel: {', '.join(unread_parts)} unread", file=sys.stderr)
+                # Surface recent channel messages (last 5) so agent has context
+                total_unread = sum(counts.values())
+                if total_unread > 0:
+                    summary = channel_read("dev", limit=min(total_unread, 5))
+                    if summary:
+                        print(f"\nRecent #dev messages:\n{summary}")
         except Exception:
             pass  # Channel is non-critical
 
