@@ -83,3 +83,45 @@ def estimate_split(db_path: Path) -> dict[str, int]:
         return counts
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Index DB tables — these stay in the lightweight index
+# ---------------------------------------------------------------------------
+
+_INDEX_TABLES = frozenset({
+    "metadata",
+    "knowledge",
+    "knowledge_fts",
+    "knowledge_fts_data",
+    "knowledge_fts_idx",
+    "knowledge_fts_docsize",
+    "knowledge_fts_config",
+    "clusters",
+    "clusters_fts",
+    "clusters_fts_data",
+    "clusters_fts_idx",
+    "clusters_fts_docsize",
+    "clusters_fts_config",
+    "cluster_summaries",
+    "cluster_chunks",
+    "access_stats",
+    "access_log_archive",
+    "chunk_links",
+    "pending_contradictions",
+})
+
+# Data tables — these get sharded per quarter
+_DATA_TABLES = frozenset({
+    "chunks",
+    "access_log",
+})
+
+
+def is_sharded(index_dir: Path) -> bool:
+    """Check if an index directory uses the sharded layout.
+
+    Returns True if index.db exists (sharded), False if only recall.db
+    exists (monolithic).
+    """
+    return (index_dir / "index.db").exists()
