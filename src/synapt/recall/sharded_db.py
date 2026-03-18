@@ -105,7 +105,7 @@ class ShardedRecallDB:
 
     # -- Chunk methods (data shards or monolithic) -------------------------
 
-    def load_chunks(self) -> list:
+    def load_chunks(self) -> list["TranscriptChunk"]:  # noqa: F821
         """Load chunks from all data shards, or from monolithic DB."""
         if self._data_dbs:
             all_chunks = []
@@ -114,17 +114,29 @@ class ShardedRecallDB:
             return all_chunks
         return self._index.load_chunks()
 
-    def save_chunks(self, chunks: list) -> None:
-        """Save chunks. Phase 1: delegates to monolithic DB."""
-        # Phase 2 will route to the correct quarterly shard
+    def save_chunks(self, chunks: list["TranscriptChunk"]) -> None:  # noqa: F821
+        """Save chunks to the appropriate database.
+
+        In monolithic mode, delegates directly. In sharded mode, raises
+        NotImplementedError — Phase 2 will route chunks to the correct
+        quarterly shard based on timestamp.
+        """
         if self._data_dbs:
-            # For now, save to last (most recent) data shard
-            self._data_dbs[-1].save_chunks(chunks)
-        else:
-            self._index.save_chunks(chunks)
+            raise NotImplementedError(
+                "Sharded save_chunks not yet implemented. "
+                "Phase 2 will route chunks to quarterly shards by timestamp."
+            )
+        self._index.save_chunks(chunks)
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
-        """FTS search across all shards, merging results by score."""
+        """FTS search across all shards, merging results by score.
+
+        WARNING (Phase 2): rowids are NOT globally unique across shards.
+        Each shard has its own rowid sequence starting at 1. Callers that
+        use rowids to fetch chunk data (get_embeddings, load by rowid)
+        will get wrong results when merging across shards. Phase 2 must
+        use shard-qualified identifiers (shard_idx, rowid) instead.
+        """
         if self._data_dbs:
             all_results = []
             for db in self._data_dbs:

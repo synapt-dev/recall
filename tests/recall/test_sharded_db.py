@@ -101,6 +101,15 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertEqual(db.shard_count, 3)
         db.close()
 
+    def test_save_chunks_raises_in_sharded_mode(self):
+        """Sharded save_chunks is not yet implemented (Phase 2)."""
+        RecallDB(self.index_dir / "index.db").close()
+        RecallDB(self.index_dir / "data_2025_q1.db").close()
+        db = ShardedRecallDB.open(self.index_dir)
+        with self.assertRaises(NotImplementedError):
+            db.save_chunks([])
+        db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
