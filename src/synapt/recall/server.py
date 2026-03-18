@@ -1638,11 +1638,52 @@ def _check_version_stale() -> str:
     return ""
 
 
+def _check_channel_activity() -> str:
+    """Lightweight check for new channel messages since last tool call.
+
+    Uses file mtime comparison instead of reading full JSONL — ~1ms.
+    Returns a notification string if new messages exist, empty string otherwise.
+    """
+    try:
+        from synapt.recall.core import project_data_dir
+        channels_dir = project_data_dir() / "channels"
+        if not channels_dir.exists():
+            return ""
+
+        # Check mtime of dev.jsonl against our last-seen marker
+        dev_jsonl = channels_dir / "dev.jsonl"
+        if not dev_jsonl.exists():
+            return ""
+
+        marker = channels_dir / ".last_seen_mtime"
+        current_mtime = dev_jsonl.stat().st_mtime
+
+        if marker.exists():
+            last_mtime = float(marker.read_text().strip())
+            if current_mtime <= last_mtime:
+                return ""  # No new messages
+
+        # New messages detected — update marker and notify
+        marker.write_text(str(current_mtime))
+
+        # Count new messages (cheap: just count lines after last position)
+        from synapt.recall.channel import channel_unread
+        counts = channel_unread()
+        if counts:
+            total = sum(counts.values())
+            if total > 0:
+                channels = ", ".join(f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0)
+                return f"[channel] {total} new message(s): {channels}. Use recall_channel(action='read') to see them."
+    except Exception:
+        pass
+    return ""
+
+
 def _directive_suffix() -> str:
-    """Check for pending directives and return a suffix to append to tool results.
+    """Check for pending directives, @mentions, channel activity, and version.
 
     Returns empty string if nothing pending. Runs in ~20ms (no subprocess).
-    Also warns if the server is running stale code.
+    Replaces the need for a polling loop — piggybacks on every tool call.
     """
     parts = []
     try:
@@ -1652,6 +1693,12 @@ def _directive_suffix() -> str:
             parts.append(result)
     except Exception:
         pass
+
+    # Lightweight channel activity check (~1ms)
+    activity = _check_channel_activity()
+    if activity:
+        parts.append(activity)
+
     stale = _check_version_stale()
     if stale:
         parts.append(stale)
