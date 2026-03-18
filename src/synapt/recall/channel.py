@@ -499,15 +499,25 @@ def _store_mentions(
         return
     conn = _open_db(project_dir)
     try:
-        # Resolve @names to agent_ids via display_name or griptree lookup
+        # Build a lookup of all known identities → agent_id
+        # Matches: display_name, agent_id, griptree, last griptree segment
+        identity_map: dict[str, str] = {}
+        for row in conn.execute(
+            "SELECT agent_id, display_name, griptree FROM presence"
+        ).fetchall():
+            aid = row["agent_id"]
+            identity_map[aid.lower()] = aid
+            if row["display_name"]:
+                identity_map[row["display_name"].lower()] = aid
+            if row["griptree"]:
+                identity_map[row["griptree"].lower()] = aid
+                # Also match last segment (e.g., "synapt" from "synapt/synapt")
+                parts = row["griptree"].split("/")
+                if len(parts) > 1:
+                    identity_map[parts[-1].lower()] = aid
+
         for name in names:
-            # Check presence for matching display_name or agent_id
-            row = conn.execute(
-                "SELECT agent_id FROM presence "
-                "WHERE display_name = ? OR agent_id = ? LIMIT 1",
-                (name, name),
-            ).fetchone()
-            mentioned = row["agent_id"] if row else name
+            mentioned = identity_map.get(name.lower(), name)
             conn.execute(
                 "INSERT INTO mentions (message_id, channel, mentioned, timestamp) "
                 "VALUES (?, ?, ?, ?)",
