@@ -117,16 +117,37 @@ class ShardedRecallDB:
     def save_chunks(self, chunks: list["TranscriptChunk"]) -> None:  # noqa: F821
         """Save chunks to the appropriate database.
 
-        In monolithic mode, delegates directly. In sharded mode, raises
-        NotImplementedError — Phase 2 will route chunks to the correct
-        quarterly shard based on timestamp.
+        In monolithic mode, delegates directly to the single DB.
+        In sharded mode, groups chunks by quarter and saves each group
+        to the corresponding shard. New shards are created as needed.
         """
-        if self._data_dbs:
-            raise NotImplementedError(
-                "Sharded save_chunks not yet implemented. "
-                "Phase 2 will route chunks to quarterly shards by timestamp."
-            )
-        self._index.save_chunks(chunks)
+        if not self._data_dbs:
+            self._index.save_chunks(chunks)
+            return
+
+        # Group chunks by quarter
+        from synapt.recall.sharding import quarter_for_timestamp, shard_name
+
+        by_quarter: dict[str, list] = {}
+        for chunk in chunks:
+            q = quarter_for_timestamp(chunk.timestamp)
+            by_quarter.setdefault(q, []).append(chunk)
+
+        # Map existing shards by name
+        shard_map = {db._path.name: db for db in self._data_dbs}
+
+        for quarter, q_chunks in by_quarter.items():
+            s_name = shard_name(quarter)
+            if s_name in shard_map:
+                # Save to existing shard
+                shard_map[s_name].save_chunks(q_chunks)
+            else:
+                # Create new shard
+                shard_path = self._index._path.parent / s_name
+                new_db = RecallDB(shard_path)
+                new_db.save_chunks(q_chunks)
+                self._data_dbs.append(new_db)
+                shard_map[s_name] = new_db
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.

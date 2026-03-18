@@ -249,9 +249,15 @@ def _archive_and_build_locked(
     if not build_sources and source_dirs:
         build_sources = [source_dirs[0]]
 
-    # Step 3: Open or create SQLite database
+    # Step 3: Open or create SQLite database (shard-aware)
     index_dir.mkdir(parents=True, exist_ok=True)
-    db = RecallDB(index_dir / "recall.db")
+    from synapt.recall.sharding import is_sharded
+    if is_sharded(index_dir):
+        from synapt.recall.sharded_db import ShardedRecallDB
+        db = ShardedRecallDB.open(index_dir)
+        print(f"  Sharded layout: {db.shard_count} data shard(s)")
+    else:
+        db = RecallDB(index_dir / "recall.db")
 
     # Step 4: Load existing data for incremental builds
     incremental_manifest = None
