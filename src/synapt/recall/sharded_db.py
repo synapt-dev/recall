@@ -118,36 +118,35 @@ class ShardedRecallDB:
         """Save chunks to the appropriate database.
 
         In monolithic mode, delegates directly to the single DB.
-        In sharded mode, groups chunks by quarter and saves each group
-        to the corresponding shard. New shards are created as needed.
+        In sharded mode, saves to the active (last) shard. If the active
+        shard exceeds SHARD_CHUNK_THRESHOLD, a new shard is created.
         """
         if not self._data_dbs:
             self._index.save_chunks(chunks)
             return
 
-        # Group chunks by quarter
-        from synapt.recall.sharding import quarter_for_timestamp, shard_name
+        from synapt.recall.sharding import (
+            SHARD_CHUNK_THRESHOLD,
+            shard_name_for_index,
+            next_shard_index,
+        )
 
-        by_quarter: dict[str, list] = {}
-        for chunk in chunks:
-            q = quarter_for_timestamp(chunk.timestamp)
-            by_quarter.setdefault(q, []).append(chunk)
+        # Save to the last (active) shard
+        active_db = self._data_dbs[-1]
+        active_db.save_chunks(chunks)
 
-        # Map existing shards by name
-        shard_map = {db._path.name: db for db in self._data_dbs}
-
-        for quarter, q_chunks in by_quarter.items():
-            s_name = shard_name(quarter)
-            if s_name in shard_map:
-                # Save to existing shard
-                shard_map[s_name].save_chunks(q_chunks)
-            else:
-                # Create new shard
-                shard_path = self._index._path.parent / s_name
-                new_db = RecallDB(shard_path)
-                new_db.save_chunks(q_chunks)
+        # Check if active shard exceeded threshold — if so, note for next build
+        # (actual splitting happens during build, not during save)
+        try:
+            count = active_db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            if count > SHARD_CHUNK_THRESHOLD:
+                # Create new empty shard for next writes
+                idx = next_shard_index(self._index._path.parent)
+                new_path = self._index._path.parent / shard_name_for_index(idx)
+                new_db = RecallDB(new_path)
                 self._data_dbs.append(new_db)
-                shard_map[s_name] = new_db
+        except Exception:
+            pass  # Threshold check is best-effort
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.
