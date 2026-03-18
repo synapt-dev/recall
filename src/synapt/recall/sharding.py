@@ -1,8 +1,9 @@
 """Sharded database utilities for tree-structured recall storage.
 
 Splits the monolithic recall.db into:
-  - index.db: lightweight routing index (knowledge, clusters, metadata)
-  - data_YYYY_QN.db: per-quarter chunk shards (chunks, FTS, access_log)
+  - index.db: lightweight routing index (knowledge, clusters, metadata,
+    access tracking)
+  - data_YYYY_QN.db: per-quarter chunk shards (chunks + FTS)
 
 This module provides helpers for shard routing, migration from monolithic
 DB, and the ShardedRecallDB wrapper that preserves the RecallDB interface.
@@ -17,14 +18,20 @@ from datetime import datetime
 from pathlib import Path
 
 
-def quarter_for_timestamp(timestamp: str) -> str:
+def quarter_for_timestamp(timestamp: str | None) -> str:
     """Return the quarter label for an ISO 8601 timestamp.
+
+    Returns ``"unknown"`` for invalid or missing timestamps.
 
     >>> quarter_for_timestamp("2025-03-17T10:00:00Z")
     '2025_q1'
     >>> quarter_for_timestamp("2025-07-01T00:00:00Z")
     '2025_q3'
+    >>> quarter_for_timestamp(None)
+    'unknown'
     """
+    if not timestamp:
+        return "unknown"
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         quarter = (dt.month - 1) // 3 + 1
@@ -43,7 +50,11 @@ def shard_name(quarter: str) -> str:
 
 
 def list_shards(index_dir: Path) -> list[Path]:
-    """List all data shard DBs in the index directory, sorted chronologically."""
+    """List all data shard DBs in the index directory, sorted by name.
+
+    Lexicographic sort gives chronological order for ``data_YYYY_qN.db``
+    names.  A ``data_unknown.db`` (invalid timestamps) sorts last.
+    """
     return sorted(index_dir.glob("data_*.db"))
 
 
@@ -69,10 +80,17 @@ def estimate_split(db_path: Path) -> dict[str, int]:
 
     Returns dict mapping quarter label to chunk count.
     Useful for planning before actually splitting.
+    Returns empty dict if the DB has no chunks table.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
+        # Check if chunks table exists
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()
+        if row is None:
+            return {}
         rows = conn.execute(
             "SELECT timestamp FROM chunks ORDER BY timestamp"
         ).fetchall()
@@ -86,7 +104,8 @@ def estimate_split(db_path: Path) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Index DB tables — these stay in the lightweight index
+# Index DB tables — these stay in the lightweight always-loaded index.
+# Includes access tracking (keyed by access time, not chunk creation time).
 # ---------------------------------------------------------------------------
 
 _INDEX_TABLES = frozenset({
@@ -105,16 +124,23 @@ _INDEX_TABLES = frozenset({
     "clusters_fts_config",
     "cluster_summaries",
     "cluster_chunks",
+    "access_log",
     "access_stats",
     "access_log_archive",
     "chunk_links",
     "pending_contradictions",
 })
 
-# Data tables — these get sharded per quarter
+# Data tables — these get sharded per quarter.
+# chunks_fts must co-locate with chunks (FTS5 content-sync triggers
+# reference the same DB's chunks table).
 _DATA_TABLES = frozenset({
     "chunks",
-    "access_log",
+    "chunks_fts",
+    "chunks_fts_data",
+    "chunks_fts_idx",
+    "chunks_fts_docsize",
+    "chunks_fts_config",
 })
 
 
