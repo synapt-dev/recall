@@ -574,6 +574,41 @@ def discover_transcript_dirs() -> list[Path]:
 # Commands
 # ---------------------------------------------------------------------------
 
+def cmd_split(args: argparse.Namespace) -> None:
+    """Split monolithic recall.db into quarterly shards."""
+    from synapt.recall.sharding import split_monolithic_db, estimate_split
+    index_dir = project_index_dir()
+
+    if args.dry_run:
+        plan = split_monolithic_db(index_dir, dry_run=True)
+        print("Split plan (dry run):")
+        total = 0
+        for name, count in sorted(plan.items()):
+            if name == "index.db":
+                print(f"  {name}: knowledge, clusters, metadata")
+            else:
+                print(f"  {name}: {count} chunks")
+                total += count
+        print(f"  Total: {total} chunks across {len(plan) - 1} shard(s)")
+        return
+
+    try:
+        plan = split_monolithic_db(index_dir)
+        total = sum(v for k, v in plan.items() if k != "index.db")
+        shards = len(plan) - 1  # Exclude index.db
+        print(f"Split complete: {total} chunks across {shards} quarterly shard(s)")
+        for name, count in sorted(plan.items()):
+            if name != "index.db":
+                print(f"  {name}: {count} chunks")
+        print(f"\nOriginal recall.db preserved. Delete it manually after verifying.")
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     """Build a transcript index from local files, HuggingFace, or ChatGPT."""
     project = Path.cwd().resolve()
@@ -2010,6 +2045,10 @@ def main():
     build_parser.add_argument("--incremental", action="store_true", help="Skip already-indexed files")
     build_parser.add_argument("--rescrub", action="store_true", help="Re-scrub archived transcripts with latest patterns before building")
 
+    # Split
+    split_parser = subparsers.add_parser("split", help="Split monolithic recall.db into quarterly shards")
+    split_parser.add_argument("--dry-run", action="store_true", help="Show split plan without writing")
+
     # Search
     search_parser = subparsers.add_parser("search", help="Search transcript index")
     search_parser.add_argument("query", help="Search query")
@@ -2143,6 +2182,8 @@ def main():
         cmd_setup(args)
     elif args.command == "build":
         cmd_build(args)
+    elif args.command == "split":
+        cmd_split(args)
     elif args.command == "search":
         cmd_search(args)
     elif args.command == "stats":
