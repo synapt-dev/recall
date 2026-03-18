@@ -879,9 +879,11 @@ class TranscriptIndex:
         self._query_cache: dict[tuple, str] = {}
         self._query_cache_max = 32
 
-        # Working memory (session-scoped, in-memory LRU)
+        # Working memory — seeded from recent access_log for cross-session persistence
         from synapt.recall.working_memory import WorkingMemory
         self._working_memory = WorkingMemory()
+        if db is not None:
+            self._working_memory.seed_from_db(db)
 
         # Current session ID (set by MCP server for access tracking)
         self._current_session_id: str = ""
