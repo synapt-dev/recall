@@ -524,8 +524,9 @@ def _store_mentions(
                 (msg.id, msg.channel, mentioned, msg.timestamp),
             )
         conn.commit()
-    except Exception:
-        pass  # Mentions are non-critical
+    except Exception as exc:
+        import logging
+        logging.getLogger("synapt.recall.channel").debug("Mention storage failed: %s", exc)
     finally:
         conn.close()
 
@@ -1443,6 +1444,8 @@ def check_directives(
         conn2.close()
 
     # Check for unread @mentions (by agent_id or display_name)
+    # Filter by earliest cursor to avoid resurfacing old mentions
+    earliest_cursor = min(cursors.values()) if cursors else "1970-01-01T00:00:00Z"
     mention_conn = _open_db(project_dir)
     try:
         # Get this agent's display name for mention matching
@@ -1451,17 +1454,18 @@ def check_directives(
         ).fetchone()
         display_name = dn_row["display_name"] if dn_row else ""
 
-        # Find mentions targeting this agent (by agent_id or display_name)
-        mention_ids: set[str] = set()
+        # Find mentions targeting this agent, only after cursor
         if display_name:
             rows = mention_conn.execute(
-                "SELECT message_id FROM mentions WHERE mentioned IN (?, ?)",
-                (aid, display_name),
+                "SELECT message_id FROM mentions "
+                "WHERE mentioned IN (?, ?) AND timestamp > ?",
+                (aid, display_name, earliest_cursor),
             ).fetchall()
         else:
             rows = mention_conn.execute(
-                "SELECT message_id FROM mentions WHERE mentioned = ?",
-                (aid,),
+                "SELECT message_id FROM mentions "
+                "WHERE mentioned = ? AND timestamp > ?",
+                (aid, earliest_cursor),
             ).fetchall()
         mention_ids = {r["message_id"] for r in rows}
     finally:
@@ -1484,6 +1488,10 @@ def check_directives(
             elif msg.id in mention_ids and msg.from_agent != aid:
                 # @mention from another agent (not self-mentions)
                 mentions.append((ch, msg))
+
+    # Dedup: remove mentions that are already in pending directives
+    pending_ids = {msg.id for _, msg in pending}
+    mentions = [(ch, msg) for ch, msg in mentions if msg.id not in pending_ids]
 
     if not pending and not mentions:
         return ""
