@@ -218,6 +218,33 @@ class TestSplitMonolithicDb(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             split_monolithic_db(Path(tmpdir))
 
+    def test_failure_cleans_up_temp_files(self):
+        """On failure, partial output is cleaned up — no stale shards left."""
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir)
+        d = Path(tmpdir)
+
+        # Make quarter_for_timestamp raise after being called a few times
+        # to simulate a failure during shard creation
+        from unittest.mock import patch
+        real_qft = quarter_for_timestamp
+        call_count = [0]
+
+        def failing_qft(ts):
+            call_count[0] += 1
+            if call_count[0] > 2:
+                raise OSError("Simulated failure")
+            return real_qft(ts)
+
+        with patch("synapt.recall.sharding.quarter_for_timestamp", failing_qft):
+            with self.assertRaises(OSError):
+                split_monolithic_db(d)
+
+        # No partial output left — no index.db, no data shards, no temp dirs
+        self.assertFalse((d / "index.db").exists())
+        self.assertEqual(list(d.glob("data_*.db")), [])
+        self.assertEqual(list(d.glob(".split_tmp_*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
