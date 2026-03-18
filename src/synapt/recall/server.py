@@ -541,6 +541,7 @@ def recall_stats() -> str:
             pass
 
         lines = [
+            f"synapt v{_STARTUP_VERSION}",
             f"Chunks: {stats.get('chunk_count', 0)}",
             f"Sessions: {stats.get('session_count', 0)}",
             f"Avg chunks/session: {stats.get('avg_chunks_per_session', 0):.1f}",
@@ -627,6 +628,12 @@ def recall_stats() -> str:
 
         total_size = sum(fp.stat().st_size for fp in index_dir.iterdir() if fp.is_file())
         lines.append(f"Index size: {format_size(total_size)}")
+
+        # Stale version warning
+        stale = _check_version_stale()
+        if stale:
+            lines.append("")
+            lines.append(stale)
 
         return "\n".join(lines)
     except Exception as exc:
