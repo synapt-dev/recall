@@ -37,6 +37,7 @@ from synapt.recall.channel import (
     channel_rename,
     channel_claim,
     channel_unclaim,
+    channel_claim_intent,
     is_claimed,
     check_directives,
 )
@@ -1458,6 +1459,41 @@ class TestClaim(unittest.TestCase):
         result = channel_unclaim(msg_id, agent_name="s_agent2")
         self.assertIn("Cannot unclaim", result)
         self.assertIsNotNone(is_claimed(msg_id))
+
+
+class TestClaimIntent(unittest.TestCase):
+    """Test intent claiming for issue/PR dedup (#175)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_first_intent_succeeds(self):
+        channel_join("dev", agent_name="s_agent1")
+        ok, msg = channel_claim_intent("filing issue for perf fix", agent_name="s_agent1")
+        self.assertTrue(ok)
+        self.assertIn("INTENT", msg)
+
+    def test_duplicate_intent_blocked(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_join("dev", agent_name="s_agent2")
+        ok1, _ = channel_claim_intent("filing issue for perf fix", agent_name="s_agent1")
+        self.assertTrue(ok1)
+        ok2, msg2 = channel_claim_intent("filing issue for perf fix", agent_name="s_agent2")
+        self.assertFalse(ok2)
+        self.assertIn("Already claimed", msg2)
+
+    def test_different_intents_both_succeed(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_join("dev", agent_name="s_agent2")
+        ok1, _ = channel_claim_intent("filing issue for perf fix", agent_name="s_agent1")
+        ok2, _ = channel_claim_intent("creating PR for auth feature", agent_name="s_agent2")
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
 
 
 class TestBroadcast(unittest.TestCase):

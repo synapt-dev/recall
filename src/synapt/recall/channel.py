@@ -1326,6 +1326,54 @@ def channel_unclaim(
         conn.close()
 
 
+def channel_claim_intent(
+    intent: str,
+    channel: str = "dev",
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> tuple[bool, str]:
+    """Announce and claim an intent before creating an issue/PR.
+
+    Posts a ``[INTENT]`` message to the channel and claims it atomically.
+    Other agents should check for existing intents before duplicating.
+
+    Args:
+        intent: Description of what you're about to create (e.g.,
+                "filing issue for session-start perf fix").
+        channel: Channel to post in.
+
+    Returns:
+        (True, message) if intent claimed successfully.
+        (False, message) if someone else already claimed the same intent.
+    """
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+
+    # Check if anyone recently posted the same intent (dedup by content)
+    path = _channel_path(channel, project_dir)
+    if path.exists():
+        recent = _read_messages(path)
+        # Check last 20 messages for duplicate intents
+        for msg in recent[-20:]:
+            if msg.type == "intent" and msg.from_agent != aid:
+                if intent.lower() in msg.body.lower() or msg.body.lower() in intent.lower():
+                    claimer = _resolve_display_name_for(msg.from_agent, project_dir)
+                    return (False, f"Already claimed by {claimer}: {msg.body}")
+
+    # Post and claim
+    msg = ChannelMessage(
+        timestamp=now, from_agent=aid, channel=channel,
+        type="intent", body=intent,
+    )
+    _append_message(msg, project_dir)
+
+    # Auto-claim the intent message
+    channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir)
+
+    display = _resolve_display_name_for(aid, project_dir)
+    return (True, f"[INTENT] {display}: {intent}")
+
+
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     """Return list of all channel names (from JSONL files)."""
     ch_dir = _channels_dir(project_dir)
