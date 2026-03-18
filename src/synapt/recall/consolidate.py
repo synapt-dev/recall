@@ -253,9 +253,16 @@ Rules:
 9. If no specific patterns emerge, output {{"nodes": []}}. Empty is better than generic.
 
 Output ONLY valid JSON, no markdown fences, no explanation:
-{{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": "", "source_turns": ["s001c00:5", "s003c00:12"]}}]}}
+{{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": "", "source_turns": ["s001c00:5", "s003c00:12"], "valid_from": null, "valid_until": null}}]}}
 
 source_turns: list the session:turn pairs where this fact appears. Format: "session_id:turn_number". Include ALL turns that support the fact — these are used to link back to the original conversation.
+
+valid_from/valid_until: ISO 8601 dates (e.g. "2026-03-15") or null. Set these when the fact has clear temporal boundaries:
+- "We migrated to PostgreSQL in March 2026" → valid_from: "2026-03-01"
+- "The API key expires April 30" → valid_until: "2026-04-30"
+- "Before the refactor, we used callbacks" → valid_until: (date of refactor session)
+- Timeless facts (names, preferences) → both null
+Only set dates you're confident about. null is better than guessing.
 
 If no durable patterns emerge, output: {{"nodes": []}}
 """
@@ -272,8 +279,8 @@ CONSOLIDATION_PROMPT_MINIMAL = """\
 
 Categories: fact (names/dates/details), preference, decision, convention, workflow, architecture, infrastructure, tooling, debugging, lesson-learned
 
-Extract durable knowledge as JSON. Be specific — include names, values, dates. Include source_turns citing session:turn pairs. Output ONLY valid JSON:
-{{"nodes": [{{"action": "create|corroborate|contradict", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": "", "source_turns": ["s001c00:5"]}}]}}
+Extract durable knowledge as JSON. Be specific — include names, values, dates. Include source_turns citing session:turn pairs. Include valid_from/valid_until (ISO dates or null) when facts have clear temporal boundaries. Output ONLY valid JSON:
+{{"nodes": [{{"action": "create|corroborate|contradict", "existing_id": null, "content": "...", "category": "...", "confidence": 0.6, "tags": ["tag1"], "contradiction_note": "", "source_turns": ["s001c00:5"], "valid_from": null, "valid_until": null}}]}}
 """
 
 
@@ -1147,7 +1154,12 @@ def _apply_consolidation_result(
                 tags=tags,
                 source_turns=source_turns,
             )
-            new_node.valid_from = datetime.now(timezone.utc).isoformat()
+            # Use LLM-extracted temporal bounds if provided, else default
+            llm_valid_from = raw_node.get("valid_from")
+            llm_valid_until = raw_node.get("valid_until")
+            new_node.valid_from = llm_valid_from or datetime.now(timezone.utc).isoformat()
+            if llm_valid_until:
+                new_node.valid_until = llm_valid_until
             append_node(new_node, knowledge_path)
             existing_nodes.append(new_node)  # Track for intra-batch dedup
             result.nodes_created += 1
