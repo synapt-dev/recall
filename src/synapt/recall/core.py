@@ -1007,8 +1007,9 @@ class TranscriptIndex:
         if len(rowids) < 2:
             return 0
 
-        # Build session map: rowid -> session_id
+        # Build session map and chunk ID map: rowid -> session_id, rowid -> chunk_id
         session_map = self._db.chunk_session_map()
+        id_map = self._db.chunk_id_map()
         sessions = [session_map.get(r, "") for r in rowids]
 
         # Build embedding matrix (N, D)
@@ -1030,7 +1031,7 @@ class TranscriptIndex:
                     sim_matrix[i, j] = -1.0
                     sim_matrix[j, i] = -1.0
 
-        links: list[tuple[int, int, float]] = []
+        links: list[tuple[str, str, float]] = []
         k = self.CROSS_LINK_MAX_PER_CHUNK
         min_sim = self.CROSS_LINK_MIN_SIM
 
@@ -1043,7 +1044,9 @@ class TranscriptIndex:
                 top_idx = np.arange(len(rowids))
             for j in top_idx:
                 if row[j] >= min_sim:
-                    links.append((rowids[i], rowids[int(j)], float(row[j])))
+                    src_id = id_map.get(rowids[i], str(rowids[i]))
+                    tgt_id = id_map.get(rowids[int(j)], str(rowids[int(j)]))
+                    links.append((src_id, tgt_id, float(row[j])))
 
         self._db.save_chunk_links(links)
         logger.info("Built %d cross-session links for %d chunks", len(links), len(rowids))
@@ -1081,26 +1084,39 @@ class TranscriptIndex:
 
         result = list(candidates)
         seen = {idx for idx, _ in result}
-        source_rowids = []
-        for idx, _ in result[:5]:
-            rowid = self._idx_to_rowid.get(idx)
-            if rowid is not None:
-                source_rowids.append(rowid)
 
-        if not source_rowids:
+        # Map top result indices to chunk IDs for link lookup
+        source_ids = []
+        idx_to_chunk_id: dict[int, str] = {}
+        chunk_id_to_idx: dict[str, int] = {}
+        for idx, _ in result[:5]:
+            if idx < len(self.chunks):
+                cid = self.chunks[idx].id
+                source_ids.append(cid)
+                idx_to_chunk_id[idx] = cid
+                chunk_id_to_idx[cid] = idx
+
+        if not source_ids:
             return candidates
 
-        neighbors = self._db.get_cross_links_batch(source_rowids)
+        # Build reverse map for all chunks (for target lookup)
+        if not chunk_id_to_idx:
+            return candidates
+        for i, chunk in enumerate(self.chunks):
+            if chunk.id not in chunk_id_to_idx:
+                chunk_id_to_idx[chunk.id] = i
+
+        neighbors = self._db.get_cross_links_batch(source_ids)
         expansions = 0
-        for src_rowid in source_rowids:
-            src_idx = self._rowid_to_idx.get(src_rowid)
+        for src_id in source_ids:
+            src_idx = chunk_id_to_idx.get(src_id)
             if src_idx is None:
                 continue
             src_score = next(
                 (s for i, s in result if i == src_idx), 0.0,
             )
-            for tgt_rowid, sim in neighbors.get(src_rowid, []):
-                tgt_idx = self._rowid_to_idx.get(tgt_rowid)
+            for tgt_id, sim in neighbors.get(src_id, []):
+                tgt_idx = chunk_id_to_idx.get(tgt_id)
                 if tgt_idx is None or tgt_idx in seen:
                     continue
                 exp_score = src_score * sim * self.CROSS_LINK_DISCOUNT

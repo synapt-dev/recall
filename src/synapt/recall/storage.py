@@ -184,13 +184,13 @@ CREATE TABLE IF NOT EXISTS access_stats (
 -- chunks in different sessions.  Built during recall build; used at query
 -- time to expand results with related chunks from underrepresented sessions.
 CREATE TABLE IF NOT EXISTS chunk_links (
-    source_rowid INTEGER NOT NULL,
-    target_rowid INTEGER NOT NULL,
-    similarity   REAL NOT NULL,
-    PRIMARY KEY (source_rowid, target_rowid)
+    source_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    similarity REAL NOT NULL,
+    PRIMARY KEY (source_id, target_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_chunk_links_source ON chunk_links(source_rowid);
+CREATE INDEX IF NOT EXISTS idx_chunk_links_source ON chunk_links(source_id);
 
 CREATE TABLE IF NOT EXISTS access_log_archive (
     item_type    TEXT NOT NULL,
@@ -416,6 +416,7 @@ class RecallDB:
         self._migrate_clusters_table()
         self._migrate_access_stats_table()
         self._migrate_contradictions_table()
+        self._migrate_chunk_links_table()
         # Check if FTS table exists (FTS5 virtual tables don't support
         # IF NOT EXISTS, so we check manually before creating)
         row = self._conn.execute(
@@ -671,6 +672,42 @@ class RecallDB:
             )
             self._conn.commit()
 
+    def _migrate_chunk_links_table(self) -> None:
+        """Migrate chunk_links from rowid-based to chunk-ID-based schema.
+
+        Old schema: (source_rowid INTEGER, target_rowid INTEGER, similarity)
+        New schema: (source_id TEXT, target_id TEXT, similarity)
+
+        Chunk IDs are globally unique across shards, unlike rowids.
+        """
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_links'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(chunk_links)").fetchall()
+        }
+        if "source_id" in cols:
+            return  # Already migrated
+
+        if "source_rowid" in cols:
+            # Recreate with new schema — existing links become stale
+            # (rowids are meaningless after sharding) so we drop them.
+            # They'll be rebuilt on next `recall build`.
+            self._conn.executescript("""
+                DROP TABLE IF EXISTS chunk_links;
+                CREATE TABLE chunk_links (
+                    source_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    similarity REAL NOT NULL,
+                    PRIMARY KEY (source_id, target_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_links_source ON chunk_links(source_id);
+            """)
+            self._conn.commit()
+
     def _needs_clusters_fts_migration(self) -> bool:
         """Check if clusters_fts schema differs from current definition."""
         row = self._conn.execute(
@@ -841,36 +878,37 @@ class RecallDB:
     # Cross-session chunk links
     # ------------------------------------------------------------------
 
-    def save_chunk_links(self, links: list[tuple[int, int, float]]) -> None:
+    def save_chunk_links(self, links: list[tuple[str, str, float]]) -> None:
         """Replace all cross-session links.
 
-        Each tuple is (source_rowid, target_rowid, similarity).
+        Each tuple is (source_id, target_id, similarity) where IDs are
+        globally unique chunk IDs (e.g. "s001c00:t5"), not rowids.
         """
         self._conn.execute("DELETE FROM chunk_links")
         self._conn.executemany(
-            "INSERT INTO chunk_links (source_rowid, target_rowid, similarity) "
+            "INSERT INTO chunk_links (source_id, target_id, similarity) "
             "VALUES (?, ?, ?)",
             links,
         )
         self._conn.commit()
 
     def get_cross_links_batch(
-        self, source_rowids: list[int], limit_per: int = 3,
-    ) -> dict[int, list[tuple[int, float]]]:
+        self, source_ids: list[str], limit_per: int = 3,
+    ) -> dict[str, list[tuple[str, float]]]:
         """Get cross-session neighbors for multiple chunks at once.
 
-        Returns {source_rowid: [(target_rowid, similarity), ...]}.
+        Returns {source_id: [(target_id, similarity), ...]}.
         """
-        if not source_rowids:
+        if not source_ids:
             return {}
-        placeholders = ",".join("?" * len(source_rowids))
+        placeholders = ",".join("?" * len(source_ids))
         rows = self._conn.execute(
-            f"SELECT source_rowid, target_rowid, similarity "
-            f"FROM chunk_links WHERE source_rowid IN ({placeholders}) "
-            f"ORDER BY source_rowid, similarity DESC",
-            source_rowids,
+            f"SELECT source_id, target_id, similarity "
+            f"FROM chunk_links WHERE source_id IN ({placeholders}) "
+            f"ORDER BY source_id, similarity DESC",
+            source_ids,
         ).fetchall()
-        result: dict[int, list[tuple[int, float]]] = {}
+        result: dict[str, list[tuple[str, float]]] = {}
         for src, tgt, sim in rows:
             bucket = result.setdefault(src, [])
             if len(bucket) < limit_per:
@@ -893,6 +931,13 @@ class RecallDB:
         """Return {rowid: session_id} for all chunks."""
         rows = self._conn.execute(
             "SELECT rowid, session_id FROM chunks"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def chunk_id_map(self) -> dict[int, str]:
+        """Return {rowid: chunk_id} for all chunks."""
+        rows = self._conn.execute(
+            "SELECT rowid, id FROM chunks"
         ).fetchall()
         return {r[0]: r[1] for r in rows}
 
