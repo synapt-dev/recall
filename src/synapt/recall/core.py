@@ -2292,6 +2292,9 @@ class TranscriptIndex:
             if query_entities is None:
                 query_entities = extract_entities(query)
 
+            # Filter expired knowledge nodes (valid_until in the past)
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
             results = []
             seen_ids: set[str] = set()
             for rowid in all_rowids:
@@ -2301,6 +2304,14 @@ class TranscriptIndex:
                 node_id = node.get("id", str(rowid))
                 if node_id in seen_ids:
                     continue
+                # Skip expired nodes unless include_historical is set
+                valid_until = node.get("valid_until")
+                if valid_until and not include_historical:
+                    try:
+                        if valid_until[:10] < now_iso:
+                            continue  # Expired — skip
+                    except (TypeError, IndexError):
+                        pass  # Invalid date format — don't filter
                 node_content = node.get("content", "")
                 node_tokens = set(_tokenize(node_content))
                 token_overlap = len(query_tokens & node_tokens) >= min_matches
