@@ -243,6 +243,7 @@ CREATE TABLE IF NOT EXISTS presence (
     agent_id TEXT PRIMARY KEY,
     griptree TEXT NOT NULL DEFAULT '',
     display_name TEXT DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'agent',
     status TEXT DEFAULT 'online',
     last_seen TEXT NOT NULL,
     joined_at TEXT NOT NULL
@@ -339,6 +340,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE pins ADD COLUMN message_id TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
+    # Add role column to presence if missing
+    if "role" not in cols:
+        try:
+            conn.execute("ALTER TABLE presence ADD COLUMN role TEXT NOT NULL DEFAULT 'agent'")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
 
 
@@ -560,8 +567,13 @@ def channel_join(
     channel: str = "dev",
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    role: str = "agent",
 ) -> str:
-    """Join a channel. Registers agent identity on first join."""
+    """Join a channel. Registers agent identity on first join.
+
+    Args:
+        role: "human" (set by session-start hook), "agent" (default), or "system".
+    """
     aid = agent_name or _agent_id(project_dir)
     griptree = _resolve_griptree(project_dir)
     display = _resolve_display_name(project_dir)
@@ -579,11 +591,11 @@ def channel_join(
     try:
         # Upsert presence with identity
         conn.execute(
-            "INSERT INTO presence (agent_id, griptree, display_name, status, last_seen, joined_at) "
-            "VALUES (?, ?, ?, 'online', ?, ?) "
+            "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+            "VALUES (?, ?, ?, ?, 'online', ?, ?) "
             "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
-            "griptree=?, display_name=?",
-            (aid, griptree, display, now, now, now, griptree, display),
+            "griptree=?, display_name=?, role=?",
+            (aid, griptree, display, role, now, now, now, griptree, display, role),
         )
 
         # Add membership
@@ -737,10 +749,12 @@ def channel_read(
             (channel,),
         ).fetchall()
 
-        # Resolve display names for rendering
+        # Resolve display names and roles for rendering
         display_map = {}
-        for r in conn.execute("SELECT agent_id, display_name, griptree FROM presence").fetchall():
+        role_map: dict[str, str] = {}
+        for r in conn.execute("SELECT agent_id, display_name, griptree, role FROM presence").fetchall():
             display_map[r["agent_id"]] = r["display_name"] or r["griptree"] or r["agent_id"]
+            role_map[r["agent_id"]] = r["role"]
 
         # Load claims for this channel
         claim_map = {}
@@ -795,6 +809,9 @@ def channel_read(
         ts = msg.timestamp[:16]
         display = display_map.get(msg.from_agent, msg.from_agent)
         mid = f" [{msg.id}]" if msg.id else ""
+        # Role marker — human messages get a distinct prefix
+        is_human = role_map.get(msg.from_agent) == "human"
+        role_tag = " [human]" if is_human else ""
         # Claim annotation
         claimer_id = claim_map.get(msg.id)
         claim_tag = ""
@@ -806,9 +823,9 @@ def channel_read(
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
-            lines.append(f"  {ts}{mid}  {prefix}{target} {display}: {msg.body}{claim_tag}")
+            lines.append(f"  {ts}{mid}  {prefix}{target} {display}{role_tag}: {msg.body}{claim_tag}")
         else:
-            lines.append(f"  {ts}{mid}  {display}: {msg.body}{claim_tag}")
+            lines.append(f"  {ts}{mid}  {display}{role_tag}: {msg.body}{claim_tag}")
 
     return "\n".join(lines)
 
@@ -823,7 +840,7 @@ def channel_who(project_dir: Path | None = None) -> str:
         _reap_stale_agents(conn, project_dir)
 
         agents = conn.execute(
-            "SELECT agent_id, griptree, display_name, status, last_seen FROM presence"
+            "SELECT agent_id, griptree, display_name, role, status, last_seen FROM presence"
         ).fetchall()
 
         if not agents:
@@ -873,7 +890,12 @@ def channel_who(project_dir: Path | None = None) -> str:
                 mins = int(delta.total_seconds() / 60)
                 status_label = f"{status} ({mins}m)"
 
-            lines.append(f"  {display}{identity}  [{status_label}]  {channels_str}")
+            try:
+                agent_role = row["role"]
+            except (IndexError, KeyError):
+                agent_role = "agent"
+            role_label = f" [{agent_role}]" if agent_role != "agent" else ""
+            lines.append(f"  {display}{identity}{role_label}  [{status_label}]  {channels_str}")
 
         if len(lines) == 1:
             return "No agents online."
