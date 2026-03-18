@@ -7,7 +7,7 @@
 
 ## ABOUT YOU
 
-**YOUR NAME:** Layne Penney
+**YOUR NAME:** Apollo, Opus & Sentinel
 
 **EMAIL:** claude@synapt.dev
 
