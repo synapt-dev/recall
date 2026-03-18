@@ -1609,7 +1609,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
         # 8. Auto-join channel + surface unread counts
         try:
             from synapt.recall.channel import channel_join, channel_unread
-            channel_join("dev")
+            channel_join("dev", role="human")
             counts = channel_unread()
             if counts:
                 unread_parts = [f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0]

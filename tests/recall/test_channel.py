@@ -825,6 +825,42 @@ class TestWho(unittest.TestCase):
         self.assertIn("worker-1", result)
         self.assertIn("worker-2", result)
 
+    def test_human_role_shown_in_who(self):
+        """Human role is displayed in /who output."""
+        channel_join("dev", agent_name="s_human", role="human")
+        # Set distinct display name so dedup doesn't collapse them
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'layne' WHERE agent_id = 's_human'")
+        conn.commit()
+        conn.close()
+        channel_join("dev", agent_name="s_bot")
+        result = channel_who()
+        self.assertIn("[human]", result)
+        self.assertIn("layne", result)
+
+    def test_human_role_shown_in_read(self):
+        """Messages from humans get a [human] tag in channel_read."""
+        channel_join("dev", agent_name="s_human", role="human")
+        channel_post("dev", "hello from the user", agent_name="s_human")
+        channel_join("dev", agent_name="s_bot")
+        channel_post("dev", "hello from the bot", agent_name="s_bot")
+        result = channel_read("dev", agent_name="s_reader")
+        self.assertIn("[human]", result)
+        # Bot message should not have [human] tag
+        for line in result.split("\n"):
+            if "hello from the bot" in line:
+                self.assertNotIn("[human]", line)
+
+    def test_role_defaults_to_agent(self):
+        """Without explicit role, agents get role='agent'."""
+        channel_join("dev", agent_name="s_default")
+        conn = _open_db()
+        row = conn.execute(
+            "SELECT role FROM presence WHERE agent_id = ?", ("s_default",)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row["role"], "agent")
+
 
 class TestLegacyMigration(unittest.TestCase):
     """Test migration from _presence.json to SQLite."""
