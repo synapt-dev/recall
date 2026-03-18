@@ -1484,6 +1484,12 @@ def check_directives(
                 claimer = all_claims.get(msg.id)
                 if msg.to == "*" and claimer and claimer != aid:
                     continue
+                # Auto-claim broadcast directives on first read
+                if msg.to == "*" and not claimer:
+                    try:
+                        channel_claim(msg.id, ch, agent_name=aid, project_dir=project_dir)
+                    except Exception:
+                        pass  # Claim is best-effort
                 pending.append((ch, msg))
             elif msg.id in mention_ids and msg.from_agent != aid:
                 # @mention from another agent (not self-mentions)
