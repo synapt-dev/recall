@@ -179,11 +179,18 @@ def split_monolithic_db(
 
     plan: dict[str, int] = {"index.db": 0}
 
+    # Write to a temp directory first, then move into place on success.
+    # On failure, clean up temp dir — original recall.db is untouched.
+    import shutil
+    import tempfile
+
+    tmp_dir = Path(tempfile.mkdtemp(dir=index_dir, prefix=".split_tmp_"))
+
     src = sqlite3.connect(str(db_path))
     src.row_factory = sqlite3.Row
     try:
         # Step 1: Create index.db with non-chunk tables
-        idx_path = index_dir / "index.db"
+        idx_path = tmp_dir / "index.db"
         idx = sqlite3.connect(str(idx_path))
         idx.execute("PRAGMA journal_mode=WAL")
         idx.execute(f"ATTACH DATABASE '{db_path}' AS src")
@@ -220,7 +227,7 @@ def split_monolithic_db(
         col_names = [desc[0] for desc in src.execute("SELECT * FROM chunks LIMIT 0").description]
 
         for quarter, rows in chunks_by_quarter.items():
-            shard_path = index_dir / shard_name(quarter)
+            shard_path = tmp_dir / shard_name(quarter)
             shard = sqlite3.connect(str(shard_path))
             shard.execute("PRAGMA journal_mode=WAL")
             try:
@@ -250,6 +257,15 @@ def split_monolithic_db(
                 f"Chunk count mismatch: original={original_count}, split={split_count}"
             )
 
+        # Step 4: Move validated files from temp dir to index dir
+        for f in tmp_dir.iterdir():
+            shutil.move(str(f), str(index_dir / f.name))
+        tmp_dir.rmdir()
+
+    except Exception:
+        # Clean up partial output on any failure
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     finally:
         src.close()
 
