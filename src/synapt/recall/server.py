@@ -541,6 +541,7 @@ def recall_stats() -> str:
             pass
 
         lines = [
+            f"synapt v{_STARTUP_VERSION}",
             f"Chunks: {stats.get('chunk_count', 0)}",
             f"Sessions: {stats.get('session_count', 0)}",
             f"Avg chunks/session: {stats.get('avg_chunks_per_session', 0):.1f}",
