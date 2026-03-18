@@ -1,11 +1,11 @@
-"""Session-scoped working memory for recall search.
+"""Working memory for recall search — with cross-session persistence.
 
 A small in-memory LRU buffer of recently accessed items. Items in
 working memory get a relevance boost in search results — mimicking how
 human working memory keeps recently-used context readily available.
 
-Not persisted — resets when the MCP server restarts, like human working
-memory clears on sleep.
+On startup, seeds from the access_log DB table so frequently accessed
+topics from recent sessions carry forward with natural decay.
 """
 
 from __future__ import annotations
@@ -110,6 +110,59 @@ class WorkingMemory:
         if slot.access_count >= 3:
             return base_score * 2.0
         return base_score * 1.5
+
+    def seed_from_db(self, db, days: int = 7) -> int:
+        """Seed working memory from recent access_log entries.
+
+        Loads the most frequently accessed items from the last N days
+        and pre-populates working memory slots. This gives cross-session
+        persistence — topics you searched for yesterday still get a mild
+        boost today, with natural decay via the LRU eviction.
+
+        Args:
+            db: RecallDB instance with access_log table.
+            days: How many days of history to consider (default: 7).
+
+        Returns:
+            Number of slots seeded.
+        """
+        if db is None:
+            return 0
+
+        try:
+            from datetime import datetime, timedelta, timezone
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+            # Get top accessed items by frequency in the last N days
+            rows = db._conn.execute(
+                "SELECT item_type, item_id, COUNT(*) as cnt, "
+                "  MAX(query) as last_query "
+                "FROM access_log "
+                "WHERE created_at > ? "
+                "GROUP BY item_type, item_id "
+                "ORDER BY cnt DESC "
+                "LIMIT ?",
+                (cutoff, MAX_SLOTS),
+            ).fetchall()
+
+            seeded = 0
+            for row in rows:
+                item_id = row["item_id"]
+                if item_id in self._slots:
+                    continue  # Already populated (e.g., from current session)
+                self._access_seq += 1
+                self._slots[item_id] = WorkingMemorySlot(
+                    item_type=row["item_type"],
+                    item_id=item_id,
+                    content_preview=row["last_query"][:200] if row["last_query"] else "",
+                    tokens=_tokenize(row["last_query"] or ""),
+                    last_accessed=self._access_seq,
+                    access_count=row["cnt"],
+                )
+                seeded += 1
+            return seeded
+        except Exception:
+            return 0
 
     def __len__(self) -> int:
         return len(self._slots)
