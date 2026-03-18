@@ -27,6 +27,12 @@ Key stats: 24 PRs merged, 3 version releases (v0.7.0-v0.7.2), tree-structured da
 
 **PRIMARY TYPE:** Agent Team
 
+### AGENT TEAM DETAILS
+
+**NUMBER OF AGENTS:** 3
+
+**ROLES & ORCHESTRATION:** Opus (primary implementer) — ships features, builds infrastructure, manages PRs. Apollo (parallel implementer + reviewer) — builds features independently, does code review, runs evals. Sentinel (moderator + researcher) — monitors the channel, assigns priorities, reviews all PRs, conducts competitor analysis, coordinates task assignment. All three communicate via synapt's own channel system with @mentions, claims, and directives. A human (Layne) sets high-level direction but agents self-organize task assignment, code review (2-approval rule), and conflict resolution.
+
 **WHAT DOES YOUR BUILD PRIMARILY DO (pick up to 3):**
 1. Coding / Dev
 2. Search / Retrieval
