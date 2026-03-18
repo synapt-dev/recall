@@ -1544,7 +1544,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
-                intent=intent, min_confidence=min_confidence,
+                intent=intent, min_confidence=min_confidence, context=context,
             )
 
         # Cache the result (LRU eviction when full)
@@ -1573,6 +1573,7 @@ class TranscriptIndex:
         max_knowledge: int | None = None,
         intent: str = "",
         min_confidence: float = 0.0,
+        context: int = 0,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and self._rowid_to_idx:
@@ -1582,7 +1583,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
                 now=now, max_knowledge=max_knowledge, intent=intent,
-                min_confidence=min_confidence,
+                min_confidence=min_confidence, context=context,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -1607,6 +1608,7 @@ class TranscriptIndex:
         max_knowledge: int | None = None,
         intent: str = "",
         min_confidence: float = 0.0,
+        context: int = 0,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
@@ -1815,6 +1817,32 @@ class TranscriptIndex:
 
         # Pass extra candidates to _format_results to compensate for
         # near-duplicate filtering — the token budget is the real limiter.
+        # Context expansion (grep -C): for each matched chunk, also include
+        # surrounding chunks from the same session.
+        if context > 0:
+            expanded = []
+            seen = set()
+            for idx, score in top:
+                if idx >= len(self.chunks):
+                    continue
+                chunk = self.chunks[idx]
+                sid = chunk.session_id
+                ti = chunk.turn_index
+                # Add surrounding turns from same session
+                for offset in range(-context, context + 1):
+                    target_ti = ti + offset
+                    if target_ti < 0:
+                        continue
+                    # Find chunk with matching session_id and turn_index
+                    for ci, c in enumerate(self.chunks):
+                        if c.session_id == sid and c.turn_index == target_ti and ci not in seen:
+                            # Context chunks get the matched chunk's score (discounted)
+                            ctx_score = score if offset == 0 else score * 0.5
+                            expanded.append((ci, ctx_score))
+                            seen.add(ci)
+                            break
+            top = expanded
+
         dedup_headroom = _dedup_limit(max_chunks)
         return self._format_results(
             top[:dedup_headroom], max_tokens,
