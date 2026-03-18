@@ -1616,6 +1616,33 @@ def _with_directive_check(fn):
     return wrapper
 
 
+def recall_reload() -> str:
+    """Restart the MCP server to pick up code changes after pip install.
+
+    Replaces the current process with a fresh one via os.execv().
+    The MCP client (Claude Code) will reconnect automatically.
+    Only needed when you see a stale version warning.
+    """
+    import os
+    import sys
+
+    stale = _check_version_stale()
+    if not stale:
+        return f"Server is already running the latest version ({_STARTUP_VERSION}). No reload needed."
+
+    # Log the reload to stderr so it's visible
+    logging.getLogger("synapt.recall").info("Reloading MCP server (v%s -> installed)", _STARTUP_VERSION)
+
+    # Flush any pending DB writes
+    _invalidate_cache()
+
+    # Replace this process with a fresh one
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # os.execv never returns — this is just for type checkers
+    return "Reloading..."  # pragma: no cover
+
+
 def register_tools(mcp) -> None:
     """Register recall tools on the given FastMCP server instance.
 
@@ -1637,6 +1664,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(_with_directive_check(recall_context))
     mcp.tool()(_with_directive_check(recall_timeline))
     mcp.tool()(_with_directive_check(recall_channel))
+    mcp.tool()(recall_reload)
 
 
 def main():
