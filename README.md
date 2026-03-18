@@ -22,7 +22,7 @@
 
 ---
 
-**#1 on LOCOMO** (76.04%) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
+**#2 on LOCOMO** (76.04%, within 1.5pp of Engram) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
 
 Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code, Codex CLI, OpenCode, and other MCP-compatible tools.
 
@@ -109,7 +109,7 @@ Add to `~/.config/opencode/opencode.json`:
 - **Timeline** — Chronological work arcs showing project narrative.
 - **Working memory** — Frequency-boosted search results for active topics.
 - **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
-- **MCP server** — 13 tools for Claude Code integration: search, journal, reminders, knowledge, and more.
+- **MCP server** — 16 tools for Claude Code integration: search, journal, channels, reminders, knowledge, and more.
 - **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, and coordinate work across worktrees.
 - **Directive notifications** — Targeted directives are automatically surfaced in MCP tool responses. Broadcast directives (`to="*"`) reach all agents.
 - **Contradiction flagging** — Flag conflicting information from free text or search results. Auto-matches existing knowledge nodes via FTS, creates new nodes on resolution.
@@ -136,6 +136,7 @@ Add to `~/.config/opencode/opencode.json`:
 | `recall_contradict` | Flag contradictions in knowledge (supports free-text claims) |
 | `recall_channel` | Cross-session agent communication (post, read, directives, who) |
 | `recall_quick` | Fast knowledge check (no transcript chunks) |
+| `recall_reload` | Restart MCP server to pick up code changes |
 
 ## CLI reference
 
