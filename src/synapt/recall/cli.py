@@ -320,6 +320,46 @@ def _archive_and_build_locked(
     except Exception as exc:
         logger.debug("Codex transcript parsing failed: %s", exc)
 
+    # Channel messages → searchable chunks
+    try:
+        from synapt.recall.channel import _channels_dir, _read_messages, ChannelMessage
+        from synapt.recall.core import TranscriptChunk
+        import hashlib as _hashlib
+        ch_dir = _channels_dir(project_dir)
+        if ch_dir.exists():
+            channel_chunks = []
+            for ch_file in sorted(ch_dir.glob("*.jsonl")):
+                ch_name = ch_file.stem
+                messages = _read_messages(ch_file)
+                # Group consecutive messages into chunks (max 10 per chunk)
+                for i in range(0, len(messages), 10):
+                    batch = messages[i:i+10]
+                    if not batch:
+                        continue
+                    body_parts = []
+                    for msg in batch:
+                        if msg.type in ("message", "directive"):
+                            body_parts.append(f"{msg.from_agent}: {msg.body}")
+                    if not body_parts:
+                        continue
+                    text = "\n".join(body_parts)
+                    seed = f"ch_{ch_name}_{batch[0].timestamp}_{i}"
+                    chunk_id = f"ch_{_hashlib.sha256(seed.encode()).hexdigest()[:12]}:t{i//10}"
+                    chunk = TranscriptChunk(
+                        id=chunk_id,
+                        session_id=f"channel_{ch_name}",
+                        timestamp=batch[0].timestamp,
+                        turn_index=i // 10,
+                        user_text="",
+                        assistant_text=text,
+                    )
+                    channel_chunks.append(chunk)
+            if channel_chunks:
+                all_chunks.extend(channel_chunks)
+                print(f"  Channels: {len(channel_chunks)} chunks from {len(list(ch_dir.glob('*.jsonl')))} channel(s)")
+    except Exception as exc:
+        logger.debug("Channel indexing failed: %s", exc)
+
     # Tier 1: Synthesize auto-journal stubs for sessions without entries
     from synapt.recall.journal import _journal_path, synthesize_journal_stubs
     from synapt.recall.core import parse_journal_entries
