@@ -295,6 +295,28 @@ class ConsolidationResult:
     clusters_found: int = 0
 
 
+def _validate_iso_date(value: str | None) -> str | None:
+    """Validate an ISO 8601 date string from LLM output.
+
+    Returns the value if it parses as a valid date, None otherwise.
+    Handles full ISO timestamps and date-only strings.
+
+    >>> _validate_iso_date("2026-03-15")
+    '2026-03-15'
+    >>> _validate_iso_date("2026-03-15T10:00:00Z")
+    '2026-03-15T10:00:00Z'
+    >>> _validate_iso_date("March 2026")
+    >>> _validate_iso_date(None)
+    """
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+    except (ValueError, AttributeError):
+        return None
+
+
 def _is_generic_node(content: str) -> bool:
     """Return True if content matches a known generic advice pattern."""
     for pattern in _GENERIC_PATTERNS:
@@ -1154,9 +1176,10 @@ def _apply_consolidation_result(
                 tags=tags,
                 source_turns=source_turns,
             )
-            # Use LLM-extracted temporal bounds if provided, else default
-            llm_valid_from = raw_node.get("valid_from")
-            llm_valid_until = raw_node.get("valid_until")
+            # Use LLM-extracted temporal bounds if provided, else default.
+            # Validate dates — LLMs can hallucinate non-ISO formats.
+            llm_valid_from = _validate_iso_date(raw_node.get("valid_from"))
+            llm_valid_until = _validate_iso_date(raw_node.get("valid_until"))
             new_node.valid_from = llm_valid_from or datetime.now(timezone.utc).isoformat()
             if llm_valid_until:
                 new_node.valid_until = llm_valid_until

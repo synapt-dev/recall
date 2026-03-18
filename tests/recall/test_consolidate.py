@@ -1579,5 +1579,39 @@ class TestAgentAwareConsolidation(unittest.TestCase):
         self.assertIn("collaborative", text)
 
 
+# ---------------------------------------------------------------------------
+# Temporal date validation (#158 follow-up)
+# ---------------------------------------------------------------------------
+
+class TestValidateIsoDate(unittest.TestCase):
+    """Test _validate_iso_date for LLM output sanitization."""
+
+    def test_valid_date(self):
+        from synapt.recall.consolidate import _validate_iso_date
+        self.assertEqual(_validate_iso_date("2026-03-15"), "2026-03-15")
+
+    def test_valid_timestamp(self):
+        from synapt.recall.consolidate import _validate_iso_date
+        self.assertEqual(
+            _validate_iso_date("2026-03-15T10:00:00Z"),
+            "2026-03-15T10:00:00Z",
+        )
+
+    def test_invalid_natural_language(self):
+        from synapt.recall.consolidate import _validate_iso_date
+        self.assertIsNone(_validate_iso_date("March 2026"))
+        self.assertIsNone(_validate_iso_date("soon"))
+        self.assertIsNone(_validate_iso_date("last week"))
+
+    def test_none_and_empty(self):
+        from synapt.recall.consolidate import _validate_iso_date
+        self.assertIsNone(_validate_iso_date(None))
+        self.assertIsNone(_validate_iso_date(""))
+
+    def test_non_string(self):
+        from synapt.recall.consolidate import _validate_iso_date
+        self.assertIsNone(_validate_iso_date(42))
+
+
 if __name__ == "__main__":
     unittest.main()
