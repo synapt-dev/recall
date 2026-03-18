@@ -1727,6 +1727,43 @@ class TestCheckDirectives(unittest.TestCase):
         conn.close()
         self.assertEqual(row["status"], "online")
 
+    def test_mention_surfaces_in_check_directives(self):
+        """@mention in a message is surfaced by check_directives."""
+        channel_join("dev", agent_name="s_opus")
+        # Set display name so @opus matches
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_read("dev", agent_name="s_opus")  # Set cursor
+        channel_post("dev", "hey @opus please review", agent_name="s_apollo")
+        result = check_directives(agent_name="s_opus")
+        self.assertIn("@mention", result)
+        self.assertIn("please review", result)
+
+    def test_self_mention_not_surfaced(self):
+        """Agent's own @mentions don't show up as notifications."""
+        channel_join("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_read("dev", agent_name="s_opus")
+        channel_post("dev", "I am @opus and I approve", agent_name="s_opus")
+        result = check_directives(agent_name="s_opus")
+        self.assertEqual(result, "")
+
+    def test_mention_stored_in_db(self):
+        """@mentions are stored in the mentions table."""
+        channel_join("dev", agent_name="s_sender")
+        channel_post("dev", "hey @apollo and @opus check this", agent_name="s_sender")
+        conn = _open_db()
+        rows = conn.execute("SELECT mentioned FROM mentions ORDER BY mentioned").fetchall()
+        conn.close()
+        mentioned = [r["mentioned"] for r in rows]
+        self.assertIn("apollo", mentioned)
+        self.assertIn("opus", mentioned)
+
 
 if __name__ == "__main__":
     unittest.main()
