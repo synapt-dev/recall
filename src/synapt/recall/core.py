@@ -36,6 +36,7 @@ logger = logging.getLogger("synapt.recall")
 from synapt.recall.bm25 import BM25, _tokenize
 from synapt.recall.hybrid import extract_entities
 from synapt.recall.storage import RecallDB
+from synapt.recall.sharded_db import ShardedRecallDB
 
 # Multiplier for knowledge nodes whose content matches query entities
 ENTITY_BOOST = 1.5
@@ -3177,20 +3178,22 @@ class TranscriptIndex:
         db_path = directory / "recall.db"
         chunks_path = directory / "chunks.jsonl"
 
-        # Prefer SQLite
-        if db_path.exists():
+        # Prefer ShardedRecallDB (auto-detects monolithic recall.db or sharded layout)
+        from synapt.recall.sharding import is_sharded
+        if db_path.exists() or is_sharded(directory):
             db = None
             try:
-                db = RecallDB(db_path)
+                db = ShardedRecallDB.open(directory)
                 chunks = db.load_chunks()
                 return cls(chunks, use_embeddings=use_embeddings, cache_dir=directory, db=db)
             except (sqlite3.DatabaseError, OSError) as exc:
-                logger.warning("Corrupt recall.db, rebuilding: %s", exc)
+                logger.warning("Corrupt recall DB, rebuilding: %s", exc)
                 if db is not None:
                     with contextlib.suppress(Exception):
                         db.close()
-                with contextlib.suppress(OSError):
-                    db_path.unlink()
+                if not is_sharded(directory):
+                    with contextlib.suppress(OSError):
+                        db_path.unlink()
                 # Fall through to JSONL path or empty index
 
         # Legacy JSONL — load and auto-migrate to SQLite
