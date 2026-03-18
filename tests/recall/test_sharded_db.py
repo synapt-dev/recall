@@ -101,13 +101,29 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertEqual(db.shard_count, 3)
         db.close()
 
-    def test_save_chunks_raises_in_sharded_mode(self):
-        """Sharded save_chunks is not yet implemented (Phase 2)."""
+    def test_save_chunks_routes_to_correct_shard(self):
+        """Sharded save_chunks groups chunks by quarter."""
+        from synapt.recall.core import TranscriptChunk
         RecallDB(self.index_dir / "index.db").close()
         RecallDB(self.index_dir / "data_2025_q1.db").close()
         db = ShardedRecallDB.open(self.index_dir)
-        with self.assertRaises(NotImplementedError):
-            db.save_chunks([])
+        # Save a chunk for Q2 (new shard needed)
+        chunk = TranscriptChunk(
+            id="test:t0", session_id="s1", timestamp="2025-04-15T10:00:00Z",
+            turn_index=0, user_text="hello", assistant_text="hi",
+        )
+        db.save_chunks([chunk])
+        # New shard should exist
+        self.assertTrue((self.index_dir / "data_2025_q2.db").exists())
+        self.assertEqual(db.shard_count, 2)
+        db.close()
+
+    def test_save_chunks_empty_is_noop(self):
+        """Saving empty list to sharded DB doesn't crash."""
+        RecallDB(self.index_dir / "index.db").close()
+        RecallDB(self.index_dir / "data_2025_q1.db").close()
+        db = ShardedRecallDB.open(self.index_dir)
+        db.save_chunks([])
         db.close()
 
 
