@@ -828,7 +828,7 @@ class TranscriptIndex:
         chunks: list[TranscriptChunk],
         use_embeddings: bool = False,
         cache_dir: Path | None = None,
-        db: RecallDB | None = None,
+        db: RecallDB | ShardedRecallDB | None = None,
     ):
         # Sort by timestamp descending (most recent first)
         self.chunks = sorted(chunks, key=lambda c: c.timestamp, reverse=True)
