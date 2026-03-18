@@ -925,8 +925,7 @@ def cmd_archive(args: argparse.Namespace) -> None:
     project = Path.cwd().resolve()
     transcript_all = project_transcript_dirs(project)
     if not transcript_all:
-        print("No transcript directory found for this project.", file=sys.stderr)
-        sys.exit(1)
+        return  # New project, no transcripts yet — not an error
 
     total_copied: list[str] = []
     for transcript_dir in transcript_all:
