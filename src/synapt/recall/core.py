@@ -2498,20 +2498,44 @@ class TranscriptIndex:
         updated = (node.get("updated_at", "") or "")[:10]
         status = node.get("status", "active")
 
-        # Historical label for superseded/contradicted nodes
+        # Freshness label from updated_at
+        freshness = ""
+        if updated and len(updated) >= 10:
+            try:
+                updated_dt = datetime.fromisoformat(updated)
+                now = datetime.now(timezone.utc)
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+                days_ago = (now - updated_dt).days
+                if days_ago == 0:
+                    freshness = "today"
+                elif days_ago == 1:
+                    freshness = "yesterday"
+                elif days_ago < 7:
+                    freshness = f"{days_ago}d ago"
+                elif days_ago < 30:
+                    freshness = f"{days_ago // 7}w ago"
+                else:
+                    freshness = updated
+            except (ValueError, TypeError):
+                freshness = updated
+
+        # Historical/superseded/contradicted labels
         if status == "contradicted":
-            header = f"--- [knowledge, historical] {category} ---"
+            header = f"--- [knowledge, CONTRADICTED] {category} ---"
+        elif status == "superseded":
+            header = f"--- [knowledge, SUPERSEDED] {category} ---"
         else:
-            header = f"--- [knowledge] {category} ({conf_label} confidence) ---"
+            header = f"--- [knowledge] {category} ({conf_label}, {freshness or updated}) ---"
 
         # Temporal metadata with source attribution
         if sources:
             source_refs = ", ".join(s[:8] for s in sources[-5:])
             if len(sources) > 5:
                 source_refs += f" +{len(sources) - 5} more"
-            meta_parts = [f"Sources: {source_refs}. Updated {updated}"]
+            meta_parts = [f"Sources: {source_refs}"]
         else:
-            meta_parts = [f"Last updated {updated}"]
+            meta_parts = []
         valid_from = node.get("valid_from")
         valid_until = node.get("valid_until")
         if valid_from and valid_until:
@@ -2519,12 +2543,13 @@ class TranscriptIndex:
         elif valid_from:
             meta_parts.append(f"Current since {valid_from[:10]}")
 
-        # Supersession note
+        # Supersession note — make it prominent
         note = node.get("contradiction_note", "")
-        if status == "contradicted" and note:
-            meta_parts.append(f"Superseded: {note}")
+        if status in ("contradicted", "superseded") and note:
+            meta_parts.append(f"Note: {note}")
 
-        return f"{header}\n{content}\n[{'. '.join(meta_parts)}]"
+        meta_line = f"[{'. '.join(meta_parts)}]" if meta_parts else ""
+        return f"{header}\n{content}\n{meta_line}" if meta_line else f"{header}\n{content}"
 
     def _format_results(
         self,
@@ -3010,6 +3035,9 @@ class TranscriptIndex:
         ts_display = raw_ts.replace("T", " ")
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
         header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label} ---"
+        # Note: chunk source (FTS vs embedding) is not tracked per-result
+        # in the current pipeline — would require threading match_source
+        # through the ranking. Deferred to a follow-up.
 
         parts = [header]
         # Sub-chunks already embed context in their user_text — skip
