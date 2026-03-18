@@ -536,6 +536,45 @@ def _store_mentions(
         conn.close()
 
 
+def _index_channel_message(
+    msg: ChannelMessage, project_dir: Path | None = None,
+) -> None:
+    """Index a channel message as a transcript chunk for recall search.
+
+    Best-effort — failures are logged but don't block message delivery.
+    Channel chunks use session_id="channel:<name>" and a ch: ID prefix
+    so they're distinguishable from conversation chunks in search results.
+    """
+    try:
+        from synapt.recall.core import TranscriptChunk, project_index_dir
+        from synapt.recall.storage import RecallDB
+
+        index_dir = project_index_dir(project_dir)
+        db_path = index_dir / "recall.db"
+        if not db_path.exists():
+            return  # No recall DB yet — skip indexing
+
+        display = _resolve_display_name_for(msg.from_agent, project_dir)
+        chunk = TranscriptChunk(
+            id=f"ch:{msg.channel}:{msg.id}",
+            session_id=f"channel:{msg.channel}",
+            timestamp=msg.timestamp,
+            turn_index=0,
+            user_text=f"[#{msg.channel}] {display}: {msg.body}",
+            assistant_text="",
+        )
+        db = RecallDB(db_path)
+        try:
+            db.save_chunks([chunk])
+        finally:
+            db.close()
+    except Exception:
+        import logging
+        logging.getLogger("synapt.recall.channel").debug(
+            "Channel message indexing failed for %s", msg.id, exc_info=True,
+        )
+
+
 def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> None:
     """Append a message to a channel's JSONL log with file locking.
 
@@ -554,6 +593,9 @@ def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> Non
     # Store @mentions (non-blocking, best-effort)
     if msg.type in ("message", "directive") and "@" in msg.body:
         _store_mentions(msg, project_dir)
+    # Index message as a transcript chunk for recall search (best-effort)
+    if msg.type in ("message", "directive", "intent"):
+        _index_channel_message(msg, project_dir)
 
 
 def _read_messages(
