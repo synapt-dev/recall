@@ -170,11 +170,16 @@ def recall_search(
     depth: str = "full",
     include_archived: bool = False,
     include_historical: bool = False,
+    context: int = 0,
+    min_confidence: float = 0.0,
+    top_k: int = 0,
 ) -> str:
     """Search past coding sessions for relevant context. USE PROACTIVELY.
 
     Call this BEFORE starting work to check for prior decisions, bugs, or
     approaches. Returns relevant conversation chunks sorted by relevance.
+
+    Works like grep: returns matching chunks with optional surrounding context.
 
     When to use (without being asked):
     - User mentions past work → search for it
@@ -198,6 +203,12 @@ def recall_search(
         depth: "full" returns knowledge + journal + transcript results.
                "summary" returns only knowledge nodes + journal entries.
                "concise" returns knowledge + cluster summaries (no raw chunks).
+        context: Number of surrounding chunks to include per match (like grep -C).
+                 0 = just the matching chunk. 2 = matching chunk + 2 before/after.
+        min_confidence: Minimum confidence for knowledge node results (0.0-1.0).
+                       Filters out low-quality extractions. 0 = no filter.
+        top_k: If set >0, return only the top K results regardless of other limits.
+               Like grep -m K. 0 = use max_chunks (default behavior).
         include_archived: If True, include archived clusters in concise mode results.
                           In full mode, individual chunks are always searchable regardless.
         include_historical: If True, include superseded/contradicted knowledge nodes
@@ -247,9 +258,13 @@ def recall_search(
         # intent classification can override it. When the user explicitly
         # sets a value, pass it through as-is to honour their choice.
         effective_hl: float | None = None if half_life == 60.0 else half_life
+        # top_k overrides max_chunks for grep-style "give me N results"
+        effective_max_chunks = top_k if top_k > 0 else max_chunks
+        # min_confidence filters knowledge nodes post-retrieval
+        effective_min_confidence = min_confidence
         result = index.lookup(
             query,
-            max_chunks=max_chunks,
+            max_chunks=effective_max_chunks,
             max_tokens=indexed_budget,
             max_sessions=max_sessions,
             after=after,
@@ -259,6 +274,8 @@ def recall_search(
             depth=depth,
             include_archived=include_archived,
             include_historical=include_historical,
+            min_confidence=effective_min_confidence,
+            context=context,
         )
         # Combine live (current session) + indexed (past sessions) results
         parts = []

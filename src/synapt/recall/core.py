@@ -1404,8 +1404,14 @@ class TranscriptIndex:
         now: datetime | None = None,
         knowledge_boost: float | None = None,
         max_knowledge: int | None = None,
+        min_confidence: float = 0.0,
+        context: int = 0,
     ) -> str:
         """Search transcripts and return formatted context string.
+
+        Grep-style parameters:
+            min_confidence: Filter knowledge nodes below this confidence (0.0-1.0).
+            context: Include N surrounding chunks per match (like grep -C N).
 
         Args:
             query: Search query (natural language or keywords).
@@ -1538,7 +1544,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
-                intent=intent,
+                intent=intent, min_confidence=min_confidence,
             )
 
         # Cache the result (LRU eviction when full)
@@ -1566,6 +1572,7 @@ class TranscriptIndex:
         now: datetime | None = None,
         max_knowledge: int | None = None,
         intent: str = "",
+        min_confidence: float = 0.0,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and self._rowid_to_idx:
@@ -1575,6 +1582,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
                 now=now, max_knowledge=max_knowledge, intent=intent,
+                min_confidence=min_confidence,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -1598,6 +1606,7 @@ class TranscriptIndex:
         now: datetime | None = None,
         max_knowledge: int | None = None,
         intent: str = "",
+        min_confidence: float = 0.0,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
@@ -1609,6 +1618,13 @@ class TranscriptIndex:
             knowledge_boost=knowledge_boost, emb_weight=emb_weight,
             query_entities=query_entities, intent=intent,
         )
+
+        # Apply min_confidence filter (grep-style noise reduction)
+        if min_confidence > 0 and knowledge_results:
+            knowledge_results = [
+                n for n in knowledge_results
+                if n.get("confidence", 0) >= min_confidence
+            ]
 
         # Concise mode: search clusters directly, return only summaries
         if depth == "concise":
