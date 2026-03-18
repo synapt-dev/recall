@@ -710,7 +710,9 @@ def recall_contradict(
 
     Args:
         action: "list" (show pending), "resolve" (confirm/dismiss one),
-                "flag" (report a new contradiction).
+                "flag" (report a new contradiction),
+                "forget" (archive a knowledge node — removes from search),
+                "correct" (supersede a knowledge node with updated content).
         contradiction_id: ID of the contradiction to resolve (required for "resolve").
         resolution: "confirmed" (supersede old node) or "dismissed" (keep old node).
         claim: Free-text description of conflicting information (for "flag").
@@ -791,7 +793,36 @@ def recall_contradict(
                 return f"Contradiction #{contradiction_id} confirmed — old node superseded."
             return f"Contradiction #{contradiction_id} dismissed — old node retained."
 
-        return f"Unknown action: {action}. Use 'list', 'resolve', or 'flag'."
+        if action == "forget":
+            if not old_node_id:
+                return "Error: old_node_id is required for 'forget'. Provide the knowledge node ID to archive."
+            node = index._db.get_knowledge_node(old_node_id)
+            if not node:
+                return f"Knowledge node '{old_node_id}' not found."
+            from synapt.recall.knowledge import update_node, _knowledge_path
+            update_node(old_node_id, {"status": "archived"}, _knowledge_path())
+            return f"Forgotten: node '{old_node_id}' archived. Content was: {node['content'][:100]}"
+
+        if action == "correct":
+            if not old_node_id:
+                return "Error: old_node_id is required for 'correct'. Provide the knowledge node ID to update."
+            if not claim and not new_content:
+                return "Error: claim or new_content is required for 'correct'. Provide the corrected information."
+            node = index._db.get_knowledge_node(old_node_id)
+            if not node:
+                return f"Knowledge node '{old_node_id}' not found."
+            corrected = new_content or claim
+            _apply_supersession(
+                index._db,
+                old_node_id=old_node_id,
+                new_content=corrected,
+                category=node.get("category", "general"),
+                reason=reason or "Manual correction",
+                source_sessions=[],
+            )
+            return f"Corrected: '{old_node_id}' superseded with: {corrected[:100]}"
+
+        return f"Unknown action: {action}. Use 'list', 'resolve', 'flag', 'forget', or 'correct'."
     except Exception as exc:
         return f"Contradiction management failed: {exc}"
     finally:
