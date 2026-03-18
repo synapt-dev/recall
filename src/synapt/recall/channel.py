@@ -71,15 +71,20 @@ _AGENT_ID_CACHE: dict[str, str] = {}
 
 
 def _agent_id(project_dir: Path | None = None) -> str:
-    """Return a stable session-scoped agent ID (s_xxxxxxxx).
+    """Return a stable worktree-scoped agent ID (s_xxxxxxxx).
 
-    Cached per resolved data directory so different project_dirs in tests
-    get distinct IDs, while production (single gripspace) gets one ID.
+    Stable across process restarts — the same worktree always gets the
+    same agent_id.  This ensures /who presence survives MCP server
+    restarts without creating orphan entries.
+
+    The seed is (griptree, data_dir) — deterministic per worktree.
+    Different worktrees get different IDs; the same worktree always
+    gets the same one.
     """
     key = str(project_data_dir(project_dir))
     if key not in _AGENT_ID_CACHE:
         gt = _resolve_griptree(project_dir)
-        seed = f"{gt}:{os.getpid()}:{time.monotonic_ns()}"
+        seed = f"{gt}:{key}"
         _AGENT_ID_CACHE[key] = "s_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
     return _AGENT_ID_CACHE[key]
 
