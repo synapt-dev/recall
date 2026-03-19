@@ -1643,6 +1643,7 @@ def _check_channel_activity() -> str:
 
     Uses file mtime comparison instead of reading full JSONL — ~1ms.
     Returns a notification string if new messages exist, empty string otherwise.
+    Checks all channel files, not just #dev.
     """
     try:
         from synapt.recall.core import project_data_dir
@@ -1650,30 +1651,32 @@ def _check_channel_activity() -> str:
         if not channels_dir.exists():
             return ""
 
-        # Check mtime of dev.jsonl against our last-seen marker
-        dev_jsonl = channels_dir / "dev.jsonl"
-        if not dev_jsonl.exists():
+        # Check mtime of all channel JSONL files
+        channel_files = sorted(channels_dir.glob("*.jsonl"))
+        if not channel_files:
             return ""
 
         marker = channels_dir / ".last_seen_mtime"
-        current_mtime = dev_jsonl.stat().st_mtime
+        max_mtime = max(f.stat().st_mtime for f in channel_files)
 
         if marker.exists():
             last_mtime = float(marker.read_text().strip())
-            if current_mtime <= last_mtime:
+            if max_mtime <= last_mtime:
                 return ""  # No new messages
 
-        # New messages detected — update marker and notify
-        marker.write_text(str(current_mtime))
-
-        # Count new messages (cheap: just count lines after last position)
+        # New messages detected — count BEFORE updating marker
         from synapt.recall.channel import channel_unread
         counts = channel_unread()
         if counts:
             total = sum(counts.values())
             if total > 0:
+                # Update marker only AFTER successful read
+                marker.write_text(str(max_mtime))
                 channels = ", ".join(f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0)
                 return f"[channel] {total} new message(s): {channels}. Use recall_channel(action='read') to see them."
+
+        # No unread messages — still update marker to avoid re-checking
+        marker.write_text(str(max_mtime))
     except Exception:
         pass
     return ""
