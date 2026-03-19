@@ -462,7 +462,7 @@
         </div>
         <div class="feature-card">
           <div class="tag tag-tools">Tools</div>
-          <h3>13 MCP tools</h3>
+          <h3>16 MCP tools</h3>
           <p>Search, journal, reminders, channels, knowledge management. Works with Claude Code, Codex CLI, OpenCode, and any MCP-compatible assistant.</p>
         </div>
         <div class="feature-card">
@@ -524,7 +524,7 @@
 <span class="dim">                    +-----------------+</span>
 <span class="dim">                    |</span> <span class="hl">ranked context</span>   <span class="dim">|</span>
 <span class="dim">                    +-----------------+</span></div>
-      <h3>v0.6.2 pipeline features</h3>
+      <h3>Pipeline features</h3>
       <ul>
         <li>Sub-chunk splitting at tool-use boundaries</li>
         <li>Cross-session link expansion via pre-computed cosine neighbors</li>
@@ -648,7 +648,7 @@
         </tbody>
       </table>
       <p class="footnote">
-        76.04% on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> &mdash; within 1.5pp of <a href="https://arxiv.org/abs/2511.12960">Engram</a> (77.55%), the only system ahead, and beating every other competitor. The 3B local config (73.38%) beats the full-context upper bound (72.60%) on a laptop.
+        76.04% on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> &mdash; within 1.5pp of <a href="https://arxiv.org/abs/2511.12960">Engram</a> (77.55%), the only system ahead, and beating every other competitor. The 3B local config (73.38%) beats the full-context upper bound (72.90%) on a laptop.
         On <a href="https://github.com/laynepenney/synapt/tree/main/evaluation/codememo">CodeMemo</a>, synapt scores 90.51% &mdash; +14.51pp over Mem0 (76.0%) &mdash; with perfect debugging recall and near-perfect factual accuracy.
         Competitor data from <a href="https://arxiv.org/abs/2511.12960">Engram paper</a> and <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a> (shared gpt-4o-mini backbone).
       </p>
@@ -694,7 +694,7 @@
       </div>
       <p class="footnote" style="text-align: center; color: var(--text-dim); font-size: 0.85rem;">
         Benchmarked on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> conversations with
-        Claude Haiku. synapt v0.6.0, mem0 v1.0.5.
+        Claude Haiku. synapt v0.7.4, mem0 v1.0.5.
       </p>
     </div>
   </section>
@@ -767,6 +767,9 @@
           <tr><td><code>recall_enrich</code></td><td>LLM-powered chunk and cluster summarization</td></tr>
           <tr><td><code>recall_consolidate</code></td><td>Extract durable knowledge from journals</td></tr>
           <tr><td><code>recall_contradict</code></td><td>Flag and resolve contradictions in knowledge</td></tr>
+          <tr><td><code>recall_channel</code></td><td>Multi-agent coordination via append-only channels</td></tr>
+          <tr><td><code>recall_quick</code></td><td>Fast, low-cost knowledge check (~500 tokens)</td></tr>
+          <tr><td><code>recall_reload</code></td><td>In-place MCP server restart after upgrades</td></tr>
         </tbody>
       </table>
     </div>

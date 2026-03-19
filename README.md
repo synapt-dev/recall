@@ -165,11 +165,11 @@ All systems use gpt-4o-mini as shared backbone (generation + judge) for fair com
 | Memobase | 75.78 | 46.88 | **85.05** | cloud |
 | **synapt v0.6.1 (3B)** | **73.38** | 70.21 | 61.68 | **local 3B on M2 Air** |
 | memOS | 72.99 ± 0.14 | — | — | cloud |
-| Full-Context | 72.60 ± 0.07 | — | — | upper bound |
+| Full-Context | 72.90 | — | — | upper bound |
 | Mem0 | 64.73 ± 0.17 | 51.15 | 55.51 | cloud GPT-4 |
 | Zep | 42.29 ± 0.18 | — | — | cloud |
 
-Synapt is **#2 on LOCOMO** at 76.04% — 1.51pp behind Engram (within their stddev of ±0.13) and ahead of Memobase (75.78%), the Full-Context upper bound (72.60%), and all other systems. The 3B local configuration (73.38%) beats the Full-Context upper bound using only a Ministral 3B model running on an M2 MacBook Air.
+Synapt is **#2 on LOCOMO** at 76.04% — 1.51pp behind Engram (within their stddev of ±0.13) and ahead of Memobase (75.78%), the Full-Context upper bound (72.90%), and all other systems. The 3B local configuration (73.38%) beats the Full-Context upper bound using only a Ministral 3B model running on an M2 MacBook Air.
 
 **Best-in-class multi-hop**: 70.92% — highest of any system tested, including those using GPT-4 for memory extraction. Engram is cloud-only; synapt runs entirely on a laptop.
 
