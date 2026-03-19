@@ -34,6 +34,14 @@ class TestShardNaming(unittest.TestCase):
         (d / "data_002.db").touch()
         self.assertEqual(next_shard_index(d), 3)
 
+    def test_next_shard_index_ignores_legacy_names(self):
+        """Legacy data_YYYY_qN.db shards must not confuse the index parser."""
+        tmpdir = tempfile.mkdtemp()
+        d = Path(tmpdir)
+        (d / "data_001.db").touch()
+        (d / "data_2025_q1.db").touch()  # legacy shard
+        self.assertEqual(next_shard_index(d), 2)
+
 
 class TestListShards(unittest.TestCase):
 

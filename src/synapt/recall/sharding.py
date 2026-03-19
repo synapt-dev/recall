@@ -14,10 +14,14 @@ See issue #89 and synapt-private #444 for design.
 
 from __future__ import annotations
 
+import logging
+import re
 import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -43,26 +47,31 @@ def shard_name_for_index(index: int) -> str:
     return f"data_{index:03d}.db"
 
 
+_SEQUENTIAL_SHARD_RE = re.compile(r"^data_(\d{3,})\.db$")
+"""Matches sequential shard names like data_001.db, data_042.db."""
+
+
 def list_shards(index_dir: Path) -> list[Path]:
     """List all data shard DBs in the index directory, sorted by name.
 
     Lexicographic sort gives sequential order for ``data_NNN.db`` names.
+    Also discovers legacy ``data_YYYY_qN.db`` shards for backward compat.
     """
     return sorted(index_dir.glob("data_*.db"))
 
 
 def next_shard_index(index_dir: Path) -> int:
-    """Return the next available shard index (1-based)."""
-    existing = list_shards(index_dir)
-    if not existing:
-        return 1
-    # Parse the highest index from existing shard names
-    last = existing[-1].stem  # e.g., "data_003"
-    try:
-        num = int(last.split("_")[1])
-        return num + 1
-    except (IndexError, ValueError):
-        return len(existing) + 1
+    """Return the next available shard index (1-based).
+
+    Only considers sequential ``data_NNN.db`` shards — legacy
+    ``data_YYYY_qN.db`` names are ignored to avoid misparsing.
+    """
+    max_idx = 0
+    for p in index_dir.glob("data_*.db"):
+        m = _SEQUENTIAL_SHARD_RE.match(p.name)
+        if m:
+            max_idx = max(max_idx, int(m.group(1)))
+    return max_idx + 1
 
 
 def is_sharded(index_dir: Path) -> bool:
@@ -90,15 +99,22 @@ CREATE TABLE IF NOT EXISTS shard_metadata (
 """
 
 
-def _update_shard_metadata(index_conn: sqlite3.Connection, shard_path: Path,
-                           chunk_count: int, min_ts: str, max_ts: str) -> None:
+def _update_shard_metadata(
+    index_conn: sqlite3.Connection,
+    shard_path: Path,
+    chunk_count: int,
+    min_ts: str,
+    max_ts: str,
+    *,
+    is_active: bool = False,
+) -> None:
     """Insert or update shard metadata in index.db."""
     size = shard_path.stat().st_size if shard_path.exists() else 0
     index_conn.execute(
         "INSERT OR REPLACE INTO shard_metadata "
         "(shard_name, chunk_count, min_timestamp, max_timestamp, size_bytes, is_active) "
-        "VALUES (?, ?, ?, ?, ?, 0)",
-        (shard_path.name, chunk_count, min_ts, max_ts, size),
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (shard_path.name, chunk_count, min_ts, max_ts, size, int(is_active)),
     )
 
 
@@ -279,16 +295,14 @@ def split_monolithic_db(
             # Record shard metadata
             min_ts = batch[0]["timestamp"] if batch else ""
             max_ts = batch[-1]["timestamp"] if batch else ""
+            is_last = offset + threshold >= len(all_chunks)
             idx_conn = sqlite3.connect(str(idx_path))
             try:
                 idx_conn.execute(SHARD_METADATA_SQL)
-                _update_shard_metadata(idx_conn, shard_path, len(batch), min_ts, max_ts)
-                # Mark last shard as active
-                if offset + threshold >= len(all_chunks):
-                    idx_conn.execute(
-                        "UPDATE shard_metadata SET is_active = 1 WHERE shard_name = ?",
-                        (s_name,),
-                    )
+                _update_shard_metadata(
+                    idx_conn, shard_path, len(batch), min_ts, max_ts,
+                    is_active=is_last,
+                )
                 idx_conn.commit()
             finally:
                 idx_conn.close()

@@ -15,6 +15,7 @@ See issue #89 for the full design.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from synapt.recall.sharding import is_sharded, list_shards
@@ -127,6 +128,8 @@ class ShardedRecallDB:
 
         from synapt.recall.sharding import (
             SHARD_CHUNK_THRESHOLD,
+            SHARD_METADATA_SQL,
+            _update_shard_metadata,
             shard_name_for_index,
             next_shard_index,
         )
@@ -135,18 +138,41 @@ class ShardedRecallDB:
         active_db = self._data_dbs[-1]
         active_db.save_chunks(chunks)
 
-        # Check if active shard exceeded threshold — if so, note for next build
-        # (actual splitting happens during build, not during save)
+        # Check if active shard exceeded threshold — rotate to a new shard
         try:
             count = active_db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
             if count > SHARD_CHUNK_THRESHOLD:
-                # Create new empty shard for next writes
-                idx = next_shard_index(self._index._path.parent)
-                new_path = self._index._path.parent / shard_name_for_index(idx)
+                index_dir = self._index._path.parent
+                idx = next_shard_index(index_dir)
+                new_path = index_dir / shard_name_for_index(idx)
                 new_db = RecallDB(new_path)
                 self._data_dbs.append(new_db)
+
+                # Update shard metadata: old shard is now inactive, new is active
+                idx_conn = sqlite3.connect(str(self._index._path))
+                try:
+                    idx_conn.execute(SHARD_METADATA_SQL)
+                    # Get timestamps from the now-full shard
+                    ts_row = active_db._conn.execute(
+                        "SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM chunks"
+                    ).fetchone()
+                    _update_shard_metadata(
+                        idx_conn, active_db._path, count,
+                        ts_row[0] or "", ts_row[1] or "",
+                        is_active=False,
+                    )
+                    _update_shard_metadata(
+                        idx_conn, new_path, 0, "", "",
+                        is_active=True,
+                    )
+                    idx_conn.commit()
+                finally:
+                    idx_conn.close()
         except Exception:
-            pass  # Threshold check is best-effort
+            import logging
+            logging.getLogger(__name__).warning(
+                "Shard rotation check failed", exc_info=True
+            )
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.
