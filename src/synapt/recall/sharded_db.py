@@ -15,8 +15,11 @@ See issue #89 for the full design.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from synapt.recall.sharding import is_sharded, list_shards
 from synapt.recall.storage import RecallDB
@@ -169,10 +172,7 @@ class ShardedRecallDB:
                 finally:
                     idx_conn.close()
         except Exception:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Shard rotation check failed", exc_info=True
-            )
+            logger.warning("Shard rotation check failed", exc_info=True)
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.
