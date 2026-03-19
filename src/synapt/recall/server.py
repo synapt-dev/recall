@@ -1638,11 +1638,55 @@ def _check_version_stale() -> str:
     return ""
 
 
+def _check_channel_activity() -> str:
+    """Lightweight check for new channel messages since last tool call.
+
+    Uses file mtime comparison instead of reading full JSONL — ~1ms.
+    Returns a notification string if new messages exist, empty string otherwise.
+    Checks all channel files, not just #dev.
+    """
+    try:
+        from synapt.recall.core import project_data_dir
+        channels_dir = project_data_dir() / "channels"
+        if not channels_dir.exists():
+            return ""
+
+        # Check mtime of all channel JSONL files
+        channel_files = sorted(channels_dir.glob("*.jsonl"))
+        if not channel_files:
+            return ""
+
+        marker = channels_dir / ".last_seen_mtime"
+        max_mtime = max(f.stat().st_mtime for f in channel_files)
+
+        if marker.exists():
+            last_mtime = float(marker.read_text().strip())
+            if max_mtime <= last_mtime:
+                return ""  # No new messages
+
+        # New messages detected — count BEFORE updating marker
+        from synapt.recall.channel import channel_unread
+        counts = channel_unread()
+        if counts:
+            total = sum(counts.values())
+            if total > 0:
+                # Update marker only AFTER successful read
+                marker.write_text(str(max_mtime))
+                channels = ", ".join(f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0)
+                return f"[channel] {total} new message(s): {channels}. Use recall_channel(action='read') to see them."
+
+        # No unread messages — still update marker to avoid re-checking
+        marker.write_text(str(max_mtime))
+    except Exception:
+        pass
+    return ""
+
+
 def _directive_suffix() -> str:
-    """Check for pending directives and return a suffix to append to tool results.
+    """Check for pending directives, @mentions, channel activity, and version.
 
     Returns empty string if nothing pending. Runs in ~20ms (no subprocess).
-    Also warns if the server is running stale code.
+    Replaces the need for a polling loop — piggybacks on every tool call.
     """
     parts = []
     try:
@@ -1652,6 +1696,12 @@ def _directive_suffix() -> str:
             parts.append(result)
     except Exception:
         pass
+
+    # Lightweight channel activity check (~1ms)
+    activity = _check_channel_activity()
+    if activity:
+        parts.append(activity)
+
     stale = _check_version_stale()
     if stale:
         parts.append(stale)
