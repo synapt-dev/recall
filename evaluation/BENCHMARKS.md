@@ -4,7 +4,7 @@ synapt recall evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Lo
 
 ## Current Best
 
-**v0.6.1 Full Pipeline (Ministral 8B cloud, 10 convs) — J-Score: 76.04%** — #1 on LOCOMO, beating Memobase (75.78%), Zep (75.14%), and all competitors.
+**v0.6.1 Full Pipeline (Ministral 8B cloud, 10 convs) — J-Score: 76.04%** — #2 on LOCOMO, within 1.5pp of Engram (77.55%), ahead of Memobase (75.78%) and all other competitors.
 
 **v0.6.1 Full Pipeline (Ministral 3B local, 10 convs) — J-Score: 73.38%** — beats Full-Context upper bound (72.90%) with a local 3B model.
 
