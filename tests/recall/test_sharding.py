@@ -1,4 +1,4 @@
-"""Tests for synapt.recall.sharding — tree-structured DB utilities."""
+"""Tests for synapt.recall.sharding — size-based sharding utilities."""
 
 import sqlite3
 import tempfile
@@ -6,48 +6,41 @@ import unittest
 from pathlib import Path
 
 from synapt.recall.sharding import (
-    quarter_for_timestamp,
-    shard_name,
+    shard_name_for_index,
     list_shards,
-    group_chunks_by_quarter,
-    estimate_split,
+    next_shard_index,
     is_sharded,
+    estimate_split,
     split_monolithic_db,
+    SHARD_CHUNK_THRESHOLD,
 )
 
 
-class TestQuarterForTimestamp(unittest.TestCase):
+class TestShardNaming(unittest.TestCase):
 
-    def test_q1(self):
-        self.assertEqual(quarter_for_timestamp("2025-01-15T10:00:00Z"), "2025_q1")
-        self.assertEqual(quarter_for_timestamp("2025-03-31T23:59:59Z"), "2025_q1")
+    def test_sequential_names(self):
+        self.assertEqual(shard_name_for_index(1), "data_001.db")
+        self.assertEqual(shard_name_for_index(42), "data_042.db")
+        self.assertEqual(shard_name_for_index(100), "data_100.db")
 
-    def test_q2(self):
-        self.assertEqual(quarter_for_timestamp("2025-04-01T00:00:00Z"), "2025_q2")
-        self.assertEqual(quarter_for_timestamp("2025-06-15T12:00:00Z"), "2025_q2")
+    def test_next_shard_index_empty(self):
+        tmpdir = tempfile.mkdtemp()
+        self.assertEqual(next_shard_index(Path(tmpdir)), 1)
 
-    def test_q3(self):
-        self.assertEqual(quarter_for_timestamp("2025-07-01T00:00:00Z"), "2025_q3")
+    def test_next_shard_index_existing(self):
+        tmpdir = tempfile.mkdtemp()
+        d = Path(tmpdir)
+        (d / "data_001.db").touch()
+        (d / "data_002.db").touch()
+        self.assertEqual(next_shard_index(d), 3)
 
-    def test_q4(self):
-        self.assertEqual(quarter_for_timestamp("2025-12-25T08:00:00Z"), "2025_q4")
-
-    def test_invalid_returns_unknown(self):
-        self.assertEqual(quarter_for_timestamp("not-a-date"), "unknown")
-        self.assertEqual(quarter_for_timestamp(""), "unknown")
-
-    def test_none_returns_unknown(self):
-        self.assertEqual(quarter_for_timestamp(None), "unknown")
-
-    def test_no_timezone(self):
-        self.assertEqual(quarter_for_timestamp("2025-03-17T10:00:00"), "2025_q1")
-
-
-class TestShardName(unittest.TestCase):
-
-    def test_format(self):
-        self.assertEqual(shard_name("2025_q1"), "data_2025_q1.db")
-        self.assertEqual(shard_name("2024_q4"), "data_2024_q4.db")
+    def test_next_shard_index_ignores_legacy_names(self):
+        """Legacy data_YYYY_qN.db shards must not confuse the index parser."""
+        tmpdir = tempfile.mkdtemp()
+        d = Path(tmpdir)
+        (d / "data_001.db").touch()
+        (d / "data_2025_q1.db").touch()  # legacy shard
+        self.assertEqual(next_shard_index(d), 2)
 
 
 class TestListShards(unittest.TestCase):
@@ -55,73 +48,19 @@ class TestListShards(unittest.TestCase):
     def test_finds_data_dbs(self):
         tmpdir = tempfile.mkdtemp()
         d = Path(tmpdir)
-        (d / "data_2024_q1.db").touch()
-        (d / "data_2024_q2.db").touch()
-        (d / "index.db").touch()  # Should not match
-        (d / "other.db").touch()  # Should not match
+        (d / "data_001.db").touch()
+        (d / "data_002.db").touch()
+        (d / "index.db").touch()
+        (d / "other.db").touch()
 
         shards = list_shards(d)
         self.assertEqual(len(shards), 2)
-        self.assertEqual(shards[0].name, "data_2024_q1.db")
-        self.assertEqual(shards[1].name, "data_2024_q2.db")
+        self.assertEqual(shards[0].name, "data_001.db")
+        self.assertEqual(shards[1].name, "data_002.db")
 
     def test_empty_dir(self):
         tmpdir = tempfile.mkdtemp()
         self.assertEqual(list_shards(Path(tmpdir)), [])
-
-    def test_unknown_shard_sorts_last(self):
-        tmpdir = tempfile.mkdtemp()
-        d = Path(tmpdir)
-        (d / "data_2024_q1.db").touch()
-        (d / "data_unknown.db").touch()
-        shards = list_shards(d)
-        self.assertEqual(shards[-1].name, "data_unknown.db")
-
-
-class TestGroupChunksByQuarter(unittest.TestCase):
-
-    def test_groups_correctly(self):
-        chunks = [
-            {"timestamp": "2025-01-10T10:00:00Z", "id": "c1"},
-            {"timestamp": "2025-01-20T10:00:00Z", "id": "c2"},
-            {"timestamp": "2025-04-05T10:00:00Z", "id": "c3"},
-            {"timestamp": "2025-07-15T10:00:00Z", "id": "c4"},
-        ]
-        groups = group_chunks_by_quarter(chunks)
-        self.assertEqual(len(groups["2025_q1"]), 2)
-        self.assertEqual(len(groups["2025_q2"]), 1)
-        self.assertEqual(len(groups["2025_q3"]), 1)
-        self.assertNotIn("2025_q4", groups)
-
-    def test_empty_list(self):
-        self.assertEqual(group_chunks_by_quarter([]), {})
-
-
-class TestEstimateSplit(unittest.TestCase):
-
-    def test_empty_db_no_chunks_table(self):
-        tmpdir = tempfile.mkdtemp()
-        db_path = Path(tmpdir) / "test.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE metadata (key TEXT, value TEXT)")
-        conn.close()
-        self.assertEqual(estimate_split(db_path), {})
-
-    def test_counts_by_quarter(self):
-        tmpdir = tempfile.mkdtemp()
-        db_path = Path(tmpdir) / "test.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE chunks (timestamp TEXT)")
-        conn.executemany("INSERT INTO chunks VALUES (?)", [
-            ("2025-01-10T10:00:00Z",),
-            ("2025-01-20T10:00:00Z",),
-            ("2025-04-05T10:00:00Z",),
-        ])
-        conn.commit()
-        conn.close()
-        result = estimate_split(db_path)
-        self.assertEqual(result["2025_q1"], 2)
-        self.assertEqual(result["2025_q2"], 1)
 
 
 class TestIsSharded(unittest.TestCase):
@@ -136,18 +75,42 @@ class TestIsSharded(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         d = Path(tmpdir)
         (d / "index.db").touch()
-        (d / "data_2025_q1.db").touch()
+        (d / "data_001.db").touch()
         self.assertTrue(is_sharded(d))
 
 
-class TestSplitMonolithicDb(unittest.TestCase):
-    """Test the migration from monolithic to sharded layout."""
+class TestEstimateSplit(unittest.TestCase):
 
-    def _create_monolithic(self, tmpdir):
-        """Create a minimal monolithic recall.db with test data."""
+    def test_empty_db(self):
+        tmpdir = tempfile.mkdtemp()
+        db_path = Path(tmpdir) / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE metadata (key TEXT, value TEXT)")
+        conn.close()
+        self.assertEqual(estimate_split(db_path), {})
+
+    def test_splits_by_threshold(self):
+        tmpdir = tempfile.mkdtemp()
+        db_path = Path(tmpdir) / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE chunks (timestamp TEXT)")
+        # Insert 25 chunks, threshold 10
+        for i in range(25):
+            conn.execute("INSERT INTO chunks VALUES (?)", (f"2025-01-{i+1:02d}T10:00:00Z",))
+        conn.commit()
+        conn.close()
+
+        result = estimate_split(db_path, threshold=10)
+        self.assertEqual(result["data_001.db"], 10)
+        self.assertEqual(result["data_002.db"], 10)
+        self.assertEqual(result["data_003.db"], 5)
+
+
+class TestSplitMonolithicDb(unittest.TestCase):
+
+    def _create_monolithic(self, tmpdir, num_chunks=25):
         from synapt.recall.storage import RecallDB
         db = RecallDB(Path(tmpdir) / "recall.db")
-        # Insert some knowledge
         db._conn.execute(
             "INSERT INTO knowledge (id, content, category, confidence, status, "
             "source_sessions, source_turns, source_offsets, created_at, updated_at, "
@@ -155,39 +118,38 @@ class TestSplitMonolithicDb(unittest.TestCase):
             "VALUES ('k1', 'test fact', 'workflow', 0.8, 'active', '[]', '[]', '[]', "
             "'2025-01-01', '2025-01-01', '', '', '', NULL, NULL, 1, '')"
         )
-        # Insert chunks across two quarters
-        for i, ts in enumerate([
-            "2025-01-10T10:00:00Z", "2025-02-15T10:00:00Z",  # Q1
-            "2025-04-05T10:00:00Z",  # Q2
-        ]):
+        for i in range(num_chunks):
             db._conn.execute(
                 "INSERT INTO chunks (id, session_id, timestamp, turn_index, user_text, "
                 "assistant_text, tools_used, files_touched, tool_content, transcript_path, "
                 "byte_offset, byte_length) "
-                f"VALUES ('c{i}', 's1', '{ts}', {i}, 'user', 'assistant', '[]', '[]', '', '', 0, 0)"
+                f"VALUES ('c{i}', 's1', '2025-01-{(i % 28) + 1:02d}T10:00:00Z', {i}, "
+                "'user', 'assistant', '[]', '[]', '', '', 0, 0)"
             )
         db._conn.commit()
         db.close()
 
     def test_split_creates_index_and_shards(self):
         tmpdir = tempfile.mkdtemp()
-        self._create_monolithic(tmpdir)
+        self._create_monolithic(tmpdir, num_chunks=25)
         d = Path(tmpdir)
 
-        plan = split_monolithic_db(d)
+        plan = split_monolithic_db(d, threshold=10)
 
         self.assertIn("index.db", plan)
         self.assertTrue((d / "index.db").exists())
-        self.assertTrue((d / "data_2025_q1.db").exists())
-        self.assertTrue((d / "data_2025_q2.db").exists())
-        self.assertEqual(plan["data_2025_q1.db"], 2)
-        self.assertEqual(plan["data_2025_q2.db"], 1)
+        self.assertTrue((d / "data_001.db").exists())
+        self.assertTrue((d / "data_002.db").exists())
+        self.assertTrue((d / "data_003.db").exists())
+        self.assertEqual(plan["data_001.db"], 10)
+        self.assertEqual(plan["data_002.db"], 10)
+        self.assertEqual(plan["data_003.db"], 5)
 
     def test_split_preserves_knowledge_in_index(self):
         tmpdir = tempfile.mkdtemp()
         self._create_monolithic(tmpdir)
         d = Path(tmpdir)
-        split_monolithic_db(d)
+        split_monolithic_db(d, threshold=10)
 
         conn = sqlite3.connect(str(d / "index.db"))
         conn.row_factory = sqlite3.Row
@@ -196,13 +158,32 @@ class TestSplitMonolithicDb(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["content"], "test fact")
 
+    def test_shard_metadata_created(self):
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir, num_chunks=25)
+        d = Path(tmpdir)
+        split_monolithic_db(d, threshold=10)
+
+        conn = sqlite3.connect(str(d / "index.db"))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM shard_metadata ORDER BY shard_name"
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["shard_name"], "data_001.db")
+        self.assertEqual(rows[0]["chunk_count"], 10)
+        self.assertEqual(rows[2]["shard_name"], "data_003.db")
+        self.assertEqual(rows[2]["is_active"], 1)  # Last shard is active
+
     def test_dry_run_doesnt_write(self):
         tmpdir = tempfile.mkdtemp()
         self._create_monolithic(tmpdir)
         d = Path(tmpdir)
 
-        plan = split_monolithic_db(d, dry_run=True)
-        self.assertIn("2025_q1", plan)
+        plan = split_monolithic_db(d, threshold=10, dry_run=True)
+        self.assertIn("data_001.db", plan)
         self.assertFalse((d / "index.db").exists())
 
     def test_already_sharded_raises(self):
@@ -219,28 +200,24 @@ class TestSplitMonolithicDb(unittest.TestCase):
             split_monolithic_db(Path(tmpdir))
 
     def test_failure_cleans_up_temp_files(self):
-        """On failure, partial output is cleaned up — no stale shards left."""
         tmpdir = tempfile.mkdtemp()
         self._create_monolithic(tmpdir)
         d = Path(tmpdir)
 
-        # Make quarter_for_timestamp raise after being called a few times
-        # to simulate a failure during shard creation
         from unittest.mock import patch
-        real_qft = quarter_for_timestamp
+        real_fn = shard_name_for_index
         call_count = [0]
 
-        def failing_qft(ts):
+        def failing_fn(idx):
             call_count[0] += 1
-            if call_count[0] > 2:
+            if call_count[0] > 1:
                 raise OSError("Simulated failure")
-            return real_qft(ts)
+            return real_fn(idx)
 
-        with patch("synapt.recall.sharding.quarter_for_timestamp", failing_qft):
+        with patch("synapt.recall.sharding.shard_name_for_index", failing_fn):
             with self.assertRaises(OSError):
-                split_monolithic_db(d)
+                split_monolithic_db(d, threshold=10)
 
-        # No partial output left — no index.db, no data shards, no temp dirs
         self.assertFalse((d / "index.db").exists())
         self.assertEqual(list(d.glob("data_*.db")), [])
         self.assertEqual(list(d.glob(".split_tmp_*")), [])

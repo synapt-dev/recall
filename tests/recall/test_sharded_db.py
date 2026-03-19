@@ -82,9 +82,8 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.index_dir = Path(self.tmpdir)
 
     def test_open_detects_sharded_layout(self):
-        # Create index.db + one data shard
         RecallDB(self.index_dir / "index.db").close()
-        RecallDB(self.index_dir / "data_2025_q1.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
 
         db = ShardedRecallDB.open(self.index_dir)
         self.assertFalse(db.is_monolithic)
@@ -93,35 +92,35 @@ class TestShardedRecallDBSharded(unittest.TestCase):
 
     def test_multiple_shards(self):
         RecallDB(self.index_dir / "index.db").close()
-        RecallDB(self.index_dir / "data_2024_q3.db").close()
-        RecallDB(self.index_dir / "data_2024_q4.db").close()
-        RecallDB(self.index_dir / "data_2025_q1.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
+        RecallDB(self.index_dir / "data_002.db").close()
+        RecallDB(self.index_dir / "data_003.db").close()
 
         db = ShardedRecallDB.open(self.index_dir)
         self.assertEqual(db.shard_count, 3)
         db.close()
 
-    def test_save_chunks_routes_to_correct_shard(self):
-        """Sharded save_chunks groups chunks by quarter."""
+    def test_save_chunks_to_active_shard(self):
+        """Sharded save_chunks writes to the active (last) shard."""
         from synapt.recall.core import TranscriptChunk
         RecallDB(self.index_dir / "index.db").close()
-        RecallDB(self.index_dir / "data_2025_q1.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
         db = ShardedRecallDB.open(self.index_dir)
-        # Save a chunk for Q2 (new shard needed)
         chunk = TranscriptChunk(
             id="test:t0", session_id="s1", timestamp="2025-04-15T10:00:00Z",
             turn_index=0, user_text="hello", assistant_text="hi",
         )
         db.save_chunks([chunk])
-        # New shard should exist
-        self.assertTrue((self.index_dir / "data_2025_q2.db").exists())
-        self.assertEqual(db.shard_count, 2)
+        # Chunk saved to active shard
+        active = db._data_dbs[-1]
+        count = active._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        self.assertEqual(count, 1)
         db.close()
 
     def test_save_chunks_empty_is_noop(self):
         """Saving empty list to sharded DB doesn't crash."""
         RecallDB(self.index_dir / "index.db").close()
-        RecallDB(self.index_dir / "data_2025_q1.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
         db = ShardedRecallDB.open(self.index_dir)
         db.save_chunks([])
         db.close()

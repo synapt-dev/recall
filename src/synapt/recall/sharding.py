@@ -2,110 +2,124 @@
 
 Splits the monolithic recall.db into:
   - index.db: lightweight routing index (knowledge, clusters, metadata,
-    access tracking)
-  - data_YYYY_QN.db: per-quarter chunk shards (chunks + FTS)
+    access tracking, shard metadata)
+  - data_NNN.db: size-based chunk shards (chunks + FTS)
 
-This module provides helpers for shard routing, migration from monolithic
-DB, and the ShardedRecallDB wrapper that preserves the RecallDB interface.
+Shards are split by chunk count (default 10K chunks per shard).
+Sequential naming (data_001, data_002, ...) with a shard_metadata
+table in index.db for time-range queries and stats.
 
-See issue #89 for the full design.
+See issue #89 and synapt-private #444 for design.
 """
 
 from __future__ import annotations
 
+import logging
+import re
+import shutil
 import sqlite3
-from datetime import datetime
+import tempfile
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
-def quarter_for_timestamp(timestamp: str | None) -> str:
-    """Return the quarter label for an ISO 8601 timestamp.
 
-    Returns ``"unknown"`` for invalid or missing timestamps.
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-    >>> quarter_for_timestamp("2025-03-17T10:00:00Z")
-    '2025_q1'
-    >>> quarter_for_timestamp("2025-07-01T00:00:00Z")
-    '2025_q3'
-    >>> quarter_for_timestamp(None)
-    'unknown'
+SHARD_CHUNK_THRESHOLD = 10_000
+"""Maximum chunks per data shard before splitting to a new one."""
+
+
+# ---------------------------------------------------------------------------
+# Shard naming and discovery
+# ---------------------------------------------------------------------------
+
+def shard_name_for_index(index: int) -> str:
+    """Return the database filename for a shard index.
+
+    >>> shard_name_for_index(1)
+    'data_001.db'
+    >>> shard_name_for_index(42)
+    'data_042.db'
     """
-    if not timestamp:
-        return "unknown"
-    try:
-        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        quarter = (dt.month - 1) // 3 + 1
-        return f"{dt.year}_q{quarter}"
-    except (ValueError, AttributeError):
-        return "unknown"
+    return f"data_{index:03d}.db"
 
 
-def shard_name(quarter: str) -> str:
-    """Return the database filename for a quarter.
-
-    >>> shard_name("2025_q1")
-    'data_2025_q1.db'
-    """
-    return f"data_{quarter}.db"
+_SEQUENTIAL_SHARD_RE = re.compile(r"^data_(\d{3,})\.db$")
+"""Matches sequential shard names like data_001.db, data_042.db."""
 
 
 def list_shards(index_dir: Path) -> list[Path]:
     """List all data shard DBs in the index directory, sorted by name.
 
-    Lexicographic sort gives chronological order for ``data_YYYY_qN.db``
-    names.  A ``data_unknown.db`` (invalid timestamps) sorts last.
+    Lexicographic sort gives sequential order for ``data_NNN.db`` names.
+    Also discovers legacy ``data_YYYY_qN.db`` shards for backward compat.
     """
     return sorted(index_dir.glob("data_*.db"))
 
 
-def group_chunks_by_quarter(chunks: list[dict]) -> dict[str, list[dict]]:
-    """Group chunk dicts by quarter based on their timestamp.
+def next_shard_index(index_dir: Path) -> int:
+    """Return the next available shard index (1-based).
 
-    Args:
-        chunks: List of dicts with at least a 'timestamp' key.
-
-    Returns:
-        Dict mapping quarter label to list of chunks.
+    Only considers sequential ``data_NNN.db`` shards — legacy
+    ``data_YYYY_qN.db`` names are ignored to avoid misparsing.
     """
-    groups: dict[str, list[dict]] = {}
-    for chunk in chunks:
-        ts = chunk.get("timestamp", "")
-        q = quarter_for_timestamp(ts)
-        groups.setdefault(q, []).append(chunk)
-    return groups
+    max_idx = 0
+    for p in index_dir.glob("data_*.db"):
+        m = _SEQUENTIAL_SHARD_RE.match(p.name)
+        if m:
+            max_idx = max(max_idx, int(m.group(1)))
+    return max_idx + 1
 
 
-def estimate_split(db_path: Path) -> dict[str, int]:
-    """Estimate how chunks would be distributed across quarters.
+def is_sharded(index_dir: Path) -> bool:
+    """Check if an index directory uses the sharded layout.
 
-    Returns dict mapping quarter label to chunk count.
-    Useful for planning before actually splitting.
-    Returns empty dict if the DB has no chunks table.
+    Returns True if index.db exists (sharded), False if only recall.db
+    exists (monolithic).
     """
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        # Check if chunks table exists
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
-        ).fetchone()
-        if row is None:
-            return {}
-        rows = conn.execute(
-            "SELECT timestamp FROM chunks ORDER BY timestamp"
-        ).fetchall()
-        counts: dict[str, int] = {}
-        for row in rows:
-            q = quarter_for_timestamp(row["timestamp"])
-            counts[q] = counts.get(q, 0) + 1
-        return counts
-    finally:
-        conn.close()
+    return (index_dir / "index.db").exists()
+
+
+# ---------------------------------------------------------------------------
+# Shard metadata schema (lives in index.db)
+# ---------------------------------------------------------------------------
+
+SHARD_METADATA_SQL = """\
+CREATE TABLE IF NOT EXISTS shard_metadata (
+    shard_name    TEXT PRIMARY KEY,
+    chunk_count   INTEGER NOT NULL DEFAULT 0,
+    min_timestamp TEXT,
+    max_timestamp TEXT,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    is_active     INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def _update_shard_metadata(
+    index_conn: sqlite3.Connection,
+    shard_path: Path,
+    chunk_count: int,
+    min_ts: str,
+    max_ts: str,
+    *,
+    is_active: bool = False,
+) -> None:
+    """Insert or update shard metadata in index.db."""
+    size = shard_path.stat().st_size if shard_path.exists() else 0
+    index_conn.execute(
+        "INSERT OR REPLACE INTO shard_metadata "
+        "(shard_name, chunk_count, min_timestamp, max_timestamp, size_bytes, is_active) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (shard_path.name, chunk_count, min_ts, max_ts, size, int(is_active)),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Index DB tables — these stay in the lightweight always-loaded index.
-# Includes access tracking (keyed by access time, not chunk creation time).
 # ---------------------------------------------------------------------------
 
 _INDEX_TABLES = frozenset({
@@ -131,7 +145,7 @@ _INDEX_TABLES = frozenset({
     "pending_contradictions",
 })
 
-# Data tables — these get sharded per quarter.
+# Data tables — these get sharded by size.
 # chunks_fts must co-locate with chunks (FTS5 content-sync triggers
 # reference the same DB's chunks table).
 _DATA_TABLES = frozenset({
@@ -144,18 +158,54 @@ _DATA_TABLES = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Split monolithic DB into size-based shards
+# ---------------------------------------------------------------------------
+
+def estimate_split(db_path: Path, threshold: int = SHARD_CHUNK_THRESHOLD) -> dict[str, int]:
+    """Estimate how chunks would be distributed across size-based shards.
+
+    Returns dict mapping shard name to chunk count.
+    Returns empty dict if the DB has no chunks table.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()
+        if row is None:
+            return {}
+        total = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        if total == 0:
+            return {}
+
+        plan: dict[str, int] = {"index.db": 0}
+        shard_idx = 1
+        remaining = total
+        while remaining > 0:
+            count = min(remaining, threshold)
+            plan[shard_name_for_index(shard_idx)] = count
+            remaining -= count
+            shard_idx += 1
+        return plan
+    finally:
+        conn.close()
+
+
 def split_monolithic_db(
     index_dir: Path,
+    threshold: int = SHARD_CHUNK_THRESHOLD,
     dry_run: bool = False,
 ) -> dict[str, int]:
-    """Split a monolithic recall.db into index.db + quarterly data shards.
+    """Split a monolithic recall.db into index.db + size-based data shards.
 
     Creates:
-      - index.db: knowledge, clusters, metadata, access tracking
-      - data_YYYY_qN.db: chunks grouped by quarter
+      - index.db: knowledge, clusters, metadata, shard_metadata
+      - data_001.db, data_002.db, ...: chunks grouped by size threshold
 
     Args:
         index_dir: Directory containing recall.db.
+        threshold: Max chunks per shard (default 10,000).
         dry_run: If True, only returns the split plan without writing.
 
     Returns:
@@ -171,75 +221,69 @@ def split_monolithic_db(
     if is_sharded(index_dir):
         raise RuntimeError(f"Already sharded at {index_dir}")
 
-    # Plan the split
     if dry_run:
-        plan = estimate_split(db_path)
-        plan["index.db"] = 0
-        return plan
+        return estimate_split(db_path, threshold)
 
     plan: dict[str, int] = {"index.db": 0}
-
-    # Write to a temp directory first, then move into place on success.
-    # On failure, clean up temp dir — original recall.db is untouched.
-    import shutil
-    import tempfile
-
     tmp_dir = Path(tempfile.mkdtemp(dir=index_dir, prefix=".split_tmp_"))
 
     src = sqlite3.connect(str(db_path))
     src.row_factory = sqlite3.Row
     try:
-        # Step 1: Create index.db with non-chunk tables
+        # Step 1: Create index.db with non-chunk tables + shard metadata
         idx_path = tmp_dir / "index.db"
         idx = sqlite3.connect(str(idx_path))
         idx.execute("PRAGMA journal_mode=WAL")
         idx.execute(f"ATTACH DATABASE '{db_path}' AS src")
         try:
-            # Copy schema + data for index tables (skip FTS virtual tables —
-            # they'll be recreated by RecallDB.__init__ on first open)
             for table_info in src.execute(
                 "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
             ).fetchall():
                 tname = table_info["name"]
                 tsql = table_info["sql"]
-                if tname in _INDEX_TABLES and tsql and not tname.endswith(("_data", "_idx", "_docsize", "_config")):
+                if tname in _INDEX_TABLES and tsql and not tname.endswith(
+                    ("_data", "_idx", "_docsize", "_config")
+                ):
                     idx.execute(tsql)
                     idx.execute(f"INSERT INTO [{tname}] SELECT * FROM src.[{tname}]")
-            # Copy indexes
             for idx_info in src.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
             ).fetchall():
                 try:
                     idx.execute(idx_info["sql"])
                 except sqlite3.OperationalError:
-                    pass  # Index for table not in index.db
+                    pass
+            # Create shard metadata table
+            idx.execute(SHARD_METADATA_SQL)
             idx.commit()
         finally:
             idx.execute("DETACH DATABASE src")
             idx.close()
 
-        # Step 2: Create data shards grouped by quarter
-        chunks_by_quarter: dict[str, list[sqlite3.Row]] = {}
-        for row in src.execute("SELECT * FROM chunks ORDER BY timestamp"):
-            q = quarter_for_timestamp(row["timestamp"])
-            chunks_by_quarter.setdefault(q, []).append(row)
+        # Step 2: Create data shards by chunk count (ordered by timestamp)
+        col_names = [
+            desc[0]
+            for desc in src.execute("SELECT * FROM chunks LIMIT 0").description
+        ]
+        all_chunks = src.execute(
+            "SELECT * FROM chunks ORDER BY timestamp"
+        ).fetchall()
 
-        col_names = [desc[0] for desc in src.execute("SELECT * FROM chunks LIMIT 0").description]
+        chunks_sql = src.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()["sql"]
 
-        for quarter, rows in chunks_by_quarter.items():
-            shard_path = tmp_dir / shard_name(quarter)
+        shard_idx = 1
+        for offset in range(0, len(all_chunks), threshold):
+            batch = all_chunks[offset : offset + threshold]
+            s_name = shard_name_for_index(shard_idx)
+            shard_path = tmp_dir / s_name
             shard = sqlite3.connect(str(shard_path))
             shard.execute("PRAGMA journal_mode=WAL")
             try:
-                # Create chunks table with same schema
-                chunks_sql = src.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'"
-                ).fetchone()["sql"]
                 shard.execute(chunks_sql)
-
-                # Insert chunks
                 placeholders = ",".join("?" for _ in col_names)
-                for row in rows:
+                for row in batch:
                     shard.execute(
                         f"INSERT INTO chunks ({','.join(col_names)}) VALUES ({placeholders})",
                         tuple(row[c] for c in col_names),
@@ -247,10 +291,27 @@ def split_monolithic_db(
                 shard.commit()
             finally:
                 shard.close()
-            plan[shard_name(quarter)] = len(rows)
+
+            # Record shard metadata
+            min_ts = batch[0]["timestamp"] if batch else ""
+            max_ts = batch[-1]["timestamp"] if batch else ""
+            is_last = offset + threshold >= len(all_chunks)
+            idx_conn = sqlite3.connect(str(idx_path))
+            try:
+                idx_conn.execute(SHARD_METADATA_SQL)
+                _update_shard_metadata(
+                    idx_conn, shard_path, len(batch), min_ts, max_ts,
+                    is_active=is_last,
+                )
+                idx_conn.commit()
+            finally:
+                idx_conn.close()
+
+            plan[s_name] = len(batch)
+            shard_idx += 1
 
         # Step 3: Validate total chunk count
-        original_count = src.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        original_count = len(all_chunks)
         split_count = sum(v for k, v in plan.items() if k != "index.db")
         if split_count != original_count:
             raise RuntimeError(
@@ -263,19 +324,9 @@ def split_monolithic_db(
         tmp_dir.rmdir()
 
     except Exception:
-        # Clean up partial output on any failure
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
     finally:
         src.close()
 
     return plan
-
-
-def is_sharded(index_dir: Path) -> bool:
-    """Check if an index directory uses the sharded layout.
-
-    Returns True if index.db exists (sharded), False if only recall.db
-    exists (monolithic).
-    """
-    return (index_dir / "index.db").exists()

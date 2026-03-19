@@ -15,7 +15,11 @@ See issue #89 for the full design.
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from synapt.recall.sharding import is_sharded, list_shards
 from synapt.recall.storage import RecallDB
@@ -118,36 +122,57 @@ class ShardedRecallDB:
         """Save chunks to the appropriate database.
 
         In monolithic mode, delegates directly to the single DB.
-        In sharded mode, groups chunks by quarter and saves each group
-        to the corresponding shard. New shards are created as needed.
+        In sharded mode, saves to the active (last) shard. If the active
+        shard exceeds SHARD_CHUNK_THRESHOLD, a new shard is created.
         """
         if not self._data_dbs:
             self._index.save_chunks(chunks)
             return
 
-        # Group chunks by quarter
-        from synapt.recall.sharding import quarter_for_timestamp, shard_name
+        from synapt.recall.sharding import (
+            SHARD_CHUNK_THRESHOLD,
+            SHARD_METADATA_SQL,
+            _update_shard_metadata,
+            shard_name_for_index,
+            next_shard_index,
+        )
 
-        by_quarter: dict[str, list] = {}
-        for chunk in chunks:
-            q = quarter_for_timestamp(chunk.timestamp)
-            by_quarter.setdefault(q, []).append(chunk)
+        # Save to the last (active) shard
+        active_db = self._data_dbs[-1]
+        active_db.save_chunks(chunks)
 
-        # Map existing shards by name
-        shard_map = {db._path.name: db for db in self._data_dbs}
-
-        for quarter, q_chunks in by_quarter.items():
-            s_name = shard_name(quarter)
-            if s_name in shard_map:
-                # Save to existing shard
-                shard_map[s_name].save_chunks(q_chunks)
-            else:
-                # Create new shard
-                shard_path = self._index._path.parent / s_name
-                new_db = RecallDB(shard_path)
-                new_db.save_chunks(q_chunks)
+        # Check if active shard exceeded threshold — rotate to a new shard
+        try:
+            count = active_db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            if count > SHARD_CHUNK_THRESHOLD:
+                index_dir = self._index._path.parent
+                idx = next_shard_index(index_dir)
+                new_path = index_dir / shard_name_for_index(idx)
+                new_db = RecallDB(new_path)
                 self._data_dbs.append(new_db)
-                shard_map[s_name] = new_db
+
+                # Update shard metadata: old shard is now inactive, new is active
+                idx_conn = sqlite3.connect(str(self._index._path))
+                try:
+                    idx_conn.execute(SHARD_METADATA_SQL)
+                    # Get timestamps from the now-full shard
+                    ts_row = active_db._conn.execute(
+                        "SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM chunks"
+                    ).fetchone()
+                    _update_shard_metadata(
+                        idx_conn, active_db._path, count,
+                        ts_row[0] or "", ts_row[1] or "",
+                        is_active=False,
+                    )
+                    _update_shard_metadata(
+                        idx_conn, new_path, 0, "", "",
+                        is_active=True,
+                    )
+                    idx_conn.commit()
+                finally:
+                    idx_conn.close()
+        except Exception:
+            logger.warning("Shard rotation check failed", exc_info=True)
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.
