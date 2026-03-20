@@ -630,6 +630,7 @@ def enrich_all(
     _backfill_stubs(project_dir, journal_path, all_journaled)
 
     count = 0
+    last_processed_ts = ""
     for entry in iter_enrichable_entries(journal_path):
         if entry.session_id in existing_non_auto:
             continue  # Already has a manual/enriched entry
@@ -646,6 +647,7 @@ def enrich_all(
                 append_entry(enriched, journal_path)
                 print(f"  Enriched: {entry.session_id[:8]} — {enriched.focus[:80]}")
                 existing_non_auto.add(entry.session_id)
+                last_processed_ts = entry.timestamp
                 count += 1
             else:
                 print(f"  Skipped: {entry.session_id[:8]} (enrichment failed)")
@@ -653,9 +655,10 @@ def enrich_all(
         if max_entries and count >= max_entries:
             break
 
-    # Save enrichment checkpoint so next run skips already-processed entries
-    if count > 0 and not dry_run:
-        _set_last_enrichment_ts(project_dir)
+    # Checkpoint the last successfully enriched entry's timestamp (not now()),
+    # so failed entries with earlier timestamps can be retried next run.
+    if last_processed_ts and not dry_run:
+        _set_last_enrichment_ts(project_dir, last_processed_ts)
 
     return count
 
@@ -677,20 +680,20 @@ def _get_last_enrichment_ts(project_dir: Path) -> str:
         return ""
 
 
-def _set_last_enrichment_ts(project_dir: Path) -> None:
-    """Save the current time as the last enrichment checkpoint."""
+def _set_last_enrichment_ts(project_dir: Path, ts: str) -> None:
+    """Save the last enriched entry's timestamp as the checkpoint.
+
+    Uses the entry's own timestamp (not wall-clock time) so that entries
+    which failed enrichment and have earlier timestamps can be retried.
+    """
     try:
-        from datetime import datetime, timezone
         from synapt.recall.core import project_index_dir
         from synapt.recall.storage import RecallDB
         db_path = project_index_dir(project_dir) / "recall.db"
         if not db_path.exists():
             return
         db = RecallDB(db_path)
-        db.set_metadata(
-            "last_enrichment_ts",
-            datetime.now(timezone.utc).isoformat(),
-        )
+        db.set_metadata("last_enrichment_ts", ts)
         db.close()
     except Exception as exc:
         logger.debug("Failed to save enrichment checkpoint: %s", exc)
