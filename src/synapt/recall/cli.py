@@ -1660,6 +1660,26 @@ def cmd_hook(args: argparse.Namespace) -> None:
         except Exception:
             pass  # Branch context is non-critical
 
+        # 4b. Surface open PR status for current branch
+        try:
+            from synapt.recall.journal import _get_branch
+            branch = _get_branch(str(project))
+            if branch and branch not in ("main", "master"):
+                import subprocess as _sp
+                pr_result = _sp.run(
+                    ["gh", "pr", "list", "--head", branch, "--state", "open",
+                     "--json", "number,title,reviews,url", "--limit", "1"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if pr_result.returncode == 0 and pr_result.stdout.strip() not in ("", "[]"):
+                    import json as _json
+                    prs = _json.loads(pr_result.stdout)
+                    for pr in prs:
+                        n_reviews = len(pr.get("reviews", []))
+                        print(f"Open PR: #{pr['number']} — {pr['title']} ({n_reviews} review(s))")
+        except Exception:
+            pass  # PR status is non-critical
+
         # 5. Surface journal context — show last 3 entries for continuity
         try:
             from synapt.recall.journal import _read_all_entries, _journal_path, _dedup_entries

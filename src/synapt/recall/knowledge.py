@@ -21,7 +21,7 @@ from synapt.recall._llm_util import truncate_at_word as _tw
 VALID_CATEGORIES = frozenset({
     "workflow", "architecture", "infrastructure", "debugging",
     "convention", "tooling", "lesson-learned", "decision",
-    "preference", "fact",
+    "preference", "fact", "collection",
 })
 
 VALID_STATUSES = frozenset({"active", "stale", "contradicted"})
