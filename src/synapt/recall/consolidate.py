@@ -267,6 +267,36 @@ Only set dates you're confident about. null is better than guessing.
 If no durable patterns emerge, output: {{"nodes": []}}
 """
 
+COLLECTION_EXTRACTION_PROMPT = """\
+You are analyzing knowledge nodes to find entity collections — groups of similar things \
+mentioned across multiple sessions.
+
+## Existing Knowledge Nodes
+{existing_knowledge}
+
+## Task
+Find entity collections: groups of 3+ similar items scattered across different sessions. \
+For each collection, produce a single summary node that enumerates all instances.
+
+Examples of collections:
+- "User has 5 model kits: Revell F-15 (s3), Tamiya Spitfire (s7), B-29 bomber (s12), '69 Camaro (s14), Gundam RX-78 (s19)"
+- "User visited 4 countries in 2025: Japan (s5), Italy (s8, s9), Brazil (s15), Iceland (s22)"
+- "Project uses 3 databases: PostgreSQL for users (s2), Redis for cache (s4), Elasticsearch for search (s11)"
+
+Rules:
+1. Only create collections from entities ALREADY in existing knowledge nodes — do not invent items.
+2. Each collection must reference 3+ items from 2+ different sessions.
+3. Include the specific names/details and source sessions for each item.
+4. Category is always "collection".
+5. If an existing collection node covers the same entities, use "action": "corroborate" with its ID. \
+   If the existing collection is missing items, use "action": "contradict" to supersede it with a complete list.
+6. If no collections are found, output {{"nodes": []}}.
+
+Output ONLY valid JSON:
+{{"nodes": [{{"action": "create", "existing_id": null, "content": "...", "category": "collection", \
+"confidence": 0.8, "tags": ["collection-type"], "source_turns": [], "valid_from": null, "valid_until": null}}]}}
+"""
+
 CONSOLIDATION_PROMPT_MINIMAL = """\
 ## Project Context
 {project_context}
@@ -1471,6 +1501,13 @@ def consolidate(
             # Single final sync after all resolvers have written their updates
             if resolved or resolved_offsets:
                 _sync_knowledge_to_db(project_dir, kn_path)
+
+            # Collection extraction: find entity groups across sessions
+            collections_created = extract_collections(
+                project_dir, model=model, adapter_path=adapter_path,
+            )
+            if collections_created:
+                result.nodes_created += collections_created
         elif clusters and kn_path.exists() and kn_path.stat().st_size > 0:
             _sync_knowledge_to_db(project_dir, kn_path)
     finally:
@@ -1478,6 +1515,91 @@ def consolidate(
             db.close()
 
     return result
+
+
+def extract_collections(
+    project_dir: Path | None = None,
+    model: str = DEFAULT_MODEL,
+    adapter_path: str = "",
+) -> int:
+    """Extract entity-collection knowledge nodes from existing knowledge.
+
+    Runs as a second pass after standard consolidation. Scans all active
+    knowledge nodes to find groups of 3+ similar entities across sessions,
+    then creates "collection" category nodes that enumerate them.
+
+    Returns number of collection nodes created.
+    """
+    project_dir = (project_dir or Path.cwd()).resolve()
+    kn_path = _knowledge_path(project_dir)
+
+    if not kn_path.exists():
+        return 0
+
+    existing_nodes = read_nodes(kn_path, status="active")
+    if len(existing_nodes) < 5:
+        # Not enough knowledge to find meaningful collections
+        return 0
+
+    # Skip if we already have collection nodes and no new non-collection nodes
+    collection_nodes = [n for n in existing_nodes if n.category == "collection"]
+    non_collection = [n for n in existing_nodes if n.category != "collection"]
+    if not non_collection:
+        return 0
+
+    # Format existing knowledge for the prompt
+    lines = []
+    for node in non_collection:
+        sessions = ", ".join(node.source_sessions[:5]) if node.source_sessions else "?"
+        lines.append(f"- [{node.category}] {node.content} (sessions: {sessions})")
+    existing_text = "\n".join(lines[:100])  # Cap to avoid context overflow
+
+    # Also include existing collection nodes so the model can corroborate/update
+    if collection_nodes:
+        existing_text += "\n\n## Existing Collections\n"
+        for cn in collection_nodes:
+            existing_text += f"- [id={cn.id}] {cn.content}\n"
+
+    prompt = COLLECTION_EXTRACTION_PROMPT.format(existing_knowledge=existing_text)
+
+    # Get model client
+    from synapt.recall._model_router import get_client, RecallTask
+    client = get_client(RecallTask.CONSOLIDATE, max_tokens=MIN_RESPONSE_TOKENS)
+    if client is None:
+        if not _MLX_AVAILABLE:
+            logger.warning("No model backend available for collection extraction")
+            return 0
+        from synapt._models.mlx_client import MLXClient, MLXOptions
+        client = MLXClient(MLXOptions(max_tokens=MIN_RESPONSE_TOKENS))
+
+    try:
+        response = client.chat(
+            model=model,
+            messages=[Message(role="user", content=prompt)],
+            temperature=0.1,
+            adapter_path=adapter_path or None,
+            max_tokens=MIN_RESPONSE_TOKENS,
+        )
+    except Exception as exc:
+        logger.warning("Collection extraction inference failed: %s", exc)
+        return 0
+
+    parsed = _parse_llm_response(response)
+    if not parsed:
+        logger.debug("No collections extracted (unparseable response)")
+        return 0
+
+    # Apply results — only create/corroborate, use the standard apply function
+    dummy_cluster: list[JournalEntry] = []  # No journal entries for collection pass
+    collection_result = _apply_consolidation_result(
+        parsed, existing_nodes, dummy_cluster, kn_path,
+    )
+
+    if collection_result.nodes_created:
+        logger.info("Extracted %d collection node(s)", collection_result.nodes_created)
+        _sync_knowledge_to_db(project_dir, kn_path)
+
+    return collection_result.nodes_created
 
 
 def _get_last_consolidation_ts(project_dir: Path) -> str:
