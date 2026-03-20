@@ -44,8 +44,33 @@ _AWAY_MINUTES = 120       # 30-120 min => away
 
 
 def _channels_dir(project_dir: Path | None = None) -> Path:
-    """Return the shared channels directory: <data>/.synapt/recall/channels/."""
-    return project_data_dir(project_dir) / "channels"
+    """Return the shared channels directory.
+
+    Channels are inherently cross-repo, so they resolve to a single shared
+    location rather than per-worktree:
+      1. Gripspace root's .synapt/recall/channels/ (if in a gripspace)
+      2. project_data_dir()/channels/ (if .synapt already exists there)
+      3. ~/.synapt/recall/channels/ (global fallback — ensures all griptrees
+         in the same gripspace family share one channel dir, even when the
+         gripspace root can't be resolved)
+
+    Fixes #233: agents in different griptrees getting separate channel files.
+    """
+    # Try project_data_dir first — it already resolves gripspace roots
+    data_dir = project_data_dir(project_dir)
+    channels = data_dir / "channels"
+    if channels.exists():
+        return channels
+
+    # Global fallback: ~/.synapt/recall/channels/
+    # This ensures griptrees that can't resolve their parent gripspace
+    # still share a single channel directory.
+    global_channels = Path.home() / ".synapt" / "recall" / "channels"
+    if global_channels.exists():
+        return global_channels
+
+    # Default to project_data_dir (will be created on first use)
+    return channels
 
 
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
