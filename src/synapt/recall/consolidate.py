@@ -1414,10 +1414,20 @@ def consolidate(
         return True
 
     try:
-        for cluster in clusters:
+        n_clusters = len(clusters)
+        for ci, cluster in enumerate(clusters):
+            logger.info(
+                "Consolidating cluster %d/%d (%d entries)",
+                ci + 1, n_clusters, len(cluster),
+            )
             if _process_cluster(cluster):
                 # Reload existing nodes for subsequent clusters
                 existing_nodes = read_nodes(kn_path, status="active")
+                logger.info(
+                    "Cluster %d/%d done: %d nodes created, %d corroborated",
+                    ci + 1, n_clusters,
+                    result.nodes_created, result.nodes_corroborated,
+                )
                 continue
 
             # Retry: split failed cluster in half and process each sub-cluster
