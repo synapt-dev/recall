@@ -71,20 +71,21 @@ _AGENT_ID_CACHE: dict[str, str] = {}
 
 
 def _agent_id(project_dir: Path | None = None) -> str:
-    """Return a stable worktree-scoped agent ID (s_xxxxxxxx).
+    """Return a stable session-scoped agent ID (s_xxxxxxxx).
 
-    Stable across process restarts — the same worktree always gets the
-    same agent_id.  This ensures /who presence survives MCP server
-    restarts without creating orphan entries.
+    Stable across MCP server restarts within the same Claude Code session,
+    but unique per concurrent session in the same worktree.
 
-    The seed is (griptree, data_dir) — deterministic per worktree.
-    Different worktrees get different IDs; the same worktree always
-    gets the same one.
+    The seed is (griptree, data_dir, PPID) where PPID is the parent
+    process ID (Claude Code's PID). This stays stable when the MCP server
+    restarts (same parent), but differs between concurrent Claude Code
+    sessions (different parents).
     """
     key = str(project_data_dir(project_dir))
     if key not in _AGENT_ID_CACHE:
         gt = _resolve_griptree(project_dir)
-        seed = f"{gt}:{key}"
+        ppid = os.getppid()
+        seed = f"{gt}:{key}:{ppid}"
         _AGENT_ID_CACHE[key] = "s_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
     return _AGENT_ID_CACHE[key]
 

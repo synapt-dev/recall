@@ -1217,6 +1217,8 @@ def consolidate(
     min_entries: int = 3,
     adapter_path: str = "",
     content_profile=None,
+    explicit_journal_path: Path | None = None,
+    explicit_knowledge_path: Path | None = None,
 ) -> ConsolidationResult:
     """Run memory consolidation: extract knowledge from journal entries.
 
@@ -1227,13 +1229,15 @@ def consolidate(
         force: Ignore last_consolidation_ts, reprocess all entries.
         min_entries: Minimum enriched journal entries to trigger consolidation.
         adapter_path: Optional LoRA adapter for knowledge extraction.
+        explicit_journal_path: Override journal path (for temp dirs / eval adapters).
+        explicit_knowledge_path: Override knowledge path (for temp dirs / eval adapters).
 
     Returns:
         Summary of what was created/corroborated/contradicted.
     """
     project_dir = (project_dir or Path.cwd()).resolve()
-    journal_path = _journal_path(project_dir)
-    kn_path = _knowledge_path(project_dir)
+    journal_path = explicit_journal_path or _journal_path(project_dir)
+    kn_path = explicit_knowledge_path or _knowledge_path(project_dir)
     result = ConsolidationResult()
 
     if not journal_path.exists():

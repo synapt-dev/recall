@@ -630,6 +630,9 @@ def enrich_all(
     for entry in iter_enrichable_entries(journal_path):
         if entry.session_id in existing_non_auto:
             continue  # Already has a manual/enriched entry
+        # Dedup relies on existing_non_auto: successfully enriched entries
+        # get a non-auto entry appended, so they're skipped on retry.
+        # Failed entries stay as auto stubs and are retried next run.
 
         if dry_run:
             focus_preview = entry.focus[:80] if entry.focus else "(no focus)"
@@ -648,4 +651,28 @@ def enrich_all(
         if max_entries and count >= max_entries:
             break
 
+    # Record when enrichment last ran (observability only — not used for filtering)
+    if count > 0 and not dry_run:
+        _set_last_enrichment_ts(project_dir)
+
     return count
+
+
+def _set_last_enrichment_ts(project_dir: Path) -> None:
+    """Record when enrichment last ran (observability/debugging only).
+
+    Not used for filtering — dedup relies on existing_non_auto set in
+    enrich_all(), which correctly retries failed entries.
+    """
+    try:
+        from datetime import datetime, timezone
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.storage import RecallDB
+        db_path = project_index_dir(project_dir) / "recall.db"
+        if not db_path.exists():
+            return
+        db = RecallDB(db_path)
+        db.set_metadata("last_enrichment_ts", datetime.now(timezone.utc).isoformat())
+        db.close()
+    except Exception as exc:
+        logger.debug("Failed to save enrichment timestamp: %s", exc)
