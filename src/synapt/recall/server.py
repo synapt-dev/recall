@@ -1682,25 +1682,55 @@ def _check_channel_activity() -> str:
     return ""
 
 
+_solo_mode_until: float = 0.0  # monotonic timestamp when solo check expires
+
+
+def _is_solo_mode() -> bool:
+    """Check if we're the only agent (no channel files exist).
+
+    Cached for 60 seconds — avoids re-checking the filesystem on every
+    tool call. In solo sessions, this saves ~19ms per call by skipping
+    the directive and channel checks entirely.
+    """
+    import time as _time
+    global _solo_mode_until
+    now = _time.monotonic()
+    if now < _solo_mode_until:
+        return True
+    try:
+        from synapt.recall.core import project_data_dir
+        channels_dir = project_data_dir() / "channels"
+        if not channels_dir.exists() or not any(channels_dir.glob("*.jsonl")):
+            _solo_mode_until = now + 60.0
+            return True
+    except Exception:
+        pass
+    _solo_mode_until = 0.0
+    return False
+
+
 def _directive_suffix() -> str:
     """Check for pending directives, @mentions, channel activity, and version.
 
-    Returns empty string if nothing pending. Runs in ~20ms (no subprocess).
-    Replaces the need for a polling loop — piggybacks on every tool call.
+    Returns empty string if nothing pending. In solo mode (no channel files),
+    skips directive and channel checks entirely (~0ms instead of ~20ms).
     """
     parts = []
-    try:
-        from synapt.recall.channel import check_directives
-        result = check_directives()
-        if result:
-            parts.append(result)
-    except Exception:
-        pass
 
-    # Lightweight channel activity check (~1ms)
-    activity = _check_channel_activity()
-    if activity:
-        parts.append(activity)
+    # Skip channel checks in solo mode (#436)
+    if not _is_solo_mode():
+        try:
+            from synapt.recall.channel import check_directives
+            result = check_directives()
+            if result:
+                parts.append(result)
+        except Exception:
+            pass
+
+        # Lightweight channel activity check (~1ms)
+        activity = _check_channel_activity()
+        if activity:
+            parts.append(activity)
 
     stale = _check_version_stale()
     if stale:
