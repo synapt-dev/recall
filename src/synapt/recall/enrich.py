@@ -604,6 +604,9 @@ def enrich_all(
     project_dir = (project_dir or Path.cwd()).resolve()
     journal_path = _journal_path(project_dir)
 
+    # Skip entries already processed in a previous enrichment run
+    last_enrichment_ts = _get_last_enrichment_ts(project_dir)
+
     # Collect all journaled session_ids and non-auto session_ids
     all_journaled: set[str] = set()
     existing_non_auto: set[str] = set()
@@ -630,6 +633,8 @@ def enrich_all(
     for entry in iter_enrichable_entries(journal_path):
         if entry.session_id in existing_non_auto:
             continue  # Already has a manual/enriched entry
+        if last_enrichment_ts and entry.timestamp <= last_enrichment_ts:
+            continue  # Already attempted in a previous enrichment run
 
         if dry_run:
             focus_preview = entry.focus[:80] if entry.focus else "(no focus)"
@@ -667,7 +672,8 @@ def _get_last_enrichment_ts(project_dir: Path) -> str:
         ts = db.get_metadata("last_enrichment_ts") or ""
         db.close()
         return ts
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to read enrichment checkpoint: %s", exc)
         return ""
 
 
@@ -686,5 +692,5 @@ def _set_last_enrichment_ts(project_dir: Path) -> None:
             datetime.now(timezone.utc).isoformat(),
         )
         db.close()
-    except Exception:
-        pass  # Checkpoint is best-effort
+    except Exception as exc:
+        logger.debug("Failed to save enrichment checkpoint: %s", exc)

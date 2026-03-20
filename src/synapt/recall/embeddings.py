@@ -131,10 +131,11 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
 
     if prefer_local:
         try:
-            provider = LocalEmbeddings()
-            # Verify it works
-            provider.embed(["test"])
-            return provider
+            import sentence_transformers  # noqa: F401
+            # Return provider without loading the model — lazy init defers
+            # actual model loading to first embed() call to avoid
+            # semaphore/deadlock issues when created before multiprocessing forks.
+            return LocalEmbeddings()
         except ImportError:
             log.info(
                 "sentence-transformers not installed. "
