@@ -473,6 +473,7 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
             )
             _append_message(msg, project_dir)
 
+        conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
         conn.execute("DELETE FROM memberships WHERE agent_id = ?", (aid,))
         conn.execute(
             "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
@@ -714,8 +715,13 @@ def channel_leave(
 
     conn = _open_db(project_dir)
     try:
+        _reap_stale_agents(conn, project_dir)
         conn.execute(
             "DELETE FROM memberships WHERE agent_id = ? AND channel = ?",
+            (aid, channel),
+        )
+        conn.execute(
+            "DELETE FROM claims WHERE claimed_by = ? AND channel = ?",
             (aid, channel),
         )
         conn.execute(
@@ -728,6 +734,7 @@ def channel_leave(
         ).fetchone()[0]
         if remaining == 0:
             conn.execute("DELETE FROM presence WHERE agent_id = ?", (aid,))
+            conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
         conn.execute(
             "DELETE FROM cursors WHERE agent_id = ? AND channel = ?",
             (aid, channel),
@@ -1317,6 +1324,7 @@ def channel_claim(
 
     conn = _open_db(project_dir)
     try:
+        _reap_stale_agents(conn, project_dir)
         conn.execute(
             "INSERT OR IGNORE INTO claims (message_id, channel, claimed_by, claimed_at) "
             "VALUES (?, ?, ?, ?)",
@@ -1347,6 +1355,7 @@ def is_claimed(
     """Check if a message is claimed. Returns claim dict or None."""
     conn = _open_db(project_dir)
     try:
+        _reap_stale_agents(conn, project_dir)
         row = conn.execute(
             "SELECT claimed_by, claimed_at FROM claims WHERE message_id = ?",
             (message_id,),
@@ -1368,6 +1377,7 @@ def channel_unclaim(
 
     conn = _open_db(project_dir)
     try:
+        _reap_stale_agents(conn, project_dir)
         row = conn.execute(
             "SELECT claimed_by FROM claims WHERE message_id = ?",
             (message_id,),
@@ -1515,6 +1525,7 @@ def check_directives(
 
     conn = _open_db(project_dir)
     try:
+        _reap_stale_agents(conn, project_dir)
         # Get channels this agent is a member of
         memberships = conn.execute(
             "SELECT channel FROM memberships WHERE agent_id = ?",
