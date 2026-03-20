@@ -638,15 +638,17 @@ def channel_join(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     role: str = "agent",
+    display_name: str | None = None,
 ) -> str:
     """Join a channel. Registers agent identity on first join.
 
     Args:
         role: "human" (set by session-start hook), "agent" (default), or "system".
+        display_name: If provided, used as display name in join event.
     """
     aid = agent_name or _agent_id(project_dir)
     griptree = _resolve_griptree(project_dir)
-    display = _resolve_display_name(project_dir)
+    display = display_name or _resolve_display_name(project_dir)
     now = _now_iso()
 
     # Determine cursor initial value: the timestamp of the last message
