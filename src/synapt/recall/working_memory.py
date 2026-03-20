@@ -111,6 +111,11 @@ class WorkingMemory:
         """Apply working memory boost to a search result score."""
         return base_score * self.boost_multiplier(item_id)
 
+    def clear(self) -> None:
+        """Drop all in-memory slots without touching persisted access history."""
+        self._slots.clear()
+        self._access_seq = 0
+
     def seed_from_db(self, db, days: int = 7) -> int:
         """Seed working memory from recent access_log entries.
 
