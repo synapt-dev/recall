@@ -3078,10 +3078,26 @@ class TranscriptIndex:
             raw_ts = raw_ts[:16]
         ts_display = raw_ts.replace("T", " ")
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
-        header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label} ---"
-        # Note: chunk source (FTS vs embedding) is not tracked per-result
-        # in the current pipeline — would require threading match_source
-        # through the ranking. Deferred to a follow-up.
+        # Freshness label for chunks — same style as knowledge nodes
+        freshness = ""
+        if chunk.timestamp and len(chunk.timestamp) >= 10:
+            try:
+                chunk_dt = datetime.fromisoformat(
+                    chunk.timestamp[:19].replace("Z", "+00:00"))
+                if chunk_dt.tzinfo is None:
+                    chunk_dt = chunk_dt.replace(tzinfo=timezone.utc)
+                days_ago = (datetime.now(timezone.utc) - chunk_dt).days
+                if days_ago == 0:
+                    freshness = ", today"
+                elif days_ago == 1:
+                    freshness = ", yesterday"
+                elif days_ago < 7:
+                    freshness = f", {days_ago}d ago"
+                elif days_ago < 30:
+                    freshness = f", {days_ago // 7}w ago"
+            except (ValueError, TypeError):
+                pass
+        header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label}{freshness} ---"
 
         parts = [header]
         # Sub-chunks already embed context in their user_text — skip
