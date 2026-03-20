@@ -46,6 +46,7 @@ except ModuleNotFoundError:
     assert _SCHEMA_SPEC is not None
     assert _SCHEMA_SPEC.loader is not None
     _schema_module = importlib.util.module_from_spec(_SCHEMA_SPEC)
+    sys.modules[_SCHEMA_SPEC.name] = _schema_module
     _SCHEMA_SPEC.loader.exec_module(_schema_module)
     CATEGORY_NAMES = _schema_module.CATEGORY_NAMES
     ALL_CATEGORIES = _schema_module.ALL_CATEGORIES
