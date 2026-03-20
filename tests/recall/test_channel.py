@@ -360,6 +360,38 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         result = channel_read("dev")
         self.assertIn("timed out", result)
 
+    def test_reap_releases_claims(self):
+        stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        conn = _open_db()
+        try:
+            conn.execute(
+                "INSERT INTO presence (agent_id, status, last_seen, joined_at) "
+                "VALUES ('stale-bot', 'online', ?, ?)",
+                (stale_time, stale_time),
+            )
+            conn.execute(
+                "INSERT INTO memberships (agent_id, channel, joined_at) "
+                "VALUES ('stale-bot', 'dev', ?)",
+                (stale_time,),
+            )
+            conn.execute(
+                "INSERT INTO claims (message_id, channel, claimed_by, claimed_at) "
+                "VALUES ('m_stale', 'dev', 'stale-bot', ?)",
+                (stale_time,),
+            )
+            conn.commit()
+
+            _reap_stale_agents(conn)
+
+            claim = conn.execute(
+                "SELECT * FROM claims WHERE message_id = 'm_stale'"
+            ).fetchone()
+            self.assertIsNone(claim)
+        finally:
+            conn.close()
+
     def test_who_triggers_reap(self):
         stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -1480,6 +1512,43 @@ class TestClaim(unittest.TestCase):
         result = channel_unclaim(msg_id, agent_name="s_agent2")
         self.assertIn("Cannot unclaim", result)
         self.assertIsNotNone(is_claimed(msg_id))
+
+    def test_second_agent_can_claim_after_stale_owner_times_out(self):
+        stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        channel_join("dev", agent_name="s_agent1")
+        channel_join("dev", agent_name="s_agent2")
+        channel_post("dev", "task", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+        channel_claim(msg_id, "dev", agent_name="s_agent1")
+
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = 's_agent1'",
+                (stale_time,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = channel_claim(msg_id, "dev", agent_name="s_agent2")
+        self.assertIn("you", result.lower())
+        claim = is_claimed(msg_id)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim["claimed_by"], "s_agent2")
+
+    def test_leave_releases_claims_in_that_channel(self):
+        channel_join("dev", agent_name="s_agent1")
+        channel_post("dev", "task", agent_name="s_agent1")
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg_id = [m for m in msgs if m.type == "message"][-1].id
+
+        channel_claim(msg_id, "dev", agent_name="s_agent1")
+        channel_leave("dev", agent_name="s_agent1")
+        self.assertIsNone(is_claimed(msg_id))
 
 
 class TestClaimIntent(unittest.TestCase):
