@@ -259,6 +259,33 @@ pip install -e ".[test]"
 pytest tests/ -v
 ```
 
+## Reproducible Evals
+
+Long-running evals should run from an isolated git worktree with a dedicated
+venv so code changes on `main` do not mutate the run mid-flight.
+
+```bash
+./scripts/eval-worktree.sh              # from HEAD
+./scripts/eval-worktree.sh abc1234      # from a specific commit/tag
+
+source /tmp/synapt-eval-<ref>/.venv/bin/activate
+cd /tmp/synapt-eval-<ref>
+python -m evaluation.codememo.eval --recalldb --model gpt-4o-mini
+python -m evaluation.locomo_eval --recalldb --batch
+```
+
+The helper creates:
+
+- a detached worktree at `/tmp/synapt-eval-<ref>`
+- a dedicated venv at `/tmp/synapt-eval-<ref>/.venv`
+- a non-editable install frozen to that ref
+
+Clean up with:
+
+```bash
+./scripts/eval-worktree.sh --cleanup <ref>
+```
+
 ## Links
 
 - [synapt.dev](https://synapt.dev) — Website

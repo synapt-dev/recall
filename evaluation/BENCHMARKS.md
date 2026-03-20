@@ -2,6 +2,24 @@
 
 synapt recall evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversational Memory), following [Mem0's methodology](https://arxiv.org/abs/2504.19413) (J-score via gpt-4o-mini LLM-as-Judge).
 
+## Reproducibility
+
+For pinned benchmark runs, create an isolated worktree and venv first:
+
+```bash
+./scripts/eval-worktree.sh              # from HEAD
+./scripts/eval-worktree.sh abc1234      # from a specific commit/tag
+
+source /tmp/synapt-eval-<ref>/.venv/bin/activate
+cd /tmp/synapt-eval-<ref>
+python -m evaluation.codememo.eval --recalldb --model gpt-4o-mini
+python -m evaluation.locomo_eval --recalldb --batch
+```
+
+This freezes both the code and the Python environment for the duration of the
+run, so later edits on `main` cannot contaminate an ablation or benchmark that
+claims to have run at a specific ref.
+
 ## Current Best
 
 **v0.6.1 Full Pipeline (Ministral 8B cloud, 10 convs) — J-Score: 76.04%** — #2 on LOCOMO, within 1.5pp of Engram (77.55%), ahead of Memobase (75.78%) and all other competitors.
