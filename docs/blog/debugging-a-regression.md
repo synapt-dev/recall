@@ -36,7 +36,7 @@ The Jaccard deduplication threshold was set to 0.6. Any two chunks with more tha
 
 The problem: coding sessions produce chunks that are naturally similar. Editing the same file across multiple sessions creates chunks that share significant token overlap but contain different critical details — the specific error message, the fix applied, the PR that resolved it. At 0.6 threshold, these were being silently removed.
 
-The fix was one line: raise the threshold from 0.6 to 0.75 for coding content profiles. Post-fix CodeMemo recovered from 73.6% to 88.68% on the hardest project.
+The fix was one line: raise the global threshold from 0.6 to 0.75. Post-fix CodeMemo recovered from 73.6% to 88.68% on the hardest project. The LOCOMO confirmation run with the new threshold is still in progress — early signals are positive. Content-profile-aware thresholds (coding 0.8, personal 0.75) are on the roadmap as a follow-up.
 
 ## What we learned
 
