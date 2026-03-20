@@ -157,7 +157,7 @@ class AdaptiveParams:
     garbled_filter_enabled: bool = True
 
     # Retrieval
-    dedup_jaccard: float = 0.75
+    dedup_jaccard: float = 0.6
     max_knowledge_default: int | None = None   # None = no cap
     knowledge_boost_adjust: float = 0.0        # Added to intent-based boost
 
@@ -187,7 +187,7 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             specificity_threshold=10000,    # Effectively disabled
             generic_filter_enabled=False,   # Personal facts look "generic" to code filters
             garbled_filter_enabled=True,    # Still catch LLM artifacts
-            dedup_jaccard=0.75,             # Personal content is more diverse
+            dedup_jaccard=0.6,              # Preserve distinct personal evidence chunks
             max_knowledge_default=0,        # Disable knowledge in retrieval — raw chunks only
             knowledge_boost_adjust=0.0,     # N/A with max_knowledge=0
         )
