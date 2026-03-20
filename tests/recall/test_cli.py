@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -449,6 +450,56 @@ def test_recall_setup_no_transcripts(tmp_path):
         result = recall_setup()
 
     assert "No Claude Code transcripts found" in result
+
+
+def test_main_dispatches_export_command(tmp_path):
+    """CLI main dispatches the export command to cmd_export."""
+    with patch.object(sys, "argv", ["synapt", "export", "backup.synapt-archive"]), \
+         patch("synapt.recall.cli.cmd_export") as mock_export:
+        main()
+    mock_export.assert_called_once()
+    assert mock_export.call_args[0][0].output == "backup.synapt-archive"
+
+
+def test_main_dispatches_import_command(tmp_path):
+    """CLI main dispatches the import command to cmd_import."""
+    with patch.object(sys, "argv", ["synapt", "import", "backup.synapt-archive", "--merge"]), \
+         patch("synapt.recall.cli.cmd_import") as mock_import:
+        main()
+    mock_import.assert_called_once()
+    args = mock_import.call_args[0][0]
+    assert args.archive == "backup.synapt-archive"
+    assert args.merge is True
+
+
+def test_recall_export_tool_formats_success(tmp_path):
+    """recall_export MCP tool returns a concise summary."""
+    from synapt.recall.server import recall_export
+
+    archive_path = tmp_path / "project.synapt-archive"
+    with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+         patch("synapt.recall.archive.export_recall_archive",
+               return_value=(archive_path, {"chunk_count": 3, "knowledge_count": 2, "worktree_count": 1})):
+        result = recall_export()
+
+    assert str(archive_path) in result
+    assert "chunks: 3" in result
+    assert "knowledge: 2" in result
+
+
+def test_recall_import_tool_formats_success(tmp_path):
+    """recall_import MCP tool returns a concise summary."""
+    from synapt.recall.server import recall_import
+
+    archive_path = tmp_path / "project.synapt-archive"
+    with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+         patch("synapt.recall.archive.import_recall_archive",
+               return_value={"mode": "merge", "chunk_count": 5, "knowledge_count": 4}):
+        result = recall_import(str(archive_path), mode="merge")
+
+    assert str(archive_path) in result
+    assert "mode: merge" in result
+    assert "chunks: 5" in result
 
 
 # ---------------------------------------------------------------------------

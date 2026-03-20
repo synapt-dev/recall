@@ -528,6 +528,62 @@ def recall_setup(no_hook: bool = False) -> str:
     return "Setup complete.\n" + "\n".join(f"  - {s}" for s in steps)
 
 
+def recall_export(
+    output_path: str = "",
+    exclude_transcripts: bool = False,
+    exclude_channels: bool = False,
+) -> str:
+    """Export portable recall state to a .synapt-archive file.
+
+    Args:
+        output_path: Destination file path. Defaults to <project>.synapt-archive.
+        exclude_transcripts: If True, omit archived raw transcript JSONL files.
+        exclude_channels: If True, omit channel history files.
+    """
+    from synapt.recall.archive import export_recall_archive
+
+    project = Path.cwd().resolve()
+    try:
+        archive_path, manifest = export_recall_archive(
+            project,
+            Path(output_path).expanduser() if output_path else None,
+            exclude_transcripts=exclude_transcripts,
+            exclude_channels=exclude_channels,
+        )
+    except Exception as e:
+        return f"Export failed: {e}"
+
+    return (
+        f"Recall archive exported to {archive_path}\n"
+        f"  - chunks: {manifest.get('chunk_count', 0)}\n"
+        f"  - knowledge: {manifest.get('knowledge_count', 0)}\n"
+        f"  - worktrees: {manifest.get('worktree_count', 0)}"
+    )
+
+
+def recall_import(archive_path: str, mode: str = "replace") -> str:
+    """Import portable recall state from a .synapt-archive file.
+
+    Args:
+        archive_path: Path to the exported .synapt-archive file.
+        mode: Either "replace" or "merge".
+    """
+    from synapt.recall.archive import import_recall_archive
+
+    project = Path.cwd().resolve()
+    try:
+        summary = import_recall_archive(project, Path(archive_path), mode=mode)
+    except Exception as e:
+        return f"Import failed: {e}"
+
+    return (
+        f"Recall archive imported from {Path(archive_path).expanduser().resolve()}\n"
+        f"  - mode: {summary.get('mode', mode)}\n"
+        f"  - chunks: {summary.get('chunk_count', 0)}\n"
+        f"  - knowledge: {summary.get('knowledge_count', 0)}"
+    )
+
+
 def recall_stats() -> str:
     """Get statistics about the transcript index.
 
@@ -1792,6 +1848,8 @@ def register_tools(mcp) -> None:
     mcp.tool()(_with_directive_check(recall_sessions))
     mcp.tool()(recall_build)
     mcp.tool()(recall_setup)
+    mcp.tool()(recall_export)
+    mcp.tool()(recall_import)
     mcp.tool()(_with_directive_check(recall_stats))
     mcp.tool()(_with_directive_check(recall_journal))
     mcp.tool()(_with_directive_check(recall_remind))
