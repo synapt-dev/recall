@@ -383,8 +383,46 @@
     </div>
 
     <div class="tool-sig">
+      <h4>recall_export</h4>
+      <p>Export portable recall state to a versioned <code>.synapt-archive</code> tarball for backup, migration, or sharing.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>output_path</code></td><td>string</td><td>project-name.synapt-archive</td><td>Destination archive path</td></tr>
+        <tr><td><code>exclude_transcripts</code></td><td>bool</td><td>false</td><td>Omit archived raw transcript JSONL files</td></tr>
+        <tr><td><code>exclude_channels</code></td><td>bool</td><td>false</td><td>Omit channel history files</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_import</h4>
+      <p>Import a portable <code>.synapt-archive</code> backup into the current project.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>archive_path</code></td><td>string</td><td>&mdash;</td><td>Path to the archive file (required)</td></tr>
+        <tr><td><code>mode</code></td><td>string</td><td>"replace"</td><td><code>"replace"</code> for full restore, <code>"merge"</code> to union imported state with local recall data</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
       <h4>recall_stats</h4>
       <p>Index statistics. No parameters. Returns chunk count, session count, date range, tool/file coverage, embeddings status, knowledge nodes, clusters, storage backend, and index size on disk.</p>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_channel</h4>
+      <p>Cross-worktree coordination channel for multi-agent work. Supports messaging, directives, presence, unread checks, and channel search.</p>
+      <table>
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>action</code></td><td>string</td><td>"read"</td><td><code>post</code>, <code>read</code>, <code>who</code>, <code>join</code>, <code>leave</code>, <code>unread</code>, <code>directive</code>, and related coordination actions</td></tr>
+        <tr><td><code>channel</code></td><td>string</td><td>"dev"</td><td>Channel name to target</td></tr>
+        <tr><td><code>message</code></td><td>string</td><td>none</td><td>Message body for post/directive/broadcast actions</td></tr>
+        <tr><td><code>limit</code></td><td>int</td><td>20</td><td>Maximum messages to return for read/search actions</td></tr>
+      </table>
+    </div>
+
+    <div class="tool-sig">
+      <h4>recall_reload</h4>
+      <p>Restart the MCP server process in place so editable installs or local code changes take effect without a manual stop/start.</p>
     </div>
 
     <!-- ───────────────── Intent Classification ───────────────── -->

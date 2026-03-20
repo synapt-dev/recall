@@ -109,7 +109,7 @@ Add to `~/.config/opencode/opencode.json`:
 - **Timeline** — Chronological work arcs showing project narrative.
 - **Working memory** — Frequency-boosted search results for active topics.
 - **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
-- **MCP server** — 16 tools for Claude Code integration: search, journal, channels, reminders, knowledge, and more.
+- **MCP server** — 18 tools for Claude Code integration: search, journal, channels, reminders, portable archive export/import, knowledge, and more.
 - **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, and coordinate work across worktrees.
 - **Directive notifications** — Targeted directives are automatically surfaced in MCP tool responses. Broadcast directives (`to="*"`) reach all agents.
 - **Contradiction flagging** — Flag conflicting information from free text or search results. Auto-matches existing knowledge nodes via FTS, creates new nodes on resolution.
@@ -128,6 +128,8 @@ Add to `~/.config/opencode/opencode.json`:
 | `recall_timeline` | View chronological work arcs |
 | `recall_build` | Build or rebuild the transcript index |
 | `recall_setup` | Auto-configure hooks and MCP integration |
+| `recall_export` | Export a portable `.synapt-archive` backup |
+| `recall_import` | Import a portable recall archive (merge or replace) |
 | `recall_stats` | Index statistics |
 | `recall_journal` | Write rich session journal entries |
 | `recall_remind` | Set cross-session reminders |
@@ -144,6 +146,8 @@ Add to `~/.config/opencode/opencode.json`:
 synapt recall build              # Build index (discovers transcripts automatically)
 synapt recall build --incremental # Skip already-indexed files
 synapt recall search "query"     # Search past sessions
+synapt recall export backup.synapt-archive  # Create a portable backup
+synapt recall import backup.synapt-archive --merge  # Merge a backup into local recall state
 synapt recall stats              # Show index statistics
 synapt recall journal --write    # Write a session journal entry
 synapt recall setup              # Auto-configure hooks

@@ -247,7 +247,7 @@ synapt recall setup</code></pre>
 
     <h2 id="tools">4. Available Tools</h2>
 
-    <p>The MCP server exposes 14 recall tools. Here's what each does and when to use it.</p>
+    <p>The MCP server exposes 18 recall tools. Here's what each does and when to use it.</p>
 
     <h3>Search</h3>
     <table>
@@ -331,8 +331,32 @@ synapt recall setup</code></pre>
         <td>Initialize project directory, hooks, and gitignore</td>
       </tr>
       <tr>
+        <td><code>recall_export</code></td>
+        <td>Create a portable <code>.synapt-archive</code> backup of recall state</td>
+      </tr>
+      <tr>
+        <td><code>recall_import</code></td>
+        <td>Restore or merge a portable recall archive into the current project</td>
+      </tr>
+      <tr>
         <td><code>recall_stats</code></td>
         <td>Index statistics: chunks, sessions, date range, embeddings status, storage size</td>
+      </tr>
+    </table>
+
+    <h3>Coordination</h3>
+    <table>
+      <tr>
+        <th>Tool</th>
+        <th>Purpose</th>
+      </tr>
+      <tr>
+        <td><code>recall_channel</code></td>
+        <td>Cross-agent coordination: post messages, read channels, send directives, track presence, and check unread activity</td>
+      </tr>
+      <tr>
+        <td><code>recall_reload</code></td>
+        <td>Restart the MCP server after upgrades or editable-install changes</td>
       </tr>
     </table>
 
