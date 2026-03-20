@@ -2616,6 +2616,17 @@ class TranscriptIndex:
             f"{summary}{extra}. Review with "
             "`recall_contradict(action=\"list\")`.]"
         )
+
+    @staticmethod
+    def _annotate_boosted_block(block: str, label: str) -> str:
+        """Append a boost label to the first line of a rendered result block."""
+        if not block:
+            return block
+        lines = block.splitlines()
+        if not lines:
+            return block
+        lines[0] = f"{lines[0]} [{label}]"
+        return "\n".join(lines)
     def _format_results(
         self,
         ranked: list[tuple[int, float]],
@@ -2798,10 +2809,16 @@ class TranscriptIndex:
             top_unboosted = max(s for s, _, _, _ in emit_items)
             boost_ceiling = top_unboosted * 0.95  # never exceed 95% of top score
             for i, (score, block, item_type, item_id) in enumerate(emit_items):
+                wm_multiplier = wm.boost_multiplier(item_id)
                 boosted = wm.boost_score(score, item_id)
                 boosted = self._access_frequency_boost(boosted, item_type, item_id)
                 if boosted != score:
                     boosted = min(boosted, max(score, boost_ceiling))
+                    if boosted != score and wm_multiplier > 1.0:
+                        block = self._annotate_boosted_block(
+                            block,
+                            f"boosted: working-memory {wm_multiplier:.1f}x",
+                        )
                     emit_items[i] = (boosted, block, item_type, item_id)
 
         # Sort by score descending (highest relevance first)

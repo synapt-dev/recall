@@ -2,6 +2,7 @@
 
 import time
 
+from synapt.recall.core import TranscriptChunk, TranscriptIndex
 from synapt.recall.working_memory import WorkingMemory, WorkingMemorySlot, MAX_SLOTS
 
 
@@ -112,3 +113,40 @@ class TestWorkingMemory:
         wm.record("chunk", "s1:t0", "content")
         assert len(wm) == 1
         assert "s1:t0" in wm
+
+
+def _chunk(id: str, user: str = "", assistant: str = "") -> TranscriptChunk:
+    return TranscriptChunk(
+        id=id,
+        session_id="sess-1",
+        timestamp="2026-03-20T09:00:00Z",
+        turn_index=0,
+        user_text=user,
+        assistant_text=assistant,
+    )
+
+
+class TestWorkingMemoryResultFormatting:
+    def test_format_results_tags_working_memory_boost(self):
+        idx = TranscriptIndex([
+            _chunk("sess-1:t0", user="Show the strongest result", assistant="Top unboosted result."),
+            _chunk("sess-1:t1", user="What drink do I prefer?", assistant="You prefer tea."),
+        ])
+        idx._working_memory.record("chunk", "sess-1:t1", "You prefer tea.")
+
+        result = idx._format_results([(0, 10.0), (1, 7.0)], max_tokens=2000)
+
+        assert "[boosted: working-memory 1.5x]" in result
+
+    def test_format_results_tags_frequent_working_memory_boost(self):
+        idx = TranscriptIndex([
+            _chunk("sess-1:t0", user="Show the strongest result", assistant="Top unboosted result."),
+            _chunk("sess-1:t1", user="What drink do I prefer?", assistant="You prefer tea."),
+        ])
+        idx._working_memory.record("chunk", "sess-1:t1", "You prefer tea.")
+        idx._working_memory.record("chunk", "sess-1:t1", "You prefer tea.")
+        idx._working_memory.record("chunk", "sess-1:t1", "You prefer tea.")
+
+        result = idx._format_results([(0, 10.0), (1, 7.0)], max_tokens=2000)
+
+        assert "[boosted: working-memory 2.0x]" in result
