@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
-from evaluation.codememo import eval as codememo_eval
+
+def _load_codememo_eval():
+    repo_root = Path(__file__).resolve().parents[2]
+    module_path = repo_root / "evaluation" / "codememo" / "eval.py"
+    spec = importlib.util.spec_from_file_location("tests_codememo_eval_module", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+codememo_eval = _load_codememo_eval()
 
 
 class FakeSUT:
