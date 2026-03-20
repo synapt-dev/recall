@@ -873,6 +873,7 @@ class TranscriptIndex:
 
         # Search diagnostics (populated on empty results for caller inspection)
         self._last_diagnostics: SearchDiagnostics | None = None
+        self._last_conflicts: list[tuple[dict, dict]] = []
 
         # Query result cache — avoids re-computing BM25/embedding/RRF for
         # identical queries within the same index lifetime. LRU with max 32 entries.
@@ -2595,6 +2596,26 @@ class TranscriptIndex:
         meta_line = f"[{'. '.join(meta_parts)}]" if meta_parts else ""
         return f"{header}\n{content}\n{meta_line}" if meta_line else f"{header}\n{content}"
 
+    def _format_conflict_notice(self) -> str:
+        """Render a short user-facing notice for co-retrieval contradictions."""
+        if not self._last_conflicts:
+            return ""
+
+        previews: list[str] = []
+        for old, new in self._last_conflicts[:2]:
+            old_text = (old.get("content", "") or old.get("id", "unknown"))[:50]
+            new_text = (new.get("content", "") or new.get("id", "unknown"))[:50]
+            previews.append(f'"{old_text}" vs "{new_text}"')
+
+        summary = "; ".join(previews)
+        extra = ""
+        if len(self._last_conflicts) > 2:
+            extra = f" (+{len(self._last_conflicts) - 2} more)"
+        return (
+            "[Potential contradiction detected in retrieved knowledge: "
+            f"{summary}{extra}. Review with "
+            "`recall_contradict(action=\"list\")`.]"
+        )
     def _format_results(
         self,
         ranked: list[tuple[int, float]],
@@ -2911,6 +2932,10 @@ class TranscriptIndex:
             elif item["item_type"] == "knowledge":
                 content = knowledge_content.get(item["item_id"], "")
             wm.record(item["item_type"], item["item_id"], content)
+
+        conflict_notice = self._format_conflict_notice()
+        if conflict_notice:
+            lines.append(conflict_notice)
 
         if len(lines) <= 1:
             return ""

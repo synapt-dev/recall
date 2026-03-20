@@ -1397,6 +1397,33 @@ class TestCoRetrievalConflictDetection:
         index.lookup("nonexistent query that matches nothing")
         assert index._last_conflicts == []
 
+    def test_format_results_surfaces_conflict_notice(self, tmp_path):
+        """Visible search output should surface detected knowledge conflicts."""
+        db = _make_db(tmp_path)
+        index = TranscriptIndex([], db=db)
+        old = _make_knowledge_node(
+            node_id="n1",
+            content="always use unittest for Python testing",
+            category="tooling",
+            confidence=0.7,
+        )
+        new = _make_knowledge_node(
+            node_id="n2",
+            content="prefer pytest with fixtures and markers",
+            category="tooling",
+            confidence=0.8,
+        )
+        index._last_conflicts = [(old, new)]
+
+        result = index._format_results(
+            [],
+            max_tokens=2000,
+            knowledge_results=[old, new],
+        )
+
+        assert "Potential contradiction detected in retrieved knowledge" in result
+        assert "recall_contradict(action=\"list\")" in result
+
     def test_has_pending_contradiction_for(self, tmp_path):
         """Test the storage dedup helper."""
         db = _make_db(tmp_path)
