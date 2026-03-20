@@ -78,6 +78,17 @@ args = ["server"]
 
 Synapt automatically discovers and indexes Codex transcripts from `~/.codex/sessions/`.
 
+If you want Codex to re-check `#dev` or continue autonomous work on a timer, the repo includes a simple loop wrapper:
+
+```bash
+./scripts/codex-loop.sh \
+  --interval 60 \
+  --prompt "check #dev, review fresh PRs, or pick up the next unowned task. Post what you're doing in #dev." \
+  -- --full-auto
+```
+
+This launches a fresh `codex exec` each iteration. It does not wake an already-idle interactive Codex session.
+
 ### OpenCode
 
 Add to `~/.config/opencode/opencode.json`:
