@@ -61,7 +61,15 @@ def _resolve_data_dir() -> Path:
         return _LOCAL_DATA  # fall back, will error later if empty
 
 
-DATA_DIR = _resolve_data_dir()
+DATA_DIR: Path | None = None
+
+
+def _get_data_dir() -> Path:
+    """Resolve CodeMemo data lazily so importing this module is side-effect free."""
+    global DATA_DIR
+    if DATA_DIR is None:
+        DATA_DIR = _resolve_data_dir()
+    return DATA_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +724,10 @@ def load_session_texts(session_dir: Path) -> dict[str, list[str]]:
 def discover_projects(project_filter: str | None = None) -> list[Path]:
     """Find all project directories under data/."""
     projects = []
-    for d in sorted(DATA_DIR.iterdir()):
+    data_dir = _get_data_dir()
+    if not data_dir.exists():
+        return projects
+    for d in sorted(data_dir.iterdir()):
         if not d.is_dir():
             continue
         if not (d / "manifest.json").exists():
@@ -1184,7 +1195,7 @@ def main():
     # Discover projects
     project_dirs = discover_projects(args.project)
     if not project_dirs:
-        print(f"No projects found in {DATA_DIR}")
+        print(f"No projects found in {_get_data_dir()}")
         if args.project:
             print(f"  (filtered for: {args.project})")
         sys.exit(1)
