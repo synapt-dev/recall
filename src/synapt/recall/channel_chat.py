@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import json
 import os
-import readline as _readline  # noqa: F401 — import enables line editing
 import select
 import shlex
 import sys
 from pathlib import Path
+
+try:
+    import readline as _readline  # noqa: F401
+except ImportError:  # pragma: no cover - platform dependent
+    _readline = None
 
 from synapt.recall.channel import (
     ChannelMessage,
@@ -201,10 +205,10 @@ class ChatUI:
 
         # Set up readline for editing + tab completion
         self._completer = _ChatCompleter()
-        import readline
-        readline.set_completer(self._completer.complete)
-        readline.set_completer_delims(" ")
-        readline.parse_and_bind("tab: complete")
+        if _readline is not None:
+            _readline.set_completer(self._completer.complete)
+            _readline.set_completer_delims(" ")
+            _readline.parse_and_bind("tab: complete")
 
     def run(self) -> None:
         """Main event loop."""

@@ -33,3 +33,9 @@ class TestChannelChatAttachments(unittest.TestCase):
             agent_name="human",
             attachment_paths=[str(path)],
         )
+
+    def test_chat_ui_init_without_readline(self):
+        with patch("synapt.recall.channel_chat._readline", None):
+            ui = ChatUI(channel="dev", agent_name="layne")
+
+        self.assertEqual(ui.channel, "dev")
