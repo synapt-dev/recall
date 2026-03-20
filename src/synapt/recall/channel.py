@@ -1553,7 +1553,19 @@ def check_directives(
     pending_ids = {msg.id for _, msg in pending}
     mentions = [(ch, msg) for ch, msg in mentions if msg.id not in pending_ids]
 
-    if not pending and not mentions:
+    # Collect recent intents from other agents (last 10 min)
+    # so this agent sees what others are working on
+    intents: list[tuple[str, ChannelMessage]] = []
+    for ch in channels:
+        since = cursors.get(ch, "1970-01-01T00:00:00Z")
+        path = _channel_path(ch, project_dir)
+        if not path.exists():
+            continue
+        for msg in _read_messages(path, since=since):
+            if msg.type == "intent" and msg.from_agent != aid:
+                intents.append((ch, msg))
+
+    if not pending and not mentions and not intents:
         return ""
 
     # Format for output (will appear as system reminder in context)
@@ -1566,4 +1578,9 @@ def check_directives(
         lines.append(f"[channel] {len(mentions)} @mention(s):")
         for ch, msg in mentions:
             lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    if intents:
+        lines.append(f"[channel] {len(intents)} active intent(s):")
+        for ch, msg in intents:
+            display = _resolve_display_name_for(msg.from_agent, project_dir)
+            lines.append(f"  #{ch} {display} is working on: {msg.body}")
     return "\n".join(lines)
