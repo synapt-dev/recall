@@ -2383,12 +2383,20 @@ class TranscriptIndex:
                         conf = 0.5
                     # Confidence gate: low-confidence knowledge (<0.4) gets
                     # no boost to avoid polluting results with weak facts.
-                    # Above the gate, scale linearly: conf=0.5 → 2.0x,
-                    # conf=0.9 → 2.8x.
+                    # Above the gate, scale by confidence AND specificity.
+                    # Reuses consolidation's _lacks_specificity which checks
+                    # file paths, versions, CLI flags, CamelCase/snake_case,
+                    # PR/issue refs, and proper nouns. Short-but-specific
+                    # facts like "Pin croniter to v1.3.8" get full boost.
                     if conf < 0.4:
                         effective_boost = 1.0
                     else:
-                        effective_boost = 1.0 + conf * knowledge_boost
+                        from synapt.recall.consolidate import _lacks_specificity
+                        if _lacks_specificity(node_content, threshold=200):
+                            specificity = 0.5  # abstract/generic — reduced boost
+                        else:
+                            specificity = 1.0  # specific (paths, versions, names)
+                        effective_boost = 1.0 + conf * specificity * knowledge_boost
                     # Entity boost: prefer knowledge about the specific
                     # entities mentioned in the query (e.g. person names).
                     if query_entities:
