@@ -3569,15 +3569,17 @@ def _find_gripspace_root(path: Path) -> Path | None:
     while current != current.parent:
         gitgrip = current / ".gitgrip"
         if gitgrip.is_dir():
-            # Gripspace root has griptrees.json (plural)
-            if (gitgrip / "griptrees.json").exists():
-                _gripspace_cache[cache_key] = (current, time.monotonic())
-                return current
-            # Linked griptree has griptree.json (singular) — resolve to parent
+            # Linked griptree has griptree.json (singular) — always resolve
+            # to parent gripspace, even if griptrees.json also exists (which
+            # happens when `gr` clones the full directory structure).
             if (gitgrip / "griptree.json").exists():
                 root = _resolve_griptree_parent(current)
                 _gripspace_cache[cache_key] = (root, time.monotonic())
                 return root
+            # Gripspace root has only griptrees.json (plural), no singular
+            if (gitgrip / "griptrees.json").exists():
+                _gripspace_cache[cache_key] = (current, time.monotonic())
+                return current
         # Don't walk above $HOME
         if current == home:
             break
