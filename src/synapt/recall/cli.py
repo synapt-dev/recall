@@ -1607,6 +1607,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
         project = Path.cwd().resolve()
         transcript_all = project_transcript_dirs(project)
 
+        # 0a. Stale MCP server warning — surface prominently so agent acts (#428)
+        try:
+            from synapt.recall.server import _check_version_stale
+            stale_warning = _check_version_stale()
+            if stale_warning:
+                print(f"WARNING: {stale_warning}")
+                print("Call recall_reload to restart the MCP server with the latest code.")
+        except Exception:
+            pass
+
         # 0. Catch up: archive + journal for any un-processed transcripts.
         #    Handles /clear (where session-end may not have fired) and
         #    crash recovery. Only writes a journal entry if the latest
