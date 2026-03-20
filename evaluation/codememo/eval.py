@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -36,7 +37,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from evaluation.codememo.schema import CATEGORY_NAMES, ALL_CATEGORIES
+try:
+    from evaluation.codememo.schema import CATEGORY_NAMES, ALL_CATEGORIES
+except ModuleNotFoundError:
+    # Tests may load this module by file path, where evaluation/ is not a package.
+    _SCHEMA_PATH = Path(__file__).with_name("schema.py")
+    _SCHEMA_SPEC = importlib.util.spec_from_file_location("codememo_schema", _SCHEMA_PATH)
+    assert _SCHEMA_SPEC is not None
+    assert _SCHEMA_SPEC.loader is not None
+    _schema_module = importlib.util.module_from_spec(_SCHEMA_SPEC)
+    _SCHEMA_SPEC.loader.exec_module(_schema_module)
+    CATEGORY_NAMES = _schema_module.CATEGORY_NAMES
+    ALL_CATEGORIES = _schema_module.ALL_CATEGORIES
 
 # ---------------------------------------------------------------------------
 # Data paths
