@@ -1,6 +1,7 @@
 """synapt -- unified CLI for recall and MCP server.
 
 Usage:
+    synapt init      # one-command project setup
     synapt recall search "query"
     synapt recall build --incremental
     synapt recall stats
@@ -29,6 +30,13 @@ def _discover_commands() -> dict[str, callable]:
     return commands
 
 
+def _dispatch_recall(*args: str) -> None:
+    from synapt.recall.cli import main as recall_main
+
+    sys.argv = ["synapt recall"] + list(args)
+    recall_main()
+
+
 def main():
     extra_commands = _discover_commands()
 
@@ -48,18 +56,19 @@ def main():
         print(f"synapt {__version__}")
         return
 
-    # Remove the subcommand from argv so each sub-CLI sees correct args
-    sys.argv = [f"synapt {subcmd}"] + sys.argv[2:]
-
     if subcmd == "recall":
-        from synapt.recall.cli import main as recall_main
-
-        recall_main()
+        _dispatch_recall(*sys.argv[2:])
+    elif subcmd == "init":
+        _dispatch_recall("setup", *sys.argv[2:])
     elif subcmd == "server":
+        # Remove the subcommand from argv so the sub-CLI sees correct args.
+        sys.argv = [f"synapt {subcmd}"] + sys.argv[2:]
         from synapt.server import main as server_main
 
         server_main()
     elif subcmd in extra_commands:
+        # Remove the subcommand from argv so the plugin sees correct args.
+        sys.argv = [f"synapt {subcmd}"] + sys.argv[2:]
         ep = extra_commands[subcmd]
         cli_main = ep.load()
         cli_main()
@@ -74,6 +83,7 @@ def _print_help(extra_commands: dict | None = None):
         "synapt -- persistent conversational memory for AI coding assistants",
         "",
         "Commands:",
+        "  init      One-command project setup",
         "  recall    Search and manage past session transcripts",
         "  server    Start the unified MCP server (--dev for auto-reload)",
     ]

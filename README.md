@@ -154,6 +154,7 @@ Add to `~/.config/opencode/opencode.json`:
 ## CLI reference
 
 ```bash
+synapt init                      # One-command project setup
 synapt recall build              # Build index (discovers transcripts automatically)
 synapt recall build --incremental # Skip already-indexed files
 synapt recall search "query"     # Search past sessions
@@ -161,7 +162,7 @@ synapt recall export backup.synapt-archive  # Create a portable backup
 synapt recall import backup.synapt-archive --merge  # Merge a backup into local recall state
 synapt recall stats              # Show index statistics
 synapt recall journal --write    # Write a session journal entry
-synapt recall setup              # Auto-configure hooks
+synapt recall setup              # Same setup path, explicitly under recall
 synapt server                    # Start MCP server
 ```
 
