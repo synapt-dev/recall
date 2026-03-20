@@ -4,7 +4,7 @@ Provides fourteen tools via the Model Context Protocol:
   - recall_search: Search past session transcripts by keyword/topic
   - recall_quick: Fast, low-cost knowledge-only search for speculative checks
   - recall_context: Drill down into a search result for full raw content
-  - recall_files: Find sessions that touched a specific file
+  - recall_files: Find file history when you need prior context or rationale
   - recall_sessions: List recent sessions with summaries
   - recall_timeline: View chronological timeline of work arcs
   - recall_build: Build or rebuild the transcript index
@@ -57,7 +57,7 @@ MCP_INSTRUCTIONS = (
     "Search BEFORE you act, not after.\n"
     "\n"
     "WHEN TO SEARCH (do this automatically, without being asked):\n"
-    "- Before editing a file you haven't seen this session -> recall_files\n"
+    "- When you need file history or design rationale for a specific path -> recall_files\n"
     "- Before making a design decision -> recall_search for prior discussion\n"
     "- When debugging an error -> recall_search for past fixes\n"
     "- When user references past work -> recall_search immediately\n"
@@ -68,7 +68,7 @@ MCP_INSTRUCTIONS = (
     "WHICH TOOL:\n"
     "- recall_quick: Fast, cheap knowledge check. Use speculatively when unsure.\n"
     "- recall_search: Full search with transcript chunks. Use when you need detail.\n"
-    "- recall_files: Find sessions that touched a specific file path.\n"
+    "- recall_files: Use for file history questions like 'who changed this and why?'\n"
     "- recall_journal: Read/write session notes. Check at session start.\n"
     "- recall_remind: Set/check cross-session reminders.\n"
     "\n"
@@ -369,6 +369,8 @@ def recall_files(
 
     Searches the files_touched metadata of all indexed conversation turns.
     Supports partial path matching: 'repair.py' matches 'src/graph/repair.py'.
+    Best when you need file history or design context, not as a generic
+    "before editing" step.
 
     Args:
         pattern: File path or partial path to search for.
