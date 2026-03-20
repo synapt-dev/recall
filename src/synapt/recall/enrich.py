@@ -604,9 +604,6 @@ def enrich_all(
     project_dir = (project_dir or Path.cwd()).resolve()
     journal_path = _journal_path(project_dir)
 
-    # Skip entries already processed in a previous enrichment run
-    last_enrichment_ts = _get_last_enrichment_ts(project_dir)
-
     # Collect all journaled session_ids and non-auto session_ids
     all_journaled: set[str] = set()
     existing_non_auto: set[str] = set()
@@ -630,12 +627,12 @@ def enrich_all(
     _backfill_stubs(project_dir, journal_path, all_journaled)
 
     count = 0
-    last_processed_ts = ""
     for entry in iter_enrichable_entries(journal_path):
         if entry.session_id in existing_non_auto:
             continue  # Already has a manual/enriched entry
-        if last_enrichment_ts and entry.timestamp <= last_enrichment_ts:
-            continue  # Already attempted in a previous enrichment run
+        # Dedup relies on existing_non_auto: successfully enriched entries
+        # get a non-auto entry appended, so they're skipped on retry.
+        # Failed entries stay as auto stubs and are retried next run.
 
         if dry_run:
             focus_preview = entry.focus[:80] if entry.focus else "(no focus)"
@@ -647,7 +644,6 @@ def enrich_all(
                 append_entry(enriched, journal_path)
                 print(f"  Enriched: {entry.session_id[:8]} — {enriched.focus[:80]}")
                 existing_non_auto.add(entry.session_id)
-                last_processed_ts = entry.timestamp
                 count += 1
             else:
                 print(f"  Skipped: {entry.session_id[:8]} (enrichment failed)")
@@ -655,45 +651,28 @@ def enrich_all(
         if max_entries and count >= max_entries:
             break
 
-    # Checkpoint the last successfully enriched entry's timestamp (not now()),
-    # so failed entries with earlier timestamps can be retried next run.
-    if last_processed_ts and not dry_run:
-        _set_last_enrichment_ts(project_dir, last_processed_ts)
+    # Record when enrichment last ran (observability only — not used for filtering)
+    if count > 0 and not dry_run:
+        _set_last_enrichment_ts(project_dir)
 
     return count
 
 
-def _get_last_enrichment_ts(project_dir: Path) -> str:
-    """Get the timestamp of the last enrichment run from DB metadata."""
-    try:
-        from synapt.recall.core import project_index_dir
-        from synapt.recall.storage import RecallDB
-        db_path = project_index_dir(project_dir) / "recall.db"
-        if not db_path.exists():
-            return ""
-        db = RecallDB(db_path)
-        ts = db.get_metadata("last_enrichment_ts") or ""
-        db.close()
-        return ts
-    except Exception as exc:
-        logger.debug("Failed to read enrichment checkpoint: %s", exc)
-        return ""
+def _set_last_enrichment_ts(project_dir: Path) -> None:
+    """Record when enrichment last ran (observability/debugging only).
 
-
-def _set_last_enrichment_ts(project_dir: Path, ts: str) -> None:
-    """Save the last enriched entry's timestamp as the checkpoint.
-
-    Uses the entry's own timestamp (not wall-clock time) so that entries
-    which failed enrichment and have earlier timestamps can be retried.
+    Not used for filtering — dedup relies on existing_non_auto set in
+    enrich_all(), which correctly retries failed entries.
     """
     try:
+        from datetime import datetime, timezone
         from synapt.recall.core import project_index_dir
         from synapt.recall.storage import RecallDB
         db_path = project_index_dir(project_dir) / "recall.db"
         if not db_path.exists():
             return
         db = RecallDB(db_path)
-        db.set_metadata("last_enrichment_ts", ts)
+        db.set_metadata("last_enrichment_ts", datetime.now(timezone.utc).isoformat())
         db.close()
     except Exception as exc:
-        logger.debug("Failed to save enrichment checkpoint: %s", exc)
+        logger.debug("Failed to save enrichment timestamp: %s", exc)
