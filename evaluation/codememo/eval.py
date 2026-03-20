@@ -352,6 +352,12 @@ class SynaptSUT:
             return {}
         return self._index.stats()
 
+    def reset_working_memory(self) -> None:
+        """Clear only session-scoped working memory between repeat passes."""
+        wm = getattr(self._index, "_working_memory", None)
+        if wm is not None and hasattr(wm, "clear"):
+            wm.clear()
+
     def close(self) -> None:
         """Clean up resources."""
         if self._db is not None:
@@ -724,6 +730,86 @@ def discover_projects(project_filter: str | None = None) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
+# Repeat-run helpers
+# ---------------------------------------------------------------------------
+
+def _result_key(result: dict) -> str:
+    """Stable checkpoint key across repeat runs and projects."""
+    run = int(result.get("run", 1) or 1)
+    project = result.get("project", "")
+    qid = result.get("id", "")
+    return f"{run}:{project}:{qid}"
+
+
+def _build_run_summary(
+    *,
+    run: int,
+    project_ids: list[str],
+    max_chunks: int,
+    model: str,
+    pipeline_mode: str,
+    provenance: dict,
+    retrieval_only: bool,
+    category_scores: dict[int, list],
+    category_f1: dict[int, list],
+    category_recall: dict[int, list],
+    total_retrieve_time: float,
+    total_generate_time: float,
+    total_judge_time: float,
+    total_chunks: int,
+    total_knowledge: int,
+    question_count: int,
+    enrich_model_name: str = "",
+) -> dict:
+    """Build one pass summary without mutating outer state."""
+    summary: dict = {
+        "benchmark": "codememo",
+        "run": run,
+        "projects": project_ids,
+        "questions_evaluated": question_count,
+        "max_chunks": max_chunks,
+        "index_chunks": total_chunks,
+        "model": model,
+        "enrichment_model": enrich_model_name or "none",
+        "pipeline_mode": pipeline_mode,
+        "provenance": provenance,
+    }
+    if total_knowledge:
+        summary["knowledge_nodes"] = total_knowledge
+    if question_count:
+        summary["avg_retrieve_ms"] = round(total_retrieve_time / question_count * 1000, 1)
+
+    for cat in sorted(ALL_CATEGORIES):
+        if category_recall[cat]:
+            avg = sum(category_recall[cat]) / len(category_recall[cat])
+            summary[f"recall@{max_chunks}_{CATEGORY_NAMES[cat]}"] = round(avg * 100, 2)
+            summary[f"n_{CATEGORY_NAMES[cat]}"] = len(category_recall[cat])
+
+    if not retrieval_only and category_scores:
+        if question_count:
+            summary["avg_generate_ms"] = round(total_generate_time / question_count * 1000, 1)
+            summary["avg_judge_ms"] = round(total_judge_time / question_count * 1000, 1)
+
+        for cat in sorted(ALL_CATEGORIES):
+            if category_scores[cat]:
+                j = sum(category_scores[cat]) / len(category_scores[cat]) * 100
+                summary[f"j_score_{CATEGORY_NAMES[cat]}"] = round(j, 2)
+
+        all_j = [s for scores in category_scores.values() for s in scores]
+        summary["j_score_overall"] = round(sum(all_j) / len(all_j) * 100, 2) if all_j else 0
+
+        for cat in sorted(ALL_CATEGORIES):
+            if category_f1[cat]:
+                avg_f1 = sum(category_f1[cat]) / len(category_f1[cat]) * 100
+                summary[f"f1_{CATEGORY_NAMES[cat]}"] = round(avg_f1, 2)
+
+        all_f1 = [f for scores in category_f1.values() for f in scores]
+        summary["f1_overall"] = round(sum(all_f1) / len(all_f1) * 100, 2) if all_f1 else 0
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Main evaluation loop
 # ---------------------------------------------------------------------------
 
@@ -734,6 +820,8 @@ def run_evaluation(
     max_chunks: int = 20,
     output_path: Path | None = None,
     model: str = "gpt-4o-mini",
+    repeat_runs: int = 1,
+    reset_working_memory_between_runs: bool = False,
 ) -> dict:
     """Run the CodeMemo evaluation across one or more projects.
 
@@ -767,16 +855,7 @@ def run_evaluation(
     pipeline_mode = sut.mode if isinstance(sut, SynaptSUT) else "external"
     audit_ts = _audit_start(pipeline_mode, model, provenance)
 
-    all_results = []
-    category_scores: dict[int, list] = defaultdict(list)
-    category_f1: dict[int, list] = defaultdict(list)
-    category_recall: dict[int, list] = defaultdict(list)
-    total_retrieve_time = 0.0
-    total_generate_time = 0.0
-    total_judge_time = 0.0
-    total_chunks = 0
-    total_knowledge = 0
-    total_questions = 0
+    all_results: list[dict] = []
 
     # Resume from checkpoint if available
     checkpoint_dir = output_path if output_path else Path("evaluation/codememo/results")
@@ -787,16 +866,12 @@ def run_evaluation(
             checkpoint_data = json.load(f)
         all_results = checkpoint_data
         for r in all_results:
-            completed_ids.add(r["id"])
-            cat = r["category"]
-            if "j_score" in r:
-                category_scores[cat].append(r["j_score"])
-            if "f1" in r:
-                category_f1[cat].append(r["f1"])
-            if "retrieval_recall" in r:
-                category_recall[cat].append(r["retrieval_recall"])
-        total_questions = len(completed_ids)
-        print(f"  Resumed from checkpoint: {len(completed_ids)} questions already evaluated")
+            completed_ids.add(_result_key(r))
+        print(f"  Resumed from checkpoint: {len(completed_ids)} completed question-runs")
+
+    project_infos: list[dict] = []
+    total_chunks = 0
+    total_knowledge = 0
 
     for project_dir in project_dirs:
         project_id = project_dir.name
@@ -842,96 +917,19 @@ def run_evaluation(
         kn_msg = f", {kn_count} knowledge nodes" if kn_count else ""
         print(f"  Indexed: {chunk_count} chunks{kn_msg} in {ingest_time:.1f}s")
 
-        # Evaluate each question
-        for i, qa in enumerate(questions):
-            qid = qa["id"]
-            question = qa["question"]
-            gold = str(qa.get("answer_short", qa["answer"]))
-            category = qa["category"]
-            evidence = qa.get("evidence", [])
-
-            if category not in ALL_CATEGORIES:
-                continue
-
-            if qid in completed_ids:
-                continue
-
-            # Retrieve
-            t0 = time.time()
-            context = sut.query(question, max_chunks=max_chunks)
-            retrieve_time = time.time() - t0
-            total_retrieve_time += retrieve_time
-
-            # Retrieval recall
-            recall_at_k = compute_retrieval_recall(
-                context, evidence, session_texts,
-                chunk_line_map=chunk_line_map,
-            )
-            category_recall[category].append(recall_at_k)
-
-            result_entry = {
-                "project": project_id,
-                "id": qid,
-                "question": question,
-                "gold_answer": gold,
-                "category": category,
-                "category_name": CATEGORY_NAMES.get(category, "?"),
-                "context": context,
-                "context_length": len(context),
-                "retrieve_time_ms": round(retrieve_time * 1000, 1),
-                "retrieval_recall": recall_at_k,
-            }
-
-            if not retrieval_only and client:
-                # Generate
-                t0 = time.time()
-                generated = generate_answer(question, context, client, model=model)
-                generate_time = time.time() - t0
-                total_generate_time += generate_time
-
-                # F1
-                f1 = token_f1(generated, gold)
-                category_f1[category].append(f1)
-
-                # Judge
-                t0 = time.time()
-                j_score = judge_answer(question, gold, generated, client, model=model)
-                judge_time = time.time() - t0
-                total_judge_time += judge_time
-
-                category_scores[category].append(j_score)
-
-                result_entry.update({
-                    "generated_answer": generated,
-                    "j_score": j_score,
-                    "f1": round(f1, 4),
-                    "generate_time_ms": round(generate_time * 1000, 1),
-                    "judge_time_ms": round(judge_time * 1000, 1),
-                })
-
-            all_results.append(result_entry)
-            total_questions += 1
-
-            # Progress
-            if (i + 1) % 10 == 0 or i == len(questions) - 1:
-                elapsed = total_retrieve_time + total_generate_time + total_judge_time
-                if not retrieval_only and category_scores:
-                    all_j = [s for scores in category_scores.values() for s in scores]
-                    running_j = sum(all_j) / len(all_j) * 100 if all_j else 0
-                    print(f"  [{i+1}/{len(questions)}] J={running_j:.1f}% "
-                          f"({elapsed:.0f}s elapsed)")
-                else:
-                    print(f"  [{i+1}/{len(questions)}] retrieval done "
-                          f"({elapsed:.0f}s elapsed)")
-
-                # Save checkpoint so progress isn't lost on crash/rate-limit
-                checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                with open(checkpoint_path, "w") as f:
-                    json.dump(all_results, f)
+        project_infos.append({
+            "project_id": project_id,
+            "questions": questions,
+            "session_texts": session_texts,
+            "chunk_line_map": chunk_line_map,
+        })
 
     # ---------------------------------------------------------------------------
     # Aggregate scores
     # ---------------------------------------------------------------------------
+    run_summaries: list[dict] = []
+    total_questions_all = 0
+
     # Resolve enrichment model for provenance
     enrich_model_name = ""
     if isinstance(sut, SynaptSUT):
@@ -943,56 +941,157 @@ def run_evaluation(
             except ImportError:
                 enrich_model_name = "(default — unknown)"
 
-    summary: dict = {
+    for run in range(1, max(1, repeat_runs) + 1):
+        if run > 1 and reset_working_memory_between_runs and hasattr(sut, "reset_working_memory"):
+            sut.reset_working_memory()
+
+        category_scores: dict[int, list] = defaultdict(list)
+        category_f1: dict[int, list] = defaultdict(list)
+        category_recall: dict[int, list] = defaultdict(list)
+        total_retrieve_time = 0.0
+        total_generate_time = 0.0
+        total_judge_time = 0.0
+        total_questions = 0
+
+        print(f"\n{'-'*60}")
+        print(f"Run {run}/{max(1, repeat_runs)}")
+        print(f"{'-'*60}")
+
+        for info in project_infos:
+            project_id = info["project_id"]
+            questions = info["questions"]
+            session_texts = info["session_texts"]
+            chunk_line_map = info["chunk_line_map"]
+
+            for i, qa in enumerate(questions):
+                qid = qa["id"]
+                question = qa["question"]
+                gold = str(qa.get("answer_short", qa["answer"]))
+                category = qa["category"]
+                evidence = qa.get("evidence", [])
+
+                if category not in ALL_CATEGORIES:
+                    continue
+
+                key = f"{run}:{project_id}:{qid}"
+                if key in completed_ids:
+                    continue
+
+                t0 = time.time()
+                context = sut.query(question, max_chunks=max_chunks)
+                retrieve_time = time.time() - t0
+                total_retrieve_time += retrieve_time
+
+                recall_at_k = compute_retrieval_recall(
+                    context, evidence, session_texts, chunk_line_map=chunk_line_map,
+                )
+                category_recall[category].append(recall_at_k)
+
+                result_entry = {
+                    "run": run,
+                    "project": project_id,
+                    "id": qid,
+                    "question": question,
+                    "gold_answer": gold,
+                    "category": category,
+                    "category_name": CATEGORY_NAMES.get(category, "?"),
+                    "context": context,
+                    "context_length": len(context),
+                    "retrieve_time_ms": round(retrieve_time * 1000, 1),
+                    "retrieval_recall": recall_at_k,
+                }
+
+                if not retrieval_only and client:
+                    t0 = time.time()
+                    generated = generate_answer(question, context, client, model=model)
+                    generate_time = time.time() - t0
+                    total_generate_time += generate_time
+
+                    f1 = token_f1(generated, gold)
+                    category_f1[category].append(f1)
+
+                    t0 = time.time()
+                    j_score = judge_answer(question, gold, generated, client, model=model)
+                    judge_time = time.time() - t0
+                    total_judge_time += judge_time
+
+                    category_scores[category].append(j_score)
+                    result_entry.update({
+                        "generated_answer": generated,
+                        "j_score": j_score,
+                        "f1": round(f1, 4),
+                        "generate_time_ms": round(generate_time * 1000, 1),
+                        "judge_time_ms": round(judge_time * 1000, 1),
+                    })
+
+                all_results.append(result_entry)
+                completed_ids.add(key)
+                total_questions += 1
+                total_questions_all += 1
+
+                if (i + 1) % 10 == 0 or i == len(questions) - 1:
+                    elapsed = total_retrieve_time + total_generate_time + total_judge_time
+                    if not retrieval_only and category_scores:
+                        all_j = [s for scores in category_scores.values() for s in scores]
+                        running_j = sum(all_j) / len(all_j) * 100 if all_j else 0
+                        print(
+                            f"  Run {run} [{i+1}/{len(questions)}] "
+                            f"J={running_j:.1f}% ({elapsed:.0f}s elapsed)"
+                        )
+                    else:
+                        print(
+                            f"  Run {run} [{i+1}/{len(questions)}] retrieval done "
+                            f"({elapsed:.0f}s elapsed)"
+                        )
+
+                    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    with open(checkpoint_path, "w") as f:
+                        json.dump(all_results, f)
+
+        run_summaries.append(_build_run_summary(
+            run=run,
+            project_ids=[d.name for d in project_dirs],
+            max_chunks=max_chunks,
+            model=model,
+            pipeline_mode=sut.mode if isinstance(sut, SynaptSUT) else "external",
+            provenance=provenance,
+            retrieval_only=retrieval_only,
+            category_scores=category_scores,
+            category_f1=category_f1,
+            category_recall=category_recall,
+            total_retrieve_time=total_retrieve_time,
+            total_generate_time=total_generate_time,
+            total_judge_time=total_judge_time,
+            total_chunks=total_chunks,
+            total_knowledge=total_knowledge,
+            question_count=total_questions,
+            enrich_model_name=enrich_model_name,
+        ))
+
+    summary = dict(run_summaries[-1]) if run_summaries else {
         "benchmark": "codememo",
         "projects": [d.name for d in project_dirs],
-        "questions_evaluated": total_questions,
+        "questions_evaluated": 0,
         "max_chunks": max_chunks,
-        "index_chunks": total_chunks,
         "model": model,
-        "enrichment_model": enrich_model_name or "none",
         "pipeline_mode": sut.mode if isinstance(sut, SynaptSUT) else "external",
         "provenance": provenance,
     }
-    if total_knowledge:
-        summary["knowledge_nodes"] = total_knowledge
-    if total_questions:
-        summary["avg_retrieve_ms"] = round(
-            total_retrieve_time / total_questions * 1000, 1)
-
-    # Retrieval recall by category
-    for cat in sorted(ALL_CATEGORIES):
-        if category_recall[cat]:
-            avg = sum(category_recall[cat]) / len(category_recall[cat])
-            summary[f"recall@{max_chunks}_{CATEGORY_NAMES[cat]}"] = round(avg * 100, 2)
-            summary[f"n_{CATEGORY_NAMES[cat]}"] = len(category_recall[cat])
-
-    if not retrieval_only and category_scores:
-        summary["avg_generate_ms"] = round(
-            total_generate_time / total_questions * 1000, 1)
-        summary["avg_judge_ms"] = round(
-            total_judge_time / total_questions * 1000, 1)
-
-        # J scores by category
-        for cat in sorted(ALL_CATEGORIES):
-            if category_scores[cat]:
-                j = sum(category_scores[cat]) / len(category_scores[cat]) * 100
-                summary[f"j_score_{CATEGORY_NAMES[cat]}"] = round(j, 2)
-
-        # Overall J score
-        all_j = [s for scores in category_scores.values() for s in scores]
-        summary["j_score_overall"] = round(
-            sum(all_j) / len(all_j) * 100, 2) if all_j else 0
-
-        # F1 by category
-        for cat in sorted(ALL_CATEGORIES):
-            if category_f1[cat]:
-                avg_f1 = sum(category_f1[cat]) / len(category_f1[cat]) * 100
-                summary[f"f1_{CATEGORY_NAMES[cat]}"] = round(avg_f1, 2)
-
-        all_f1 = [f for scores in category_f1.values() for f in scores]
-        summary["f1_overall"] = round(
-            sum(all_f1) / len(all_f1) * 100, 2) if all_f1 else 0
+    summary["repeat_runs"] = max(1, repeat_runs)
+    summary["questions_per_run"] = run_summaries[-1]["questions_evaluated"] if run_summaries else 0
+    summary["questions_evaluated_total"] = total_questions_all
+    if run_summaries:
+        summary["run_summaries"] = run_summaries
+        if len(run_summaries) > 1:
+            deltas: list[dict] = []
+            for prev, curr in zip(run_summaries, run_summaries[1:]):
+                delta = {"from_run": prev["run"], "to_run": curr["run"]}
+                if "j_score_overall" in prev and "j_score_overall" in curr:
+                    delta["j_score_overall_delta"] = round(
+                        curr["j_score_overall"] - prev["j_score_overall"], 2
+                    )
+                deltas.append(delta)
+            summary["run_deltas"] = deltas
 
     # Print summary
     print("\n" + "=" * 60)
@@ -1070,6 +1169,16 @@ def main():
         help="Persistent work directory for index/enrichment data. "
              "If set, reused across runs (GPU enrich → CPU eval split).",
     )
+    parser.add_argument(
+        "--repeat-runs", type=int, default=1,
+        help="Run the same question set multiple times against the same ingested DB. "
+             "Useful for measuring persistent access-frequency effects.",
+    )
+    parser.add_argument(
+        "--reset-working-memory-between-runs", action="store_true",
+        help="Clear only session-scoped working memory between repeat passes while "
+             "keeping persistent access-frequency boosts intact.",
+    )
     args = parser.parse_args()
 
     # Discover projects
@@ -1107,6 +1216,8 @@ def main():
             max_chunks=args.max_chunks,
             output_path=args.output,
             model=args.model,
+            repeat_runs=args.repeat_runs,
+            reset_working_memory_between_runs=args.reset_working_memory_between_runs,
         )
     except Exception as e:
         # Audit failure — find the most recent RUNNING entry's timestamp
