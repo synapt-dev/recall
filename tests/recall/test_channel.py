@@ -26,6 +26,7 @@ from synapt.recall.channel import (
     channel_who,
     channel_heartbeat,
     channel_unread,
+    channel_unread_read,
     channel_pin,
     channel_directive,
     channel_mute,
@@ -472,6 +473,26 @@ class TestUnreadMessages(unittest.TestCase):
 
         unread = channel_unread(agent_name="agent-a")
         self.assertEqual(unread["dev"], 1)
+
+    def test_unread_read_returns_messages_and_resets_cursor(self):
+        channel_join("dev", agent_name="agent-a")
+        channel_post("dev", "msg1", agent_name="agent-b")
+        channel_post("dev", "msg2", agent_name="agent-b")
+
+        result = channel_unread_read(agent_name="agent-a")
+
+        self.assertIn("## #dev (2 messages)", result)
+        self.assertIn("msg1", result)
+        self.assertIn("msg2", result)
+        unread = channel_unread(agent_name="agent-a")
+        self.assertEqual(unread["dev"], 0)
+
+    def test_unread_read_reports_no_unread_messages(self):
+        channel_join("dev", agent_name="agent-a")
+
+        result = channel_unread_read(agent_name="agent-a")
+
+        self.assertEqual(result, "No unread messages.")
 
     def test_unread_multiple_channels(self):
         channel_join("dev", agent_name="agent-a")

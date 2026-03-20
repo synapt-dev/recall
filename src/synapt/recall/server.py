@@ -1549,6 +1549,7 @@ def recall_channel(
             channel_who,
             channel_heartbeat,
             channel_unread,
+            channel_unread_read,
             channel_pin,
             channel_directive,
             channel_mute,
@@ -1579,14 +1580,7 @@ def recall_channel(
             return channel_heartbeat()
 
         if action == "unread":
-            counts = channel_unread()
-            if not counts:
-                return "No channel memberships -- join a channel first."
-            lines = ["## Unread messages"]
-            for ch, count in sorted(counts.items()):
-                marker = f" ({count} new)" if count > 0 else ""
-                lines.append(f"  #{ch}: {count}{marker}")
-            return "\n".join(lines)
+            return channel_unread_read(limit=limit)
 
         if action == "pin":
             if not message:
