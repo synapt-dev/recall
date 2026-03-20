@@ -1559,10 +1559,7 @@ def recall_channel(
         )
 
         if action == "join":
-            result = channel_join(channel=channel)
-            if name:
-                channel_rename(new_name=name)
-            return result
+            return channel_join(channel=channel, display_name=name)
 
         if action == "leave":
             return channel_leave(channel=channel)
