@@ -119,6 +119,7 @@ Add to `~/.config/opencode/opencode.json`:
 - **Reminders** — Cross-session sticky reminders that surface at session start.
 - **Timeline** — Chronological work arcs showing project narrative.
 - **Working memory** — Frequency-boosted search results for active topics.
+- **28x more token-efficient than context-stuffing** — Retrieves ~1,800 tokens per query (only relevant chunks) vs ~50,000 for systems that inject all memories every turn. Your context window stays free for actual work.
 - **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
 - **MCP server** — 18 tools for Claude Code integration: search, journal, channels, reminders, portable archive export/import, knowledge, and more.
 - **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, and coordinate work across worktrees.
