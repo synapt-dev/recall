@@ -221,13 +221,22 @@ class SynaptSUT:
         self._work_dir: Path | None = None
         self._persistent_work_dir = work_dir  # if set, reuse instead of tmpdir
 
+    def _project_key(self, session_paths: list[Path]) -> str:
+        """Derive a stable per-project work-dir key from session paths."""
+        if not session_paths:
+            return "project"
+        sessions_dir = session_paths[0].parent
+        project_dir = sessions_dir.parent
+        return project_dir.name or sessions_dir.name or "project"
+
     def ingest(self, session_paths: list[Path]) -> None:
         """Build a synapt recall index from session transcripts."""
         from synapt.recall.core import build_index, parse_transcript
         from synapt.recall.storage import RecallDB
 
         if self._persistent_work_dir:
-            self._work_dir = Path(self._persistent_work_dir)
+            project_key = self._project_key(session_paths)
+            self._work_dir = Path(self._persistent_work_dir) / project_key
             self._work_dir.mkdir(parents=True, exist_ok=True)
         else:
             self._work_dir = Path(tempfile.mkdtemp(prefix="codememo_"))
@@ -237,6 +246,7 @@ class SynaptSUT:
         # Sessions are already in Claude Code JSONL format — no conversion
         # needed. Just point build_index at a directory containing them.
         transcript_dir = self._work_dir / "transcripts"
+        shutil.rmtree(transcript_dir, ignore_errors=True)
         transcript_dir.mkdir()
 
         # Symlink sessions into the transcript dir
@@ -275,6 +285,7 @@ class SynaptSUT:
 
         # Set up directory structure that enrich_all expects
         project_dir = self._work_dir / "project"
+        shutil.rmtree(project_dir, ignore_errors=True)
         project_dir.mkdir()
         data_dir = project_dir / ".synapt" / "recall"
         # _worktree_name(project_dir) resolves to project_dir.name = "project"

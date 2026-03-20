@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_codememo_eval():
@@ -40,8 +41,8 @@ class FakeSUT:
         self.reset_calls += 1
 
 
-def _write_project(root: Path) -> Path:
-    project = root / "project_demo"
+def _write_project(root: Path, name: str = "project_demo") -> Path:
+    project = root / name
     sessions = project / "sessions"
     sessions.mkdir(parents=True)
 
@@ -128,3 +129,38 @@ def test_run_evaluation_can_reset_working_memory_between_runs(tmp_path):
 
     assert summary["repeat_runs"] == 3
     assert sut.reset_calls == 2
+
+
+def test_synapt_sut_namespaces_persistent_work_dir_per_project(tmp_path, monkeypatch):
+    project_a = _write_project(tmp_path / "a", name="project_alpha")
+    project_b = _write_project(tmp_path / "b", name="project_beta")
+
+    import synapt.recall.core as recall_core
+    import synapt.recall.storage as recall_storage
+
+    monkeypatch.setattr(recall_core, "parse_transcript", lambda path: [])
+    monkeypatch.setattr(recall_core, "build_index", lambda **kwargs: SimpleNamespace(chunks=[]))
+
+    class DummyRecallDB:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def save_chunks(self, chunks) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(recall_storage, "RecallDB", DummyRecallDB)
+
+    sut = codememo_eval.SynaptSUT(mode="recalldb", work_dir=str(tmp_path / "work"))
+    sut.ingest(sorted((project_a / "sessions").glob("*.jsonl")))
+    first_dir = sut._work_dir
+    sut.ingest(sorted((project_b / "sessions").glob("*.jsonl")))
+    second_dir = sut._work_dir
+
+    assert first_dir is not None
+    assert second_dir is not None
+    assert first_dir != second_dir
+    assert first_dir.name == project_a.name
+    assert second_dir.name == project_b.name
