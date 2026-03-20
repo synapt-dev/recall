@@ -134,7 +134,7 @@ Add to `~/.config/opencode/opencode.json`:
 |------|-------------|
 | `recall_search` | Search past sessions by query |
 | `recall_context` | Get context for the current session |
-| `recall_files` | Find sessions that touched specific files |
+| `recall_files` | Find file history and prior context for a specific path |
 | `recall_sessions` | List indexed sessions |
 | `recall_timeline` | View chronological work arcs |
 | `recall_build` | Build or rebuild the transcript index |
