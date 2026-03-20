@@ -648,4 +648,43 @@ def enrich_all(
         if max_entries and count >= max_entries:
             break
 
+    # Save enrichment checkpoint so next run skips already-processed entries
+    if count > 0 and not dry_run:
+        _set_last_enrichment_ts(project_dir)
+
     return count
+
+
+def _get_last_enrichment_ts(project_dir: Path) -> str:
+    """Get the timestamp of the last enrichment run from DB metadata."""
+    try:
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.storage import RecallDB
+        db_path = project_index_dir(project_dir) / "recall.db"
+        if not db_path.exists():
+            return ""
+        db = RecallDB(db_path)
+        ts = db.get_metadata("last_enrichment_ts") or ""
+        db.close()
+        return ts
+    except Exception:
+        return ""
+
+
+def _set_last_enrichment_ts(project_dir: Path) -> None:
+    """Save the current time as the last enrichment checkpoint."""
+    try:
+        from datetime import datetime, timezone
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.storage import RecallDB
+        db_path = project_index_dir(project_dir) / "recall.db"
+        if not db_path.exists():
+            return
+        db = RecallDB(db_path)
+        db.set_metadata(
+            "last_enrichment_ts",
+            datetime.now(timezone.utc).isoformat(),
+        )
+        db.close()
+    except Exception:
+        pass  # Checkpoint is best-effort

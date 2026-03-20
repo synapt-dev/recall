@@ -41,20 +41,35 @@ class EmbeddingProvider:
 
 
 class LocalEmbeddings(EmbeddingProvider):
-    """Local embeddings via sentence-transformers. No network required."""
+    """Local embeddings via sentence-transformers. No network required.
+
+    Model loading is deferred to first use (lazy initialization) to avoid
+    semaphore/deadlock issues when the provider is created before
+    multiprocessing forks.
+    """
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2",
                  device: str = "cpu"):
-        from sentence_transformers import SentenceTransformer
-        self.model = SentenceTransformer(model_name, device=device)
-        self._dim = self.model.get_sentence_embedding_dimension()
+        self._model_name = model_name
+        self._device = device
+        self._model = None
+        self._dim_cached: int | None = None
+
+    def _ensure_model(self) -> None:
+        """Load the model on first use, not at init time."""
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self._model_name, device=self._device)
+            self._dim_cached = self._model.get_sentence_embedding_dimension()
 
     @property
     def dim(self) -> int:
-        return self._dim
+        self._ensure_model()
+        return self._dim_cached  # type: ignore[return-value]
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        embeddings = self.model.encode(texts, batch_size=32, show_progress_bar=False)
+        self._ensure_model()
+        embeddings = self._model.encode(texts, batch_size=32, show_progress_bar=False)
         return embeddings.tolist()
 
 
