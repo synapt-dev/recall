@@ -1752,6 +1752,15 @@ def cmd_hook(args: argparse.Namespace) -> None:
         except Exception:
             pass  # Channel is non-critical
 
+        # 9. Surface pending directives targeted at this agent (#431)
+        try:
+            from synapt.recall.channel import check_directives
+            directives = check_directives()
+            if directives:
+                print(f"\nPending directives:\n{directives}")
+        except Exception:
+            pass  # Directives are non-critical
+
     elif event == "session-end":
         # 1. Archive transcripts locally
         cmd_archive(argparse.Namespace())
