@@ -1538,8 +1538,8 @@ def check_directives(
                 claimer = all_claims.get(msg.id)
                 if msg.to == "*" and claimer and claimer != aid:
                     continue
-                # Auto-claim broadcast directives on first read
-                if msg.to == "*" and not claimer:
+                # Auto-claim directives on first read (#174)
+                if not claimer:
                     try:
                         channel_claim(msg.id, ch, agent_name=aid, project_dir=project_dir)
                     except Exception:
