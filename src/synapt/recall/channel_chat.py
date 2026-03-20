@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import readline as _readline  # noqa: F401 — import enables line editing
 import select
 import sys
 from pathlib import Path
@@ -134,6 +135,33 @@ class _Tailer:
 # ChatUI
 # ---------------------------------------------------------------------------
 
+class _ChatCompleter:
+    """Tab completer for slash commands and @mentions."""
+
+    _COMMANDS = [
+        "/quit", "/q", "/help", "/h", "/who", "/w", "/channels", "/ch",
+        "/join", "/j", "/history", "/pin", "/mute", "/kick",
+        "/broadcast", "/directive", "/d", "/clear",
+    ]
+
+    def __init__(self):
+        self._agents: list[str] = []
+
+    def update_agents(self, agents: list[str]) -> None:
+        """Update the known agent list for @mention completion."""
+        self._agents = agents
+
+    def complete(self, text: str, state: int) -> str | None:
+        if text.startswith("/"):
+            matches = [c for c in self._COMMANDS if c.startswith(text)]
+        elif text.startswith("@"):
+            prefix = text[1:].lower()
+            matches = [f"@{a}" for a in self._agents if a.lower().startswith(prefix)]
+        else:
+            return None
+        return matches[state] if state < len(matches) else None
+
+
 class ChatUI:
     """Interactive terminal chat UI for agent channels."""
 
@@ -151,6 +179,13 @@ class ChatUI:
         self._running = False
         self._poll_count = 0
         self._heartbeat_interval = 60  # heartbeat every N polls
+
+        # Set up readline for editing + tab completion
+        self._completer = _ChatCompleter()
+        import readline
+        readline.set_completer(self._completer.complete)
+        readline.set_completer_delims(" ")
+        readline.parse_and_bind("tab: complete")
 
     def run(self) -> None:
         """Main event loop."""
@@ -195,11 +230,9 @@ class ChatUI:
 
             if readable:
                 try:
-                    line = sys.stdin.readline()
+                    line = input()
                 except (EOFError, OSError):
                     break
-                if not line:
-                    break  # EOF
                 line = line.strip()
                 if not line:
                     continue
@@ -243,7 +276,18 @@ class ChatUI:
         if cmd == "/help" or cmd == "/h":
             self._show_help()
         elif cmd == "/who" or cmd == "/w":
-            print(channel_who())
+            who_result = channel_who()
+            print(who_result)
+            # Update tab completion with current agent names
+            try:
+                from synapt.recall.channel import _open_db
+                conn = _open_db()
+                rows = conn.execute("SELECT display_name, agent_id FROM presence").fetchall()
+                conn.close()
+                names = [r["display_name"] or r["agent_id"] for r in rows]
+                self._completer.update_agents(names)
+            except Exception:
+                pass
         elif cmd == "/channels" or cmd == "/ch":
             self._show_channels()
         elif cmd == "/join" or cmd == "/j":
