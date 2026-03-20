@@ -14,19 +14,21 @@ The v0.7.x release cycle had shipped dozens of improvements: entity-collection n
 
 ## The investigation
 
-We ran six experiments in parallel:
+We ran two rounds of experiments — first on LOCOMO, then on CodeMemo — to isolate the cause.
 
-**Experiment 1: max_knowledge=3.** The v0.6.1 baseline capped knowledge nodes at 3 per query. The v0.7.4 run had no cap, letting 444 knowledge nodes compete freely for 20 retrieval slots. Result: 73.1% — recovered 1.6 points. Better, but not enough.
+### Round 1: LOCOMO (personal conversations)
 
-**Experiment 2: max_knowledge=0.** No knowledge nodes at all. If the regression was entirely in the knowledge layer, this should match the baseline. Result: 79.7%. Still 11 points below v0.6.2's 90.51% on CodeMemo. The regression was in chunk retrieval itself.
+**Experiment 1: max_knowledge=3.** The v0.6.1 baseline capped knowledge nodes at 3 per query. The v0.7.4 run had no cap, letting 444 knowledge nodes compete freely for 20 retrieval slots. Result: LOCOMO recovered from 71.5% to 73.1% — a 1.6pp gain. Better, but still 3pp below baseline.
 
-**Experiment 3: Dedup + boosts disabled.** We disabled both the Jaccard deduplication filter and the working memory boosts. Result: 90% on project_02 — full recovery to baseline. The regression was in the post-retrieval shaping pipeline.
+### Round 2: CodeMemo (coding sessions)
+
+CodeMemo also regressed: 90.51% to 86.27%. We ran deeper ablations on CodeMemo's hardest project to isolate the remaining gap.
+
+**Experiment 2: max_knowledge=0.** No knowledge nodes at all. If the regression was entirely in the knowledge layer, this should match baseline. Result: 79.7% on CodeMemo — still 11pp below v0.6.2. The regression was in chunk retrieval itself, not knowledge overflow.
+
+**Experiment 3: Dedup + boosts disabled.** We disabled both the Jaccard deduplication filter and the working memory boosts. Result: 90% on CodeMemo project_02 — full recovery to baseline. The regression was in the post-retrieval shaping pipeline.
 
 **Experiment 4: Dedup only disabled.** Boosts still on, dedup off. Result: 90.57% — identical to the combined ablation. Dedup alone was the culprit. Boosts were innocent.
-
-**Experiment 5: Prompt-only fixes.** Updated the answer generation prompt with "count ALL mentions" and "compute exact dates." Result: no improvement on hard categories, actually worse on multi-session. Confirmed this was a retrieval problem, not generation.
-
-**Experiment 6: Wider retrieval (k=15).** More chunks should help, right? Result: 11.8% on multi-session — catastrophically worse. More context meant more noise drowning the signal.
 
 ## The root cause
 
@@ -40,9 +42,9 @@ The fix was one line: raise the threshold from 0.6 to 0.75 for coding content pr
 
 Three findings that matter beyond this specific bug:
 
-**Focused retrieval beats exhaustive retrieval.** Returning more results (k=15) made things worse, not better. Returning fewer, more precise results (k=5 with less aggressive dedup) recovered performance. This parallels our LongMemEval finding from March 18: "retrieval architecture matters more than model scale."
+**Focused dedup beats aggressive dedup.** The 0.6 threshold removed chunks that were similar in vocabulary but different in critical details. Raising it to 0.75 let through the evidence the judge needed without flooding results with true duplicates. The same principle applies to knowledge nodes: a hard cap (max_knowledge=3) outperformed no cap.
 
-**Ablation experiments are cheap, guessing is expensive.** Six targeted experiments cost less than one full benchmark re-run. Each experiment took 20-50 questions on a single project slice. The total investigation cost was under $2 in API calls and produced a definitive root cause. Without ablations, we would still be guessing.
+**Ablation experiments are cheap, guessing is expensive.** Four targeted experiments cost less than one full benchmark re-run. Each experiment took 20-50 questions on a single project slice. The total investigation cost was under $2 in API calls and produced a definitive root cause. Without ablations, we would still be guessing.
 
 **The regression was invisible to unit tests.** All 1400+ tests passed. The dedup threshold change did not break any contract — it changed the *quality* of results in a way that only showed up under benchmark evaluation. This is why eval-driven development matters for retrieval systems.
 
