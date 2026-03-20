@@ -534,6 +534,7 @@ def _extract_snippet(text: str, query: str, context_lines: int = 1) -> str:
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
+    subchunk_min_text: int | None = None,
 ) -> list[TranscriptChunk]:
     """Parse a Claude Code transcript JSONL file into semantic chunks.
 
@@ -600,7 +601,10 @@ def parse_transcript(
             for s in nonempty_segs
         )
 
-        _sub_chunk_min_text = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
+        if subchunk_min_text is not None:
+            _sub_chunk_min_text = subchunk_min_text
+        else:
+            _sub_chunk_min_text = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
         if len(nonempty_segs) >= 2 and total_text > _sub_chunk_min_text and _sub_chunk_min_text > 0:
             # --- Sub-chunk mode ---
             for seg_i, seg in enumerate(nonempty_segs):
