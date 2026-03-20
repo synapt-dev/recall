@@ -1519,6 +1519,7 @@ def recall_channel(
     target: str | None = None,
     limit: int = 20,
     pin: bool = False,
+    name: str | None = None,
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -1536,6 +1537,7 @@ def recall_channel(
         target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
         limit: Max messages to return for "read" action (default 20).
         pin: If True with "post" action, also pin the message.
+        name: Display name for this agent (set on join, shown in messages instead of agent ID).
     """
     try:
         from synapt.recall.channel import (
@@ -1543,6 +1545,7 @@ def recall_channel(
             channel_leave,
             channel_post,
             channel_read,
+            channel_rename,
             channel_who,
             channel_heartbeat,
             channel_unread,
@@ -1556,7 +1559,10 @@ def recall_channel(
         )
 
         if action == "join":
-            return channel_join(channel=channel)
+            result = channel_join(channel=channel)
+            if name:
+                channel_rename(new_name=name)
+            return result
 
         if action == "leave":
             return channel_leave(channel=channel)
