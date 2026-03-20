@@ -116,6 +116,18 @@ class TestChannelMessage(unittest.TestCase):
         self.assertEqual(restored.type, msg.type)
         self.assertEqual(restored.body, msg.body)
 
+    def test_round_trip_with_attachments(self):
+        msg = ChannelMessage(
+            timestamp="2026-03-16T10:00:00Z",
+            from_agent="test",
+            channel="eval",
+            type="message",
+            body="",
+            attachments=["attachments/m_abc12345/file.png"],
+        )
+        restored = ChannelMessage.from_dict(msg.to_dict())
+        self.assertEqual(restored.attachments, msg.attachments)
+
     def test_from_dict_ignores_extra_keys(self):
         d = {
             "timestamp": "2026-03-16T10:00:00Z",
@@ -644,6 +656,41 @@ class TestPostAndRead(unittest.TestCase):
         data_dir = Path(self.tmpdir) / "project" / ".synapt" / "recall"
         channel_file = data_dir / "channels" / "dev.jsonl"
         self.assertTrue(channel_file.exists())
+
+    def test_post_copies_attachments_into_channel_store(self):
+        src = Path(self.tmpdir) / "screenshot.png"
+        src.write_text("fake-image")
+
+        result = channel_post(
+            "dev",
+            "",
+            agent_name="agent-a",
+            attachment_paths=[str(src)],
+        )
+
+        msgs = _read_messages(_channels_dir() / "dev.jsonl")
+        msg = [m for m in msgs if m.type == "message"][-1]
+        self.assertEqual(len(msg.attachments), 1)
+        relpath = msg.attachments[0]
+        self.assertTrue(relpath.startswith("attachments/"))
+        stored = _channels_dir() / relpath
+        self.assertTrue(stored.exists())
+        self.assertEqual(stored.read_text(), "fake-image")
+        self.assertIn(relpath, result)
+
+    def test_read_shows_attachment_paths(self):
+        src = Path(self.tmpdir) / "diagram.txt"
+        src.write_text("diagram")
+
+        channel_post(
+            "dev",
+            "see attached",
+            agent_name="agent-a",
+            attachment_paths=[str(src)],
+        )
+        result = channel_read("dev", agent_name="agent-b")
+        self.assertIn("attachments/", result)
+        self.assertIn("diagram.txt", result)
 
     def test_read_after_post(self):
         channel_post("dev", "first message", agent_name="agent-a")

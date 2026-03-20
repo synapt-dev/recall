@@ -20,9 +20,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -61,6 +62,11 @@ def _db_path(project_dir: Path | None = None) -> Path:
 def _presence_path(project_dir: Path | None = None) -> Path:
     """Return the legacy presence JSON file path (for migration)."""
     return _channels_dir(project_dir) / "_presence.json"
+
+
+def _attachments_dir(project_dir: Path | None = None) -> Path:
+    """Return the channel attachments directory."""
+    return _channels_dir(project_dir) / "attachments"
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +226,7 @@ class ChannelMessage:
     from_agent: str = ""
     id: str = ""       # auto-generated message ID (m_xxxxxxxx)
     to: str = ""       # directive target agent (optional)
+    attachments: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -229,6 +236,8 @@ class ChannelMessage:
             d.pop("id", None)
         if not d.get("to"):
             d.pop("to", None)
+        if not d.get("attachments"):
+            d.pop("attachments", None)
         return d
 
     @classmethod
@@ -558,6 +567,38 @@ def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> Non
         _store_mentions(msg, project_dir)
 
 
+def _copy_attachments(
+    message_id: str,
+    attachment_paths: list[str],
+    project_dir: Path | None = None,
+) -> list[str]:
+    """Copy attachments into the channel store and return relative paths."""
+    target_dir = _attachments_dir(project_dir) / message_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    stored: list[str] = []
+    for raw_path in attachment_paths:
+        source = Path(raw_path).expanduser().resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"Attachment not found: {source}")
+
+        candidate = target_dir / source.name
+        if candidate.exists():
+            stem = source.stem
+            suffix = source.suffix
+            idx = 2
+            while True:
+                candidate = target_dir / f"{stem}-{idx}{suffix}"
+                if not candidate.exists():
+                    break
+                idx += 1
+
+        shutil.copy2(source, candidate)
+        stored.append(candidate.relative_to(_channels_dir(project_dir)).as_posix())
+
+    return stored
+
+
 def _read_messages(
     path: Path,
     since: str | None = None,
@@ -759,6 +800,7 @@ def channel_post(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     pin: bool = False,
+    attachment_paths: list[str] | None = None,
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message."""
     aid = agent_name or _agent_id(project_dir)
@@ -768,6 +810,9 @@ def channel_post(
         timestamp=now, from_agent=aid, channel=channel,
         type="message", body=message,
     )
+    if attachment_paths:
+        msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
+        msg.attachments = _copy_attachments(msg.id, attachment_paths, project_dir)
     _append_message(msg, project_dir)
 
     conn = _open_db(project_dir)
@@ -787,7 +832,10 @@ def channel_post(
         conn.close()
 
     display = _resolve_display_name_for(aid, project_dir)
-    result = f"[#{channel}] {display}: {message}"
+    attachment_suffix = ""
+    if msg.attachments:
+        attachment_suffix = f" [attachments: {', '.join(msg.attachments)}]"
+    result = f"[#{channel}] {display}: {message}{attachment_suffix}".rstrip()
     if pin:
         result += " (pinned)"
     return result
@@ -898,14 +946,17 @@ def channel_read(
         if claimer_id:
             claimer_name = display_map.get(claimer_id, claimer_id)
             claim_tag = f" [CLAIMED by {claimer_name}]"
+        attachment_tag = ""
+        if msg.attachments:
+            attachment_tag = f" [attachments: {', '.join(msg.attachments)}]"
         if msg.type in ("join", "leave"):
             lines.append(f"  {ts}{mid}  -- {msg.body}")
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
-            lines.append(f"  {ts}{mid}  {prefix}{target} {display}{role_tag}: {msg.body}{claim_tag}")
+            lines.append(f"  {ts}{mid}  {prefix}{target} {display}{role_tag}: {msg.body}{attachment_tag}{claim_tag}")
         else:
-            lines.append(f"  {ts}{mid}  {display}{role_tag}: {msg.body}{claim_tag}")
+            lines.append(f"  {ts}{mid}  {display}{role_tag}: {msg.body}{attachment_tag}{claim_tag}")
 
     return "\n".join(lines)
 

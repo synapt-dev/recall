@@ -14,6 +14,7 @@ import json
 import os
 import readline as _readline  # noqa: F401 — import enables line editing
 import select
+import shlex
 import sys
 from pathlib import Path
 
@@ -69,6 +70,9 @@ def _render_message(msg: ChannelMessage, my_id: str) -> str:
     ts = msg.timestamp[11:19]  # HH:MM:SS
     mid = f" {_DIM}[{msg.id}]{_RESET}" if msg.id else ""
     color = _color_for(msg.from_agent)
+    attachment_tag = ""
+    if msg.attachments:
+        attachment_tag = f" {_DIM}[attachments: {', '.join(msg.attachments)}]{_RESET}"
 
     if msg.type in ("join", "leave"):
         return f"  {_DIM}{ts}{mid}  -- {msg.body}{_RESET}"
@@ -79,9 +83,24 @@ def _render_message(msg: ChannelMessage, my_id: str) -> str:
         else:
             prefix = f"{_DIM}[directive]{_RESET}"
         target = f" @{msg.to}" if msg.to else ""
-        return f"  {_DIM}{ts}{mid}{_RESET}  {prefix}{target} {color}{msg.from_agent}{_RESET}: {msg.body}"
+        return f"  {_DIM}{ts}{mid}{_RESET}  {prefix}{target} {color}{msg.from_agent}{_RESET}: {msg.body}{attachment_tag}"
 
-    return f"  {_DIM}{ts}{mid}{_RESET}  {color}{msg.from_agent}{_RESET}: {msg.body}"
+    return f"  {_DIM}{ts}{mid}{_RESET}  {color}{msg.from_agent}{_RESET}: {msg.body}{attachment_tag}"
+
+
+def _extract_attachment_paths(line: str) -> list[str]:
+    """Return attachment file paths when input is a pasted file path list."""
+    try:
+        parts = shlex.split(line)
+    except ValueError:
+        return []
+    if not parts:
+        return []
+
+    resolved = [str(Path(part).expanduser()) for part in parts]
+    if all(Path(path).is_file() for path in resolved):
+        return resolved
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +160,7 @@ class _ChatCompleter:
     _COMMANDS = [
         "/quit", "/q", "/help", "/h", "/who", "/w", "/channels", "/ch",
         "/join", "/j", "/history", "/pin", "/mute", "/kick",
-        "/broadcast", "/directive", "/d", "/clear",
+        "/broadcast", "/directive", "/d", "/attach", "/clear",
     ]
 
     def __init__(self):
@@ -240,14 +259,24 @@ class ChatUI:
                     if not self._handle_command(line):
                         break  # /quit
                 else:
-                    channel_post(self.channel, line, agent_name=self.agent_id)
+                    attachment_paths = _extract_attachment_paths(line)
+                    if attachment_paths:
+                        channel_post(
+                            self.channel,
+                            "",
+                            agent_name=self.agent_id,
+                            attachment_paths=attachment_paths,
+                        )
+                    else:
+                        channel_post(self.channel, line, agent_name=self.agent_id)
                     # Echo own message with formatting
                     echo = ChannelMessage(
                         timestamp=_now_iso(),
                         from_agent=self.display_name,
                         channel=self.channel,
                         type="message",
-                        body=line,
+                        body="" if attachment_paths else line,
+                        attachments=attachment_paths,
                     )
                     print(_render_message(echo, self.agent_id))
 
@@ -327,6 +356,17 @@ class ChatUI:
                 ))
             else:
                 self._print_error("Usage: /directive <agent>: <message>")
+        elif cmd == "/attach":
+            attachment_paths = _extract_attachment_paths(arg)
+            if attachment_paths:
+                print(channel_post(
+                    self.channel,
+                    "",
+                    agent_name=self.agent_id,
+                    attachment_paths=attachment_paths,
+                ))
+            else:
+                self._print_error("Usage: /attach <file-path> [file-path ...]")
         elif cmd == "/clear":
             self._clear_channel()
         else:
@@ -347,6 +387,7 @@ class ChatUI:
   /kick <agent>         Kick an agent
   /broadcast <msg>      Post to all channels
   /directive <agent>: <msg>   Send a priority directive
+  /attach <path...>     Post file attachments
   /clear                Clear channel (with confirm)
   /quit, /q             Leave and exit
 """)
