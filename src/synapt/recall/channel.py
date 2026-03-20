@@ -1030,6 +1030,60 @@ def channel_unread(
         conn.close()
 
 
+def channel_unread_read(
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+    limit: int = 20,
+) -> str:
+    """Read unread messages across all joined channels and advance cursors.
+
+    Keeps ``channel_unread()`` as the lightweight count primitive used by
+    chat UI and directive checks, while giving the MCP ``unread`` action a
+    single-call catchup path that includes message content.
+    """
+    aid = agent_name or _agent_id(project_dir)
+
+    conn = _open_db(project_dir)
+    try:
+        memberships = conn.execute(
+            "SELECT channel FROM memberships WHERE agent_id = ?",
+            (aid,),
+        ).fetchall()
+        if not memberships:
+            return "No channel memberships -- join a channel first."
+
+        unread_channels: list[tuple[str, str, int]] = []
+        for row in memberships:
+            ch = row["channel"]
+            cursor_row = conn.execute(
+                "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = ?",
+                (aid, ch),
+            ).fetchone()
+            last_read = cursor_row["last_read_at"] if cursor_row else "1970-01-01T00:00:00Z"
+            path = _channel_path(ch, project_dir)
+            count = _count_messages_since(path, last_read) if path.exists() else 0
+            if count > 0:
+                unread_channels.append((ch, last_read, count))
+    finally:
+        conn.close()
+
+    if not unread_channels:
+        return "No unread messages."
+
+    sections = []
+    for ch, last_read, count in sorted(unread_channels):
+        rendered = channel_read(
+            channel=ch,
+            limit=limit,
+            since=last_read,
+            agent_name=aid,
+            project_dir=project_dir,
+        )
+        sections.append(rendered)
+
+    return "\n\n".join(sections)
+
+
 def channel_pin(
     channel: str,
     message_id: str,
