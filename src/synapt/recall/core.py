@@ -2384,19 +2384,18 @@ class TranscriptIndex:
                     # Confidence gate: low-confidence knowledge (<0.4) gets
                     # no boost to avoid polluting results with weak facts.
                     # Above the gate, scale by confidence AND specificity.
-                    # Specificity penalizes short abstract nodes ("User likes X")
-                    # and rewards long detailed nodes with dates/names/numbers
-                    # that contain the evidence LOCOMO judges need.
+                    # Reuses consolidation's _lacks_specificity which checks
+                    # file paths, versions, CLI flags, CamelCase/snake_case,
+                    # PR/issue refs, and proper nouns. Short-but-specific
+                    # facts like "Pin croniter to v1.3.8" get full boost.
                     if conf < 0.4:
                         effective_boost = 1.0
                     else:
-                        # Specificity: longer content with detail markers scores higher
-                        specificity = min(1.0, len(node_content) / 100)
-                        # Detail markers: dates, numbers, proper nouns boost specificity
-                        if re.search(r'\d{4}[-/]?\d{2}[-/]?\d{2}|\b\d+[:.]\d+\b', node_content):
-                            specificity = min(1.0, specificity * 1.2)  # has dates/times
-                        if re.search(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+', node_content):
-                            specificity = min(1.0, specificity * 1.1)  # has proper nouns
+                        from synapt.recall.consolidate import _lacks_specificity
+                        if _lacks_specificity(node_content, threshold=200):
+                            specificity = 0.5  # abstract/generic — reduced boost
+                        else:
+                            specificity = 1.0  # specific (paths, versions, names)
                         effective_boost = 1.0 + conf * specificity * knowledge_boost
                     # Entity boost: prefer knowledge about the specific
                     # entities mentioned in the query (e.g. person names).
