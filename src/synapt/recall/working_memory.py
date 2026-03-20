@@ -98,18 +98,18 @@ class WorkingMemory:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [slot for _, slot in scored[:max_results]]
 
-    def boost_score(self, base_score: float, item_id: str) -> float:
-        """Apply working memory boost to a search result score.
-
-        Items in working memory: 1.5x.
-        Items accessed 3+ times this session: 2.0x.
-        """
+    def boost_multiplier(self, item_id: str) -> float:
+        """Return the working-memory multiplier for an item."""
         slot = self._slots.get(item_id)
         if slot is None:
-            return base_score
+            return 1.0
         if slot.access_count >= 3:
-            return base_score * 2.0
-        return base_score * 1.5
+            return 2.0
+        return 1.5
+
+    def boost_score(self, base_score: float, item_id: str) -> float:
+        """Apply working memory boost to a search result score."""
+        return base_score * self.boost_multiplier(item_id)
 
     def seed_from_db(self, db, days: int = 7) -> int:
         """Seed working memory from recent access_log entries.
