@@ -72,8 +72,12 @@ def atomic_json_write(data: dict | list, path: Path, indent: int = 2) -> None:
         raise
 
 
-# Near-duplicate Jaccard threshold for result deduplication
-_DEDUP_JACCARD_THRESHOLD = 0.6
+# Near-duplicate Jaccard threshold for result deduplication.
+# 0.75 keeps only near-identical chunks from consuming retrieval slots.
+# Lower values (0.6) aggressively remove "similar" chunks that contain
+# different critical details — this caused a -4pp regression on both
+# LOCOMO and CodeMemo benchmarks (see #459).
+_DEDUP_JACCARD_THRESHOLD = 0.75
 
 
 def _dedup_limit(max_chunks: int) -> int:
