@@ -15,19 +15,626 @@ Data flow:
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import shutil
+import tarfile
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from synapt.recall.core import project_data_dir, project_archive_dir
+
+ARCHIVE_FORMAT_VERSION = "1"
+ARCHIVE_EXTENSION = ".synapt-archive"
+_ROOT_EXPORT_FILES = (
+    "config.json",
+    "dedup_decisions.jsonl",
+    "knowledge.jsonl",
+    "last_sync_time",
+    "reminders.json",
+    "upload_manifest.json",
+)
 
 
 def _data_dir(project_dir: Path) -> Path:
     """Resolve the synapt recall data directory for a project (shared root)."""
     return project_data_dir(project_dir)
+
+
+def _index_dir(project_dir: Path) -> Path:
+    """Return the recall index directory for *project_dir*."""
+    return _data_dir(project_dir) / "index"
+
+
+def _has_index(index_dir: Path) -> bool:
+    """True when *index_dir* contains a recall DB in any supported layout."""
+    return (index_dir / "recall.db").exists() or (index_dir / "index.db").exists()
+
+
+def _archive_output_path(project_dir: Path, output_path: Path | None) -> Path:
+    """Resolve the export destination path."""
+    if output_path is not None:
+        return output_path.expanduser().resolve()
+    return (project_dir / f"{project_dir.name}{ARCHIVE_EXTENSION}").resolve()
+
+
+def _json_dumps(obj: dict) -> bytes:
+    """Serialize JSON deterministically for archive metadata."""
+    return json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
+
+
+def _file_count(path: Path, pattern: str) -> int:
+    """Count files under *path* matching *pattern*."""
+    if not path.exists():
+        return 0
+    return sum(1 for _ in path.glob(pattern))
+
+
+def _top_level_export_paths(data_dir: Path) -> list[Path]:
+    """Return exportable root-level state files."""
+    return [data_dir / name for name in _ROOT_EXPORT_FILES if (data_dir / name).is_file()]
+
+
+def _iter_export_paths(
+    data_dir: Path,
+    *,
+    include_transcripts: bool,
+    include_channels: bool,
+) -> list[tuple[Path, str]]:
+    """Return archive members as ``(absolute_path, archive_name)`` pairs."""
+    members: list[tuple[Path, str]] = []
+
+    index_dir = data_dir / "index"
+    if index_dir.is_dir():
+        for path in sorted(p for p in index_dir.rglob("*") if p.is_file()):
+            members.append((path, path.relative_to(data_dir).as_posix()))
+
+    if include_channels:
+        channels_dir = data_dir / "channels"
+        if channels_dir.is_dir():
+            for path in sorted(p for p in channels_dir.rglob("*") if p.is_file()):
+                members.append((path, path.relative_to(data_dir).as_posix()))
+
+    worktrees_root = data_dir / "worktrees"
+    if worktrees_root.is_dir():
+        for wt_dir in sorted(p for p in worktrees_root.iterdir() if p.is_dir()):
+            journal_path = wt_dir / "journal.jsonl"
+            if journal_path.is_file():
+                members.append((journal_path, journal_path.relative_to(data_dir).as_posix()))
+            transcript_dir = wt_dir / "transcripts"
+            if include_transcripts and transcript_dir.is_dir():
+                for path in sorted(p for p in transcript_dir.glob("*.jsonl") if p.is_file()):
+                    members.append((path, path.relative_to(data_dir).as_posix()))
+
+    for path in _top_level_export_paths(data_dir):
+        members.append((path, path.relative_to(data_dir).as_posix()))
+
+    members.sort(key=lambda item: item[1])
+    return members
+
+
+def _archive_manifest(
+    project_dir: Path,
+    *,
+    include_transcripts: bool,
+    include_channels: bool,
+) -> dict:
+    """Build manifest metadata for a portable recall archive."""
+    from synapt import __version__ as synapt_version
+    from synapt.recall.sharded_db import ShardedRecallDB
+
+    data_dir = _data_dir(project_dir)
+    index_dir = data_dir / "index"
+    worktrees_root = data_dir / "worktrees"
+
+    chunk_count = 0
+    knowledge_count = 0
+    shard_count = 0
+    is_sharded = False
+    if _has_index(index_dir):
+        db = ShardedRecallDB.open(index_dir)
+        try:
+            chunk_count = db.chunk_count()
+            knowledge_count = len(db.load_knowledge_nodes(status=None))
+            shard_count = db.shard_count
+            is_sharded = not db.is_monolithic
+        finally:
+            db.close()
+
+    transcripts_count = 0
+    journals_count = 0
+    worktree_names: list[str] = []
+    if worktrees_root.is_dir():
+        for wt_dir in sorted(p for p in worktrees_root.iterdir() if p.is_dir()):
+            worktree_names.append(wt_dir.name)
+            if (wt_dir / "journal.jsonl").exists():
+                journals_count += 1
+            if include_transcripts:
+                transcripts_count += _file_count(wt_dir / "transcripts", "*.jsonl")
+
+    channel_files = 0
+    if include_channels:
+        channel_files = _file_count(data_dir / "channels", "*.jsonl")
+
+    return {
+        "version": ARCHIVE_FORMAT_VERSION,
+        "synapt_version": synapt_version,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_project": project_dir.name,
+        "chunk_count": chunk_count,
+        "knowledge_count": knowledge_count,
+        "shard_count": shard_count,
+        "is_sharded": is_sharded,
+        "worktrees": worktree_names,
+        "worktree_count": len(worktree_names),
+        "transcript_count": transcripts_count,
+        "journal_count": journals_count,
+        "channel_file_count": channel_files,
+        "includes_transcripts": include_transcripts,
+        "includes_channels": include_channels,
+    }
+
+
+def _tar_add_bytes(tf: tarfile.TarFile, arcname: str, data: bytes) -> None:
+    """Add a bytes payload as a deterministic tar member."""
+    info = tarfile.TarInfo(arcname)
+    info.size = len(data)
+    info.mode = 0o644
+    info.mtime = 0
+    tf.addfile(info, io.BytesIO(data))
+
+
+def _tar_add_file(tf: tarfile.TarFile, path: Path, arcname: str) -> None:
+    """Add a file to the tar with deterministic metadata."""
+    info = tarfile.TarInfo(arcname)
+    stat = path.stat()
+    info.size = stat.st_size
+    info.mode = 0o644
+    info.mtime = 0
+    with open(path, "rb") as f:
+        tf.addfile(info, f)
+
+
+def export_recall_archive(
+    project_dir: Path,
+    output_path: Path | None = None,
+    *,
+    exclude_transcripts: bool = False,
+    exclude_channels: bool = False,
+) -> tuple[Path, dict]:
+    """Export portable recall state to a ``.synapt-archive`` tar.gz file."""
+    project_dir = project_dir.resolve()
+    data_dir = _data_dir(project_dir)
+    if not data_dir.exists():
+        raise FileNotFoundError(f"No recall data found at {data_dir}")
+
+    output_path = _archive_output_path(project_dir, output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    include_transcripts = not exclude_transcripts
+    include_channels = not exclude_channels
+    manifest = _archive_manifest(
+        project_dir,
+        include_transcripts=include_transcripts,
+        include_channels=include_channels,
+    )
+    members = _iter_export_paths(
+        data_dir,
+        include_transcripts=include_transcripts,
+        include_channels=include_channels,
+    )
+
+    with tarfile.open(output_path, "w:gz", format=tarfile.PAX_FORMAT) as tf:
+        _tar_add_bytes(tf, "manifest.json", _json_dumps(manifest))
+        for path, arcname in members:
+            _tar_add_file(tf, path, arcname)
+
+    return output_path, manifest
+
+
+def _load_archive_manifest(archive_path: Path) -> dict:
+    """Read and validate the manifest from a recall archive."""
+    with tarfile.open(archive_path, "r:*") as tf:
+        member = tf.getmember("manifest.json")
+        manifest_file = tf.extractfile(member)
+        if manifest_file is None:
+            raise ValueError("Archive manifest is missing")
+        manifest = json.loads(manifest_file.read().decode("utf-8"))
+    version = str(manifest.get("version", ""))
+    if version != ARCHIVE_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported archive version {version!r}; expected {ARCHIVE_FORMAT_VERSION!r}"
+        )
+    return manifest
+
+
+def _safe_extract_archive(archive_path: Path, dest_dir: Path) -> None:
+    """Extract archive members under *dest_dir* with path traversal protection."""
+    root = dest_dir.resolve()
+    with tarfile.open(archive_path, "r:*") as tf:
+        for member in tf.getmembers():
+            if member.name == "manifest.json" or not member.isfile():
+                continue
+            target = (root / member.name).resolve()
+            if not str(target).startswith(str(root)):
+                raise ValueError(f"Unsafe archive member path: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = tf.extractfile(member)
+            if extracted is None:
+                continue
+            with open(target, "wb") as f:
+                shutil.copyfileobj(extracted, f)
+
+
+def _worktree_name_map(extracted_dir: Path, project_dir: Path) -> dict[str, str]:
+    """Map archived worktree names onto destination worktree names.
+
+    If the archive contains exactly one worktree and it differs from the
+    current worktree name, remap it to the current worktree so imported
+    transcripts/journal are immediately visible from the destination.
+    Multi-worktree archives preserve names verbatim.
+    """
+    from synapt.recall.core import _worktree_name
+
+    worktrees_root = extracted_dir / "worktrees"
+    if not worktrees_root.is_dir():
+        return {}
+
+    archived = sorted(p.name for p in worktrees_root.iterdir() if p.is_dir())
+    current = _worktree_name(project_dir)
+    if len(archived) == 1 and archived[0] != current:
+        return {archived[0]: current}
+    return {name: name for name in archived}
+
+
+def _copytree_contents(src: Path, dst: Path) -> None:
+    """Copy all contents from *src* into *dst*."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in sorted(src.rglob("*")):
+        rel = path.relative_to(src)
+        target = dst / rel
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+
+
+def _merge_transcript_archives(src_dir: Path, dst_dir: Path) -> int:
+    """Merge transcript archive files with size-based dedup semantics."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    merged = 0
+    for src_file in sorted(src_dir.glob("*.jsonl")):
+        dst_file = dst_dir / src_file.name
+        src_size = src_file.stat().st_size
+        if dst_file.exists():
+            dst_size = dst_file.stat().st_size
+            if src_size == dst_size or src_size < dst_size:
+                continue
+        shutil.copy2(src_file, dst_file)
+        merged += 1
+    return merged
+
+
+def _merge_jsonl_lines(src_path: Path, dst_path: Path) -> int:
+    """Append unique raw JSONL lines from *src_path* into *dst_path*."""
+    if not src_path.exists():
+        return 0
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = set()
+    if dst_path.exists():
+        with open(dst_path, encoding="utf-8") as f:
+            existing = {line.rstrip("\n") for line in f if line.strip()}
+
+    added = 0
+    with open(dst_path, "a", encoding="utf-8") as out:
+        with open(src_path, encoding="utf-8") as src:
+            for line in src:
+                raw = line.rstrip("\n")
+                if not raw or raw in existing:
+                    continue
+                out.write(raw + "\n")
+                existing.add(raw)
+                added += 1
+    return added
+
+
+def _merge_reminders(src_path: Path, dst_path: Path) -> None:
+    """Merge reminder JSON arrays by reminder ID."""
+    try:
+        src_items = json.loads(src_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+
+    dst_items = []
+    if dst_path.exists():
+        try:
+            dst_items = json.loads(dst_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            dst_items = []
+
+    merged: dict[str, dict] = {}
+    for item in dst_items:
+        if isinstance(item, dict) and item.get("id"):
+            merged[item["id"]] = item
+    for item in src_items:
+        if isinstance(item, dict) and item.get("id"):
+            merged[item["id"]] = item
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    dst_path.write_text(
+        json.dumps(list(merged.values()), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _write_knowledge_jsonl(nodes: list[dict], path: Path) -> None:
+    """Rewrite ``knowledge.jsonl`` from deduplicated knowledge nodes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(nodes, key=lambda n: (n.get("updated_at", ""), n.get("id", "")))
+    with open(path, "w", encoding="utf-8") as f:
+        for node in ordered:
+            f.write(json.dumps(node, sort_keys=True) + "\n")
+
+
+def _merge_knowledge_nodes(local_nodes: list[dict], imported_nodes: list[dict]) -> list[dict]:
+    """Merge knowledge nodes by ID, keeping the newest version."""
+    merged: dict[str, dict] = {}
+    for node in local_nodes:
+        if node.get("id"):
+            merged[node["id"]] = node
+    for node in imported_nodes:
+        node_id = node.get("id")
+        if not node_id:
+            continue
+        existing = merged.get(node_id)
+        if existing is None or node.get("updated_at", "") >= existing.get("updated_at", ""):
+            merged[node_id] = node
+    return list(merged.values())
+
+
+def _merge_chunks(local_chunks, imported_chunks):
+    """Merge transcript chunks by stable chunk ID."""
+    merged: dict[str, object] = {}
+    for chunk in local_chunks:
+        merged[chunk.id] = chunk
+    for chunk in imported_chunks:
+        merged.setdefault(chunk.id, chunk)
+    chunks = list(merged.values())
+    chunks.sort(key=lambda c: (c.timestamp, c.session_id, c.turn_index, c.id))
+    return chunks
+
+
+def _merge_pending_contradictions(local_items: list[dict], imported_items: list[dict]) -> list[dict]:
+    """Merge pending contradictions by semantic key."""
+    merged: dict[tuple, dict] = {}
+    for item in local_items + imported_items:
+        key = (
+            item.get("old_node_id"),
+            item.get("new_content"),
+            item.get("category"),
+            item.get("reason"),
+            tuple(item.get("source_sessions", [])),
+            item.get("claim_text"),
+        )
+        merged[key] = item
+    return list(merged.values())
+
+
+def _manifest_from_chunks(chunks: list, extra_manifests: list[dict]) -> dict:
+    """Build merged manifest metadata from transcript chunks."""
+    sessions: dict[str, dict] = {}
+    for chunk in chunks:
+        entry = sessions.setdefault(
+            chunk.session_id,
+            {"chunk_count": 0, "min_ts": chunk.timestamp or "", "max_ts": chunk.timestamp or ""},
+        )
+        entry["chunk_count"] += 1
+        if chunk.timestamp:
+            if not entry["min_ts"] or chunk.timestamp < entry["min_ts"]:
+                entry["min_ts"] = chunk.timestamp
+            if not entry["max_ts"] or chunk.timestamp > entry["max_ts"]:
+                entry["max_ts"] = chunk.timestamp
+
+    source_files: list[str] = []
+    for manifest in extra_manifests:
+        for path in manifest.get("source_files", []) or []:
+            if path not in source_files:
+                source_files.append(path)
+
+    result = {
+        "chunk_count": len(chunks),
+        "session_count": len(sessions),
+        "sessions": sessions,
+        "build_timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if source_files:
+        result["source_files"] = source_files
+    return result
+
+
+def _load_index_state(index_dir: Path) -> tuple[list, dict, list[dict], list[dict]]:
+    """Load chunks, manifest, knowledge, and pending contradictions from *index_dir*."""
+    if not _has_index(index_dir):
+        return [], {}, [], []
+
+    from synapt.recall.core import TranscriptIndex
+
+    index = TranscriptIndex.load(index_dir, use_embeddings=False)
+    try:
+        db = index._db
+        manifest = db.load_manifest() if db else {}
+        knowledge = db.load_knowledge_nodes(status=None) if db else []
+        pending = db.list_pending_contradictions() if db else []
+        return index.chunks, manifest, knowledge, pending
+    finally:
+        if index._db is not None:
+            index._db.close()
+
+
+def _rebuild_merged_index(
+    target_index_dir: Path,
+    local_index_dir: Path,
+    imported_index_dir: Path,
+) -> dict:
+    """Merge two indexes semantically and rewrite a clean destination index."""
+    from synapt.recall.core import TranscriptIndex
+    from synapt.recall.storage import RecallDB
+
+    local_chunks, local_manifest, local_nodes, local_pending = _load_index_state(local_index_dir)
+    imported_chunks, imported_manifest, imported_nodes, imported_pending = _load_index_state(imported_index_dir)
+
+    merged_chunks = _merge_chunks(local_chunks, imported_chunks)
+    merged_nodes = _merge_knowledge_nodes(local_nodes, imported_nodes)
+    merged_pending = _merge_pending_contradictions(local_pending, imported_pending)
+    merged_manifest = _manifest_from_chunks(
+        merged_chunks,
+        [local_manifest, imported_manifest],
+    )
+
+    with tempfile.TemporaryDirectory(prefix="synapt-recall-merge-") as tmp:
+        tmp_index = Path(tmp) / "index"
+        tmp_index.mkdir(parents=True, exist_ok=True)
+        db = RecallDB(tmp_index / "recall.db")
+        try:
+            index = TranscriptIndex(
+                merged_chunks,
+                use_embeddings=False,
+                cache_dir=tmp_index,
+                db=db,
+            )
+            index.save(tmp_index)
+            db.save_knowledge_nodes(merged_nodes)
+            for item in merged_pending:
+                db.add_pending_contradiction(
+                    old_node_id=item.get("old_node_id"),
+                    new_content=item.get("new_content", ""),
+                    category=item.get("category", ""),
+                    reason=item.get("reason", ""),
+                    source_sessions=item.get("source_sessions", []),
+                    detected_by=item.get("detected_by", "archive-import"),
+                    claim_text=item.get("claim_text"),
+                )
+            db.save_manifest(merged_manifest)
+        finally:
+            db.close()
+
+        if target_index_dir.exists():
+            shutil.rmtree(target_index_dir)
+        shutil.copytree(tmp_index, target_index_dir)
+
+    return {
+        "chunk_count": len(merged_chunks),
+        "knowledge_count": len(merged_nodes),
+        "pending_contradiction_count": len(merged_pending),
+    }
+
+
+def import_recall_archive(
+    project_dir: Path,
+    archive_path: Path,
+    *,
+    mode: str = "replace",
+) -> dict:
+    """Import a portable recall archive into *project_dir*.
+
+    ``mode="replace"`` fully restores the archived data directory.
+    ``mode="merge"`` merges transcripts, journals, channels, reminders,
+    and reconstructs a merged monolithic recall index from both sources.
+    """
+    if mode not in {"replace", "merge"}:
+        raise ValueError("mode must be 'replace' or 'merge'")
+
+    project_dir = project_dir.resolve()
+    archive_path = archive_path.expanduser().resolve()
+    manifest = _load_archive_manifest(archive_path)
+
+    with tempfile.TemporaryDirectory(prefix="synapt-recall-import-") as tmp:
+        extracted_dir = Path(tmp) / "archive"
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+        _safe_extract_archive(archive_path, extracted_dir)
+
+        data_dir = _data_dir(project_dir)
+        if mode == "replace":
+            wt_map = _worktree_name_map(extracted_dir, project_dir)
+            for src_name, dst_name in wt_map.items():
+                if src_name == dst_name:
+                    continue
+                src_wt = extracted_dir / "worktrees" / src_name
+                dst_wt = extracted_dir / "worktrees" / dst_name
+                if src_wt.exists() and not dst_wt.exists():
+                    src_wt.rename(dst_wt)
+
+            if data_dir.exists():
+                shutil.rmtree(data_dir)
+            data_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(extracted_dir, data_dir)
+            summary = dict(manifest)
+            summary["mode"] = "replace"
+            return summary
+
+        # Merge mode
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Merge per-worktree transcripts and journals
+        imported_worktrees = extracted_dir / "worktrees"
+        if imported_worktrees.is_dir():
+            from synapt.recall.journal import compact_journal
+
+            wt_map = _worktree_name_map(extracted_dir, project_dir)
+            for wt_dir in sorted(p for p in imported_worktrees.iterdir() if p.is_dir()):
+                dst_wt_name = wt_map.get(wt_dir.name, wt_dir.name)
+                dst_wt = data_dir / "worktrees" / dst_wt_name
+                src_transcripts = wt_dir / "transcripts"
+                if src_transcripts.is_dir():
+                    _merge_transcript_archives(src_transcripts, dst_wt / "transcripts")
+                src_journal = wt_dir / "journal.jsonl"
+                if src_journal.is_file():
+                    _merge_jsonl_lines(src_journal, dst_wt / "journal.jsonl")
+                    compact_journal(dst_wt / "journal.jsonl")
+
+        # Merge channels by appending unique JSONL lines. Leave local DB/cursors intact.
+        imported_channels = extracted_dir / "channels"
+        if imported_channels.is_dir():
+            dst_channels = data_dir / "channels"
+            for src_file in sorted(imported_channels.glob("*.jsonl")):
+                _merge_jsonl_lines(src_file, dst_channels / src_file.name)
+
+        # Merge small root-level state files.
+        imported_reminders = extracted_dir / "reminders.json"
+        if imported_reminders.is_file():
+            _merge_reminders(imported_reminders, data_dir / "reminders.json")
+
+        imported_dedup = extracted_dir / "dedup_decisions.jsonl"
+        if imported_dedup.is_file():
+            _merge_jsonl_lines(imported_dedup, data_dir / "dedup_decisions.jsonl")
+
+        for name in ("config.json", "upload_manifest.json", "last_sync_time"):
+            src = extracted_dir / name
+            dst = data_dir / name
+            if src.is_file() and not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+
+        merged_index_stats = _rebuild_merged_index(
+            data_dir / "index",
+            _index_dir(project_dir),
+            extracted_dir / "index",
+        )
+
+        # Regenerate knowledge.jsonl from merged DB state if we have one.
+        merged_chunks, _manifest, merged_nodes, _pending = _load_index_state(data_dir / "index")
+        if merged_nodes:
+            _write_knowledge_jsonl(merged_nodes, data_dir / "knowledge.jsonl")
+
+        summary = dict(manifest)
+        summary.update(merged_index_stats)
+        summary["mode"] = "merge"
+        summary["session_count"] = len({c.session_id for c in merged_chunks})
+        return summary
 
 
 # ---------------------------------------------------------------------------

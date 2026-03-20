@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from synapt.recall.archive import (
+    export_recall_archive,
+    import_recall_archive,
     archive_transcripts,
     load_sync_config,
     save_sync_config,
@@ -14,7 +16,102 @@ from synapt.recall.archive import (
     should_sync,
     _set_last_sync_time,
 )
-from synapt.recall.core import project_archive_dir
+from synapt.recall.core import project_archive_dir, project_worktree_dir, project_index_dir, TranscriptChunk, TranscriptIndex
+from synapt.recall.storage import RecallDB
+
+
+def _seed_recall_project(
+    project: Path,
+    *,
+    session_id: str,
+    chunk_id: str,
+    knowledge_id: str,
+    journal_focus: str,
+    channel_id: str,
+    reminder_id: str,
+) -> None:
+    """Create a small but complete recall dataset for export/import tests."""
+    archive_dir = project_archive_dir(project)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / f"{session_id}.jsonl").write_text('{"type":"progress","sessionId":"' + session_id + '"}\n')
+
+    wt_dir = project_worktree_dir(project)
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    (wt_dir / "journal.jsonl").write_text(
+        json.dumps({
+            "timestamp": "2026-03-20T09:00:00+00:00",
+            "session_id": session_id,
+            "focus": journal_focus,
+            "done": [],
+            "decisions": [],
+            "next_steps": [],
+            "files_modified": [],
+            "git_log": [],
+            "auto": False,
+            "enriched": False,
+        }) + "\n"
+    )
+
+    channels_dir = project / ".synapt" / "recall" / "channels"
+    channels_dir.mkdir(parents=True, exist_ok=True)
+    (channels_dir / "dev.jsonl").write_text(
+        json.dumps({
+            "id": channel_id,
+            "timestamp": "2026-03-20T09:01:00+00:00",
+            "author": "atlas",
+            "message": f"message-{channel_id}",
+        }) + "\n"
+    )
+
+    (project / ".synapt" / "recall" / "reminders.json").write_text(
+        json.dumps([
+            {
+                "id": reminder_id,
+                "text": f"remember-{reminder_id}",
+                "sticky": False,
+                "shown_count": 0,
+                "created_at": "2026-03-20T09:02:00+00:00",
+            }
+        ])
+    )
+
+    index_dir = project_index_dir(project)
+    index_dir.mkdir(parents=True, exist_ok=True)
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        chunk = TranscriptChunk(
+            id=chunk_id,
+            session_id=session_id,
+            timestamp="2026-03-20T09:00:00+00:00",
+            turn_index=0,
+            user_text=f"user-{session_id}",
+            assistant_text=f"assistant-{session_id}",
+        )
+        index = TranscriptIndex([chunk], use_embeddings=False, cache_dir=index_dir, db=db)
+        index.save(index_dir)
+        db.save_knowledge_nodes([
+            {
+                "id": knowledge_id,
+                "content": f"knowledge-{knowledge_id}",
+                "category": "fact",
+                "confidence": 0.8,
+                "source_sessions": [session_id],
+                "created_at": "2026-03-20T09:00:00+00:00",
+                "updated_at": "2026-03-20T09:00:00+00:00",
+                "status": "active",
+                "superseded_by": "",
+                "contradiction_note": "",
+                "tags": [],
+                "valid_from": None,
+                "valid_until": None,
+                "version": 1,
+                "lineage_id": "",
+                "source_turns": [],
+                "source_offsets": [],
+            }
+        ])
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +223,106 @@ def test_archive_ignores_non_jsonl(tmp_path):
     archive_dir = project_archive_dir(project)
     assert not (archive_dir / "notes.txt").exists()
     assert not (archive_dir / "data.json").exists()
+
+
+def test_export_import_replace_roundtrip(tmp_path):
+    """Portable archive replace-import restores transcripts, channels, and index."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _seed_recall_project(
+        source,
+        session_id="sess-a",
+        chunk_id="sess-a:t0",
+        knowledge_id="know-a",
+        journal_focus="source focus",
+        channel_id="msg-a",
+        reminder_id="rem-a",
+    )
+
+    archive_path = tmp_path / "backup.synapt-archive"
+    out_path, manifest = export_recall_archive(source, archive_path)
+    assert out_path == archive_path
+    assert manifest["chunk_count"] == 1
+    assert manifest["knowledge_count"] == 1
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    summary = import_recall_archive(dest, archive_path, mode="replace")
+    assert summary["mode"] == "replace"
+
+    dest_index = TranscriptIndex.load(project_index_dir(dest), use_embeddings=False)
+    try:
+        assert len(dest_index.chunks) == 1
+        assert dest_index.chunks[0].id == "sess-a:t0"
+        assert dest_index._db is not None
+        assert len(dest_index._db.load_knowledge_nodes(status=None)) == 1
+    finally:
+        if dest_index._db is not None:
+            dest_index._db.close()
+
+    assert (project_archive_dir(dest) / "sess-a.jsonl").exists()
+    assert (project_worktree_dir(dest) / "journal.jsonl").exists()
+    assert (dest / ".synapt" / "recall" / "channels" / "dev.jsonl").exists()
+    reminders = json.loads((dest / ".synapt" / "recall" / "reminders.json").read_text())
+    assert reminders[0]["id"] == "rem-a"
+
+
+def test_import_merge_unions_chunks_knowledge_journal_and_channels(tmp_path):
+    """Merge import unions semantic recall state without dropping local data."""
+    local = tmp_path / "local"
+    local.mkdir()
+    _seed_recall_project(
+        local,
+        session_id="sess-local",
+        chunk_id="sess-local:t0",
+        knowledge_id="know-local",
+        journal_focus="local focus",
+        channel_id="msg-local",
+        reminder_id="rem-local",
+    )
+
+    imported = tmp_path / "imported"
+    imported.mkdir()
+    _seed_recall_project(
+        imported,
+        session_id="sess-imported",
+        chunk_id="sess-imported:t0",
+        knowledge_id="know-imported",
+        journal_focus="imported focus",
+        channel_id="msg-imported",
+        reminder_id="rem-imported",
+    )
+
+    archive_path = tmp_path / "merge.synapt-archive"
+    export_recall_archive(imported, archive_path)
+
+    summary = import_recall_archive(local, archive_path, mode="merge")
+    assert summary["mode"] == "merge"
+    assert summary["chunk_count"] == 2
+    assert summary["knowledge_count"] == 2
+
+    merged_index = TranscriptIndex.load(project_index_dir(local), use_embeddings=False)
+    try:
+        chunk_ids = {chunk.id for chunk in merged_index.chunks}
+        assert chunk_ids == {"sess-local:t0", "sess-imported:t0"}
+        assert merged_index._db is not None
+        node_ids = {node["id"] for node in merged_index._db.load_knowledge_nodes(status=None)}
+        assert node_ids == {"know-local", "know-imported"}
+    finally:
+        if merged_index._db is not None:
+            merged_index._db.close()
+
+    journal_text = (project_worktree_dir(local) / "journal.jsonl").read_text()
+    assert "sess-local" in journal_text
+    assert "sess-imported" in journal_text
+
+    channel_text = (local / ".synapt" / "recall" / "channels" / "dev.jsonl").read_text()
+    assert "msg-local" in channel_text
+    assert "msg-imported" in channel_text
+
+    reminders = json.loads((local / ".synapt" / "recall" / "reminders.json").read_text())
+    reminder_ids = {item["id"] for item in reminders}
+    assert reminder_ids == {"rem-local", "rem-imported"}
 
 
 # ---------------------------------------------------------------------------

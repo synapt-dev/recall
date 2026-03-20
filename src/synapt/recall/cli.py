@@ -977,6 +977,54 @@ def cmd_archive(args: argparse.Namespace) -> None:
         print("All transcripts already archived.", file=sys.stderr)
 
 
+def cmd_export(args: argparse.Namespace) -> None:
+    """Export portable recall state to a .synapt-archive file."""
+    from synapt.recall.archive import export_recall_archive
+
+    project = Path.cwd().resolve()
+    try:
+        output_path, manifest = export_recall_archive(
+            project,
+            Path(args.output).expanduser() if args.output else None,
+            exclude_transcripts=args.exclude_transcripts,
+            exclude_channels=args.exclude_channels,
+        )
+    except Exception as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Exported recall archive to {output_path}")
+    print(
+        f"  chunks={manifest.get('chunk_count', 0)} "
+        f"knowledge={manifest.get('knowledge_count', 0)} "
+        f"worktrees={manifest.get('worktree_count', 0)}"
+    )
+
+
+def cmd_import(args: argparse.Namespace) -> None:
+    """Import portable recall state from a .synapt-archive file."""
+    from synapt.recall.archive import import_recall_archive
+
+    project = Path.cwd().resolve()
+    mode = "merge" if args.merge else "replace"
+    try:
+        summary = import_recall_archive(
+            project,
+            Path(args.archive),
+            mode=mode,
+        )
+    except Exception as exc:
+        print(f"Import failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Imported recall archive from {Path(args.archive).expanduser().resolve()}")
+    print(
+        f"  mode={summary.get('mode', mode)} "
+        f"chunks={summary.get('chunk_count', 0)} "
+        f"knowledge={summary.get('knowledge_count', 0)}"
+    )
+
+
 def cmd_transcript(args: argparse.Namespace) -> None:
     """Display or save a session transcript."""
     from synapt.recall.archive import archive_transcripts
@@ -2193,6 +2241,18 @@ def main():
     # Archive (lightweight local copy, no indexing)
     subparsers.add_parser("archive", help="Archive transcripts locally (no indexing)")
 
+    # Export / Import (portable recall snapshot)
+    export_parser = subparsers.add_parser("export", help="Export portable recall data to a .synapt-archive file")
+    export_parser.add_argument("output", nargs="?", default=None, help="Output .synapt-archive path (default: <project>.synapt-archive)")
+    export_parser.add_argument("--exclude-transcripts", action="store_true", help="Skip raw transcript archives")
+    export_parser.add_argument("--exclude-channels", action="store_true", help="Skip channel history files")
+
+    import_parser = subparsers.add_parser("import", help="Import portable recall data from a .synapt-archive file")
+    import_parser.add_argument("archive", help="Path to a .synapt-archive file")
+    import_mode = import_parser.add_mutually_exclusive_group()
+    import_mode.add_argument("--merge", action="store_true", help="Merge imported data into existing recall state")
+    import_mode.add_argument("--replace", action="store_true", help="Replace existing recall state (default)")
+
     # Transcript (display/save a session)
     transcript_parser = subparsers.add_parser("transcript", help="Display or save a session transcript")
     transcript_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (default: most recent)")
@@ -2304,6 +2364,10 @@ def main():
         cmd_sync(args)
     elif args.command == "archive":
         cmd_archive(args)
+    elif args.command == "export":
+        cmd_export(args)
+    elif args.command == "import":
+        cmd_import(args)
     elif args.command == "transcript":
         cmd_transcript(args)
     elif args.command == "journal":
