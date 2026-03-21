@@ -41,7 +41,7 @@ Enter
 Type "echo '🟣 Claude Code'"
 Enter
 Sleep 1s
-Type@80ms "claude -p 'Use recall_quick only. Answer in one short line: what embedding model does this project use and why was it chosen?'"
+Type@80ms "./run_cross_editor_query.sh claude"
 Enter
 Sleep 60s
 
@@ -51,7 +51,7 @@ Enter
 Type "echo '🟢 Codex CLI (OpenAI)'"
 Enter
 Sleep 1s
-Type@80ms "codex exec --skip-git-repo-check -m gpt-5.4-mini 'Use recall_quick only. Answer in one short line: what embedding model does this project use and why was it chosen?'"
+Type@80ms "./run_cross_editor_query.sh codex"
 Enter
 Sleep 60s
 
@@ -61,7 +61,7 @@ Enter
 Type "echo '🔵 OpenCode'"
 Enter
 Sleep 1s
-Type@80ms "opencode run 'Use recall_quick only. Answer in one short line: what embedding model does this project use and why was it chosen?'"
+Type@80ms "./run_cross_editor_query.sh opencode"
 Enter
 Sleep 60s
 

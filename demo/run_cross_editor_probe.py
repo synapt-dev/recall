@@ -9,35 +9,21 @@ VHS run.
 from __future__ import annotations
 
 import argparse
-import shutil
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
 
-PROMPT = (
-    "Use recall_quick only. Answer in one short line: "
-    "what embedding model does this project use and why was it chosen?"
-)
-
 DEFAULT_DEMO_ROOT = Path("/tmp/synapt-demo")
 DEFAULT_TIMEOUT = 60
 VALID_TOOLS = ("claude", "codex", "opencode")
+HELPER_NAME = "run_cross_editor_query.sh"
 
 
-def _commands(prompt: str) -> dict[str, list[str]]:
-    return {
-        "claude": ["claude", "-p", prompt],
-        "codex": [
-            "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "-m",
-            "gpt-5.4-mini",
-            prompt,
-        ],
-        "opencode": ["opencode", "run", prompt],
-    }
+def _command(cwd: Path, tool: str) -> list[str]:
+    return [str(cwd / HELPER_NAME), tool]
 
 
 def _snippet(text: str, limit: int = 800) -> str:
@@ -49,27 +35,35 @@ def _snippet(text: str, limit: int = 800) -> str:
 
 def _probe(tool: str, cmd: list[str], cwd: Path, timeout: int) -> int:
     print(f"== {tool} ==")
-    binary = shutil.which(cmd[0])
-    if not binary:
-        print(f"missing: {cmd[0]}")
+    if not Path(cmd[0]).exists():
+        print(f"missing helper: {cmd[0]}")
         return 1
 
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
         print(f"timeout after {timeout}s")
-        stdout = exc.stdout if isinstance(exc.stdout, str) else (
-            exc.stdout or b""
-        ).decode("utf-8", "ignore")
-        stderr = exc.stderr if isinstance(exc.stderr, str) else (
-            exc.stderr or b""
-        ).decode("utf-8", "ignore")
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
         if stdout.strip():
             print("stdout:")
             print(_snippet(stdout))
@@ -79,12 +73,12 @@ def _probe(tool: str, cmd: list[str], cwd: Path, timeout: int) -> int:
         return 1
 
     print(f"rc={proc.returncode}")
-    if proc.stdout.strip():
+    if stdout.strip():
         print("stdout:")
-        print(_snippet(proc.stdout))
-    if proc.stderr.strip():
+        print(_snippet(stdout))
+    if stderr.strip():
         print("stderr:")
-        print(_snippet(proc.stderr))
+        print(_snippet(stderr))
     return 0 if proc.returncode == 0 else 1
 
 
@@ -121,12 +115,21 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if not (demo_root / HELPER_NAME).exists():
+        print(
+            f"demo helper not found: {demo_root / HELPER_NAME}",
+            file=sys.stderr,
+        )
+        print(
+            "Re-run python demo/build_demo_index.py to refresh the demo files.",
+            file=sys.stderr,
+        )
+        return 1
 
-    commands = _commands(PROMPT)
     selected = args.tools or list(VALID_TOOLS)
     failures = 0
     for tool in selected:
-        failures += _probe(tool, commands[tool], demo_root, args.timeout)
+        failures += _probe(tool, _command(demo_root, tool), demo_root, args.timeout)
 
     if failures:
         print(f"\n{failures} probe(s) failed.")

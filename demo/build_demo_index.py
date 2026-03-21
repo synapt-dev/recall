@@ -69,10 +69,27 @@ def _materialize_project_files(project_dir: Path, demo_root: Path) -> Path:
         encoding="utf-8",
     )
 
+    helper = REPO_ROOT / "demo" / "run_cross_editor_query.sh"
+    if helper.exists():
+        shutil.copy2(helper, demo_root / "run_cross_editor_query.sh")
+
     return sessions_dst
 
 
 def _build_index(demo_root: Path, sessions_dir: Path, no_embeddings: bool) -> None:
+    if no_embeddings:
+        from synapt.recall.core import build_index, project_index_dir
+
+        index_dir = project_index_dir(demo_root)
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index = build_index(
+            source_dir=sessions_dir,
+            use_embeddings=False,
+            cache_dir=index_dir,
+        )
+        index.save(index_dir)
+        return
+
     cmd = [
         sys.executable,
         "-m",
@@ -89,9 +106,6 @@ def _build_index(demo_root: Path, sessions_dir: Path, no_embeddings: bool) -> No
     existing = env.get("PYTHONPATH")
     repo_src = str(REPO_ROOT / "src")
     env["PYTHONPATH"] = repo_src if not existing else f"{repo_src}{os.pathsep}{existing}"
-    if no_embeddings:
-        # Keep the local smoke path fast and fully laptop-friendly.
-        env["SYNAPT_DISABLE_CLUSTERS"] = "1"
 
     subprocess.run(cmd, cwd=demo_root, env=env, check=True)
 
