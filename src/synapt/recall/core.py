@@ -4059,4 +4059,29 @@ def build_index(
         print(f"[synapt] Skipped {skipped} already-indexed files")
     print(f"[synapt] Total: {len(all_chunks)} chunks from {len(jsonl_files) - skipped} files")
 
+    # Auto-detect content profile and re-parse if sub-chunking should differ.
+    # Personal content needs full turns (subchunk=0); code benefits from splitting.
+    # Only re-parses when caller didn't explicitly set subchunk_min_text.
+    if subchunk_min_text is None and all_chunks:
+        from synapt.recall.content_profile import detect_content_profile, adaptive_params
+        profile = detect_content_profile(all_chunks)
+        profile_threshold = adaptive_params(profile).subchunk_min_text
+        default_threshold = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
+        if profile_threshold != default_threshold:
+            has_subchunks = any(c.user_text.startswith("(context:") for c in all_chunks)
+            if has_subchunks and profile_threshold == 0:
+                # Personal content was sub-chunked — re-parse without splitting
+                logger.info("Content profile %s: re-parsing without sub-chunking",
+                            profile.content_type)
+                all_chunks = []
+                seen_uuids_reparse: set[str] = set()
+                for filepath in jsonl_files:
+                    try:
+                        chunks = parse_transcript(filepath, seen_uuids=seen_uuids_reparse,
+                                                  subchunk_min_text=0)
+                        all_chunks.extend(chunks)
+                    except Exception:
+                        pass
+                print(f"[synapt] Re-parsed: {len(all_chunks)} chunks (sub-chunking disabled)")
+
     return TranscriptIndex(all_chunks, use_embeddings=use_embeddings, cache_dir=cache_dir, db=db)
