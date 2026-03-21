@@ -284,6 +284,18 @@ def _archive_and_build_locked(
     # Strip old journal chunks — they'll be re-parsed fresh below
     all_chunks = [c for c in existing_chunks if c.turn_index >= 0]
 
+    # Detect content profile from existing chunks (if available) to set
+    # sub-chunk threshold. Personal content disables sub-chunking to
+    # preserve full conversation turns for retrieval (#455).
+    _subchunk_min = None  # None = use default (1200)
+    if all_chunks:
+        from synapt.recall.content_profile import detect_content_profile, adaptive_params
+        _profile = detect_content_profile(all_chunks)
+        _subchunk_min = adaptive_params(_profile).subchunk_min_text
+        if _subchunk_min != 1200:
+            logger.info("build: content profile %s → subchunk_min_text=%d",
+                         _profile.content_type, _subchunk_min)
+
     # Build from archived transcripts (BM25-only, no DB needed for parsing)
     logger.info("build: parsing transcripts from %d source(s)...", len(build_sources))
     for build_source in build_sources:
@@ -291,6 +303,7 @@ def _archive_and_build_locked(
             build_source,
             use_embeddings=False,
             incremental_manifest=incremental_manifest,
+            subchunk_min_text=_subchunk_min,
         )
         all_chunks.extend(index.chunks)
     logger.info("build: parsed %d chunks in %.1fs", len(all_chunks), _time.monotonic() - build_t0)

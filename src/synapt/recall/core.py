@@ -4011,6 +4011,7 @@ def build_index(
     cache_dir: Path | None = None,
     incremental_manifest: dict | None = None,
     db: RecallDB | None = None,
+    subchunk_min_text: int | None = None,
 ) -> TranscriptIndex:
     """Build a TranscriptIndex from a directory of .jsonl transcript files.
 
@@ -4047,7 +4048,8 @@ def build_index(
                 skipped += 1
                 continue
         try:
-            chunks = parse_transcript(filepath, seen_uuids=seen_uuids)
+            chunks = parse_transcript(filepath, seen_uuids=seen_uuids,
+                                      subchunk_min_text=subchunk_min_text)
             all_chunks.extend(chunks)
             print(f"  {filepath.name}: {len(chunks)} turns")
         except Exception as e:
