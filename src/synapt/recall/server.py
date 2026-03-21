@@ -1522,6 +1522,7 @@ def recall_channel(
     limit: int = 20,
     pin: bool = False,
     name: str | None = None,
+    attachments: str | None = None,
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -1540,6 +1541,7 @@ def recall_channel(
         limit: Max messages to return for "read" action (default 20).
         pin: If True with "post" action, also pin the message.
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
+        attachments: Semicolon-separated file paths to attach (copied into channel store on post).
     """
     try:
         from synapt.recall.channel import (
@@ -1570,7 +1572,8 @@ def recall_channel(
         if action == "post":
             if not message:
                 return "Error: message is required for 'post' action."
-            return channel_post(channel=channel, message=message, pin=pin)
+            attachment_list = [p.strip() for p in attachments.split(";")] if attachments else None
+            return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list)
 
         if action == "read":
             return channel_read(channel=channel, limit=limit)
