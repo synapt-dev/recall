@@ -1,7 +1,16 @@
 # Cross-Editor Memory Demo
-# Run: cd /Users/layne/Development/synapt-dev && vhs synapt/demo/cross-editor-memory.tape
-Output synapt/demo/cross-editor-memory.gif
-Output synapt/demo/cross-editor-memory.mp4
+# Shows synapt recall working across Claude Code, Codex CLI, and OpenCode
+#
+# Prerequisites:
+#   1. Build demo project + index: python3 demo/build_demo_index.py
+#      Fast local check: python3 demo/build_demo_index.py --no-embeddings
+#   2. Probe editor CLIs: python3 demo/run_cross_editor_probe.py
+#   3. Run: vhs demo/cross-editor-memory.tape
+#
+# Uses CodeMemo project_03 (synapt development sessions) as the data source.
+
+Output demo/cross-editor-memory.gif
+Output demo/cross-editor-memory.mp4
 
 Set FontSize 16
 Set Width 1000
@@ -10,54 +19,61 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 Set Padding 20
 
-# cd to a directory with the recall index so MCP tools work
-Type "cd /Users/layne/Development/synapt-dev"
+# Start in demo project directory so synapt server finds the index
+Type "cd /tmp/synapt-demo"
 Enter
-Sleep 1s
+Sleep 500ms
 
-Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
+# Title
+Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
 Enter
-Type "echo '  synapt — persistent memory for AI coding agents'"
+Type "echo '  synapt — keep your memory'"
 Enter
-Type "echo '  One memory. Three editors. Same answer.'"
+Type "echo '  One memory. Three editors.'"
 Enter
-Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
+Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
 Enter
-Sleep 3s
+Sleep 2s
 
+# === Claude Code ===
 Type "echo ''"
 Enter
 Type "echo '🟣 Claude Code'"
 Enter
 Sleep 1s
-Type@80ms "claude -p 'use recall to tell me: what embedding model does this project use and why was it chosen? be brief.' --allowedTools 'mcp__synapt__*'"
+Type@80ms "./run_cross_editor_query.sh claude"
 Enter
 Sleep 60s
 
+# === Codex CLI ===
 Type "echo ''"
 Enter
 Type "echo '🟢 Codex CLI (OpenAI)'"
 Enter
 Sleep 1s
-Type@80ms "codex exec --skip-git-repo-check 'use recall to tell me: what embedding model does this project use and why was it chosen? be brief.'"
+Type@80ms "./run_cross_editor_query.sh codex"
 Enter
 Sleep 60s
 
+# === OpenCode ===
 Type "echo ''"
 Enter
 Type "echo '🔵 OpenCode'"
 Enter
 Sleep 1s
-Type@80ms "opencode run 'use recall to tell me: what embedding model does this project use and why was it chosen? be brief.'"
+Type@80ms "./run_cross_editor_query.sh opencode"
 Enter
 Sleep 60s
 
-Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
+# Closing
+Type "echo ''"
+Enter
+Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
 Enter
 Type "echo '  Same project. Same memory. Any editor.'"
 Enter
-Type "echo '  pip install synapt    github.com/laynepenney/synapt'"
+Type "echo '  pip install synapt    synapt.dev'"
 Enter
-Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
+Type "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'"
 Enter
-Sleep 5s
+Sleep 4s
