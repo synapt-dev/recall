@@ -534,6 +534,7 @@ def _extract_snippet(text: str, query: str, context_lines: int = 1) -> str:
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
+    subchunk_min_text: int | None = None,
 ) -> list[TranscriptChunk]:
     """Parse a Claude Code transcript JSONL file into semantic chunks.
 
@@ -600,7 +601,10 @@ def parse_transcript(
             for s in nonempty_segs
         )
 
-        _sub_chunk_min_text = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
+        if subchunk_min_text is not None:
+            _sub_chunk_min_text = subchunk_min_text
+        else:
+            _sub_chunk_min_text = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
         if len(nonempty_segs) >= 2 and total_text > _sub_chunk_min_text and _sub_chunk_min_text > 0:
             # --- Sub-chunk mode ---
             for seg_i, seg in enumerate(nonempty_segs):
@@ -4007,6 +4011,7 @@ def build_index(
     cache_dir: Path | None = None,
     incremental_manifest: dict | None = None,
     db: RecallDB | None = None,
+    subchunk_min_text: int | None = None,
 ) -> TranscriptIndex:
     """Build a TranscriptIndex from a directory of .jsonl transcript files.
 
@@ -4034,6 +4039,7 @@ def build_index(
     all_chunks: list[TranscriptChunk] = []
     seen_uuids: set[str] = set()
     skipped = 0
+    parsed_files: list[Path] = []  # Track which files were actually parsed
 
     for filepath in jsonl_files:
         if filepath.name in already_indexed:
@@ -4043,8 +4049,10 @@ def build_index(
                 skipped += 1
                 continue
         try:
-            chunks = parse_transcript(filepath, seen_uuids=seen_uuids)
+            chunks = parse_transcript(filepath, seen_uuids=seen_uuids,
+                                      subchunk_min_text=subchunk_min_text)
             all_chunks.extend(chunks)
+            parsed_files.append(filepath)
             print(f"  {filepath.name}: {len(chunks)} turns")
         except Exception as e:
             print(f"  {filepath.name}: ERROR - {e}")
@@ -4052,5 +4060,30 @@ def build_index(
     if skipped:
         print(f"[synapt] Skipped {skipped} already-indexed files")
     print(f"[synapt] Total: {len(all_chunks)} chunks from {len(jsonl_files) - skipped} files")
+
+    # Auto-detect content profile and re-parse if sub-chunking should differ.
+    # Personal content needs full turns (subchunk=0); code benefits from splitting.
+    # Only re-parses when caller didn't explicitly set subchunk_min_text.
+    if subchunk_min_text is None and all_chunks:
+        from synapt.recall.content_profile import detect_content_profile, adaptive_params
+        profile = detect_content_profile(all_chunks)
+        profile_threshold = adaptive_params(profile).subchunk_min_text
+        default_threshold = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
+        if profile_threshold != default_threshold:
+            has_subchunks = any(c.user_text.startswith("(context:") for c in all_chunks)
+            if has_subchunks and profile_threshold == 0:
+                # Personal content was sub-chunked — re-parse without splitting
+                logger.info("Content profile %s: re-parsing without sub-chunking",
+                            profile.content_type)
+                all_chunks = []
+                seen_uuids_reparse: set[str] = set()
+                for filepath in parsed_files:
+                    try:
+                        chunks = parse_transcript(filepath, seen_uuids=seen_uuids_reparse,
+                                                  subchunk_min_text=0)
+                        all_chunks.extend(chunks)
+                    except Exception:
+                        pass
+                print(f"[synapt] Re-parsed: {len(all_chunks)} chunks (sub-chunking disabled)")
 
     return TranscriptIndex(all_chunks, use_embeddings=use_embeddings, cache_dir=cache_dir, db=db)

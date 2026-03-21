@@ -156,6 +156,9 @@ class AdaptiveParams:
     generic_filter_enabled: bool = True
     garbled_filter_enabled: bool = True
 
+    # Indexing
+    subchunk_min_text: int = 1200              # Min chars to trigger sub-chunk splitting (0 = disabled)
+
     # Retrieval
     dedup_jaccard: float = 0.6
     max_knowledge_default: int | None = None   # None = no cap
@@ -178,6 +181,7 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             specificity_threshold=120,
             generic_filter_enabled=True,
             garbled_filter_enabled=True,
+            subchunk_min_text=1200,          # Code turns benefit from tool-boundary splitting
             dedup_jaccard=0.8,              # Coding chunks are naturally repetitive (same files)
             max_knowledge_default=None,
             knowledge_boost_adjust=0.0,
@@ -187,6 +191,7 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             specificity_threshold=10000,    # Effectively disabled
             generic_filter_enabled=False,   # Personal facts look "generic" to code filters
             garbled_filter_enabled=True,    # Still catch LLM artifacts
+            subchunk_min_text=0,            # Disable sub-chunking — personal turns need full context
             dedup_jaccard=0.6,              # Preserve distinct personal evidence chunks
             max_knowledge_default=0,        # Disable knowledge in retrieval — raw chunks only
             knowledge_boost_adjust=0.0,     # N/A with max_knowledge=0
@@ -196,6 +201,7 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             specificity_threshold=200,      # Relaxed but not disabled
             generic_filter_enabled=True,
             garbled_filter_enabled=True,
+            subchunk_min_text=2000,          # Higher threshold — only split very long turns
             dedup_jaccard=0.75,
             max_knowledge_default=5,
             knowledge_boost_adjust=0.0,
