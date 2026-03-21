@@ -531,6 +531,38 @@ def _extract_snippet(text: str, query: str, context_lines: int = 1) -> str:
     return snippet
 
 
+def _parse_chunk_timestamp(timestamp: str) -> datetime | None:
+    """Parse ISO-ish chunk timestamps into aware UTC datetimes."""
+    if not timestamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_timestamp_display(timestamp: str, intent: str = "") -> str:
+    """Render chunk timestamps in a query-appropriate display format."""
+    if not timestamp:
+        return "unknown"
+
+    dt = _parse_chunk_timestamp(timestamp)
+    if dt is None:
+        return timestamp
+
+    if intent == "temporal":
+        hour = dt.strftime("%I").lstrip("0") or "12"
+        return (
+            f"{dt.strftime('%A')}, {dt.strftime('%B')} {dt.day}, "
+            f"{dt.year}, {hour}:{dt.strftime('%M')} {dt.strftime('%p')}"
+        )
+
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
 def parse_transcript(
     path: Path,
     seen_uuids: set[str] | None = None,
@@ -2673,8 +2705,9 @@ class TranscriptIndex:
 
         # Build a unified emit list sorted by relevance.
         # Knowledge nodes, clusters, and raw chunks all compete on score.
-        # Each item: (score, block_text, item_type, item_id) for access tracking.
-        emit_items: list[tuple[float, str, str, str]] = []
+        # Each item: (score, block_text, item_type, item_id, sort_ts) for
+        # access tracking plus display-only chronological ordering.
+        emit_items: list[tuple[float, str, str, str, str]] = []
 
         # Include knowledge nodes in the unified ranking instead of
         # unconditionally prepending them (#284). They compete fairly
@@ -2705,7 +2738,8 @@ class TranscriptIndex:
         for node in kn_sorted:
             block = self._format_knowledge_block(node)
             node_score = node.get("score", 0.0)
-            emit_items.append((node_score, block, "knowledge", node.get("id", "")))
+            sort_ts = node.get("valid_from") or node.get("valid_until") or ""
+            emit_items.append((node_score, block, "knowledge", node.get("id", ""), sort_ts))
 
         # Source expansion only for the top knowledge nodes that will be emitted.
         # Use the unboosted base score (from FTS5/embedding) for source chunk
@@ -2759,7 +2793,7 @@ class TranscriptIndex:
                         f"{snippet}"
                     )
                     source_score = base_score * 0.6
-                    emit_items.append((source_score, block, "chunk", chunk.id))
+                    emit_items.append((source_score, block, "chunk", chunk.id, chunk.timestamp))
                     ranked_indices.add(i)
                     snippets_emitted += 1
                 if snippets_emitted > 0:
@@ -2786,13 +2820,16 @@ class TranscriptIndex:
                 source_candidates.sort(key=lambda x: x[1], reverse=True)
                 for i, overlap in source_candidates[:max_per_node]:
                     source_score = base_score * 0.6
-                    cblock = self._format_chunk_block(i)
-                    emit_items.append((source_score, cblock, "chunk", self.chunks[i].id))
+                    cblock = self._format_chunk_block(i, intent=intent)
+                    emit_items.append(
+                        (source_score, cblock, "chunk", self.chunks[i].id, self.chunks[i].timestamp)
+                    )
                     ranked_indices.add(i)
 
         for cluster_id, (cluster_info, member_indices, max_score) in cluster_groups.items():
             block = self._format_cluster_block(cluster_id, cluster_info, query=query)
-            emit_items.append((max_score, block, "cluster", cluster_id))
+            sort_ts = cluster_info.get("date_start", "") or cluster_info.get("date_end", "")
+            emit_items.append((max_score, block, "cluster", cluster_id, sort_ts))
 
         # Track which chunk IDs are sub-chunks (fragments of a split turn).
         # Used below for per-session sub-chunk capping.
@@ -2808,8 +2845,8 @@ class TranscriptIndex:
             if intent == "decision":
                 if chunk.turn_index < 0 and "Decisions:" in chunk.assistant_text:
                     score *= 1.3
-            block = self._format_chunk_block(idx)
-            emit_items.append((score, block, "chunk", chunk.id))
+            block = self._format_chunk_block(idx, intent=intent)
+            emit_items.append((score, block, "chunk", chunk.id, chunk.timestamp))
 
         # Apply adaptive score boosts before final sort:
         # 1. Working memory: items seen recently this session (1.5x / 2.0x)
@@ -2822,9 +2859,9 @@ class TranscriptIndex:
         wm = self._working_memory
         _disable_boosts = os.environ.get("SYNAPT_DISABLE_BOOSTS")
         if not _disable_boosts and emit_items:
-            top_unboosted = max(s for s, _, _, _ in emit_items)
+            top_unboosted = max(s for s, _, _, _, _ in emit_items)
             boost_ceiling = top_unboosted * 0.95  # never exceed 95% of top score
-            for i, (score, block, item_type, item_id) in enumerate(emit_items):
+            for i, (score, block, item_type, item_id, sort_ts) in enumerate(emit_items):
                 wm_multiplier = wm.boost_multiplier(item_id)
                 boosted = wm.boost_score(score, item_id)
                 boosted = self._access_frequency_boost(boosted, item_type, item_id)
@@ -2835,7 +2872,7 @@ class TranscriptIndex:
                             block,
                             f"boosted: working-memory {wm_multiplier:.1f}x",
                         )
-                    emit_items[i] = (boosted, block, item_type, item_id)
+                    emit_items[i] = (boosted, block, item_type, item_id, sort_ts)
 
         # Sort by score descending (highest relevance first)
         emit_items.sort(key=lambda x: x[0], reverse=True)
@@ -2858,20 +2895,21 @@ class TranscriptIndex:
             _MAX_SUBCHUNKS_PER_SESSION = int(os.environ.get("SYNAPT_MAX_SUBCHUNKS_PER_SESSION", str(max(1, int(_cap_override) // 2))))
         else:
             _chunk_sessions = set()
-            for _, _, itype, iid in emit_items:
+            for _, _, itype, iid, _ in emit_items:
                 if itype == "chunk":
                     sid = iid.split(":")[0] if ":" in iid else ""
                     if sid:
                         _chunk_sessions.add(sid)
             _n_sessions = max(1, len(_chunk_sessions))
-            _budget = sum(1 for _, _, t, _ in emit_items if t == "chunk")
+            _budget = sum(1 for _, _, t, _, _ in emit_items if t == "chunk")
             _MAX_PER_SESSION = max(2, _budget // _n_sessions)
             _MAX_SUBCHUNKS_PER_SESSION = max(1, _MAX_PER_SESSION // 2)
         session_emit_counts: dict[str, int] = {}
         session_subchunk_counts: dict[str, int] = {}
+        selected_blocks: list[tuple[str, int, str]] = []
 
         emitted_access: list[dict] = []
-        for score, block, item_type, item_id in emit_items:
+        for score, block, item_type, item_id, sort_ts in emit_items:
             # Cap knowledge blocks to prevent them from crowding out raw chunks
             if item_type == "knowledge" and max_knowledge is not None:
                 if knowledge_emitted >= max_knowledge:
@@ -2901,7 +2939,7 @@ class TranscriptIndex:
             block_tokens = len(block) // 4
             if token_count + block_tokens > max_tokens and len(lines) > 1:
                 break
-            lines.append(block)
+            selected_blocks.append((sort_ts, len(selected_blocks), block))
             token_count += block_tokens
             emitted_token_sets.append(block_tokens_set)
             # Track session counts (total + sub-chunk separately)
@@ -2919,6 +2957,10 @@ class TranscriptIndex:
                 "score": score,
             }
             emitted_access.append(access_entry)
+
+        if intent == "temporal":
+            selected_blocks.sort(key=lambda x: (x[0] == "", x[0], x[1]))
+        lines.extend(block for _, _, block in selected_blocks)
 
         # Record access for all emitted items (fire-and-forget)
         all_access = emitted_access
@@ -3126,24 +3168,18 @@ class TranscriptIndex:
         from synapt.recall.clustering import generate_concat_summary
         return generate_concat_summary(member_chunks, max_tokens=200)
 
-    def _format_chunk_block(self, idx: int) -> str:
+    def _format_chunk_block(self, idx: int, intent: str = "") -> str:
         """Format a single chunk as a display block."""
         chunk = self.chunks[idx]
-        raw_ts = chunk.timestamp if chunk.timestamp else "unknown"
-        # For ISO 8601 timestamps, show date + HH:MM (drop seconds/tz).
-        # For free-text timestamps (e.g. "1:56 pm on 8 May, 2023"), keep as-is.
-        if len(raw_ts) > 16 and raw_ts[4:5] == "-" and raw_ts[10:11] == "T":
-            raw_ts = raw_ts[:16]
-        ts_display = raw_ts.replace("T", " ")
+        ts_display = _format_timestamp_display(chunk.timestamp, intent=intent)
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
         # Freshness label for chunks — same style as knowledge nodes
         freshness = ""
         if chunk.timestamp and len(chunk.timestamp) >= 10:
             try:
-                chunk_dt = datetime.fromisoformat(
-                    chunk.timestamp[:19].replace("Z", "+00:00"))
-                if chunk_dt.tzinfo is None:
-                    chunk_dt = chunk_dt.replace(tzinfo=timezone.utc)
+                chunk_dt = _parse_chunk_timestamp(chunk.timestamp)
+                if chunk_dt is None:
+                    raise ValueError("unparseable timestamp")
                 days_ago = (datetime.now(timezone.utc) - chunk_dt).days
                 if days_ago == 0:
                     freshness = ", today"

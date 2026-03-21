@@ -269,6 +269,10 @@ class TestQueryIntentClassification:
         assert classify_query_intent("when was the last deployment") == "temporal"
         assert classify_query_intent("what happened last week") == "temporal"
         assert classify_query_intent("how recently was the config changed") == "temporal"
+        assert classify_query_intent("what changed between March and June") == "temporal"
+        assert classify_query_intent("what happened since March") == "temporal"
+        assert classify_query_intent("what happened before June 2023") == "temporal"
+        assert classify_query_intent("what happened during May 2023") == "temporal"
 
     def test_temporal_beats_factual_for_when(self):
         """'When did X' should classify as temporal, not factual."""
@@ -409,6 +413,41 @@ class TestTemporalExtraction:
         after, before = extract_temporal_range("on Feb 14", now=self.NOW)
         assert after == "2026-02-14"
         assert before == "2026-02-15"
+
+    def test_month_only_defaults_to_current_year(self):
+        after, before = extract_temporal_range("what happened in March", now=self.NOW)
+        assert after == "2026-03-01"
+        assert before == "2026-04-01"
+
+    def test_month_only_with_explicit_year(self):
+        after, before = extract_temporal_range("what happened during May 2023", now=self.NOW)
+        assert after == "2023-05-01"
+        assert before == "2023-06-01"
+
+    def test_year_only(self):
+        after, before = extract_temporal_range("what happened in 2023", now=self.NOW)
+        assert after == "2023-01-01"
+        assert before == "2024-01-01"
+
+    def test_between_months_same_year(self):
+        after, before = extract_temporal_range("what changed between March and June", now=self.NOW)
+        assert after == "2026-03-01"
+        assert before == "2026-07-01"
+
+    def test_since_month(self):
+        after, before = extract_temporal_range("what happened since March", now=self.NOW)
+        assert after == "2026-03-01"
+        assert before is None
+
+    def test_before_month_with_year(self):
+        after, before = extract_temporal_range("what happened before June 2023", now=self.NOW)
+        assert after is None
+        assert before == "2023-06-01"
+
+    def test_last_n_months(self):
+        after, before = extract_temporal_range("what happened over the last 3 months", now=self.NOW)
+        assert after == "2025-12-01"
+        assert before == "2026-03-10"
 
 
 # ---------------------------------------------------------------------------

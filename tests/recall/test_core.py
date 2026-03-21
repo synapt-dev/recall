@@ -1781,6 +1781,37 @@ def test_format_results_journal_chunk_uses_readable_date():
     assert "journal" in result
 
 
+def test_format_results_temporal_uses_readable_dates_and_chronological_display():
+    """Temporal intent shows fuller dates and orders emitted chunks chronologically."""
+    chunks = [
+        TranscriptChunk(
+            id="newer:t0", session_id="11111111-1111-1111-1111-111111111111",
+            timestamp="2026-03-06T16:20:00Z", turn_index=0,
+            user_text="when did we finish the deployment",
+            assistant_text="We wrapped it up on Friday afternoon.",
+        ),
+        TranscriptChunk(
+            id="older:t0", session_id="22222222-2222-2222-2222-222222222222",
+            timestamp="2026-03-04T09:05:00Z", turn_index=0,
+            user_text="when did we start the deployment",
+            assistant_text="We kicked it off on Wednesday morning.",
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+
+    result = index._format_results(
+        ranked=[(0, 1.0), (1, 0.9)],
+        max_tokens=2000,
+        intent="temporal",
+    )
+
+    older_header = "--- [Wednesday, March 4, 2026, 9:05 AM session 22222222] turn 0"
+    newer_header = "--- [Friday, March 6, 2026, 4:20 PM session 11111111] turn 0"
+    assert older_header in result
+    assert newer_header in result
+    assert result.index(older_header) < result.index(newer_header)
+
+
 def test_format_results_deduplicates_near_identical_chunks():
     """Near-duplicate chunks are filtered out to save token budget."""
     from synapt.recall.core import TranscriptIndex

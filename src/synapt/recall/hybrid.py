@@ -241,6 +241,7 @@ _TEMPORAL_PATTERNS = re.compile(
     r"first\s+time|last\s+time|most\s+recent|"
     r"ago|yesterday|today|recently|lately|"
     r"last\s+(week|month|year|time)|next\s+(week|month)|this\s+(week|month|year)|"
+    r"between\s+\w+\s+and|since\s+\w+|before\s+\w+|during\s+\w+|"
     r"what\s+(date|day|month|year|time)|"
     r"chronolog|timeline|at\s+what\s+point|"
     r"evolv\w*|progression|progressed|"
@@ -473,6 +474,44 @@ _MONTH_DAY_PATTERN = re.compile(
     re.I,
 )
 _ISO_DATE_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_MONTH_ONLY_PATTERN = re.compile(
+    r"\b(?:in|during)\s+(" + "|".join(_MONTH_NAMES.keys()) + r")"
+    r"(?:\s+(\d{4}))?\b",
+    re.I,
+)
+_YEAR_ONLY_PATTERN = re.compile(r"\bin\s+(\d{4})\b", re.I)
+_BETWEEN_MONTHS_PATTERN = re.compile(
+    r"\bbetween\s+(" + "|".join(_MONTH_NAMES.keys()) + r")"
+    r"(?:\s+(\d{4}))?\s+and\s+(" + "|".join(_MONTH_NAMES.keys()) + r")"
+    r"(?:\s+(\d{4}))?\b",
+    re.I,
+)
+_SINCE_MONTH_PATTERN = re.compile(
+    r"\b(?:since|after)\s+(" + "|".join(_MONTH_NAMES.keys()) + r")"
+    r"(?:\s+(\d{4}))?\b",
+    re.I,
+)
+_BEFORE_MONTH_PATTERN = re.compile(
+    r"\bbefore\s+(" + "|".join(_MONTH_NAMES.keys()) + r")"
+    r"(?:\s+(\d{4}))?\b",
+    re.I,
+)
+_LAST_N_MONTHS_PATTERN = re.compile(r"\blast\s+(\d+)\s+months?\b", re.I)
+
+
+def _month_start(year: int, month: int) -> datetime:
+    return datetime(year, month, 1, tzinfo=timezone.utc)
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    total_months = dt.year * 12 + (dt.month - 1) + months
+    year = total_months // 12
+    month = total_months % 12 + 1
+    return _month_start(year, month)
+
+
+def _month_number(month_name: str) -> int | None:
+    return _MONTH_NAMES.get(month_name.lower())
 
 
 def extract_temporal_range(
@@ -510,6 +549,12 @@ def extract_temporal_range(
             start = now - timedelta(days=n)
         return (start.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
 
+    match = _LAST_N_MONTHS_PATTERN.search(query)
+    if match:
+        months = int(match.group(1))
+        start = _add_months(now, -months)
+        return (start.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
+
     # Check "Month Day[, Year]" pattern
     match = _MONTH_DAY_PATTERN.search(query)
     if match:
@@ -526,6 +571,56 @@ def extract_temporal_range(
                 )
             except ValueError:
                 pass  # Invalid date (e.g., Feb 30)
+
+    match = _BETWEEN_MONTHS_PATTERN.search(query)
+    if match:
+        start_month = _month_number(match.group(1))
+        end_month = _month_number(match.group(3))
+        start_year = int(match.group(2)) if match.group(2) else None
+        end_year = int(match.group(4)) if match.group(4) else None
+        if start_month and end_month:
+            if start_year is None and end_year is None:
+                start_year = now.year
+                end_year = now.year + 1 if start_month > end_month else now.year
+            elif start_year is None:
+                start_year = end_year if start_month <= end_month else end_year - 1
+            elif end_year is None:
+                end_year = start_year if start_month <= end_month else start_year + 1
+            start = _month_start(start_year, start_month)
+            end = _add_months(_month_start(end_year, end_month), 1)
+            return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+
+    match = _SINCE_MONTH_PATTERN.search(query)
+    if match:
+        month = _month_number(match.group(1))
+        year = int(match.group(2)) if match.group(2) else now.year
+        if month:
+            start = _month_start(year, month)
+            return (start.strftime("%Y-%m-%d"), None)
+
+    match = _BEFORE_MONTH_PATTERN.search(query)
+    if match:
+        month = _month_number(match.group(1))
+        year = int(match.group(2)) if match.group(2) else now.year
+        if month:
+            end = _month_start(year, month)
+            return (None, end.strftime("%Y-%m-%d"))
+
+    match = _MONTH_ONLY_PATTERN.search(query)
+    if match:
+        month = _month_number(match.group(1))
+        year = int(match.group(2)) if match.group(2) else now.year
+        if month:
+            start = _month_start(year, month)
+            end = _add_months(start, 1)
+            return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+
+    match = _YEAR_ONLY_PATTERN.search(query)
+    if match:
+        year = int(match.group(1))
+        start = _month_start(year, 1)
+        end = _month_start(year + 1, 1)
+        return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
 
     # Check ISO date pattern
     match = _ISO_DATE_PATTERN.search(query)
