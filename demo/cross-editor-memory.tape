@@ -2,7 +2,8 @@
 # Shows synapt recall working across Claude Code, Codex CLI, and OpenCode
 #
 # Prerequisites:
-#   1. Build demo index: python3 demo/build_demo_index.py
+#   1. Build demo project + index: python3 demo/build_demo_index.py
+#      Fast local check: python3 demo/build_demo_index.py --no-embeddings
 #   2. Run: vhs demo/cross-editor-memory.tape
 #
 # Uses CodeMemo project_03 (synapt development sessions) as the data source.
