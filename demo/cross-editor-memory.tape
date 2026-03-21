@@ -4,7 +4,8 @@
 # Prerequisites:
 #   1. Build demo project + index: python3 demo/build_demo_index.py
 #      Fast local check: python3 demo/build_demo_index.py --no-embeddings
-#   2. Run: vhs demo/cross-editor-memory.tape
+#   2. Probe editor CLIs: python3 demo/run_cross_editor_probe.py
+#   3. Run: vhs demo/cross-editor-memory.tape
 #
 # Uses CodeMemo project_03 (synapt development sessions) as the data source.
 
@@ -40,9 +41,9 @@ Enter
 Type "echo '🟣 Claude Code'"
 Enter
 Sleep 1s
-Type@80ms "claude -p 'use recall to tell me: what embedding model does this project use and why was it chosen? be brief.'"
+Type@80ms "claude -p 'Use recall_quick only. Answer in one short line: what embedding model does this project use and why was it chosen?'"
 Enter
-Sleep 25s
+Sleep 60s
 
 # === Codex CLI ===
 Type "echo ''"
@@ -50,9 +51,9 @@ Enter
 Type "echo '🟢 Codex CLI (OpenAI)'"
 Enter
 Sleep 1s
-Type@80ms "codex exec 'use recall to tell me: what embedding model does this project use and why was it chosen? be brief.'"
+Type@80ms "codex exec --skip-git-repo-check -m gpt-5.4-mini 'Use recall_quick only. Answer in one short line: what embedding model does this project use and why was it chosen?'"
 Enter
-Sleep 25s
+Sleep 60s
 
 # === OpenCode ===
 Type "echo ''"
@@ -60,9 +61,9 @@ Enter
 Type "echo '🔵 OpenCode'"
 Enter
 Sleep 1s
-Type@80ms "opencode run 'use recall to tell me: what embedding model does this project use and why was it chosen? be brief.'"
+Type@80ms "opencode run 'Use recall_quick only. Answer in one short line: what embedding model does this project use and why was it chosen?'"
 Enter
-Sleep 25s
+Sleep 60s
 
 # Closing
 Type "echo ''"
