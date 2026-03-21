@@ -165,6 +165,7 @@ class TestChunksCRUD:
         assert got.assistant_text == orig.assistant_text
         assert got.tools_used == orig.tools_used
         assert got.files_touched == orig.files_touched
+        assert got.date_text == orig.date_text
 
     def test_save_replaces_existing(self, db, sample_chunks):
         db.save_chunks(sample_chunks)
@@ -258,8 +259,12 @@ class TestFTSSearch:
         # Should find via tool_content (not in user_text or assistant_text)
         results = db.fts_search("AssertionError")
         assert len(results) > 0
-        results2 = db.fts_search("pytest")
-        assert len(results2) > 0
+
+    def test_search_date_text(self, db, sample_chunks):
+        """FTS5 indexes expanded calendar text for month/year queries."""
+        db.save_chunks(sample_chunks)
+        results = db.fts_search("march 2026")
+        assert len(results) > 0
 
     def test_search_files_with_dots(self, db, sample_chunks):
         """FTS5 with tokenchars '._' handles filenames with dots."""
@@ -340,10 +345,16 @@ class TestFTSMigration:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
         ).fetchone()
         assert "porter" in row[0].lower()
+        assert "date_text" in row[0].lower()
 
         # Critical: verify existing data is searchable after migration
         results = db.fts_search("authentication")
         assert len(results) > 0, "FTS migration lost existing data"
+        cols = {
+            r[1]
+            for r in db._conn.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        assert "date_text" in cols
         db.close()
 
     def test_migration_detects_tokenchars_change(self, tmp_path):

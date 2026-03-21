@@ -38,8 +38,8 @@ _EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
 _EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
 
 # FTS5 column weights for bm25():
-#   user_text, assistant_text, tools_used, files_touched, tool_content
-_FTS_WEIGHTS = "1.0, 1.5, 2.0, 2.0, 1.5"
+#   user_text, assistant_text, tools_used, files_touched, tool_content, date_text
+_FTS_WEIGHTS = "1.0, 1.5, 2.0, 2.0, 1.5, 3.0"
 
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS metadata (
@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     tools_used TEXT NOT NULL DEFAULT '',
     files_touched TEXT NOT NULL DEFAULT '',
     tool_content TEXT NOT NULL DEFAULT '',
+    date_text TEXT NOT NULL DEFAULT '',
     transcript_path TEXT NOT NULL DEFAULT '',
     byte_offset INTEGER NOT NULL DEFAULT -1,
     byte_length INTEGER NOT NULL DEFAULT 0,
@@ -207,7 +208,7 @@ CREATE TABLE IF NOT EXISTS access_log_archive (
 # doesn't work for virtual tables — we check first).
 _FTS_TABLE_SQL = """\
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
-    user_text, assistant_text, tools_used, files_touched, tool_content,
+    user_text, assistant_text, tools_used, files_touched, tool_content, date_text,
     content=chunks,
     content_rowid=rowid,
     tokenize="porter unicode61 tokenchars '._'"
@@ -218,20 +219,20 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 # (e.g., after a crash during save_chunks drops chunks_ad).
 _FTS_TRIGGERS_SQL = """\
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
-    VALUES (new.rowid, new.user_text, new.assistant_text, new.tools_used, new.files_touched, new.tool_content);
+    INSERT INTO chunks_fts(rowid, user_text, assistant_text, tools_used, files_touched, tool_content, date_text)
+    VALUES (new.rowid, new.user_text, new.assistant_text, new.tools_used, new.files_touched, new.tool_content, new.date_text);
 END;
 
 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
-    VALUES ('delete', old.rowid, old.user_text, old.assistant_text, old.tools_used, old.files_touched, old.tool_content);
+    INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, tools_used, files_touched, tool_content, date_text)
+    VALUES ('delete', old.rowid, old.user_text, old.assistant_text, old.tools_used, old.files_touched, old.tool_content, old.date_text);
 END;
 
-CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF user_text, assistant_text, tools_used, files_touched, tool_content ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
-    VALUES ('delete', old.rowid, old.user_text, old.assistant_text, old.tools_used, old.files_touched, old.tool_content);
-    INSERT INTO chunks_fts(rowid, user_text, assistant_text, tools_used, files_touched, tool_content)
-    VALUES (new.rowid, new.user_text, new.assistant_text, new.tools_used, new.files_touched, new.tool_content);
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF user_text, assistant_text, tools_used, files_touched, tool_content, date_text ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, tools_used, files_touched, tool_content, date_text)
+    VALUES ('delete', old.rowid, old.user_text, old.assistant_text, old.tools_used, old.files_touched, old.tool_content, old.date_text);
+    INSERT INTO chunks_fts(rowid, user_text, assistant_text, tools_used, files_touched, tool_content, date_text)
+    VALUES (new.rowid, new.user_text, new.assistant_text, new.tools_used, new.files_touched, new.tool_content, new.date_text);
 END;
 """
 
@@ -508,6 +509,7 @@ class RecallDB:
         }
         new_cols = {
             "tool_content": "TEXT NOT NULL DEFAULT ''",
+            "date_text": "TEXT NOT NULL DEFAULT ''",
             "transcript_path": "TEXT NOT NULL DEFAULT ''",
             "byte_offset": "INTEGER NOT NULL DEFAULT -1",
             "byte_length": "INTEGER NOT NULL DEFAULT 0",
@@ -792,9 +794,9 @@ class RecallDB:
         cur.execute(
             "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN "
             "  INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, "
-            "    tools_used, files_touched, tool_content) "
+            "    tools_used, files_touched, tool_content, date_text) "
             "  VALUES ('delete', old.rowid, old.user_text, old.assistant_text, "
-            "    old.tools_used, old.files_touched, old.tool_content); "
+            "    old.tools_used, old.files_touched, old.tool_content, old.date_text); "
             "END;"
         )
 
@@ -808,9 +810,9 @@ class RecallDB:
             cur.execute(
                 "INSERT INTO chunks "
                 "(id, session_id, timestamp, turn_index, user_text, assistant_text, "
-                " tools_used, files_touched, tool_content, "
+                " tools_used, files_touched, tool_content, date_text, "
                 " transcript_path, byte_offset, byte_length, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     chunk.id,
                     chunk.session_id,
@@ -821,6 +823,7 @@ class RecallDB:
                     json.dumps(chunk.tools_used),
                     json.dumps(chunk.files_touched),
                     chunk.tool_content,
+                    chunk.date_text,
                     chunk.transcript_path,
                     chunk.byte_offset,
                     chunk.byte_length,
@@ -847,7 +850,7 @@ class RecallDB:
         rows = self._conn.execute(
             "SELECT id, session_id, timestamp, turn_index, "
             "user_text, assistant_text, tools_used, files_touched, "
-            "tool_content, transcript_path, byte_offset, byte_length "
+            "tool_content, date_text, transcript_path, byte_offset, byte_length "
             "FROM chunks ORDER BY rowid"
         ).fetchall()
 
@@ -863,6 +866,7 @@ class RecallDB:
                 tools_used=json.loads(r["tools_used"]) if r["tools_used"] else [],
                 files_touched=json.loads(r["files_touched"]) if r["files_touched"] else [],
                 tool_content=r["tool_content"] or "",
+                date_text=r["date_text"] or "",
                 transcript_path=r["transcript_path"] or "",
                 byte_offset=r["byte_offset"] if r["byte_offset"] is not None else -1,
                 byte_length=r["byte_length"] if r["byte_length"] is not None else 0,

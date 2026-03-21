@@ -72,6 +72,42 @@ def atomic_json_write(data: dict | list, path: Path, indent: int = 2) -> None:
         raise
 
 
+def _build_date_text(timestamp: str) -> str:
+    """Expand an ISO-ish timestamp into date terms useful for FTS/BM25."""
+    if not timestamp:
+        return ""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    day_num = str(dt.day)
+    day_padded = dt.strftime("%d")
+    month_full = dt.strftime("%B")
+    month_abbrev = dt.strftime("%b")
+    weekday = dt.strftime("%A")
+    year = dt.strftime("%Y")
+    month_num = dt.strftime("%m")
+    iso_date = dt.strftime("%Y-%m-%d")
+    return " ".join(
+        [
+            year,
+            f"{year}-{month_num}",
+            iso_date,
+            month_full,
+            month_abbrev,
+            day_num,
+            day_padded,
+            weekday,
+            f"{month_full} {year}",
+            f"{month_abbrev} {year}",
+            f"{weekday} {month_full} {day_num} {year}",
+        ]
+    )
+
+
 # Near-duplicate Jaccard threshold for result deduplication.
 # 0.75 keeps only near-identical chunks from consuming retrieval slots.
 # Lower values (0.6) aggressively remove "similar" chunks that contain
@@ -102,12 +138,15 @@ class TranscriptChunk:
     tools_used: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)
     tool_content: str = ""  # Summarized tool inputs + results
+    date_text: str = ""  # Timestamp expanded into FTS-friendly calendar text
     transcript_path: str = ""  # Path to source transcript file
     byte_offset: int = -1  # Byte position where this turn starts in raw JSONL
     byte_length: int = 0  # Total bytes of raw JSONL entries for this turn
     text: str = ""  # Combined searchable text (built at init)
 
     def __post_init__(self):
+        if not self.date_text:
+            self.date_text = _build_date_text(self.timestamp)
         if not self.text:
             self.text = self._build_text()
 
@@ -123,6 +162,8 @@ class TranscriptChunk:
             parts.append(" ".join(self.tools_used))
         if self.files_touched:
             parts.append(" ".join(self.files_touched))
+        if self.date_text:
+            parts.append(self.date_text)
         return "\n".join(parts)
 
     def to_dict(self) -> dict:
@@ -136,6 +177,7 @@ class TranscriptChunk:
             "tools_used": self.tools_used,
             "files_touched": self.files_touched,
             "tool_content": self.tool_content,
+            "date_text": self.date_text,
             "transcript_path": self.transcript_path,
             "byte_offset": self.byte_offset,
             "byte_length": self.byte_length,
@@ -153,6 +195,7 @@ class TranscriptChunk:
             tools_used=d.get("tools_used", []),
             files_touched=d.get("files_touched", []),
             tool_content=d.get("tool_content", ""),
+            date_text=d.get("date_text", ""),
             transcript_path=d.get("transcript_path", ""),
             byte_offset=d.get("byte_offset", -1),
             byte_length=d.get("byte_length", 0),
