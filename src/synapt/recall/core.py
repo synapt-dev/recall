@@ -4039,6 +4039,7 @@ def build_index(
     all_chunks: list[TranscriptChunk] = []
     seen_uuids: set[str] = set()
     skipped = 0
+    parsed_files: list[Path] = []  # Track which files were actually parsed
 
     for filepath in jsonl_files:
         if filepath.name in already_indexed:
@@ -4051,6 +4052,7 @@ def build_index(
             chunks = parse_transcript(filepath, seen_uuids=seen_uuids,
                                       subchunk_min_text=subchunk_min_text)
             all_chunks.extend(chunks)
+            parsed_files.append(filepath)
             print(f"  {filepath.name}: {len(chunks)} turns")
         except Exception as e:
             print(f"  {filepath.name}: ERROR - {e}")
@@ -4075,7 +4077,7 @@ def build_index(
                             profile.content_type)
                 all_chunks = []
                 seen_uuids_reparse: set[str] = set()
-                for filepath in jsonl_files:
+                for filepath in parsed_files:
                     try:
                         chunks = parse_transcript(filepath, seen_uuids=seen_uuids_reparse,
                                                   subchunk_min_text=0)
