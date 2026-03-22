@@ -52,6 +52,18 @@ python evaluation/codememo/eval.py
 python evaluation/codememo/eval.py --max-knowledge 5
 ```
 
+## Auditing question quality
+
+When the benchmark itself is under review, use the audit helper to surface:
+
+- near-duplicate questions
+- temporal-labeled questions that read more like debug/root-cause prompts
+
+```bash
+python -m evaluation.codememo.audit --project project_01_cli_tool
+python -m evaluation.codememo.audit --project project_01_cli_tool --json
+```
+
 ## Competitor comparison
 
 Run the same benchmark against Mem0 or Memobase to compare apples-to-apples.
