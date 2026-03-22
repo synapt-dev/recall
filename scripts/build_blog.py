@@ -304,12 +304,12 @@ def build_post(md_path: Path, force: bool = False, dry_run: bool = False) -> boo
     text = md_path.read_text(encoding="utf-8")
     meta, body_md = parse_frontmatter(text)
 
-    if not meta.get("title"):
-        # Try to extract title from first H1
-        h1_match = re.match(r"^#\s+(.+)$", body_md, re.MULTILINE)
-        if h1_match:
+    # Extract or strip leading H1 — template adds its own <h1> from frontmatter
+    h1_match = re.match(r"^#\s+(.+)$", body_md, re.MULTILINE)
+    if h1_match:
+        if not meta.get("title"):
             meta["title"] = h1_match.group(1)
-            body_md = body_md[h1_match.end():].strip()
+        body_md = body_md[h1_match.end():].strip()
 
     # Render markdown to HTML
     md = markdown.Markdown(extensions=["tables", "fenced_code", "codehilite"])
