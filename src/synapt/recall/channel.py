@@ -224,6 +224,7 @@ class ChannelMessage:
     # Use field name "from_agent" in Python to avoid shadowing builtin "from".
     # Serialized as "from" in JSON for protocol compatibility.
     from_agent: str = ""
+    from_display: str = ""  # display name at post time (persisted in JSONL)
     id: str = ""       # auto-generated message ID (m_xxxxxxxx)
     to: str = ""       # directive target agent (optional)
     attachments: list[str] = field(default_factory=list)
@@ -238,6 +239,8 @@ class ChannelMessage:
             d.pop("to", None)
         if not d.get("attachments"):
             d.pop("attachments", None)
+        if not d.get("from_display"):
+            d.pop("from_display", None)
         return d
 
     @classmethod
@@ -475,10 +478,11 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
         ]
 
         leave_time = _now_iso()
+        reap_display = _resolve_display_name_for(aid, project_dir)
         for ch in channels:
             msg = ChannelMessage(
-                timestamp=leave_time, from_agent=aid, channel=ch,
-                type="leave", body=f"{aid} timed out from #{ch}",
+                timestamp=leave_time, from_agent=aid, from_display=reap_display,
+                channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
             )
             _append_message(msg, project_dir)
 
@@ -735,6 +739,7 @@ def channel_join(
     msg = ChannelMessage(
         timestamp=now,
         from_agent=aid,
+        from_display=display,
         channel=channel,
         type="join",
         body=f"{display} joined #{channel}",
@@ -787,7 +792,7 @@ def channel_leave(
     display = _resolve_display_name(project_dir)
     body = reason if reason else f"{display} left #{channel}"
     msg = ChannelMessage(
-        timestamp=now, from_agent=aid, channel=channel,
+        timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="leave", body=body,
     )
     _append_message(msg, project_dir)
@@ -805,9 +810,10 @@ def channel_post(
     """Post a message to a channel. If pin=True, also pin the message."""
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
+    display = _resolve_display_name_for(aid, project_dir)
 
     msg = ChannelMessage(
-        timestamp=now, from_agent=aid, channel=channel,
+        timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="message", body=message,
     )
     if attachment_paths:
@@ -830,8 +836,6 @@ def channel_post(
         conn.commit()
     finally:
         conn.close()
-
-    display = _resolve_display_name_for(aid, project_dir)
     attachment_suffix = ""
     if msg.attachments:
         attachment_suffix = f" [attachments: {', '.join(msg.attachments)}]"
@@ -935,7 +939,7 @@ def channel_read(
     lines.append(f"## #{channel} ({len(messages)} messages)")
     for msg in messages:
         ts = msg.timestamp[:16]
-        display = display_map.get(msg.from_agent, msg.from_agent)
+        display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
         mid = f" [{msg.id}]" if msg.id else ""
         # Role marker — human messages get a distinct prefix
         is_human = role_map.get(msg.from_agent) == "human"
@@ -1193,9 +1197,10 @@ def channel_directive(
     """Post a directive message targeted at a specific agent."""
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
+    display = _resolve_display_name(project_dir)
 
     msg = ChannelMessage(
-        timestamp=now, from_agent=aid, channel=channel,
+        timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="directive", body=message, to=to,
     )
     _append_message(msg, project_dir)
@@ -1207,8 +1212,6 @@ def channel_directive(
             add_reminder(f"[directive from {aid}] {message}")
         except Exception:
             pass
-
-    display = _resolve_display_name(project_dir)
     return f"[#{channel}] {display} → @{to}: {message}"
 
 
@@ -1301,7 +1304,7 @@ def channel_kick(
     # Post kick event
     display = _resolve_display_name(project_dir)
     msg = ChannelMessage(
-        timestamp=now, from_agent=aid, channel=channel,
+        timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="leave", body=f"{target_id} kicked from #{channel} by {display}",
     )
     _append_message(msg, project_dir)
@@ -1480,8 +1483,9 @@ def channel_claim_intent(
                     return (False, f"Already claimed by {claimer}: {msg.body}")
 
     # Post and claim
+    display = _resolve_display_name_for(aid, project_dir)
     msg = ChannelMessage(
-        timestamp=now, from_agent=aid, channel=channel,
+        timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="intent", body=intent,
     )
     _append_message(msg, project_dir)
