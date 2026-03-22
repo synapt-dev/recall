@@ -188,6 +188,38 @@ def test_generate_answer_uses_higher_budget_for_gpt5():
     assert call["reasoning_effort"] == "minimal"
 
 
+def test_add_validity_metadata_flags_slice_ceiling_and_reasoning_gap():
+    summary = {
+        "projects": ["project_01_cli_tool"],
+        "max_chunks": 20,
+        "n_temporal": 8,
+        "j_score_temporal": 100.0,
+        "recall@20_temporal": 56.25,
+        "n_convention": 7,
+        "j_score_convention": 100.0,
+        "recall@20_convention": 85.71,
+        "n_debug": 9,
+        "j_score_debug": 66.67,
+        "recall@20_debug": 53.7,
+    }
+
+    annotated = codememo_eval._add_validity_metadata(summary)
+
+    diagnostics = annotated["category_diagnostics"]
+    assert diagnostics["temporal"]["near_ceiling"] is True
+    assert diagnostics["temporal"]["small_sample"] is True
+    assert diagnostics["temporal"]["headroom"] == 0.0
+    assert diagnostics["temporal"]["high_reasoning_gap"] is True
+    assert diagnostics["debug"]["near_ceiling"] is False
+    assert diagnostics["debug"]["high_reasoning_gap"] is False
+
+    notes = annotated["validity_notes"]
+    assert any("Single-project slice" in note for note in notes)
+    assert any("Category 'temporal' is near ceiling" in note for note in notes)
+    assert any("Category 'convention' is near ceiling" in note for note in notes)
+    assert any("may be masking retrieval weakness" in note for note in notes)
+
+
 def test_run_evaluation_can_reset_working_memory_between_runs(tmp_path):
     project = _write_project(tmp_path)
     sut = FakeSUT()

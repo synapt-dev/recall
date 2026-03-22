@@ -203,6 +203,11 @@ First benchmark specifically testing coding session memory — 158 questions acr
 
 Synapt leads by **+14.51pp overall**. The biggest gaps are in convention (+37pp), factual (+24pp), and debug (+22pp) — categories that depend on raw evidence preservation. Synapt runs entirely locally; Mem0 requires OpenAI API calls for memory extraction, embedding, and search.
 
+For current regression tracking, prefer **all-project CodeMemo runs** over
+single-project best slices. On `project_01_cli_tool`, some categories are now
+approaching ceiling on strong systems, so isolated `100.0` scores are useful as
+regression checks but less useful as headline evidence on their own.
+
 ## How search works
 
 Synapt runs three retrieval paths and merges them:

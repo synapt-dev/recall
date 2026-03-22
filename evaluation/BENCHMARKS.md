@@ -30,6 +30,34 @@ claims to have run at a specific ref.
 
 ## Current Results
 
+### CodeMemo interpretation notes (2026-03-22)
+
+Use **all-project CodeMemo runs** for headline comparisons when possible. The
+`project_01_cli_tool` slice is still useful for regression testing, but some
+categories on strong current systems are approaching ceiling and are no longer
+very discriminative on their own.
+
+Recent normalized reruns on `gpt-5-mini`:
+
+| Ref | Scope | Mode | Model | Overall |
+|-----|-------|------|-------|---------|
+| v0.6.1 | `project_01_cli_tool` | full-pipeline | gpt-5-mini | 76.0 |
+| v0.6.2 | all 3 projects | recalldb | gpt-5-mini | 71.9 |
+| v0.7.5 | `project_01_cli_tool` | recalldb | gpt-5-mini | 82.0 |
+| latest `main` (`5b3f58a`) | `project_01_cli_tool` | recalldb | gpt-5-mini | 84.0 |
+
+Important caveats:
+
+- The earlier `96.0%` `v0.7.5` result was on `gpt-4o-mini` and is still valid
+  for that standard methodology, but it is **not** directly comparable to the
+  normalized `gpt-5-mini` reruns above.
+- On `project_01`, the strongest current systems are partially saturated in a
+  few categories. Treat isolated `100.0` values over `7-8` questions as a sign
+  to inspect category-level headroom, not as proof that the whole benchmark is
+  exhausted.
+- The evaluator now emits `validity_notes` and `category_diagnostics` in
+  `codememo_summary.json` to make this visible in run artifacts.
+
 ### CodeMemo v0.6.2 — Synapt vs Mem0 (2026-03-14)
 
 First apples-to-apples comparison of coding memory systems on the CodeMemo benchmark. Same 158 questions, same gpt-4o-mini judge, same transcript data — only the memory system differs.
