@@ -116,6 +116,12 @@ def _build_date_text(timestamp: str) -> str:
 _DEDUP_JACCARD_THRESHOLD = 0.75
 
 
+def _env_flag(name: str) -> bool:
+    """Return True when an ablation env flag is enabled."""
+    value = os.environ.get(name, "").strip().lower()
+    return value not in {"", "0", "false", "no", "off"}
+
+
 def _dedup_limit(max_chunks: int) -> int:
     """Extra candidates to pass through formatting to compensate for dedup."""
     return max_chunks + max(5, max_chunks // 3)
@@ -917,14 +923,21 @@ class TranscriptIndex:
         self.chunks = sorted(chunks, key=lambda c: c.timestamp, reverse=True)
 
         # Content profile — adapts filters and retrieval to content type
-        from synapt.recall.content_profile import detect_content_profile, adaptive_params
+        from synapt.recall.content_profile import (
+            adaptive_params,
+            detect_content_profile,
+            forced_content_profile,
+        )
         if os.environ.get("SYNAPT_DISABLE_CONTENT_PROFILE"):
             from synapt.recall.content_profile import ContentProfile
             self.content_profile = ContentProfile(
                 _type="code", file_refs=0, personal_refs=0, total_chunks=len(self.chunks)
             )
         else:
-            self.content_profile = detect_content_profile(self.chunks)
+            self.content_profile = (
+                forced_content_profile(total_chunks=len(self.chunks))
+                or detect_content_profile(self.chunks)
+            )
         self._adaptive = adaptive_params(self.content_profile)
         if self.content_profile.content_type != "code":
             logger.info(
@@ -1083,6 +1096,8 @@ class TranscriptIndex:
 
         Returns the number of links created.
         """
+        if _env_flag("SYNAPT_DISABLE_CROSS_LINKS"):
+            return 0
         if not self._db or not self._all_embeddings:
             return 0
         import numpy as np
@@ -1152,6 +1167,8 @@ class TranscriptIndex:
         Preserves the original search ordering — only appends linked chunks
         after their source position.
         """
+        if _env_flag("SYNAPT_DISABLE_CROSS_LINKS"):
+            return candidates
         if not self._db:
             return candidates
         if len(candidates) < 3:
@@ -1576,7 +1593,11 @@ class TranscriptIndex:
 
             # Auto-extract date range from temporal expressions in query
             # (only when caller didn't provide explicit date filters)
-            if after is None and before is None:
+            if (
+                after is None
+                and before is None
+                and not _env_flag("SYNAPT_DISABLE_TEMPORAL_EXTRACTION")
+            ):
                 extracted_after, extracted_before = extract_temporal_range(query)
                 if extracted_after is not None:
                     after = extracted_after
@@ -1696,7 +1717,7 @@ class TranscriptIndex:
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
-        query_entities = extract_entities(query)
+        query_entities = [] if _env_flag("SYNAPT_DISABLE_ENTITY_COLLECTION") else extract_entities(query)
 
         # Search knowledge nodes first (ranked higher via boost)
         knowledge_results = self._search_knowledge(
@@ -1737,7 +1758,7 @@ class TranscriptIndex:
         # match concrete answers ("plays guitar", "goes hiking"). Tier
         # discounts are reduced to near-parity with Tier 1.
         is_aggregation = intent == "aggregation"
-        if query_entities:
+        if query_entities and not _env_flag("SYNAPT_DISABLE_ENTITY_COLLECTION"):
             from synapt.recall.storage import (
                 _build_entity_anchored_query,
                 _escape_fts_tokens,
@@ -2450,7 +2471,11 @@ class TranscriptIndex:
                     continue
                 # Skip expired nodes unless include_historical is set
                 valid_until = node.get("valid_until")
-                if valid_until and not include_historical:
+                if (
+                    valid_until
+                    and not include_historical
+                    and not _env_flag("SYNAPT_DISABLE_KNOWLEDGE_EXPIRY")
+                ):
                     try:
                         if valid_until[:10] < now_iso:
                             continue  # Expired — skip
@@ -2474,15 +2499,18 @@ class TranscriptIndex:
                     if conf < 0.4:
                         effective_boost = 1.0
                     else:
-                        from synapt.recall.consolidate import _lacks_specificity
-                        if _lacks_specificity(node_content, threshold=200):
-                            specificity = 0.5  # abstract/generic — reduced boost
+                        if _env_flag("SYNAPT_DISABLE_SPECIFICITY_SCORING"):
+                            specificity = 1.0
                         else:
-                            specificity = 1.0  # specific (paths, versions, names)
+                            from synapt.recall.consolidate import _lacks_specificity
+                            if _lacks_specificity(node_content, threshold=200):
+                                specificity = 0.5  # abstract/generic — reduced boost
+                            else:
+                                specificity = 1.0  # specific (paths, versions, names)
                         effective_boost = 1.0 + conf * specificity * knowledge_boost
                     # Entity boost: prefer knowledge about the specific
                     # entities mentioned in the query (e.g. person names).
-                    if query_entities:
+                    if query_entities and not _env_flag("SYNAPT_DISABLE_ENTITY_COLLECTION"):
                         if any(e in node_content.lower() for e in query_entities):
                             effective_boost *= ENTITY_BOOST
                     # Category-intent alignment: boost knowledge nodes whose
@@ -2974,6 +3002,12 @@ class TranscriptIndex:
                 getattr(self, "_adaptive", None), "dedup_jaccard",
                 _DEDUP_JACCARD_THRESHOLD,
             )
+            dedup_override = os.environ.get("SYNAPT_DEDUP_JACCARD")
+            if dedup_override:
+                try:
+                    dedup_threshold = float(dedup_override)
+                except ValueError:
+                    pass
             if not os.environ.get("SYNAPT_DISABLE_DEDUP"):
                 if block_tokens_set and emitted_token_sets:
                     if any(_jaccard(block_tokens_set, prev) > dedup_threshold
@@ -4109,6 +4143,13 @@ def build_index(
         print(f"[synapt] No .jsonl files found in {source_dir}")
         return TranscriptIndex([])
 
+    forced_subchunk = os.environ.get("SYNAPT_FORCE_SUBCHUNK_MIN_TEXT")
+    if subchunk_min_text is None and forced_subchunk:
+        try:
+            subchunk_min_text = int(forced_subchunk)
+        except ValueError:
+            pass
+
     # Filter for incremental builds — skip files whose mtime AND size match
     already_indexed: dict[str, tuple[float, int]] = {}
     if incremental_manifest:
@@ -4144,8 +4185,12 @@ def build_index(
     # Personal content needs full turns (subchunk=0); code benefits from splitting.
     # Only re-parses when caller didn't explicitly set subchunk_min_text.
     if subchunk_min_text is None and all_chunks:
-        from synapt.recall.content_profile import detect_content_profile, adaptive_params
-        profile = detect_content_profile(all_chunks)
+        from synapt.recall.content_profile import (
+            adaptive_params,
+            detect_content_profile,
+            forced_content_profile,
+        )
+        profile = forced_content_profile(total_chunks=len(all_chunks)) or detect_content_profile(all_chunks)
         profile_threshold = adaptive_params(profile).subchunk_min_text
         default_threshold = int(os.environ.get("SYNAPT_SUBCHUNK_MIN_TEXT", "1200"))
         if profile_threshold != default_threshold:

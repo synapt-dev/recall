@@ -1663,6 +1663,99 @@ def test_search_knowledge_entity_boost():
     assert caroline_node["score"] > melanie_node["score"]
 
 
+def test_search_knowledge_entity_boost_can_be_disabled(monkeypatch):
+    """Entity boost ablation flag should preserve base ordering."""
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("SYNAPT_DISABLE_ENTITY_COLLECTION", "1")
+
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    about_caroline = {
+        "id": "node-1",
+        "content": "Caroline drinks dark roast coffee daily",
+        "category": "preference",
+        "confidence": 0.7,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+    about_melanie = {
+        "id": "node-2",
+        "content": "Melanie drinks green tea and coffee",
+        "category": "preference",
+        "confidence": 0.7,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+
+    mock_db = MagicMock()
+    # Melanie appears first in FTS order; without entity boost she should stay first.
+    mock_db.knowledge_fts_search.return_value = [(2, 3.0), (1, 3.0)]
+    mock_db.knowledge_by_rowid.return_value = {1: about_caroline, 2: about_melanie}
+    index._db = mock_db
+
+    results = index._search_knowledge("What coffee does Caroline drink?")
+    assert len(results) == 2
+    assert results[0]["content"] == about_melanie["content"]
+
+
+def test_search_knowledge_expiry_can_be_disabled(monkeypatch):
+    """Expired nodes remain searchable when knowledge-expiry ablation is enabled."""
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("SYNAPT_DISABLE_KNOWLEDGE_EXPIRY", "1")
+
+    chunks = make_test_chunks()
+    index = TranscriptIndex(chunks)
+
+    expired = {
+        "id": "node-1",
+        "content": "Caroline switched to dark roast coffee",
+        "category": "preference",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+        "valid_until": "2026-01-01",
+    }
+    active = {
+        "id": "node-2",
+        "content": "Caroline still likes oat milk",
+        "category": "preference",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+        "valid_until": None,
+    }
+
+    mock_db = MagicMock()
+    mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 2.9)]
+    mock_db.knowledge_by_rowid.return_value = {1: expired, 2: active}
+    index._db = mock_db
+
+    results = index._search_knowledge("What coffee does Caroline like?")
+    assert len(results) == 2
+    assert any(r["content"] == expired["content"] for r in results)
+
+
+def test_expand_cross_session_can_be_disabled(monkeypatch):
+    """Cross-link ablation flag should skip expansion entirely."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("SYNAPT_DISABLE_CROSS_LINKS", "1")
+
+    index = TranscriptIndex(make_test_chunks())
+    index._db = MagicMock()
+    candidates = [(0, 1.0), (1, 0.9), (2, 0.8)]
+
+    expanded = index._expand_cross_session(candidates, max_chunks=5)
+
+    assert expanded == candidates
+    index._db.has_chunk_links.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Tests: date format in search results (#268, #275)
 # ---------------------------------------------------------------------------
@@ -1858,3 +1951,28 @@ def test_format_results_keeps_diverse_chunks():
     # Both diverse chunks should appear
     assert "deploy.sh" in result
     assert "rollback.sh" in result
+
+
+def test_format_results_respects_dedup_threshold_override(monkeypatch):
+    """Ablation env override should allow stricter or looser dedup."""
+    from synapt.recall.core import TranscriptIndex
+
+    chunks = [
+        TranscriptChunk(
+            id=f"abc:t{i}", session_id="abcdef12-0000-0000-0000-000000000000",
+            timestamp=f"2026-03-05T14:0{i}:00Z", turn_index=i,
+            user_text="How do I deploy the app?",
+            assistant_text=f"To deploy, run deploy.sh then verify. Variant {i}.",
+        )
+        for i in range(3)
+    ]
+
+    monkeypatch.setenv("SYNAPT_DEDUP_JACCARD", "1.1")
+    try:
+        index = TranscriptIndex(chunks)
+        result = index.lookup("deploy app", max_chunks=10, max_tokens=5000)
+    finally:
+        monkeypatch.delenv("SYNAPT_DEDUP_JACCARD", raising=False)
+
+    deploy_count = result.count("To deploy, run deploy.sh")
+    assert deploy_count == 3, f"Expected override to keep all 3 chunks, got {deploy_count}"

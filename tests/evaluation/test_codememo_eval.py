@@ -164,3 +164,94 @@ def test_synapt_sut_namespaces_persistent_work_dir_per_project(tmp_path, monkeyp
     assert first_dir != second_dir
     assert first_dir.name == project_a.name
     assert second_dir.name == project_b.name
+
+
+def test_compute_retrieval_recall_prefers_better_aligned_chunk():
+    retrieved = (
+        "Past session context:\n"
+        "--- [2026-03-10 12:00 session session_001] turn 211 ---\n"
+        "Assistant: Embeddings are built with sentence-transformers "
+        "all-MiniLM-L6-v2 for semantic search.\n"
+    )
+    evidence = [
+        {
+            "session_id": "session_001",
+            "turn_index": 1543,
+            "description": "Assistant implements embedding search using all-MiniLM-L6-v2",
+        }
+    ]
+    session_texts = {
+        "session_001": [""] * 1544,
+    }
+    session_texts["session_001"][1543] = (
+        "This session is being continued from a previous conversation that "
+        "ran out of context."
+    )
+    chunk_line_map = {"session_001": {1543: 133}}
+    chunk_text_map = {
+        "session_001": {
+            133: "Continuation summary of transcript-rag extraction work.",
+            211: (
+                "Embeddings are built with sentence-transformers "
+                "all-MiniLM-L6-v2 for semantic search."
+            ),
+        }
+    }
+
+    recall = codememo_eval.compute_retrieval_recall(
+        retrieved,
+        evidence,
+        session_texts,
+        chunk_line_map=chunk_line_map,
+        chunk_text_map=chunk_text_map,
+    )
+
+    assert recall == 1.0
+
+
+def test_compute_retrieval_recall_keeps_direct_chunk_when_it_matches():
+    retrieved = (
+        "Past session context:\n"
+        "--- [2026-03-10 12:00 session session_001] turn 12 ---\n"
+        "Assistant: We pinned croniter 1.3.8 for recurring tasks.\n"
+    )
+    evidence = [
+        {
+            "session_id": "session_001",
+            "turn_index": 42,
+            "description": "Assistant pins croniter 1.3.8 for recurring task support",
+        }
+    ]
+    session_texts = {"session_001": [""] * 43}
+    session_texts["session_001"][42] = "Pinned croniter 1.3.8 in pyproject.toml."
+    chunk_line_map = {"session_001": {42: 12}}
+    chunk_text_map = {
+        "session_001": {
+            12: "We pinned croniter 1.3.8 for recurring tasks.",
+            27: "Discussed packaging and changelog cleanup.",
+        }
+    }
+
+    recall = codememo_eval.compute_retrieval_recall(
+        retrieved,
+        evidence,
+        session_texts,
+        chunk_line_map=chunk_line_map,
+        chunk_text_map=chunk_text_map,
+    )
+
+    assert recall == 1.0
+
+
+def test_parse_retrieved_turns_accepts_age_suffix():
+    retrieved = (
+        "Past session context:\n"
+        "--- [2026-03-01 16:00 session session_001] turn 192, 2w ago ---\n"
+        "Assistant: Embeddings are built and cached.\n"
+        "--- [2026-03-10 12:00 session session_007] turn 8, 1w ago ---\n"
+        "Assistant: Embeddings are back.\n"
+    )
+
+    turns = codememo_eval._parse_retrieved_turns(retrieved)
+
+    assert turns == {("session_001", 192), ("session_007", 8)}

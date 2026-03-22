@@ -583,7 +583,7 @@ def _parse_retrieved_turns(retrieved_text: str) -> set[tuple[str, int]]:
     Returns set of (session_id_prefix, turn_index) tuples.
     """
     turn_pattern = re.compile(
-        r"session\s+(\S+)\]\s+turn\s+(\d+)\s+---"
+        r"session\s+(\S+)\]\s+turn\s+(\d+)(?:,\s+[^\n-][^\n]*)?\s+---"
     )
     retrieved_turns: set[tuple[str, int]] = set()
     for m in turn_pattern.finditer(retrieved_text):
@@ -593,11 +593,84 @@ def _parse_retrieved_turns(retrieved_text: str) -> set[tuple[str, int]]:
     return retrieved_turns
 
 
+_ALIGN_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]+")
+
+
+def _normalize_alignment_token(token: str) -> str:
+    token = token.lower().strip(".,:;!?()[]{}\"'`")
+    if token.isalpha() and token.endswith("s") and len(token) > 4 and not token.endswith("ss"):
+        token = token[:-1]
+    return token
+
+
+def _alignment_tokens(text: str) -> set[str]:
+    """Extract lightweight lexical tokens for evidence/chunk alignment."""
+    return {
+        norm
+        for tok in _ALIGN_TOKEN_RE.findall(text)
+        if (norm := _normalize_alignment_token(tok)) and len(norm) >= 4
+    }
+
+
+def _alignment_score(reference_text: str, chunk_text: str) -> float:
+    """Return a simple overlap score between evidence text and chunk text."""
+    ref = _alignment_tokens(reference_text)
+    if not ref:
+        return 0.0
+    chunk = _alignment_tokens(chunk_text)
+    if not chunk:
+        return 0.0
+    return len(ref & chunk) / len(ref)
+
+
+def _align_evidence_chunk_turn(
+    evidence: dict,
+    raw_turn_text: str,
+    direct_turn_index: int | None,
+    session_chunk_texts: dict[int, str],
+) -> int | None:
+    """Align raw evidence to the best matching parsed chunk in the same session.
+
+    Some benchmark evidence points at raw JSONL lines that are compaction
+    summaries or tool-result scaffolding, while retrieval surfaces a later
+    assistant chunk that carries the same substantive evidence more clearly.
+    Prefer the direct raw-line->chunk map when it remains a good lexical match,
+    otherwise promote to a clearly better chunk in the same session.
+    """
+    if not session_chunk_texts:
+        return direct_turn_index
+
+    description = str(evidence.get("description", "")).strip()
+    evidence_text = description or raw_turn_text.strip()
+    if not evidence_text:
+        return direct_turn_index
+
+    direct_score = 0.0
+    if direct_turn_index is not None:
+        direct_score = _alignment_score(
+            evidence_text, session_chunk_texts.get(direct_turn_index, "")
+        )
+
+    best_turn = direct_turn_index
+    best_score = direct_score
+    for turn_index, chunk_text in session_chunk_texts.items():
+        score = _alignment_score(evidence_text, chunk_text)
+        if score > best_score:
+            best_turn = turn_index
+            best_score = score
+
+    # Only override the direct mapping when the alternative is clearly better.
+    if best_turn != direct_turn_index and best_score >= 0.35 and best_score >= direct_score + 0.15:
+        return best_turn
+    return direct_turn_index
+
+
 def compute_retrieval_recall(
     retrieved_text: str,
     evidence: list[dict],
     session_texts: dict[str, list[str]],
     chunk_line_map: dict[str, dict[int, int]] | None = None,
+    chunk_text_map: dict[str, dict[int, str]] | None = None,
 ) -> float:
     """Check how many evidence chunks were retrieved.
 
@@ -627,9 +700,21 @@ def compute_retrieval_recall(
         sid = ev.get("session_id", "")
         tidx = ev.get("turn_index", -1)
 
-        # Tier 1: header-based matching with chunk mapping
+        raw_turn_text = ""
+        turns = session_texts.get(sid, [])
+        if 0 <= tidx < len(turns):
+            raw_turn_text = turns[tidx].strip()
+
+        # Tier 1: header-based matching with chunk mapping + evidence alignment
         if chunk_line_map and sid in chunk_line_map:
             chunk_tidx = chunk_line_map[sid].get(tidx)
+            if chunk_text_map and sid in chunk_text_map:
+                chunk_tidx = _align_evidence_chunk_turn(
+                    ev,
+                    raw_turn_text,
+                    chunk_tidx,
+                    chunk_text_map[sid],
+                )
             if chunk_tidx is not None:
                 # Match against session prefix (session IDs may be truncated
                 # to 8 chars in the header)
@@ -646,33 +731,52 @@ def compute_retrieval_recall(
                 break
         else:
             # Tier 3: raw-line text fallback
-            turns = session_texts.get(sid, [])
-            if 0 <= tidx < len(turns):
-                text = turns[tidx].strip()
+            if raw_turn_text and raw_turn_text[:80] in retrieved_text:
+                found += 1
+            elif chunk_text_map and sid in chunk_text_map:
+                aligned_turn = _align_evidence_chunk_turn(
+                    ev,
+                    raw_turn_text,
+                    chunk_line_map.get(sid, {}).get(tidx) if chunk_line_map else None,
+                    chunk_text_map[sid],
+                )
+                if aligned_turn is not None:
+                    aligned_text = chunk_text_map[sid].get(aligned_turn, "").strip()
+                    if aligned_text and aligned_text[:80] in retrieved_text:
+                        found += 1
+            elif raw_turn_text:
+                text = raw_turn_text
                 if text and text[:80] in retrieved_text:
                     found += 1
 
     return found / len(evidence)
 
 
-def _build_chunk_line_map(session_dir: Path) -> dict[str, dict[int, int]]:
-    """Build a map from raw JSONL line numbers to chunk turn indices.
+def _build_chunk_maps(
+    session_dir: Path,
+) -> tuple[dict[str, dict[int, int]], dict[str, dict[int, str]]]:
+    """Build raw-line and parsed-chunk maps for retrieval-recall alignment.
 
     For each session, parses the transcript into chunks and builds a
     line-number → byte-offset map. Then for each raw line, finds which
     chunk's byte range contains it.
 
     Returns:
-        Map from session_id to {raw_line_number: chunk_turn_index}.
+        Tuple of:
+        - session_id -> {raw_line_number: chunk_turn_index}
+        - session_id -> {chunk_turn_index: chunk_text}
     """
     from synapt.recall.core import parse_transcript
 
-    result: dict[str, dict[int, int]] = {}
+    line_map_result: dict[str, dict[int, int]] = {}
+    chunk_text_result: dict[str, dict[int, str]] = {}
     for sp in sorted(session_dir.glob("*.jsonl")):
         sid = sp.stem
         chunks = parse_transcript(sp)
         if not chunks:
             continue
+
+        chunk_text_result[sid] = {c.turn_index: c.text for c in chunks}
 
         # Build line → byte offset map
         line_map: dict[int, int] = {}
@@ -700,9 +804,9 @@ def _build_chunk_line_map(session_dir: Path) -> dict[str, dict[int, int]]:
             if c.byte_offset <= byte_off < c.byte_offset + c.byte_length:
                 raw_to_chunk[ln] = c.turn_index
 
-        result[sid] = raw_to_chunk
+        line_map_result[sid] = raw_to_chunk
 
-    return result
+    return line_map_result, chunk_text_result
 
 
 def load_session_texts(session_dir: Path) -> dict[str, list[str]]:
@@ -936,8 +1040,8 @@ def run_evaluation(
         # Load session texts for retrieval recall
         session_texts = load_session_texts(session_dir)
 
-        # Build chunk-line map for precise retrieval recall
-        chunk_line_map = _build_chunk_line_map(session_dir)
+        # Build chunk maps for precise retrieval recall
+        chunk_line_map, chunk_text_map = _build_chunk_maps(session_dir)
 
         # Ingest sessions into SUT
         print(f"  Ingesting {len(session_paths)} sessions...")
@@ -957,6 +1061,7 @@ def run_evaluation(
             "questions": questions,
             "session_texts": session_texts,
             "chunk_line_map": chunk_line_map,
+            "chunk_text_map": chunk_text_map,
         })
 
     # ---------------------------------------------------------------------------
@@ -997,6 +1102,7 @@ def run_evaluation(
             questions = info["questions"]
             session_texts = info["session_texts"]
             chunk_line_map = info["chunk_line_map"]
+            chunk_text_map = info["chunk_text_map"]
 
             for i, qa in enumerate(questions):
                 qid = qa["id"]
@@ -1018,7 +1124,11 @@ def run_evaluation(
                 total_retrieve_time += retrieve_time
 
                 recall_at_k = compute_retrieval_recall(
-                    context, evidence, session_texts, chunk_line_map=chunk_line_map,
+                    context,
+                    evidence,
+                    session_texts,
+                    chunk_line_map=chunk_line_map,
+                    chunk_text_map=chunk_text_map,
                 )
                 category_recall[category].append(recall_at_k)
 

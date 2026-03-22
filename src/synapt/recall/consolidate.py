@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,6 +44,11 @@ from synapt.recall.core import project_data_dir, project_index_dir
 from synapt.recall._llm_util import truncate_at_word as _tw
 
 logger = logging.getLogger("synapt.recall.consolidate")
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return value not in {"", "0", "false", "no", "off"}
 
 from synapt._models.base import Message
 from synapt.recall._mlx import MLX_AVAILABLE as _MLX_AVAILABLE, INSTALL_MSG as _INSTALL_MSG  # noqa: F401
@@ -1208,8 +1214,12 @@ def _apply_consolidation_result(
             )
             # Use LLM-extracted temporal bounds if provided, else default.
             # Validate dates — LLMs can hallucinate non-ISO formats.
-            llm_valid_from = _validate_iso_date(raw_node.get("valid_from"))
-            llm_valid_until = _validate_iso_date(raw_node.get("valid_until"))
+            if _env_flag("SYNAPT_DISABLE_TEMPORAL_EXTRACTION"):
+                llm_valid_from = None
+                llm_valid_until = None
+            else:
+                llm_valid_from = _validate_iso_date(raw_node.get("valid_from"))
+                llm_valid_until = _validate_iso_date(raw_node.get("valid_until"))
             new_node.valid_from = llm_valid_from or datetime.now(timezone.utc).isoformat()
             if llm_valid_until:
                 new_node.valid_until = llm_valid_until
@@ -1517,11 +1527,12 @@ def consolidate(
                 _sync_knowledge_to_db(project_dir, kn_path)
 
             # Collection extraction: find entity groups across sessions
-            collections_created = extract_collections(
-                project_dir, model=model, adapter_path=adapter_path,
-            )
-            if collections_created:
-                result.nodes_created += collections_created
+            if not _env_flag("SYNAPT_DISABLE_ENTITY_COLLECTION"):
+                collections_created = extract_collections(
+                    project_dir, model=model, adapter_path=adapter_path,
+                )
+                if collections_created:
+                    result.nodes_created += collections_created
         elif clusters and kn_path.exists() and kn_path.stat().st_size > 0:
             _sync_knowledge_to_db(project_dir, kn_path)
     finally:
@@ -1544,6 +1555,9 @@ def extract_collections(
 
     Returns number of collection nodes created.
     """
+    if _env_flag("SYNAPT_DISABLE_ENTITY_COLLECTION"):
+        return 0
+
     project_dir = (project_dir or Path.cwd()).resolve()
     kn_path = _knowledge_path(project_dir)
 

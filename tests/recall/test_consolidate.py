@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from synapt.recall.journal import JournalEntry
 from synapt.recall.knowledge import KnowledgeNode, append_node, read_nodes
@@ -452,6 +453,25 @@ class TestApplyConsolidation(unittest.TestCase):
         _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
         nodes = read_nodes(self.kn_path)
         self.assertLessEqual(len(nodes[0].content), 300)
+
+    def test_create_action_can_disable_temporal_extraction(self):
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": "Feature flag rollout starts after PR #42 lands in /src/flags.py",
+                "category": "workflow",
+                "valid_from": "2026-04-01",
+                "valid_until": "2026-04-30",
+            }]
+        }
+        with patch.dict("os.environ", {"SYNAPT_DISABLE_TEMPORAL_EXTRACTION": "1"}):
+            result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
+        self.assertEqual(result.nodes_created, 1)
+        nodes = read_nodes(self.kn_path)
+        self.assertEqual(len(nodes), 1)
+        self.assertIsNone(nodes[0].valid_until)
+        self.assertIsNotNone(nodes[0].valid_from)
+        self.assertFalse(nodes[0].valid_from.startswith("2026-04-01"))
 
 
 class TestIsGenericNode(unittest.TestCase):
@@ -1611,6 +1631,13 @@ class TestValidateIsoDate(unittest.TestCase):
     def test_non_string(self):
         from synapt.recall.consolidate import _validate_iso_date
         self.assertIsNone(_validate_iso_date(42))
+
+
+def test_extract_collections_can_be_disabled(tmp_path, monkeypatch):
+    from synapt.recall.consolidate import extract_collections
+
+    monkeypatch.setenv("SYNAPT_DISABLE_ENTITY_COLLECTION", "1")
+    assert extract_collections(tmp_path) == 0
 
 
 if __name__ == "__main__":

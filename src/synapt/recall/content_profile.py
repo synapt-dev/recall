@@ -12,6 +12,7 @@ and "what did Sarah say about moving to Denver."
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -206,3 +207,17 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             max_knowledge_default=5,
             knowledge_boost_adjust=0.0,
         )
+
+
+def forced_content_profile(total_chunks: int = 0) -> ContentProfile | None:
+    """Return an env-forced content profile, if configured.
+
+    Supported values:
+    - code
+    - personal
+    - mixed
+    """
+    forced = os.environ.get("SYNAPT_FORCE_PROFILE", "").strip().lower()
+    if forced not in {"code", "personal", "mixed"}:
+        return None
+    return ContentProfile(total_chunks=total_chunks, _type=forced)
