@@ -1448,6 +1448,85 @@ class TestRename(unittest.TestCase):
             conn.close()
 
 
+class TestFromDisplay(unittest.TestCase):
+    """Test from_display persistence in JSONL messages (#292)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_post_persists_from_display(self):
+        """Posted messages store the display name in JSONL."""
+        channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+        channel_post("dev", "hello", agent_name="s_agent1")
+        path = _channels_dir() / "dev.jsonl"
+        msgs = _read_messages(path)
+        post_msgs = [m for m in msgs if m.type == "message"]
+        self.assertEqual(len(post_msgs), 1)
+        self.assertEqual(post_msgs[0].from_display, "Apollo")
+
+    def test_join_persists_from_display(self):
+        """Join events store the display name in JSONL."""
+        channel_join("dev", agent_name="s_agent1", display_name="Sentinel")
+        path = _channels_dir() / "dev.jsonl"
+        msgs = _read_messages(path)
+        join_msgs = [m for m in msgs if m.type == "join"]
+        self.assertEqual(len(join_msgs), 1)
+        self.assertEqual(join_msgs[0].from_display, "Sentinel")
+
+    def test_read_prefers_from_display_over_presence(self):
+        """channel_read uses from_display from JSONL, not just presence."""
+        channel_join("dev", agent_name="s_agent1", display_name="OldName")
+        channel_post("dev", "with old name", agent_name="s_agent1")
+        # Change the display name in presence
+        channel_rename("NewName", agent_name="s_agent1")
+        # The message should still show OldName (persisted at post time)
+        result = channel_read("dev", agent_name="s_agent1")
+        self.assertIn("OldName", result)
+
+    def test_old_messages_fallback_to_presence(self):
+        """Messages without from_display fall back to presence lookup."""
+        channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+        # Manually write a message without from_display (simulate old format)
+        import json
+        path = _channels_dir() / "dev.jsonl"
+        old_msg = {
+            "timestamp": "2026-03-22T00:00:00Z",
+            "from": "s_agent1",
+            "channel": "dev",
+            "type": "message",
+            "body": "old format message",
+            "id": "m_oldformat",
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(old_msg) + "\n")
+        result = channel_read("dev", agent_name="s_agent1")
+        # Should resolve via presence lookup to "Apollo"
+        self.assertIn("Apollo", result)
+
+    def test_from_display_omitted_when_empty(self):
+        """Serialization omits from_display when empty for JSONL cleanliness."""
+        msg = ChannelMessage(
+            timestamp="2026-03-22", from_agent="s_x", channel="dev",
+            type="message", body="test",
+        )
+        d = msg.to_dict()
+        self.assertNotIn("from_display", d)
+
+    def test_from_display_included_when_set(self):
+        """Serialization includes from_display when non-empty."""
+        msg = ChannelMessage(
+            timestamp="2026-03-22", from_agent="s_x", from_display="Apollo",
+            channel="dev", type="message", body="test",
+        )
+        d = msg.to_dict()
+        self.assertEqual(d["from_display"], "Apollo")
+
+
 class TestClaim(unittest.TestCase):
     """Test message claim mechanism (#141)."""
 
