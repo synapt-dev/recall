@@ -552,9 +552,10 @@ def token_f1(prediction: str, ground_truth: str) -> float:
 def generate_answer(question: str, context: str, client, model: str = "gpt-4o-mini") -> str:
     """Generate a short answer using the configured LLM."""
     prompt = ANSWER_PROMPT.format(context=context, question=question)
+    max_tokens = 150 if _is_gpt5_chat_model(model) else 100
     return _api_call_with_retry(
         client, [{"role": "user", "content": prompt}],
-        max_tokens=100, model=model,
+        max_tokens=max_tokens, model=model,
     )
 
 
