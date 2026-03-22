@@ -63,6 +63,13 @@ HF_DATASET_ID = "laynepro/codememo-benchmark"
 _SMALL_SAMPLE_THRESHOLD = 10
 _NEAR_CEILING_J_SCORE = 95.0
 _RECALL_REASONING_GAP_THRESHOLD = 20.0
+_NEGATIVE_EVIDENCE_RE = re.compile(
+    r"\b("
+    r"never|no |none|not |did not|didn't|was not|wasn't|were not|weren't|"
+    r"not implemented|not added|not called|not used|no evidence|no such"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _resolve_data_dir() -> Path:
@@ -651,6 +658,33 @@ def judge_answer(
     return 1 if label == "CORRECT" else 0
 
 
+def _is_negative_evidence_question(question: str, gold_answer: str) -> bool:
+    """Return True when a question explicitly tests absence/negative evidence."""
+    text = f"{question}\n{gold_answer}"
+    return bool(_NEGATIVE_EVIDENCE_RE.search(text))
+
+
+def _apply_recall_gate(
+    *,
+    j_score: int,
+    recall_at_k: float,
+    question: str,
+    gold_answer: str,
+) -> int:
+    """Cap judged wins that were produced with zero retrieved evidence.
+
+    Exception: questions that explicitly test negative evidence ("never",
+    "not implemented", etc.) are allowed to pass without retrieved support.
+    """
+    if j_score != 1:
+        return j_score
+    if recall_at_k > 0.0:
+        return j_score
+    if _is_negative_evidence_question(question, gold_answer):
+        return j_score
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Retrieval recall (evidence-based)
 # ---------------------------------------------------------------------------
@@ -1237,14 +1271,21 @@ def run_evaluation(
                     category_f1[category].append(f1)
 
                     t0 = time.time()
-                    j_score = judge_answer(question, gold, generated, client, model=model)
+                    raw_j_score = judge_answer(question, gold, generated, client, model=model)
                     judge_time = time.time() - t0
                     total_judge_time += judge_time
 
+                    j_score = _apply_recall_gate(
+                        j_score=raw_j_score,
+                        recall_at_k=recall_at_k,
+                        question=question,
+                        gold_answer=gold,
+                    )
                     category_scores[category].append(j_score)
                     result_entry.update({
                         "generated_answer": generated,
                         "j_score": j_score,
+                        "raw_j_score": raw_j_score,
                         "f1": round(f1, 4),
                         "generate_time_ms": round(generate_time * 1000, 1),
                         "judge_time_ms": round(judge_time * 1000, 1),
