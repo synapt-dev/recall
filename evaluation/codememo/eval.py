@@ -481,6 +481,10 @@ def _is_anthropic_model(model: str) -> bool:
     return model.startswith("claude-")
 
 
+def _is_gpt5_chat_model(model: str) -> bool:
+    return model.startswith("gpt-5")
+
+
 def _api_call_with_retry(client, messages, max_tokens=100, retries=10, model="gpt-4o-mini"):
     """Call OpenAI or Anthropic API with rate-limit-aware retry."""
     for attempt in range(retries):
@@ -493,13 +497,18 @@ def _api_call_with_retry(client, messages, max_tokens=100, retries=10, model="gp
                 )
                 return response.content[0].text.strip()
             else:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0.0,
-                    max_tokens=max_tokens,
-                    seed=42,
-                )
+                kwargs = {
+                    "model": model,
+                    "messages": messages,
+                }
+                # GPT-5 chat models reject max_tokens and some legacy chat knobs.
+                if _is_gpt5_chat_model(model):
+                    kwargs["max_completion_tokens"] = max_tokens
+                else:
+                    kwargs["temperature"] = 0.0
+                    kwargs["max_tokens"] = max_tokens
+                    kwargs["seed"] = 42
+                response = client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content.strip()
         except Exception as e:
             err_str = str(e)
