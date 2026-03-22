@@ -13,13 +13,27 @@ Use it to support benchmark hardening work, not as a source of truth.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
+import sys
 from collections import Counter
 from itertools import combinations
 from pathlib import Path
 
-from evaluation.codememo.schema import CATEGORY_NAMES, Category
+try:
+    from evaluation.codememo.schema import CATEGORY_NAMES, Category
+except ModuleNotFoundError:
+    # Tests may load this module by file path, where evaluation/ is not a package.
+    _SCHEMA_PATH = Path(__file__).with_name("schema.py")
+    _SCHEMA_SPEC = importlib.util.spec_from_file_location("codememo_schema", _SCHEMA_PATH)
+    assert _SCHEMA_SPEC is not None
+    assert _SCHEMA_SPEC.loader is not None
+    _schema_module = importlib.util.module_from_spec(_SCHEMA_SPEC)
+    sys.modules[_SCHEMA_SPEC.name] = _schema_module
+    _SCHEMA_SPEC.loader.exec_module(_schema_module)
+    CATEGORY_NAMES = _schema_module.CATEGORY_NAMES
+    Category = _schema_module.Category
 from synapt.recall.hybrid import classify_query_intent
 
 CODEMEMO_DIR = Path(__file__).parent
