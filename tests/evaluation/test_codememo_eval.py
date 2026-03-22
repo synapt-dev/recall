@@ -171,6 +171,23 @@ def test_api_call_uses_gpt5_completion_arg_shape():
     assert "seed" not in call
 
 
+def test_generate_answer_uses_higher_budget_for_gpt5():
+    client = _FakeClient()
+
+    result = codememo_eval.generate_answer(
+        "What version of croniter did we pin?",
+        "We pinned croniter 1.3.8 for recurring task support.",
+        client,
+        model="gpt-5-mini",
+    )
+
+    assert result == "ok"
+    call = client.chat.completions.calls[0]
+    assert call["model"] == "gpt-5-mini"
+    assert call["max_completion_tokens"] == 150
+    assert call["reasoning_effort"] == "minimal"
+
+
 def test_run_evaluation_can_reset_working_memory_between_runs(tmp_path):
     project = _write_project(tmp_path)
     sut = FakeSUT()
