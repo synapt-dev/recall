@@ -470,8 +470,21 @@ class TestApplyConsolidation(unittest.TestCase):
         nodes = read_nodes(self.kn_path)
         self.assertEqual(len(nodes), 1)
         self.assertIsNone(nodes[0].valid_until)
-        self.assertIsNotNone(nodes[0].valid_from)
-        self.assertFalse(nodes[0].valid_from.startswith("2026-04-01"))
+        self.assertEqual(nodes[0].valid_from, "2026-03-01T00:00:00")
+
+    def test_create_action_defaults_valid_from_to_earliest_cluster_timestamp(self):
+        parsed = {
+            "nodes": [{
+                "action": "create",
+                "content": "Release flag flipped after PR #42 landed in /src/flags.py",
+                "category": "workflow",
+            }]
+        }
+        result = _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
+        self.assertEqual(result.nodes_created, 1)
+        nodes = read_nodes(self.kn_path)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].valid_from, "2026-03-01T00:00:00")
 
 
 class TestIsGenericNode(unittest.TestCase):

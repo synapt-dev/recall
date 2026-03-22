@@ -353,6 +353,24 @@ def _validate_iso_date(value: str | None) -> str | None:
         return None
 
 
+def _cluster_valid_from(cluster: list[JournalEntry]) -> str | None:
+    """Return the earliest parseable journal timestamp in *cluster*."""
+    earliest: tuple[datetime, str] | None = None
+    for entry in cluster:
+        if not entry.timestamp:
+            continue
+        try:
+            dt = datetime.fromisoformat(entry.timestamp.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        if earliest is None or dt < earliest[0]:
+            earliest = (dt, entry.timestamp)
+    return earliest[1] if earliest is not None else None
+
+
 def _is_generic_node(content: str) -> bool:
     """Return True if content matches a known generic advice pattern."""
     for pattern in _GENERIC_PATTERNS:
@@ -1115,6 +1133,7 @@ def _apply_consolidation_result(
                     knowledge_path,
                 )
                 result.nodes_contradicted += 1
+                cluster_valid_from = _cluster_valid_from(cluster)
                 now = datetime.now(timezone.utc).isoformat()
                 new_node = KnowledgeNode.create(
                     content=content,
@@ -1123,7 +1142,7 @@ def _apply_consolidation_result(
                     confidence=compute_confidence(len(cluster_sessions)),
                     tags=tags,
                 )
-                new_node.valid_from = now
+                new_node.valid_from = cluster_valid_from or now
                 update_node(target.id, {"superseded_by": new_node.id}, knowledge_path)
                 append_node(new_node, knowledge_path)
                 result.nodes_created += 1
@@ -1220,7 +1239,12 @@ def _apply_consolidation_result(
             else:
                 llm_valid_from = _validate_iso_date(raw_node.get("valid_from"))
                 llm_valid_until = _validate_iso_date(raw_node.get("valid_until"))
-            new_node.valid_from = llm_valid_from or datetime.now(timezone.utc).isoformat()
+            cluster_valid_from = _cluster_valid_from(cluster)
+            new_node.valid_from = (
+                llm_valid_from
+                or cluster_valid_from
+                or datetime.now(timezone.utc).isoformat()
+            )
             if llm_valid_until:
                 new_node.valid_until = llm_valid_until
             append_node(new_node, knowledge_path)
