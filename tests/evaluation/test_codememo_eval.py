@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,6 +236,50 @@ def test_run_evaluation_can_reset_working_memory_between_runs(tmp_path):
 
     assert summary["repeat_runs"] == 3
     assert sut.reset_calls == 2
+
+
+def test_apply_recall_gate_caps_zero_recall_non_negative_questions():
+    gated = codememo_eval._apply_recall_gate(
+        j_score=1,
+        recall_at_k=0.0,
+        question="What was the final test count and coverage percentage?",
+        gold_answer="41 tests and 89% coverage",
+    )
+
+    assert gated == 0
+
+
+def test_apply_recall_gate_allows_negative_evidence_questions():
+    gated = codememo_eval._apply_recall_gate(
+        j_score=1,
+        recall_at_k=0.0,
+        question="Was close_connection() ever called?",
+        gold_answer="No, it was never called.",
+    )
+
+    assert gated == 1
+
+
+def test_run_evaluation_applies_recall_gate_to_judged_wins(tmp_path, monkeypatch):
+    project = _write_project(tmp_path)
+    sut = FakeSUT()
+
+    monkeypatch.setattr(codememo_eval, "generate_answer", lambda *args, **kwargs: "89% coverage")
+    monkeypatch.setattr(codememo_eval, "judge_answer", lambda *args, **kwargs: 1)
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=lambda: _FakeClient()))
+
+    summary = codememo_eval.run_evaluation(
+        project_dirs=[project],
+        sut=sut,
+        output_path=tmp_path / "results",
+        repeat_runs=1,
+    )
+
+    assert summary["j_score_overall"] == 0.0
+
+    detailed = json.loads((tmp_path / "results" / "codememo_detailed.json").read_text())
+    assert {row["raw_j_score"] for row in detailed} == {1}
+    assert {row["j_score"] for row in detailed} == {0}
 
 
 def test_synapt_sut_namespaces_persistent_work_dir_per_project(tmp_path, monkeypatch):
