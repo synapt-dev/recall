@@ -593,6 +593,32 @@ def _parse_chunk_timestamp(timestamp: str) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _knowledge_overlaps_temporal_window(
+    node: dict,
+    after: str | None = None,
+    before: str | None = None,
+) -> tuple[bool, bool]:
+    """Return whether a knowledge node overlaps a query window.
+
+    Returns ``(overlaps, has_temporal_bounds)``. Nodes without parseable
+    ``valid_from``/``valid_until`` remain eligible as timeless fallback
+    context, but do not receive a temporal overlap boost.
+    """
+    valid_from = _parse_chunk_timestamp(node.get("valid_from", ""))
+    valid_until = _parse_chunk_timestamp(node.get("valid_until", ""))
+    if valid_from is None and valid_until is None:
+        return True, False
+
+    query_after = _parse_chunk_timestamp(after or "")
+    query_before = _parse_chunk_timestamp(before or "")
+
+    if query_before is not None and valid_from is not None and valid_from >= query_before:
+        return False, True
+    if query_after is not None and valid_until is not None and valid_until < query_after:
+        return False, True
+    return True, True
+
+
 def _format_timestamp_display(timestamp: str, intent: str = "") -> str:
     """Render chunk timestamps in a query-appropriate display format."""
     if not timestamp:
@@ -1636,7 +1662,7 @@ class TranscriptIndex:
         if max_sessions is not None:
             result = self._progressive_lookup(
                 query, query_tokens, max_chunks, max_tokens, max_sessions,
-                date_filter, half_life, threshold_ratio, depth,
+                date_filter, after, before, half_life, threshold_ratio, depth,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
@@ -1645,6 +1671,7 @@ class TranscriptIndex:
         else:
             result = self._global_lookup(
                 query, query_tokens, max_chunks, max_tokens, date_filter,
+                after, before,
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
@@ -1667,6 +1694,8 @@ class TranscriptIndex:
         max_chunks: int,
         max_tokens: int,
         date_filter: set[int] | None = None,
+        after: str | None = None,
+        before: str | None = None,
         half_life: float = 30.0,
         threshold_ratio: float = 0.2,
         depth: str = "full",
@@ -1684,6 +1713,7 @@ class TranscriptIndex:
         if self._db and self._rowid_to_idx:
             return self._global_lookup_fts(
                 query, max_chunks, max_tokens, date_filter,
+                after, before,
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
@@ -1702,6 +1732,8 @@ class TranscriptIndex:
         max_chunks: int,
         max_tokens: int,
         date_filter: set[int] | None,
+        after: str | None,
+        before: str | None,
         half_life: float,
         threshold_ratio: float,
         depth: str = "full",
@@ -1724,6 +1756,7 @@ class TranscriptIndex:
             query, max_chunks, include_historical=include_historical,
             knowledge_boost=knowledge_boost, emb_weight=emb_weight,
             query_entities=query_entities, intent=intent,
+            after=after, before=before,
         )
 
         # Apply min_confidence filter (grep-style noise reduction)
@@ -2146,6 +2179,8 @@ class TranscriptIndex:
         max_tokens: int,
         max_sessions: int,
         date_filter: set[int] | None = None,
+        after: str | None = None,
+        before: str | None = None,
         half_life: float = 30.0,
         threshold_ratio: float = 0.2,
         depth: str = "full",
@@ -2162,7 +2197,7 @@ class TranscriptIndex:
             self._search_knowledge(
                 query, max_chunks, include_historical=include_historical,
                 knowledge_boost=knowledge_boost, emb_weight=emb_weight,
-                intent=intent,
+                intent=intent, after=after, before=before,
             )
             if self._db else []
         )
@@ -2379,6 +2414,8 @@ class TranscriptIndex:
         emb_weight: float = 1.0,
         query_entities: set[str] | None = None,
         intent: str = "",
+        after: str | None = None,
+        before: str | None = None,
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
@@ -2475,12 +2512,21 @@ class TranscriptIndex:
                     valid_until
                     and not include_historical
                     and not _env_flag("SYNAPT_DISABLE_KNOWLEDGE_EXPIRY")
+                    and not (intent == "temporal" and (after or before))
                 ):
                     try:
                         if valid_until[:10] < now_iso:
                             continue  # Expired — skip
                     except (TypeError, IndexError):
                         pass  # Invalid date format — don't filter
+                temporal_overlap = True
+                has_temporal_bounds = False
+                if intent == "temporal" and (after or before):
+                    temporal_overlap, has_temporal_bounds = (
+                        _knowledge_overlaps_temporal_window(node, after, before)
+                    )
+                    if not temporal_overlap:
+                        continue
                 node_content = node.get("content", "")
                 node_tokens = set(_tokenize(node_content))
                 token_overlap = len(query_tokens & node_tokens) >= min_matches
@@ -2522,11 +2568,19 @@ class TranscriptIndex:
                     aligned_cats = _CAT_INTENT_MAP.get(intent, set())
                     if node_cat in aligned_cats:
                         effective_boost *= 1.5
+                    if (
+                        intent == "temporal"
+                        and temporal_overlap
+                        and has_temporal_bounds
+                    ):
+                        effective_boost *= 1.2
                     raw_score = score_map.get(rowid, 0.0)
                     node["base_score"] = raw_score
                     node["score"] = raw_score * effective_boost
                     results.append(node)
                     seen_ids.add(node_id)
+
+            results.sort(key=lambda n: n.get("score", 0.0), reverse=True)
 
             # Confidence-based dedup: when multiple nodes share a lineage
             # (i.e. one superseded another), keep the highest-confidence one

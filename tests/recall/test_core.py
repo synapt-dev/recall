@@ -1740,6 +1740,93 @@ def test_search_knowledge_expiry_can_be_disabled(monkeypatch):
     assert any(r["content"] == expired["content"] for r in results)
 
 
+def test_search_knowledge_temporal_filters_non_overlapping_windows():
+    """Temporal queries should drop knowledge nodes outside the query window."""
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import MagicMock
+
+    index = TranscriptIndex(make_test_chunks())
+
+    overlapping = {
+        "id": "node-1",
+        "content": "Caroline was using the old deploy flow in early March 2026",
+        "category": "fact",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+        "valid_from": "2026-03-01",
+        "valid_until": "2026-03-10",
+    }
+    outside_window = {
+        "id": "node-2",
+        "content": "Caroline switched to the new deploy flow in April 2026",
+        "category": "fact",
+        "confidence": 0.8,
+        "source_sessions": ["sess2"],
+        "updated_at": "2026-04-02",
+        "valid_from": "2026-04-01",
+        "valid_until": "2026-04-30",
+    }
+
+    mock_db = MagicMock()
+    mock_db.knowledge_fts_search.return_value = [(2, 3.0), (1, 2.9)]
+    mock_db.knowledge_by_rowid.return_value = {1: overlapping, 2: outside_window}
+    index._db = mock_db
+
+    results = index._search_knowledge(
+        "What deploy flow was Caroline using in early March?",
+        intent="temporal",
+        after="2026-03-01",
+        before="2026-03-15",
+    )
+
+    assert len(results) == 1
+    assert results[0]["content"] == overlapping["content"]
+
+
+def test_search_knowledge_temporal_overlap_boosts_bounded_nodes():
+    """Overlapping temporal nodes should outrank timeless fallback nodes."""
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import MagicMock
+
+    index = TranscriptIndex(make_test_chunks())
+
+    timeless = {
+        "id": "node-1",
+        "content": "Caroline deployed through the old pipeline",
+        "category": "fact",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+    overlapping = {
+        "id": "node-2",
+        "content": "Caroline deployed through the old pipeline in March 2026",
+        "category": "fact",
+        "confidence": 0.8,
+        "source_sessions": ["sess2"],
+        "updated_at": "2026-03-05",
+        "valid_from": "2026-03-01",
+        "valid_until": "2026-03-31",
+    }
+
+    mock_db = MagicMock()
+    mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 3.0)]
+    mock_db.knowledge_by_rowid.return_value = {1: timeless, 2: overlapping}
+    index._db = mock_db
+
+    results = index._search_knowledge(
+        "Which pipeline was Caroline using in March?",
+        intent="temporal",
+        after="2026-03-01",
+        before="2026-04-01",
+    )
+
+    assert len(results) == 2
+    assert results[0]["content"] == overlapping["content"]
+    assert results[0]["score"] > results[1]["score"]
+
+
 def test_expand_cross_session_can_be_disabled(monkeypatch):
     """Cross-link ablation flag should skip expansion entirely."""
     from unittest.mock import MagicMock
