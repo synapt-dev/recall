@@ -88,10 +88,16 @@ MCP_INSTRUCTIONS = (
 _cached_index: TranscriptIndex | None = None
 _cached_mtime: float = 0.0
 _cached_dir: Path | None = None
+_cached_has_embeddings: bool = False
 
 
-def _get_index() -> TranscriptIndex | None:
-    """Load per-project index with caching. Reloads if recall.db was modified."""
+def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
+    """Load per-project index with caching. Reloads if recall.db was modified.
+
+    Args:
+        use_embeddings: If False, skip embedding model loading for faster
+            startup. Use for recall_quick which only needs BM25/knowledge.
+    """
     global _cached_index, _cached_mtime, _cached_dir
     index_dir = project_index_dir()
 
@@ -103,7 +109,13 @@ def _get_index() -> TranscriptIndex | None:
 
     try:
         mtime = check_path.stat().st_mtime
-        if _cached_index is None or mtime != _cached_mtime or index_dir != _cached_dir:
+        needs_reload = (
+            _cached_index is None
+            or mtime != _cached_mtime
+            or index_dir != _cached_dir
+            or (use_embeddings and not _cached_has_embeddings)
+        )
+        if needs_reload:
             # Close old DB connection before replacing cached index
             if _cached_index is not None and getattr(_cached_index, '_db', None) is not None:
                 with contextlib.suppress(Exception):
@@ -111,11 +123,12 @@ def _get_index() -> TranscriptIndex | None:
             import time as _time
             _load_t0 = _time.monotonic()
             logging.getLogger("synapt.recall").info("Loading index from %s ...", index_dir)
-            _cached_index = TranscriptIndex.load(index_dir, use_embeddings=True)
+            _cached_index = TranscriptIndex.load(index_dir, use_embeddings=use_embeddings)
             logging.getLogger("synapt.recall").info(
                 "Index loaded: %d chunks in %.1fs",
                 len(_cached_index.chunks), _time.monotonic() - _load_t0,
             )
+            _cached_has_embeddings = use_embeddings
             _cached_mtime = mtime
             _cached_dir = index_dir
             # Set current session ID for access tracking (distinct_sessions)
@@ -137,13 +150,14 @@ def _get_index() -> TranscriptIndex | None:
 
 def _invalidate_cache() -> None:
     """Reset cached index so next search reloads from disk."""
-    global _cached_index, _cached_mtime, _cached_dir
+    global _cached_index, _cached_mtime, _cached_dir, _cached_has_embeddings
     if _cached_index is not None and getattr(_cached_index, '_db', None) is not None:
         with contextlib.suppress(Exception):
             _cached_index._db.close()
     _cached_index = None
     _cached_mtime = 0.0
     _cached_dir = None
+    _cached_has_embeddings = False
 
 
 # Clean up the DB connection before Python's module teardown begins.
@@ -334,7 +348,9 @@ def recall_quick(query: str) -> str:
         query: Natural language query or keywords to search for.
     """
     quick_budget = _cap_tokens(500)
-    index = _get_index()
+    # Skip embedding loading for quick checks — concise depth only uses
+    # BM25/FTS5 + knowledge nodes, not semantic embeddings (#472)
+    index = _get_index(use_embeddings=False)
     if index is None:
         index_dir = project_index_dir()
         return f"No index found at {index_dir}. Run `synapt recall setup` first."
