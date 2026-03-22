@@ -60,6 +60,9 @@ _LOCAL_DATA = CODEMEMO_DIR / "data"
 
 # HuggingFace dataset ID — auto-downloaded if no local data/ directory exists
 HF_DATASET_ID = "laynepro/codememo-benchmark"
+_SMALL_SAMPLE_THRESHOLD = 10
+_NEAR_CEILING_J_SCORE = 95.0
+_RECALL_REASONING_GAP_THRESHOLD = 20.0
 
 
 def _resolve_data_dir() -> Path:
@@ -178,6 +181,73 @@ def _audit_finish(start_ts: str, summary: dict, outcome: str = "SUCCESS") -> Non
     _audit_log(entry)
     j = summary.get("j_score_overall", "?")
     print(f"  [audit] Logged {outcome} — J-Score: {j}%")
+
+
+def _add_validity_metadata(summary: dict) -> dict:
+    """Attach benchmark-validity diagnostics to a CodeMemo summary."""
+    category_diagnostics: dict[str, dict] = {}
+    validity_notes: list[str] = []
+    near_ceiling: list[tuple[str, float, int]] = []
+    reasoning_gap: list[tuple[str, float, float]] = []
+
+    max_chunks = summary.get("max_chunks", 20)
+    for cat in sorted(ALL_CATEGORIES):
+        name = CATEGORY_NAMES[cat]
+        n = summary.get(f"n_{name}")
+        j_score = summary.get(f"j_score_{name}")
+        recall = summary.get(f"recall@{max_chunks}_{name}")
+
+        if n is None and j_score is None and recall is None:
+            continue
+
+        entry: dict[str, int | float | bool] = {}
+        if n is not None:
+            entry["questions"] = n
+            entry["small_sample"] = n < _SMALL_SAMPLE_THRESHOLD
+        if j_score is not None:
+            entry["j_score"] = j_score
+            entry["headroom"] = round(max(0.0, 100.0 - j_score), 2)
+            entry["near_ceiling"] = j_score >= _NEAR_CEILING_J_SCORE
+        if recall is not None:
+            entry["recall_at_k"] = recall
+        if j_score is not None and recall is not None:
+            gap = round(j_score - recall, 2)
+            entry["reasoning_gap"] = gap
+            entry["high_reasoning_gap"] = gap >= _RECALL_REASONING_GAP_THRESHOLD
+        category_diagnostics[name] = entry
+
+        if (
+            n is not None
+            and j_score is not None
+            and j_score >= _NEAR_CEILING_J_SCORE
+        ):
+            near_ceiling.append((name, j_score, n))
+        if (
+            j_score is not None
+            and recall is not None
+            and j_score >= _NEAR_CEILING_J_SCORE
+            and (j_score - recall) >= _RECALL_REASONING_GAP_THRESHOLD
+        ):
+            reasoning_gap.append((name, j_score, recall))
+
+    if len(summary.get("projects", [])) == 1:
+        validity_notes.append(
+            "Single-project slice; prefer all-project CodeMemo runs for headline claims."
+        )
+    for name, j_score, n in near_ceiling:
+        validity_notes.append(
+            f"Category '{name}' is near ceiling on this slice ({j_score:.2f}% over {n} questions)."
+        )
+    for name, j_score, recall in reasoning_gap:
+        validity_notes.append(
+            f"Category '{name}' has near-ceiling J-score ({j_score:.2f}%) despite lower retrieval recall ({recall:.2f}%), so answer-model or judge effects may be masking retrieval weakness."
+        )
+
+    if category_diagnostics:
+        summary["category_diagnostics"] = category_diagnostics
+    if validity_notes:
+        summary["validity_notes"] = validity_notes
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1248,6 +1318,7 @@ def run_evaluation(
                     )
                 deltas.append(delta)
             summary["run_deltas"] = deltas
+    summary = _add_validity_metadata(summary)
 
     # Print summary
     print("\n" + "=" * 60)
@@ -1255,6 +1326,10 @@ def run_evaluation(
     print("=" * 60)
     for k, v in summary.items():
         print(f"  {k}: {v}")
+    if summary.get("validity_notes"):
+        print("  benchmark_validity:")
+        for note in summary["validity_notes"]:
+            print(f"    - {note}")
     print("=" * 60)
 
     # Save results
