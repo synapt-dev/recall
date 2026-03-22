@@ -90,8 +90,13 @@ _cached_mtime: float = 0.0
 _cached_dir: Path | None = None
 
 
-def _get_index() -> TranscriptIndex | None:
-    """Load per-project index with caching. Reloads if recall.db was modified."""
+def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
+    """Load per-project index with caching. Reloads if recall.db was modified.
+
+    Args:
+        use_embeddings: If False, skip embedding model loading for faster
+            startup. Use for recall_quick which only needs BM25/knowledge.
+    """
     global _cached_index, _cached_mtime, _cached_dir
     index_dir = project_index_dir()
 
@@ -111,7 +116,7 @@ def _get_index() -> TranscriptIndex | None:
             import time as _time
             _load_t0 = _time.monotonic()
             logging.getLogger("synapt.recall").info("Loading index from %s ...", index_dir)
-            _cached_index = TranscriptIndex.load(index_dir, use_embeddings=True)
+            _cached_index = TranscriptIndex.load(index_dir, use_embeddings=use_embeddings)
             logging.getLogger("synapt.recall").info(
                 "Index loaded: %d chunks in %.1fs",
                 len(_cached_index.chunks), _time.monotonic() - _load_t0,
@@ -334,7 +339,9 @@ def recall_quick(query: str) -> str:
         query: Natural language query or keywords to search for.
     """
     quick_budget = _cap_tokens(500)
-    index = _get_index()
+    # Skip embedding loading for quick checks — concise depth only uses
+    # BM25/FTS5 + knowledge nodes, not semantic embeddings (#472)
+    index = _get_index(use_embeddings=False)
     if index is None:
         index_dir = project_index_dir()
         return f"No index found at {index_dir}. Run `synapt recall setup` first."
