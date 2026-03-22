@@ -111,6 +111,8 @@ def _build_transcript_summary(session_id: str, project_dir: Path) -> str:
 ENRICHMENT_PROMPT = """\
 You are summarizing a session transcript. Extract structured information about what happened.
 
+Session date: {session_date}
+
 Given the following transcript, produce a JSON object with these fields:
 - "focus": A one-sentence description of the session's main topic or goal (max 200 chars)
 - "done": A list of 1-5 concrete things accomplished, discussed, or learned (each max 100 chars)
@@ -119,9 +121,11 @@ Given the following transcript, produce a JSON object with these fields:
 
 Rules:
 - Include specific names, dates, places, numbers, and details — NOT general themes
+- Resolve ALL relative time references to absolute dates using the session date above (e.g. "yesterday" → the actual date, "last week" → the actual date range)
 - Capture people's names, their relationships, possessions, hobbies, and stated preferences
 - BAD: "discussed travel plans" — GOOD: "plans trip to Florida in June with sister Elena"
 - BAD: "talked about hobbies" — GOOD: "signed up for pottery class on July 2nd"
+- BAD: "fixed a bug yesterday" — GOOD: "fixed auth bug on March 14"
 - If the session was short or trivial, use fewer items
 - Output ONLY valid JSON, no markdown fences, no explanation
 
@@ -269,7 +273,17 @@ def enrich_entry(
                 return None
             client = MLXClient(MLXOptions(max_tokens=800))
 
-    prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text)
+    # Derive human-readable session date for relative date resolution
+    session_date = "unknown"
+    if entry.timestamp:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _ts = entry.timestamp.replace("Z", "+00:00")
+            _parsed = _dt.fromisoformat(_ts)
+            session_date = _parsed.strftime("%A, %B %d, %Y")
+        except (ValueError, AttributeError):
+            pass
+    prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text, session_date=session_date)
 
     try:
         response = client.chat(

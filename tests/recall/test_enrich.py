@@ -209,12 +209,19 @@ class TestEnrichmentPrompt(unittest.TestCase):
         self.assertIn("{transcript}", ENRICHMENT_PROMPT)
 
     def test_format_with_transcript(self):
-        prompt = ENRICHMENT_PROMPT.format(transcript="[Turn 1] User: hello")
+        prompt = ENRICHMENT_PROMPT.format(
+            transcript="[Turn 1] User: hello",
+            session_date="Monday, March 22, 2026",
+        )
         self.assertIn("[Turn 1] User: hello", prompt)
         self.assertIn("focus", prompt)
         self.assertIn("done", prompt)
         self.assertIn("decisions", prompt)
         self.assertIn("next_steps", prompt)
+        self.assertIn("March 22, 2026", prompt)
+
+    def test_has_session_date_placeholder(self):
+        self.assertIn("{session_date}", ENRICHMENT_PROMPT)
 
 
 class TestIterEnrichableEntries(unittest.TestCase):
