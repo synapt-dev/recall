@@ -504,6 +504,7 @@ def _api_call_with_retry(client, messages, max_tokens=100, retries=10, model="gp
                 # GPT-5 chat models reject max_tokens and some legacy chat knobs.
                 if _is_gpt5_chat_model(model):
                     kwargs["max_completion_tokens"] = max_tokens
+                    kwargs["reasoning_effort"] = "minimal"
                 else:
                     kwargs["temperature"] = 0.0
                     kwargs["max_tokens"] = max_tokens
