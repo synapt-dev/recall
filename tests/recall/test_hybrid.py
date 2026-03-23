@@ -108,6 +108,33 @@ class TestWeightedRRFMerge:
         assert len(merged) == 2
         assert merged[0][0] == 10
 
+    def test_bm25_floor_zero_is_noop(self):
+        """bm25_floor=0 (default) does not change output."""
+        bm25 = [(10, 5.0), (20, 3.0)]
+        emb = [(30, 0.9), (40, 0.8)]
+        without = weighted_rrf_merge(bm25, emb)
+        with_floor = weighted_rrf_merge(bm25, emb, bm25_floor=0)
+        assert without == with_floor
+
+    def test_bm25_floor_preserves_top_n(self):
+        """bm25_floor=2 ensures top-2 BM25 results appear in output."""
+        # Embedding dominates — BM25 items 10, 20 might not rank highly
+        bm25 = [(10, 5.0), (20, 3.0), (30, 1.0)]
+        emb = [(40, 0.99), (50, 0.98), (60, 0.97)]
+        merged = weighted_rrf_merge(bm25, emb, emb_weight=100.0, bm25_floor=2)
+        merged_ids = {item_id for item_id, _ in merged}
+        # Items 10 and 20 must appear even though embedding weight is huge
+        assert 10 in merged_ids
+        assert 20 in merged_ids
+
+    def test_bm25_floor_no_duplicates(self):
+        """Floor items that already rank naturally are not duplicated."""
+        bm25 = [(10, 5.0), (20, 3.0)]
+        emb = [(10, 0.9), (20, 0.8)]  # Same items
+        merged = weighted_rrf_merge(bm25, emb, bm25_floor=2)
+        ids = [item_id for item_id, _ in merged]
+        assert len(ids) == len(set(ids)), "No duplicate IDs"
+
 
 # ---------------------------------------------------------------------------
 # Embedding search

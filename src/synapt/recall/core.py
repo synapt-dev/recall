@@ -1941,8 +1941,10 @@ class TranscriptIndex:
                 emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
 
                 # Weighted RRF merge — emb_weight from intent classification
+                _bm25_floor = int(os.environ.get("SYNAPT_BM25_FLOOR", "0"))
                 merged = weighted_rrf_merge(
                     bm25_ranked, emb_ranked, emb_weight=emb_weight,
+                    bm25_floor=_bm25_floor,
                 )
                 candidates = merged
             except Exception as e:
