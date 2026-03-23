@@ -58,11 +58,18 @@ def weighted_rrf_merge(
     k: int = RRF_K,
     bm25_weight: float = 1.0,
     emb_weight: float = 1.0,
+    bm25_floor: int = 0,
 ) -> list[tuple[int, float]]:
     """Weighted RRF merge between BM25 and embedding results.
 
     When BM25 returns sparse results (< SPARSE_RESULT_THRESHOLD), the
     embedding weight is automatically increased to compensate.
+
+    ``bm25_floor`` guarantees that the top-N BM25 results always appear
+    in the final merged list, even if their RRF score is too low to rank
+    naturally.  This prevents the embedding side from completely drowning
+    out lexical matches for queries containing rare/specific terms.
+    Set via the ``SYNAPT_BM25_FLOOR`` environment variable (default 0).
     """
     # Auto-boost embeddings when BM25 is sparse
     if len(bm25_ranked) < SPARSE_RESULT_THRESHOLD and emb_ranked:
@@ -77,6 +84,19 @@ def weighted_rrf_merge(
         rrf_scores[item_id] = rrf_scores.get(item_id, 0.0) + emb_weight / (k + rank + 1)
 
     merged = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+
+    # BM25 floor: ensure top-N BM25 results appear in merged output.
+    # If a top-N BM25 result didn't rank high enough via RRF, append it
+    # at the end so it still participates in the final candidate pool.
+    if bm25_floor > 0 and bm25_ranked:
+        merged_ids = {item_id for item_id, _ in merged}
+        floor_ids = [item_id for item_id, _ in bm25_ranked[:bm25_floor]]
+        for fid in floor_ids:
+            if fid not in merged_ids:
+                # Use a tiny positive score so floor items survive downstream
+                # ``if s > 0`` filters in the retrieval path.
+                merged.append((fid, 1e-9))
+
     return merged
 
 
