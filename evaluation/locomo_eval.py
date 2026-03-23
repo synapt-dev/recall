@@ -655,12 +655,20 @@ that anchor point:
    - "recently" or "the other day" → within the week before the timestamp
 4. You MUST answer with a specific date, month, or year — NEVER use relative \
 references like "last week" or "recently" in your answer
-5. If the event is described as happening relative to the conversation time, \
+5. The conversation timestamp is ONLY an anchor for resolving relative phrases. \
+It is NOT automatically the date of the event itself. If someone is recalling an \
+earlier event, do not answer with the conversation date unless the text clearly \
+says the event happened that same day.
+6. If the event is described as happening relative to the conversation time, \
 SHOW YOUR REASONING: state the anchor timestamp, the relative expression, \
 and the computed date
-6. If multiple memories mention the same event, use the one where the event \
-was first discussed — that timestamp is closest to when it actually happened
-7. Answer with specific details from the memories. Be precise — include \
+7. If multiple memories mention the same event, prefer the memory that gives the \
+clearest date evidence for WHEN it happened, not merely the latest conversation \
+where it was discussed.
+8. If no relative phrase is present, look for an explicit absolute date, month, \
+year, season, holiday, birthday, or "during X" reference in the memory text. Do \
+NOT default to the header timestamp just because the event is mentioned there.
+9. Answer with specific details from the memories. Be precise — include \
 exact dates, names, and facts. Be complete but concise — use 2-3 sentences \
 if needed to show your date reasoning.
 
@@ -691,32 +699,30 @@ def _api_call_with_retry(client, messages, max_tokens=50, retries=3, model="gpt-
             raise RuntimeError(f"API call failed after {retries} retries: {e}") from e
 
 
+def build_answer_prompt(question: str, context: str, category: int = 0, date_range: str = "") -> str:
+    """Build the category-appropriate answer prompt for LOCOMO."""
+    dr_text = f"\nThe conversations span from {date_range}." if date_range else ""
+    if category == 1:
+        return MULTIHOP_ANSWER_PROMPT.format(
+            context=context, question=question, date_range=dr_text,
+        )
+    if category == 2:
+        return TEMPORAL_ANSWER_PROMPT.format(
+            context=context, question=question, date_range=dr_text,
+        )
+    return ANSWER_PROMPT.format(
+        context=context, question=question, date_range=dr_text,
+    )
+
+
 def generate_answer(
     question: str, context: str, client,
     category: int = 0, date_range: str = "",
 ) -> str:
-    """Generate a short answer using gpt-4o-mini.
-
-    Uses category-specific prompts:
-    - Category 1 (multi-hop): MULTIHOP_ANSWER_PROMPT — emphasizes aggregation
-    - Category 2 (temporal): TEMPORAL_ANSWER_PROMPT — emphasizes date computation
-    - All others: ANSWER_PROMPT — general memory retrieval
-
-    Injects session date range into all prompts when available.
-    """
-    dr_text = f"\nThe conversations span from {date_range}." if date_range else ""
-    if category == 1:
-        prompt = MULTIHOP_ANSWER_PROMPT.format(
-            context=context, question=question, date_range=dr_text,
-        )
-    elif category == 2:
-        prompt = TEMPORAL_ANSWER_PROMPT.format(
-            context=context, question=question, date_range=dr_text,
-        )
-    else:
-        prompt = ANSWER_PROMPT.format(
-            context=context, question=question, date_range=dr_text,
-        )
+    """Generate a short answer using gpt-4o-mini."""
+    prompt = build_answer_prompt(
+        question, context, category=category, date_range=date_range,
+    )
     return _api_call_with_retry(
         client, [{"role": "user", "content": prompt}], max_tokens=100,
     )

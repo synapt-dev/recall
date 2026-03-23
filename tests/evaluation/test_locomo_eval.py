@@ -55,3 +55,18 @@ def test_build_question_pairs_reverses_within_each_conversation():
         (1, "q1b"),
         (1, "q1a"),
     ]
+
+
+def test_build_answer_prompt_adds_temporal_guardrails():
+    prompt = locomo_eval.build_answer_prompt(
+        question="When did Caroline give a speech at a school?",
+        context="memory block",
+        category=2,
+        date_range="8 May 2023 to 9 June 2023",
+    )
+
+    assert "ONLY an anchor for resolving relative phrases" in prompt
+    assert "do not answer with the conversation date" in prompt
+    assert "prefer the memory that gives the clearest date evidence" in prompt
+    assert "Do NOT default to the header timestamp" in prompt
+    assert "The conversations span from 8 May 2023 to 9 June 2023." in prompt
