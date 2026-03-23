@@ -47,6 +47,7 @@ _ENRICHMENT_FIELD_MAP = {
     "next steps": "next_steps",
 }
 MAX_TRANSCRIPT_CHARS = 6000  # ~1.5K tokens — fits in 3B context budget
+MULTI_WINDOW_OVERLAP = 1000  # chars of overlap between adjacent windows
 
 
 def _find_transcript(session_id: str, project_dir: Path) -> Path | None:
@@ -95,6 +96,55 @@ def _build_summary_from_chunks(
     return text
 
 
+def _split_windows(
+    text: str,
+    window_size: int = MAX_TRANSCRIPT_CHARS,
+    overlap: int = MULTI_WINDOW_OVERLAP,
+) -> list[str]:
+    """Split text into overlapping windows for multi-window enrichment.
+
+    Returns a list of text windows. If text fits in one window, returns [text].
+    """
+    if len(text) <= window_size:
+        return [text]
+
+    windows = []
+    start = 0
+    step = window_size - overlap
+    while start < len(text):
+        end = min(start + window_size, len(text))
+        windows.append(text[start:end])
+        if end >= len(text):
+            break
+        start += step
+    return windows
+
+
+def _dedup_facts(items: list[str], threshold: float = 0.8) -> list[str]:
+    """Deduplicate a list of fact strings using fuzzy matching.
+
+    Keeps the first occurrence of each near-duplicate group.
+    """
+    from difflib import SequenceMatcher
+
+    unique: list[str] = []
+    for item in items:
+        is_dup = False
+        for existing in unique:
+            if SequenceMatcher(None, item.lower(), existing.lower()).ratio() > threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(item)
+    return unique
+
+
+def _multi_window_enabled() -> bool:
+    """Check if multi-window enrichment is enabled via env var."""
+    import os
+    return os.environ.get("SYNAPT_MULTI_WINDOW_ENRICH", "0") == "1"
+
+
 def _build_transcript_summary(session_id: str, project_dir: Path) -> str:
     """Build a condensed text representation of a transcript for the LLM."""
     path = _find_transcript(session_id, project_dir)
@@ -106,6 +156,20 @@ def _build_transcript_summary(session_id: str, project_dir: Path) -> str:
         return ""
 
     return _build_summary_from_chunks(chunks)
+
+
+def _build_full_transcript_text(session_id: str, project_dir: Path) -> str:
+    """Build full (non-truncated) transcript text for multi-window enrichment."""
+    path = _find_transcript(session_id, project_dir)
+    if not path:
+        return ""
+
+    chunks = parse_transcript(path)
+    if not chunks:
+        return ""
+
+    # Use a very large limit to avoid truncation
+    return _build_summary_from_chunks(chunks, max_chars=10_000_000)
 
 
 ENRICHMENT_PROMPT = """\
@@ -282,6 +346,56 @@ def _detect_content_type(transcript_text: str) -> str:
     return profile.content_type
 
 
+def _enrich_single_window(
+    transcript_text: str,
+    session_date: str,
+    content_type: str,
+    limits: dict,
+    client: "MLXClient",
+    model: str,
+    adapter_path: str = "",
+) -> dict | None:
+    """Run enrichment on a single transcript window. Returns parsed dict or None."""
+    prompt = ENRICHMENT_PROMPT.format(
+        transcript=transcript_text,
+        session_date=session_date,
+        done_limit=f"1-{limits['done']}",
+        decisions_limit=f"0-{limits['decisions']}",
+        next_steps_limit=f"0-{limits['next_steps']}",
+        personal_rules=_PERSONAL_RULES if content_type == "personal" else "",
+    )
+
+    try:
+        response = client.chat(
+            model=model,
+            messages=[Message(role="user", content=prompt)],
+            temperature=0.1,
+            adapter_path=adapter_path or None,
+        )
+    except Exception as exc:
+        logger.warning("LLM inference failed: %s", exc)
+        return None
+
+    return _parse_llm_response(response)
+
+
+def _merge_enrichment_results(results: list[dict]) -> dict:
+    """Merge enrichment results from multiple windows with dedup."""
+    merged: dict = {"focus": "", "done": [], "decisions": [], "next_steps": []}
+
+    for r in results:
+        if not merged["focus"] and r.get("focus"):
+            merged["focus"] = r["focus"]
+        for key in ("done", "decisions", "next_steps"):
+            merged[key].extend(r.get(key, []))
+
+    # Dedup each list
+    for key in ("done", "decisions", "next_steps"):
+        merged[key] = _dedup_facts([str(item) for item in merged[key] if item])
+
+    return merged
+
+
 def enrich_entry(
     entry: JournalEntry,
     project_dir: Path,
@@ -294,6 +408,9 @@ def enrich_entry(
 
     Uses the model router to select the best backend (decoder-only preferred
     for JSON schema compliance). Falls back to MLX decoder if router unavailable.
+
+    When SYNAPT_MULTI_WINDOW_ENRICH=1 and content is personal, runs enrichment
+    on overlapping 6K-char windows to avoid truncation of long conversations.
 
     Args:
         client: Reusable model client instance. Created via router if not provided.
@@ -333,31 +450,53 @@ def enrich_entry(
             session_date = _parsed.strftime("%A, %B %d, %Y")
         except (ValueError, AttributeError):
             pass
-    prompt = ENRICHMENT_PROMPT.format(
-        transcript=transcript_text,
-        session_date=session_date,
-        done_limit=f"1-{limits['done']}",
-        decisions_limit=f"0-{limits['decisions']}",
-        next_steps_limit=f"0-{limits['next_steps']}",
-        personal_rules=_PERSONAL_RULES if content_type == "personal" else "",
+
+    # Multi-window enrichment for personal content when enabled
+    use_multi_window = (
+        _multi_window_enabled()
+        and content_type == "personal"
+        and len(transcript_text) > MAX_TRANSCRIPT_CHARS
     )
 
-    try:
-        response = client.chat(
-            model=model,
-            messages=[Message(role="user", content=prompt)],
-            temperature=0.1,
-            adapter_path=adapter_path or None,
-        )
-    except Exception as exc:
-        logger.warning("LLM inference failed: %s", exc)
-        return None
+    if use_multi_window:
+        # Get full (non-truncated) transcript text
+        full_text = _build_full_transcript_text(entry.session_id, project_dir)
+        if not full_text:
+            full_text = transcript_text
 
-    parsed = _parse_llm_response(response)
+        windows = _split_windows(full_text)
+        logger.info(
+            "Multi-window enrichment: %d windows for session %s (%d chars)",
+            len(windows), entry.session_id, len(full_text),
+        )
+
+        window_results = []
+        for i, window in enumerate(windows):
+            parsed = _enrich_single_window(
+                window, session_date, content_type, limits,
+                client, model, adapter_path,
+            )
+            if parsed:
+                window_results.append(parsed)
+            else:
+                logger.warning(
+                    "Window %d/%d failed for session %s",
+                    i + 1, len(windows), entry.session_id,
+                )
+
+        if not window_results:
+            return None
+
+        parsed = _merge_enrichment_results(window_results)
+    else:
+        parsed = _enrich_single_window(
+            transcript_text, session_date, content_type, limits,
+            client, model, adapter_path,
+        )
+
     if not parsed:
         logger.warning(
-            "Failed to parse LLM response for session %s: %.200s",
-            entry.session_id, response,
+            "Failed to parse enrichment for session %s", entry.session_id,
         )
         return None
 
