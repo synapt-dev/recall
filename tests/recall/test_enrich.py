@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from synapt.recall.enrich import (
     ENRICHMENT_PROMPT,
+    _PERSONAL_RULES,
     TranscriptSegment,
     _FACT_LIMITS,
     _backfill_stubs,
@@ -218,6 +219,7 @@ class TestEnrichmentPrompt(unittest.TestCase):
             done_limit="1-5",
             decisions_limit="0-3",
             next_steps_limit="0-3",
+            personal_rules="",
         )
         self.assertIn("[Turn 1] User: hello", prompt)
         self.assertIn("focus", prompt)
@@ -234,10 +236,42 @@ class TestEnrichmentPrompt(unittest.TestCase):
         self.assertIn("{decisions_limit}", ENRICHMENT_PROMPT)
         self.assertIn("{next_steps_limit}", ENRICHMENT_PROMPT)
 
-    def test_personal_extraction_rules_in_prompt(self):
-        self.assertIn("emotional reactions", ENRICHMENT_PROMPT)
-        self.assertIn("social relationships", ENRICHMENT_PROMPT)
-        self.assertIn("possessions, pets, addresses", ENRICHMENT_PROMPT)
+    def test_has_personal_rules_placeholder(self):
+        self.assertIn("{personal_rules}", ENRICHMENT_PROMPT)
+
+    def test_personal_rules_not_in_base_prompt(self):
+        """Personal extraction rules should NOT be unconditionally in the prompt."""
+        self.assertNotIn("emotional reactions", ENRICHMENT_PROMPT)
+
+    def test_personal_rules_in_personal_addendum(self):
+        """Personal extraction rules should be in _PERSONAL_RULES."""
+        self.assertIn("emotional reactions", _PERSONAL_RULES)
+        self.assertIn("social relationships", _PERSONAL_RULES)
+        self.assertIn("possessions, pets, addresses", _PERSONAL_RULES)
+
+    def test_personal_rules_injected_for_personal_content(self):
+        """When content_type is personal, rules appear in formatted prompt."""
+        prompt = ENRICHMENT_PROMPT.format(
+            transcript="test",
+            session_date="Monday, March 22, 2026",
+            done_limit="1-15",
+            decisions_limit="0-5",
+            next_steps_limit="0-5",
+            personal_rules=_PERSONAL_RULES,
+        )
+        self.assertIn("emotional reactions", prompt)
+
+    def test_personal_rules_absent_for_code_content(self):
+        """When content_type is code, personal rules are NOT in prompt."""
+        prompt = ENRICHMENT_PROMPT.format(
+            transcript="test",
+            session_date="Monday, March 22, 2026",
+            done_limit="1-5",
+            decisions_limit="0-3",
+            next_steps_limit="0-3",
+            personal_rules="",
+        )
+        self.assertNotIn("emotional reactions", prompt)
 
 
 class TestContentAwareFactLimits(unittest.TestCase):

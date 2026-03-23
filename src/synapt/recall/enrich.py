@@ -126,16 +126,20 @@ Rules:
 - BAD: "discussed travel plans" — GOOD: "plans trip to Florida in June with sister Elena"
 - BAD: "talked about hobbies" — GOOD: "signed up for pottery class on July 2nd"
 - BAD: "fixed a bug yesterday" — GOOD: "fixed auth bug on March 14"
-- For personal conversations: capture opinions, emotional reactions, hypothetical plans, social relationships, and recurring topics
-- BAD: "talked about feelings" — GOOD: "Sarah is frustrated with her job at the bank and considering applying to grad school"
-- Capture possessions, pets, addresses, workplace details, and family relationships
-- If the session was short or trivial, use fewer items
+{personal_rules}- If the session was short or trivial, use fewer items
 - Output ONLY valid JSON, no markdown fences, no explanation
 
 Transcript:
 {transcript}
 
 JSON:"""
+
+# Additional extraction rules injected only for personal-content sessions.
+_PERSONAL_RULES = """\
+- Capture opinions, emotional reactions, hypothetical plans, social relationships, and recurring topics
+- BAD: "talked about feelings" — GOOD: "Sarah is frustrated with her job at the bank and considering applying to grad school"
+- Capture possessions, pets, addresses, workplace details, and family relationships
+"""
 
 
 # Content-profile-aware fact limits for enrichment output clamping.
@@ -335,6 +339,7 @@ def enrich_entry(
         done_limit=f"1-{limits['done']}",
         decisions_limit=f"0-{limits['decisions']}",
         next_steps_limit=f"0-{limits['next_steps']}",
+        personal_rules=_PERSONAL_RULES if content_type == "personal" else "",
     )
 
     try:
