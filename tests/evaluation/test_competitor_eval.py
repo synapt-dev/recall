@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 
-competitor_eval = importlib.import_module("evaluation.codememo.competitor_eval")
+def _load_competitor_eval():
+    repo_root = Path(__file__).resolve().parents[2]
+    module_path = repo_root / "evaluation" / "codememo" / "competitor_eval.py"
+    spec = importlib.util.spec_from_file_location("tests_competitor_eval_module", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+competitor_eval = _load_competitor_eval()
 
 
 def test_mem0_ingest_raises_when_infer_stores_zero_memories(tmp_path, monkeypatch):
