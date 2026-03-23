@@ -1807,7 +1807,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
                 # Surface recent channel messages (last 5) so agent has context
                 total_unread = sum(counts.values())
                 if total_unread > 0:
-                    summary = channel_read("dev", limit=min(total_unread, 5))
+                    summary = channel_read("dev", limit=min(total_unread, 5), show_pins=False)
                     if summary:
                         print(f"\nRecent #dev messages:\n{summary}")
         except Exception:
