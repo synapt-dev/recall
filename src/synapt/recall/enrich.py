@@ -186,6 +186,7 @@ Given the following transcript, produce a JSON object with these fields:
 Rules:
 - Include specific names, dates, places, numbers, and details — NOT general themes
 - Resolve ALL relative time references to absolute dates using the session date above (e.g. "yesterday" → the actual date, "last week" → the actual date range)
+- NEVER output template variables like {{yesterday}}, {{last_friday}}, or {{today}} — always write the actual resolved date
 - Capture people's names, their relationships, possessions, hobbies, and stated preferences
 - BAD: "discussed travel plans" — GOOD: "plans trip to Florida in June with sister Elena"
 - BAD: "talked about hobbies" — GOOD: "signed up for pottery class on July 2nd"
