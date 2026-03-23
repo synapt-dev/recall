@@ -1,6 +1,7 @@
 """Tests for journal enrichment pipeline."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,12 +15,16 @@ from synapt.recall.enrich import (
     _backfill_stubs,
     _build_summary_from_chunks,
     _build_transcript_summary,
+    _dedup_facts,
     _detect_content_type,
     _get_fact_limits,
     _has_conversation,
+    _merge_enrichment_results,
+    _multi_window_enabled,
     _parse_enrichment_text,
     _parse_llm_response,
     _segment_transcript,
+    _split_windows,
     enrich_entry,
     enrich_transcript_segments,
     iter_enrichable_entries,
@@ -309,6 +314,79 @@ class TestContentAwareFactLimits(unittest.TestCase):
         # No strong signals either way
         text = "[Turn 1] User: hello\n[Turn 1] Assistant: hi there"
         self.assertEqual(_detect_content_type(text), "mixed")
+
+
+class TestMultiWindowEnrichment(unittest.TestCase):
+    """Test multi-window enrichment for personal content (#307 P3)."""
+
+    def test_split_windows_short_text(self):
+        """Text shorter than window size returns single window."""
+        windows = _split_windows("short text", window_size=6000)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0], "short text")
+
+    def test_split_windows_long_text(self):
+        """Long text splits into overlapping windows."""
+        text = "a" * 15000
+        windows = _split_windows(text, window_size=6000, overlap=1000)
+        self.assertGreater(len(windows), 1)
+        # Each window should be <= window_size
+        for w in windows:
+            self.assertLessEqual(len(w), 6000)
+        # Windows should overlap
+        self.assertTrue(windows[0][-1000:] == windows[1][:1000])
+
+    def test_split_windows_covers_all_text(self):
+        """All characters from original text appear in at least one window."""
+        text = "".join(str(i % 10) for i in range(20000))
+        windows = _split_windows(text, window_size=6000, overlap=1000)
+        # Reconstruct: every char position should be covered
+        covered = set()
+        start = 0
+        step = 6000 - 1000
+        for i, w in enumerate(windows):
+            offset = i * step
+            for j in range(len(w)):
+                covered.add(offset + j)
+        # All positions should be covered
+        self.assertEqual(len(covered), len(text))
+
+    def test_dedup_facts_removes_near_duplicates(self):
+        items = [
+            "Caroline started painting in 2022",
+            "Caroline began painting in 2022",
+            "Melanie signed up for pottery class",
+        ]
+        result = _dedup_facts(items, threshold=0.8)
+        self.assertEqual(len(result), 2)
+        self.assertIn("Caroline started painting in 2022", result)
+        self.assertIn("Melanie signed up for pottery class", result)
+
+    def test_dedup_facts_keeps_distinct(self):
+        items = ["fact one", "fact two", "fact three"]
+        result = _dedup_facts(items)
+        self.assertEqual(len(result), 3)
+
+    def test_merge_enrichment_results(self):
+        results = [
+            {"focus": "Window 1 focus", "done": ["a", "b"], "decisions": ["d1"], "next_steps": []},
+            {"focus": "Window 2 focus", "done": ["c", "a"], "decisions": ["d2"], "next_steps": ["n1"]},
+        ]
+        merged = _merge_enrichment_results(results)
+        self.assertEqual(merged["focus"], "Window 1 focus")  # first non-empty wins
+        # "a" appears twice but should be deduped
+        self.assertIn("a", merged["done"])
+        self.assertIn("b", merged["done"])
+        self.assertIn("c", merged["done"])
+        self.assertEqual(len(merged["decisions"]), 2)
+        self.assertEqual(len(merged["next_steps"]), 1)
+
+    def test_multi_window_disabled_by_default(self):
+        self.assertFalse(_multi_window_enabled())
+
+    @patch.dict("os.environ", {"SYNAPT_MULTI_WINDOW_ENRICH": "1"})
+    def test_multi_window_enabled_by_env(self):
+        self.assertTrue(_multi_window_enabled())
 
 
 class TestIterEnrichableEntries(unittest.TestCase):
