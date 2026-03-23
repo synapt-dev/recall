@@ -2559,13 +2559,7 @@ class TranscriptIndex:
                     if conf < 0.4:
                         effective_boost = 1.0
                     else:
-                        if (
-                            _env_flag("SYNAPT_DISABLE_SPECIFICITY_SCORING")
-                            or (
-                                getattr(getattr(self, "_adaptive", None), "content_type", None)
-                                == "personal"
-                            )
-                        ):
+                        if _env_flag("SYNAPT_DISABLE_SPECIFICITY_SCORING"):
                             specificity = 1.0
                         else:
                             from synapt.recall.consolidate import _lacks_specificity
