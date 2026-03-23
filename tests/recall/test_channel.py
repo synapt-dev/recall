@@ -687,6 +687,51 @@ class TestUnpin(unittest.TestCase):
         self.assertNotIn("remove this pin", result.split("##")[1] if "##" in result else "")
 
 
+class TestShowPins(unittest.TestCase):
+    """Test show_pins option for channel_read (#306)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def _post_and_pin(self, channel, body, agent="bot"):
+        channel_post(channel, body, agent_name=agent)
+        msgs = _read_messages(_channels_dir() / f"{channel}.jsonl")
+        msg_id = [m for m in msgs if m.body == body][-1].id
+        channel_pin(channel, msg_id, agent_name=agent)
+        return msg_id
+
+    def test_show_pins_true_by_default(self):
+        self._post_and_pin("dev", "pinned rule")
+        channel_post("dev", "regular msg", agent_name="bot")
+        result = channel_read("dev")
+        self.assertIn("[pin]", result)
+        self.assertIn("pinned rule", result)
+        self.assertIn("regular msg", result)
+
+    def test_show_pins_false_hides_pins(self):
+        self._post_and_pin("dev", "pinned rule")
+        channel_post("dev", "regular msg", agent_name="bot")
+        result = channel_read("dev", show_pins=False)
+        self.assertNotIn("[pin]", result)
+        self.assertNotIn("Pinned", result)
+        self.assertIn("regular msg", result)
+
+    def test_show_pins_false_still_shows_messages(self):
+        self._post_and_pin("dev", "pinned content")
+        channel_post("dev", "msg1", agent_name="a1")
+        channel_post("dev", "msg2", agent_name="a2")
+        result = channel_read("dev", show_pins=False)
+        self.assertIn("msg1", result)
+        self.assertIn("msg2", result)
+        # The pinned message still appears as a regular message
+        self.assertIn("pinned content", result)
+
+
 class TestPostAndRead(unittest.TestCase):
     """Test posting and reading messages."""
 

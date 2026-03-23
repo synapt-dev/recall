@@ -1539,6 +1539,7 @@ def recall_channel(
     pin: bool = False,
     name: str | None = None,
     attachments: str | None = None,
+    show_pins: bool = True,
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -1558,6 +1559,7 @@ def recall_channel(
         pin: If True with "post" action, also pin the message.
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
         attachments: Semicolon-separated file paths to attach (copied into channel store on post).
+        show_pins: If False with "read" action, omit pinned messages from output (default True).
     """
     try:
         from synapt.recall.channel import (
@@ -1593,7 +1595,7 @@ def recall_channel(
             return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list)
 
         if action == "read":
-            return channel_read(channel=channel, limit=limit)
+            return channel_read(channel=channel, limit=limit, show_pins=show_pins)
 
         if action == "who":
             return channel_who()
