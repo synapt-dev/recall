@@ -1571,6 +1571,7 @@ def recall_channel(
             channel_unread,
             channel_unread_read,
             channel_pin,
+            channel_unpin,
             channel_directive,
             channel_mute,
             channel_unmute,
@@ -1607,6 +1608,11 @@ def recall_channel(
             if not message:
                 return "Error: message_id is required for 'pin' action."
             return channel_pin(channel=channel, message_id=message)
+
+        if action == "unpin":
+            if not message:
+                return "Error: message_id is required for 'unpin' action."
+            return channel_unpin(channel=channel, message_id=message)
 
         if action == "directive":
             if not message:

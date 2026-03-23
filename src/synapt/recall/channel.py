@@ -1181,6 +1181,30 @@ def channel_pin(
     return f"Pinned [{message_id}] in #{channel}: {body}"
 
 
+def channel_unpin(
+    channel: str,
+    message_id: str,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Unpin a message by its message_id."""
+    conn = _open_db(project_dir)
+    try:
+        row = conn.execute(
+            "SELECT id, body FROM pins WHERE channel = ? AND message_id = ?",
+            (channel, message_id),
+        ).fetchone()
+        if not row:
+            return f"No pin found for [{message_id}] in #{channel}."
+        conn.execute("DELETE FROM pins WHERE id = ?", (row["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    body_preview = row["body"][:80] + "..." if len(row["body"]) > 80 else row["body"]
+    return f"Unpinned [{message_id}] from #{channel}: {body_preview}"
+
+
 # ---------------------------------------------------------------------------
 # New operations: directive, mute, kick, broadcast, list
 # ---------------------------------------------------------------------------

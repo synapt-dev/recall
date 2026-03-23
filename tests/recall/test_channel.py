@@ -28,6 +28,7 @@ from synapt.recall.channel import (
     channel_unread,
     channel_unread_read,
     channel_pin,
+    channel_unpin,
     channel_directive,
     channel_mute,
     channel_unmute,
@@ -636,6 +637,54 @@ class TestPins(unittest.TestCase):
         result = channel_read("dev")
         self.assertIn("rule 1", result)
         self.assertIn("rule 2", result)
+
+
+class TestUnpin(unittest.TestCase):
+    """Test unpin functionality (#303)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def _post_and_get_id(self, channel, message):
+        channel_join(channel, agent_name="s_admin")
+        channel_post(channel, message, agent_name="s_admin")
+        path = _channels_dir() / f"{channel}.jsonl"
+        msgs = _read_messages(path)
+        return msgs[-1].id
+
+    def test_unpin_removes_pin(self):
+        msg_id = self._post_and_get_id("dev", "pinned content")
+        channel_pin("dev", msg_id, agent_name="s_admin")
+        result = channel_read("dev", agent_name="s_admin")
+        self.assertIn("[pin]", result)
+
+        unpin_result = channel_unpin("dev", msg_id)
+        self.assertIn("Unpinned", unpin_result)
+
+        result_after = channel_read("dev", agent_name="s_admin")
+        self.assertNotIn("[pin]", result_after)
+
+    def test_unpin_nonexistent(self):
+        channel_join("dev", agent_name="s_admin")
+        result = channel_unpin("dev", "m_doesnotexist")
+        self.assertIn("No pin found", result)
+
+    def test_unpin_one_of_multiple(self):
+        id1 = self._post_and_get_id("dev", "keep this pin")
+        id2 = self._post_and_get_id("dev", "remove this pin")
+        channel_pin("dev", id1, agent_name="s_admin")
+        channel_pin("dev", id2, agent_name="s_admin")
+
+        channel_unpin("dev", id2)
+
+        result = channel_read("dev", agent_name="s_admin")
+        self.assertIn("keep this pin", result)
+        self.assertNotIn("remove this pin", result.split("##")[1] if "##" in result else "")
 
 
 class TestPostAndRead(unittest.TestCase):
