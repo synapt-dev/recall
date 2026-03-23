@@ -851,6 +851,7 @@ def channel_read(
     since: str | None = None,
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    show_pins: bool = True,
 ) -> str:
     """Read recent messages from a channel.
 
@@ -874,12 +875,14 @@ def channel_read(
             ).fetchall()
         }
 
-        # Get pins
-        pins = conn.execute(
-            "SELECT body, message_id, pinned_by, pinned_at FROM pins WHERE channel = ? "
-            "ORDER BY pinned_at",
-            (channel,),
-        ).fetchall()
+        # Get pins (skip query when show_pins=False to save overhead)
+        pins = []
+        if show_pins:
+            pins = conn.execute(
+                "SELECT body, message_id, pinned_by, pinned_at FROM pins WHERE channel = ? "
+                "ORDER BY pinned_at",
+                (channel,),
+            ).fetchall()
 
         # Resolve display names and roles for rendering
         display_map = {}
