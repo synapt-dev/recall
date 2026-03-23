@@ -28,6 +28,7 @@ Notes on systems:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -35,13 +36,36 @@ import sys
 import tempfile
 from pathlib import Path
 
-from evaluation.codememo.eval import (
-    DATA_DIR,
-    SystemUnderTest,
-    discover_projects,
-    run_evaluation,
-)
-from evaluation.codememo.schema import ALL_CATEGORIES, CATEGORY_NAMES
+try:
+    from evaluation.codememo.eval import (
+        DATA_DIR,
+        SystemUnderTest,
+        discover_projects,
+        run_evaluation,
+    )
+    from evaluation.codememo.schema import ALL_CATEGORIES, CATEGORY_NAMES
+except ModuleNotFoundError:
+    # Tests may load this module by file path, where evaluation/ is not a package.
+    _CODEMEMO_DIR = Path(__file__).resolve().parent
+
+    def _load_module(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    _eval_module = _load_module("codememo_eval_fallback", _CODEMEMO_DIR / "eval.py")
+    _schema_module = _load_module("codememo_schema_fallback", _CODEMEMO_DIR / "schema.py")
+
+    DATA_DIR = _eval_module.DATA_DIR
+    SystemUnderTest = _eval_module.SystemUnderTest
+    discover_projects = _eval_module.discover_projects
+    run_evaluation = _eval_module.run_evaluation
+    ALL_CATEGORIES = _schema_module.ALL_CATEGORIES
+    CATEGORY_NAMES = _schema_module.CATEGORY_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +274,16 @@ class Mem0SUT:
                     continue
 
         print(f"    Total memories stored: {self._memory_count}")
+        if self.infer and self._memory_count == 0:
+            raise RuntimeError(
+                "Mem0 stored 0 memories during ingest. This usually means the "
+                f"configured LLM model is unsupported or failing silently "
+                f"(model={self.llm_model!r}), or that Mem0's internal extraction "
+                "path is not honoring the requested model. Re-run with visible "
+                "Mem0 logs, try a known-supported extraction model such as "
+                "'gpt-4o-mini', or use --no-infer only if you explicitly want raw "
+                "message storage instead of fact extraction."
+            )
 
     def query(self, question: str, max_chunks: int = 20) -> str:
         """Search mem0 memories and format as context text."""
