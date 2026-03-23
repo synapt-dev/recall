@@ -28,6 +28,7 @@ Notes on systems:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -35,13 +36,36 @@ import sys
 import tempfile
 from pathlib import Path
 
-from evaluation.codememo.eval import (
-    DATA_DIR,
-    SystemUnderTest,
-    discover_projects,
-    run_evaluation,
-)
-from evaluation.codememo.schema import ALL_CATEGORIES, CATEGORY_NAMES
+try:
+    from evaluation.codememo.eval import (
+        DATA_DIR,
+        SystemUnderTest,
+        discover_projects,
+        run_evaluation,
+    )
+    from evaluation.codememo.schema import ALL_CATEGORIES, CATEGORY_NAMES
+except ModuleNotFoundError:
+    # Tests may load this module by file path, where evaluation/ is not a package.
+    _CODEMEMO_DIR = Path(__file__).resolve().parent
+
+    def _load_module(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    _eval_module = _load_module("codememo_eval_fallback", _CODEMEMO_DIR / "eval.py")
+    _schema_module = _load_module("codememo_schema_fallback", _CODEMEMO_DIR / "schema.py")
+
+    DATA_DIR = _eval_module.DATA_DIR
+    SystemUnderTest = _eval_module.SystemUnderTest
+    discover_projects = _eval_module.discover_projects
+    run_evaluation = _eval_module.run_evaluation
+    ALL_CATEGORIES = _schema_module.ALL_CATEGORIES
+    CATEGORY_NAMES = _schema_module.CATEGORY_NAMES
 
 
 # ---------------------------------------------------------------------------
