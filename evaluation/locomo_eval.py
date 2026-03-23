@@ -864,6 +864,30 @@ def compute_retrieval_recall(
     return found / len(evidence_ids)
 
 
+def build_question_pairs(
+    data_with_idx: list[tuple[int, dict]],
+    *,
+    question_order: str = "forward",
+) -> list[tuple[int, dict]]:
+    """Flatten evaluable QA pairs with a controllable per-conversation order.
+
+    The eval reuses one mutable index per conversation, so order effects should
+    be tested by reversing questions within each conversation instead of
+    reversing the whole dataset globally.
+    """
+    all_qa: list[tuple[int, dict]] = []
+    for conv_idx, item in data_with_idx:
+        qa_items = [
+            qa for qa in item.get("qa", [])
+            if qa.get("category", 0) in EVAL_CATEGORIES
+        ]
+        if question_order == "reverse":
+            qa_items.reverse()
+        for qa in qa_items:
+            all_qa.append((conv_idx, qa))
+    return all_qa
+
+
 # ---------------------------------------------------------------------------
 # Main evaluation loop
 # ---------------------------------------------------------------------------
@@ -881,6 +905,7 @@ def run_evaluation(
     conv_offset: int = 0,
     knowledge_boost: float | None = None,
     max_knowledge: int | None = None,
+    question_order: str = "forward",
 ) -> dict:
     """Run the full LOCOMO evaluation.
 
@@ -1001,16 +1026,15 @@ def run_evaluation(
         total_generate_time = 0.0
         total_judge_time = 0.0
 
-        # Flatten all QA pairs
-        all_qa = []
-        for conv_idx, item in data_with_idx:
-            for qa in item.get("qa", []):
-                cat = qa.get("category", 0)
-                if cat not in EVAL_CATEGORIES:
-                    continue
-                all_qa.append((conv_idx, qa))
+        all_qa = build_question_pairs(
+            data_with_idx,
+            question_order=question_order,
+        )
 
-        print(f"Evaluating {len(all_qa)} questions (categories 1-4)...")
+        print(
+            f"Evaluating {len(all_qa)} questions (categories 1-4, "
+            f"question_order={question_order})..."
+        )
 
         for i, (conv_idx, qa) in enumerate(all_qa):
             question = qa["question"]
@@ -1104,6 +1128,7 @@ def run_evaluation(
             "enrichment_model": enrich_model_name,
             "conversations": len(data_with_idx),
             "questions_evaluated": len(all_qa),
+            "question_order": question_order,
             "max_chunks": max_chunks,
             "max_tokens": max_tokens,
             "index_chunks": total_chunks,
@@ -1353,6 +1378,7 @@ def run_batch_evaluation(
     conv_offset: int = 0,
     knowledge_boost: float | None = None,
     max_knowledge: int | None = None,
+    question_order: str = "forward",
 ) -> dict:
     """Run LOCOMO eval using OpenAI Batch API (50% cheaper, ~1hr turnaround).
 
@@ -1446,15 +1472,15 @@ def run_batch_evaluation(
             build_time = time.time() - t0
             print(f"  Indexes built in {build_time:.1f}s")
 
-            # Flatten QA pairs
-            all_qa = []
-            for conv_idx, item in data_with_idx:
-                for qa in item.get("qa", []):
-                    if qa.get("category", 0) not in EVAL_CATEGORIES:
-                        continue
-                    all_qa.append((conv_idx, qa))
+            all_qa = build_question_pairs(
+                data_with_idx,
+                question_order=question_order,
+            )
 
-            print(f"Retrieving context for {len(all_qa)} questions...")
+            print(
+                f"Retrieving context for {len(all_qa)} questions "
+                f"(question_order={question_order})..."
+            )
             retrieval_results = []
             t0 = time.time()
             for i, (conv_idx, qa) in enumerate(all_qa):
@@ -1652,6 +1678,7 @@ def run_batch_evaluation(
         "pipeline": pipeline_name,
         "enrichment_model": enrich_model_name,
         "mode": "batch",
+        "question_order": question_order,
         "conversations": max_conversations or len(retrieval_results),
         "questions_evaluated": len(results),
         "max_chunks": max_chunks,
@@ -1768,6 +1795,13 @@ def main():
         help="Model backend for enrichment/consolidation (default: auto). "
              "Use 'modal' for GPU-accelerated cloud inference.",
     )
+    parser.add_argument(
+        "--question-order",
+        type=str,
+        default="forward",
+        choices=["forward", "reverse"],
+        help="Evaluate questions in forward or reverse order within each conversation.",
+    )
     args = parser.parse_args()
 
     if not args.dataset.exists():
@@ -1800,6 +1834,7 @@ def main():
             conv_offset=args.conv_offset,
             knowledge_boost=args.knowledge_boost,
             max_knowledge=args.max_knowledge,
+            question_order=args.question_order,
         )
     else:
         run_evaluation(
@@ -1815,6 +1850,7 @@ def main():
             conv_offset=args.conv_offset,
             knowledge_boost=args.knowledge_boost,
             max_knowledge=args.max_knowledge,
+            question_order=args.question_order,
         )
 
 

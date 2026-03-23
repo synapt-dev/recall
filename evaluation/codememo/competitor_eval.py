@@ -250,6 +250,16 @@ class Mem0SUT:
                     continue
 
         print(f"    Total memories stored: {self._memory_count}")
+        if self.infer and self._memory_count == 0:
+            raise RuntimeError(
+                "Mem0 stored 0 memories during ingest. This usually means the "
+                f"configured LLM model is unsupported or failing silently "
+                f"(model={self.llm_model!r}), or that Mem0's internal extraction "
+                "path is not honoring the requested model. Re-run with visible "
+                "Mem0 logs, try a known-supported extraction model such as "
+                "'gpt-4o-mini', or use --no-infer only if you explicitly want raw "
+                "message storage instead of fact extraction."
+            )
 
     def query(self, question: str, max_chunks: int = 20) -> str:
         """Search mem0 memories and format as context text."""
