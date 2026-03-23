@@ -135,6 +135,17 @@ class TestWeightedRRFMerge:
         ids = [item_id for item_id, _ in merged]
         assert len(ids) == len(set(ids)), "No duplicate IDs"
 
+    def test_bm25_floor_items_survive_positive_filter(self):
+        """Floor-preserved items have score > 0 so they survive ``if s > 0``."""
+        bm25 = [(10, 5.0), (20, 3.0)]
+        emb = [(30, 0.99), (40, 0.98)]  # Disjoint — 10, 20 only from BM25
+        merged = weighted_rrf_merge(bm25, emb, emb_weight=100.0, bm25_floor=2)
+        # Simulate the downstream filter used in core.py retrieval path
+        surviving = [(i, s) for i, s in merged if s > 0]
+        surviving_ids = {i for i, _ in surviving}
+        assert 10 in surviving_ids, "BM25 floor item 10 must survive s > 0 filter"
+        assert 20 in surviving_ids, "BM25 floor item 20 must survive s > 0 filter"
+
 
 # ---------------------------------------------------------------------------
 # Embedding search

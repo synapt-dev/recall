@@ -93,8 +93,9 @@ def weighted_rrf_merge(
         floor_ids = [item_id for item_id, _ in bm25_ranked[:bm25_floor]]
         for fid in floor_ids:
             if fid not in merged_ids:
-                # Give it a minimal score so it sorts last among appended items
-                merged.append((fid, 0.0))
+                # Use a tiny positive score so floor items survive downstream
+                # ``if s > 0`` filters in the retrieval path.
+                merged.append((fid, 1e-9))
 
     return merged
 
