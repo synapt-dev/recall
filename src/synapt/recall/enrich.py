@@ -115,9 +115,9 @@ Session date: {session_date}
 
 Given the following transcript, produce a JSON object with these fields:
 - "focus": A one-sentence description of the session's main topic or goal (max 200 chars)
-- "done": A list of 1-5 concrete things accomplished, discussed, or learned (each max 100 chars)
-- "decisions": A list of 0-3 key decisions made or preferences stated (each max 100 chars)
-- "next_steps": A list of 0-3 items to follow up on or remember (each max 100 chars)
+- "done": A list of {done_limit} concrete things accomplished, discussed, or learned (each max 100 chars)
+- "decisions": A list of {decisions_limit} key decisions made or preferences stated (each max 100 chars)
+- "next_steps": A list of {next_steps_limit} items to follow up on or remember (each max 100 chars)
 
 Rules:
 - Include specific names, dates, places, numbers, and details — NOT general themes
@@ -126,6 +126,9 @@ Rules:
 - BAD: "discussed travel plans" — GOOD: "plans trip to Florida in June with sister Elena"
 - BAD: "talked about hobbies" — GOOD: "signed up for pottery class on July 2nd"
 - BAD: "fixed a bug yesterday" — GOOD: "fixed auth bug on March 14"
+- For personal conversations: capture opinions, emotional reactions, hypothetical plans, social relationships, and recurring topics
+- BAD: "talked about feelings" — GOOD: "Sarah is frustrated with her job at the bank and considering applying to grad school"
+- Capture possessions, pets, addresses, workplace details, and family relationships
 - If the session was short or trivial, use fewer items
 - Output ONLY valid JSON, no markdown fences, no explanation
 
@@ -133,6 +136,20 @@ Transcript:
 {transcript}
 
 JSON:"""
+
+
+# Content-profile-aware fact limits for enrichment output clamping.
+# Personal conversations contain many more extractable facts than code sessions.
+_FACT_LIMITS = {
+    "code":     {"done": 5, "decisions": 3, "next_steps": 3},
+    "mixed":    {"done": 5, "decisions": 3, "next_steps": 3},
+    "personal": {"done": 15, "decisions": 5, "next_steps": 5},
+}
+
+
+def _get_fact_limits(content_type: str) -> dict:
+    """Return fact limits for the given content type."""
+    return _FACT_LIMITS.get(content_type, _FACT_LIMITS["mixed"])
 
 
 def _parse_llm_response(response: str) -> dict | None:
@@ -236,6 +253,31 @@ def iter_enrichable_entries(
                 yield entry
 
 
+def _detect_content_type(transcript_text: str) -> str:
+    """Detect content type from transcript text for enrichment tuning.
+
+    Uses lightweight heuristics (not full ContentProfile) since we only
+    have the summary text, not raw chunks.
+    """
+    from synapt.recall.content_profile import ContentProfile
+
+    # Count code vs personal signals in the transcript text
+    profile = ContentProfile(total_chunks=1)
+    if re.search(r'(?:\.py|\.js|\.ts|\.rs|\.go|\.java|\.cpp|\.h|\.c)\b', transcript_text):
+        profile.file_refs = 1
+    if re.search(r'(?:Tool|Execute|Read|Write|Edit|Bash|Grep|Glob):', transcript_text):
+        profile.tool_uses = 1
+    if '```' in transcript_text:
+        profile.code_fences = 1
+    if re.search(r'(?:function|class|def |import |from |const |let |var )\b', transcript_text):
+        profile.tech_idents = 1
+    if re.search(r'\b(?:feel|friend|family|love|happy|sad|angry|dinner|weekend|vacation|birthday)\b',
+                 transcript_text, re.IGNORECASE):
+        profile.personal_refs = 1
+
+    return profile.content_type
+
+
 def enrich_entry(
     entry: JournalEntry,
     project_dir: Path,
@@ -273,6 +315,10 @@ def enrich_entry(
                 return None
             client = MLXClient(MLXOptions(max_tokens=800))
 
+    # Detect content type for profile-aware limits
+    content_type = _detect_content_type(transcript_text)
+    limits = _get_fact_limits(content_type)
+
     # Derive human-readable session date for relative date resolution
     session_date = "unknown"
     if entry.timestamp:
@@ -283,7 +329,13 @@ def enrich_entry(
             session_date = _parsed.strftime("%A, %B %d, %Y")
         except (ValueError, AttributeError):
             pass
-    prompt = ENRICHMENT_PROMPT.format(transcript=transcript_text, session_date=session_date)
+    prompt = ENRICHMENT_PROMPT.format(
+        transcript=transcript_text,
+        session_date=session_date,
+        done_limit=f"1-{limits['done']}",
+        decisions_limit=f"0-{limits['decisions']}",
+        next_steps_limit=f"0-{limits['next_steps']}",
+    )
 
     try:
         response = client.chat(
@@ -317,9 +369,9 @@ def enrich_entry(
         session_id=entry.session_id,
         branch=entry.branch,
         focus=_s(_tw(str(parsed.get("focus", entry.focus)), 200)),
-        done=[_s(_tw(str(d), 100)) for d in parsed.get("done", []) if d][:5],
-        decisions=[_s(_tw(str(d), 100)) for d in parsed.get("decisions", []) if d][:3],
-        next_steps=[_s(_tw(str(d), 100)) for d in parsed.get("next_steps", []) if d][:3],
+        done=[_s(_tw(str(d), 100)) for d in parsed.get("done", []) if d][:limits["done"]],
+        decisions=[_s(_tw(str(d), 100)) for d in parsed.get("decisions", []) if d][:limits["decisions"]],
+        next_steps=[_s(_tw(str(d), 100)) for d in parsed.get("next_steps", []) if d][:limits["next_steps"]],
         files_modified=entry.files_modified,
         git_log=entry.git_log,
         auto=False,
