@@ -1740,6 +1740,45 @@ def test_search_knowledge_expiry_can_be_disabled(monkeypatch):
     assert any(r["content"] == expired["content"] for r in results)
 
 
+def test_search_knowledge_skips_specificity_for_personal_profile():
+    """Personal content should not be penalized for lacking code-style specificity."""
+    from types import SimpleNamespace
+    from synapt.recall.core import TranscriptIndex
+    from unittest.mock import MagicMock
+
+    index = TranscriptIndex(make_test_chunks())
+    index._adaptive = SimpleNamespace(content_type="personal")
+
+    abstract = {
+        "id": "node-1",
+        "content": "Caroline is interested in psychology and memory research",
+        "category": "preference",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+    code_specific = {
+        "id": "node-2",
+        "content": "Caroline documented psychology notes in docs/research.md after PR #25",
+        "category": "preference",
+        "confidence": 0.8,
+        "source_sessions": ["sess1"],
+        "updated_at": "2026-03-05",
+    }
+
+    mock_db = MagicMock()
+    # Same lexical score; without a specificity penalty the first FTS hit should stay first.
+    mock_db.knowledge_fts_search.return_value = [(1, 3.0), (2, 3.0)]
+    mock_db.knowledge_by_rowid.return_value = {1: abstract, 2: code_specific}
+    index._db = mock_db
+
+    results = index._search_knowledge("What is Caroline interested in?")
+
+    assert len(results) == 2
+    assert results[0]["content"] == abstract["content"]
+    assert results[0]["score"] >= results[1]["score"]
+
+
 def test_search_knowledge_temporal_filters_non_overlapping_windows():
     """Temporal queries should drop knowledge nodes outside the query window."""
     from synapt.recall.core import TranscriptIndex
