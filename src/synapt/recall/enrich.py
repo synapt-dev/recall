@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,7 +48,7 @@ _ENRICHMENT_FIELD_MAP = {
     "next steps": "next_steps",
 }
 MAX_TRANSCRIPT_CHARS = 6000  # ~1.5K tokens — fits in 3B context budget
-MULTI_WINDOW_OVERLAP = 1000  # chars of overlap between adjacent windows
+MULTI_WINDOW_OVERLAP = int(os.environ.get("SYNAPT_MW_OVERLAP", "0"))  # default 0; set via env for ablation
 
 
 def _find_transcript(session_id: str, project_dir: Path) -> Path | None:
@@ -141,7 +142,6 @@ def _dedup_facts(items: list[str], threshold: float = 0.8) -> list[str]:
 
 def _multi_window_enabled() -> bool:
     """Check if multi-window enrichment is enabled via env var."""
-    import os
     return os.environ.get("SYNAPT_MULTI_WINDOW_ENRICH", "0") == "1"
 
 
