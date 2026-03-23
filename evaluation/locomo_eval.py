@@ -564,6 +564,21 @@ def retrieve_context(
     return result
 
 
+def attach_search_summary(result_entry: dict, index) -> None:
+    """Attach the last search summary from a RecallIndex-like object."""
+    summary = getattr(index, "_last_search_summary", None)
+    if summary is None:
+        return
+    result_entry.update({
+        "search_intent": summary.intent,
+        "selected_blocks": summary.selected_blocks,
+        "chunk_blocks": summary.chunk_blocks,
+        "knowledge_blocks": summary.knowledge_blocks,
+        "cluster_blocks": summary.cluster_blocks,
+        "effective_max_knowledge": summary.max_knowledge,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Step 4: Generate answer using LLM
 # ---------------------------------------------------------------------------
@@ -1075,6 +1090,7 @@ def run_evaluation(
                 "retrieve_time_ms": round(retrieve_time * 1000, 1),
                 "retrieval_recall": recall_at_k,
             }
+            attach_search_summary(result_entry, indexes[conv_idx])
 
             if not retrieval_only and client:
                 # Generate answer

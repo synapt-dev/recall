@@ -239,6 +239,18 @@ class SearchDiagnostics:
         return "No results found."
 
 
+@dataclass
+class SearchResultSummary:
+    """Summary of what a successful search emitted."""
+
+    intent: str = ""
+    max_knowledge: int | None = None
+    selected_blocks: int = 0
+    chunk_blocks: int = 0
+    knowledge_blocks: int = 0
+    cluster_blocks: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Transcript parser
 # ---------------------------------------------------------------------------
@@ -995,6 +1007,7 @@ class TranscriptIndex:
 
         # Search diagnostics (populated on empty results for caller inspection)
         self._last_diagnostics: SearchDiagnostics | None = None
+        self._last_search_summary: SearchResultSummary | None = None
         self._last_conflicts: list[tuple[dict, dict]] = []
 
         # Query result cache — avoids re-computing BM25/embedding/RRF for
@@ -1572,6 +1585,7 @@ class TranscriptIndex:
             When empty, ``self._last_diagnostics`` explains why.
         """
         self._last_diagnostics = None
+        self._last_search_summary = None
         self._last_conflicts: list[tuple[dict, dict]] = []
 
         if not self.chunks:
@@ -3150,7 +3164,23 @@ class TranscriptIndex:
             lines.append(conflict_notice)
 
         if len(lines) <= 1:
+            self._last_search_summary = SearchResultSummary(
+                intent=intent,
+                max_knowledge=max_knowledge,
+                selected_blocks=0,
+                chunk_blocks=0,
+                knowledge_blocks=0,
+                cluster_blocks=0,
+            )
             return ""
+        self._last_search_summary = SearchResultSummary(
+            intent=intent,
+            max_knowledge=max_knowledge,
+            selected_blocks=len(emitted_access),
+            chunk_blocks=sum(1 for item in emitted_access if item["item_type"] == "chunk"),
+            knowledge_blocks=sum(1 for item in emitted_access if item["item_type"] == "knowledge"),
+            cluster_blocks=sum(1 for item in emitted_access if item["item_type"] == "cluster"),
+        )
         return "\n".join(lines)
 
     def _access_frequency_boost(

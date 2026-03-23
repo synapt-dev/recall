@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_locomo_eval():
@@ -70,3 +71,26 @@ def test_build_answer_prompt_adds_temporal_guardrails():
     assert "prefer the memory that gives the clearest date evidence" in prompt
     assert "Do NOT default to the header timestamp" in prompt
     assert "The conversations span from 8 May 2023 to 9 June 2023." in prompt
+
+
+def test_attach_search_summary_adds_diagnostic_fields():
+    result = {"question": "When did Caroline give a speech at a school?"}
+    index = SimpleNamespace(
+        _last_search_summary=SimpleNamespace(
+            intent="temporal",
+            selected_blocks=4,
+            chunk_blocks=4,
+            knowledge_blocks=0,
+            cluster_blocks=0,
+            max_knowledge=0,
+        )
+    )
+
+    locomo_eval.attach_search_summary(result, index)
+
+    assert result["search_intent"] == "temporal"
+    assert result["selected_blocks"] == 4
+    assert result["chunk_blocks"] == 4
+    assert result["knowledge_blocks"] == 0
+    assert result["cluster_blocks"] == 0
+    assert result["effective_max_knowledge"] == 0
