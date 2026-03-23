@@ -190,6 +190,7 @@ Rules:
 - BAD: "discussed travel plans" — GOOD: "plans trip to Florida in June with sister Elena"
 - BAD: "talked about hobbies" — GOOD: "signed up for pottery class on July 2nd"
 - BAD: "fixed a bug yesterday" — GOOD: "fixed auth bug on March 14"
+- NEVER output template variables like {{yesterday}}, {{last_friday}}, or {{today}} — always write the actual resolved date
 {personal_rules}- If the session was short or trivial, use fewer items
 - Output ONLY valid JSON, no markdown fences, no explanation
 
