@@ -84,7 +84,7 @@ def render_author_meta(author_str: str, img_prefix: str = "images") -> str:
         name = name.strip().lower()
         if name in AUTHORS:
             display, avatar = AUTHORS[name]
-            parts.append(f'<img src="{img_prefix}/{avatar}" alt=""> {display}')
+            parts.append(f'<img src="{img_prefix}/{avatar}" alt="" style="width:20px;height:20px;border-radius:50%;object-fit:cover;vertical-align:middle"> {display}')
         else:
             parts.append(name.title())
     return " ".join(parts)
