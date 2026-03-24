@@ -77,14 +77,14 @@ def format_date(date_str: str) -> str:
         return date_str
 
 
-def render_author_meta(author_str: str) -> str:
+def render_author_meta(author_str: str, img_prefix: str = "images") -> str:
     """Render author avatars and names for a card meta line."""
     parts = []
     for name in author_str.split(","):
         name = name.strip().lower()
         if name in AUTHORS:
             display, avatar = AUTHORS[name]
-            parts.append(f'<img src="images/{avatar}" alt=""> {display}')
+            parts.append(f'<img src="{img_prefix}/{avatar}" alt=""> {display}')
         else:
             parts.append(name.title())
     return " ".join(parts)
@@ -334,7 +334,7 @@ def render_root_blog_section(posts: list[dict], max_grid: int = 3) -> str:
     # Featured card
     hero = featured.get("hero", "")
     hero_src = f'blog/{hero}' if hero else ""
-    author_html = render_author_meta(featured.get("author", ""))
+    author_html = render_author_meta(featured.get("author", ""), img_prefix="blog/images")
     lines = [
         '    <div class="container">',
         '      <h2 style="text-align: center; font-size: 2rem; margin-bottom: 2.5rem;">'
