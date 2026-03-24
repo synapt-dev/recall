@@ -1879,7 +1879,7 @@ def _find_best_span(node_text: str, chunk_text: str, margin: int = 30) -> tuple[
                 best_begin = scored[i][0]
                 best_end = scored[i + window - 1][1]
 
-    if best_score < 2:
+    if best_score < 1:
         return None
 
     # Add margin for context
@@ -1892,7 +1892,7 @@ def resolve_source_offsets(
     project_dir: Path | None = None,
     *,
     max_offsets_per_node: int = 3,
-    min_overlap: int = 3,
+    min_overlap: int = 2,
 ) -> int:
     """Resolve source_offsets for knowledge nodes by finding sentence spans.
 
@@ -1900,6 +1900,11 @@ def resolve_source_offsets(
     within transcript chunks from its source_sessions.  Stores character
     offsets (begin, end) so retrieval can extract precise snippets instead
     of formatting entire turns.
+
+    When a node already has ``source_turns`` (from ``resolve_source_turns``),
+    those turns are used as direct candidates — skipping the token-overlap
+    scan entirely.  This improves coverage for short or abstract nodes that
+    would otherwise fail the overlap threshold.
 
     Returns the number of nodes updated.
     """
@@ -1910,11 +1915,46 @@ def resolve_source_offsets(
     kn_path, session_chunks, nodes, db = loaded
     pending_updates: dict[str, dict] = {}
 
+    # Build a turn lookup: (session_id, turn_index) → full text
+    _turn_text: dict[tuple[str, int], str] = {}
+    for sid, chunks_list in session_chunks.items():
+        for tidx, text, _toks in chunks_list:
+            _turn_text[(sid, tidx)] = text
+
     try:
         for node in nodes:
             if node.source_offsets:
                 continue  # Already resolved
 
+            # Fast path: use source_turns as direct candidates when available.
+            # source_turns are already the best-matching turns from
+            # resolve_source_turns(), so we skip the token overlap scan.
+            if node.source_turns:
+                offsets: list[dict] = []
+                for turn_ref in node.source_turns[:max_offsets_per_node]:
+                    # Parse "session_id:turn_index" format
+                    parts = turn_ref.rsplit(":", 1)
+                    if len(parts) != 2:
+                        continue
+                    sid, tidx_str = parts
+                    try:
+                        tidx = int(tidx_str)
+                    except ValueError:
+                        continue
+                    text = _turn_text.get((sid, tidx), "")
+                    if not text:
+                        continue
+                    span = _find_best_span(node.content, text)
+                    if span:
+                        offsets.append({
+                            "s": sid, "t": tidx,
+                            "b": span[0], "e": span[1],
+                        })
+                if offsets:
+                    pending_updates[node.id] = {"source_offsets": offsets}
+                    continue
+
+            # Fallback: scan source_sessions by token overlap
             if not node.source_sessions:
                 continue
 
@@ -1922,7 +1962,6 @@ def resolve_source_offsets(
             if len(node_toks) < 2:
                 continue
 
-            # Score chunks by token overlap, keep top candidates
             candidates: list[tuple[str, int, str, int]] = []
             for sid in node.source_sessions:
                 for tidx, text, chunk_toks in session_chunks.get(sid, []):
@@ -1935,7 +1974,7 @@ def resolve_source_offsets(
 
             candidates.sort(key=lambda x: x[3], reverse=True)
 
-            offsets: list[dict] = []
+            offsets = []
             for sid, tidx, text, _ in candidates[:max_offsets_per_node]:
                 span = _find_best_span(node.content, text)
                 if span:

@@ -1653,5 +1653,42 @@ def test_extract_collections_can_be_disabled(tmp_path, monkeypatch):
     assert extract_collections(tmp_path) == 0
 
 
+# ---------------------------------------------------------------------------
+# Tests: _find_best_span threshold and offset resolution coverage
+# ---------------------------------------------------------------------------
+
+def test_find_best_span_single_keyword_match():
+    """_find_best_span now resolves with a single keyword overlap."""
+    from synapt.recall.consolidate import _find_best_span
+
+    node_text = "adoption"
+    chunk_text = (
+        "We talked about the weather. "
+        "She mentioned her adoption plans were moving forward. "
+        "Then we discussed dinner."
+    )
+    span = _find_best_span(node_text, chunk_text)
+    assert span is not None
+    begin, end = span
+    snippet = chunk_text[begin:end]
+    assert "adoption" in snippet
+
+
+def test_find_best_span_no_overlap_returns_none():
+    """_find_best_span returns None when there is zero keyword overlap."""
+    from synapt.recall.consolidate import _find_best_span
+
+    span = _find_best_span("kubernetes", "We had lunch and discussed movies.")
+    assert span is None
+
+
+def test_find_best_span_empty_inputs():
+    """_find_best_span returns None for empty inputs."""
+    from synapt.recall.consolidate import _find_best_span
+
+    assert _find_best_span("", "some text") is None
+    assert _find_best_span("query", "") is None
+
+
 if __name__ == "__main__":
     unittest.main()
