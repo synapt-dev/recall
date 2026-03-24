@@ -122,7 +122,8 @@ class ShardedRecallDB:
         """Save chunks to the appropriate database.
 
         In monolithic mode, delegates directly to the single DB.
-        In sharded mode, saves to the active (last) shard. If the active
+        In sharded mode, clears ALL shards first (to prevent duplication on
+        full rebuilds), then saves to the active (last) shard. If the active
         shard exceeds SHARD_CHUNK_THRESHOLD, a new shard is created.
         """
         if not self._data_dbs:
@@ -137,7 +138,27 @@ class ShardedRecallDB:
             next_shard_index,
         )
 
-        # Save to the last (active) shard
+        # Clear ALL non-active shards before writing. RecallDB.save_chunks()
+        # only wipes the single DB it's called on, so without this step a
+        # full rebuild leaves stale duplicates in every earlier shard.
+        for db in self._data_dbs[:-1]:
+            try:
+                db._conn.execute("DROP TRIGGER IF EXISTS chunks_ad")
+                db._conn.execute("DELETE FROM chunks")
+                db._conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('delete-all')")
+                db._conn.execute(
+                    "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN "
+                    "  INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, "
+                    "    tools_used, files_touched, tool_content, date_text) "
+                    "  VALUES ('delete', old.rowid, old.user_text, old.assistant_text, "
+                    "    old.tools_used, old.files_touched, old.tool_content, old.date_text); "
+                    "END;"
+                )
+                db._conn.commit()
+            except Exception:
+                logger.warning("Failed to clear shard %s", db._path, exc_info=True)
+
+        # Save to the last (active) shard (this also clears it internally)
         active_db = self._data_dbs[-1]
         active_db.save_chunks(chunks)
 
