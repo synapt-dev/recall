@@ -47,6 +47,34 @@ PLAUSIBLE_SNIPPET = dedent("""\
     </script>""")
 
 
+def _author_meta(author_key: str) -> tuple[str, str, str]:
+    author_key = author_key.strip().lower()
+    return AUTHORS.get(author_key, (author_key.title(), "", f"author-{author_key}.jpg"))
+
+
+def _author_keys(post: dict) -> list[str]:
+    keys: list[str] = []
+    for field in ("author", "coauthor"):
+        value = post.get(field, "")
+        if not value:
+            continue
+        keys.extend(part.strip().lower() for part in value.split(",") if part.strip())
+    return keys or ["opus"]
+
+
+def _render_author_meta(post: dict, *, link_authors: bool = False) -> str:
+    parts: list[str] = []
+    for author_key in _author_keys(post):
+        author_name, author_model, author_img = _author_meta(author_key)
+        label = f"{author_name} ({author_model})" if author_model else author_name
+        if link_authors:
+            label_html = f'<a href="authors.html#{author_key}" style="color: var(--text-dim);">{label}</a>'
+        else:
+            label_html = label
+        parts.append(f'<img src="images/{author_img}" alt="{author_name}"> {label_html}')
+    return " ".join(parts)
+
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML-style frontmatter from markdown text.
 
@@ -77,16 +105,9 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
     """Render a full blog post HTML page."""
     title = meta.get("title", "Untitled")
     description = meta.get("description", "")
-    author_key = meta.get("author", "opus").lower()
     date = meta.get("date", "")
     subtitle = meta.get("subtitle", "")
     hero = meta.get("hero", "")
-
-    author_name, author_model, author_img = AUTHORS.get(
-        author_key, (author_key.title(), "", f"author-{author_key}.jpg")
-    )
-
-    byline_text = f"{author_name} ({author_model})" if author_model else author_name
     date_display = date if date else "2026"
 
     hero_tag = ""
@@ -100,6 +121,8 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
         subtitle_tag = f'<p class="subtitle">{subtitle}</p>'
 
     og_image = f"images/{hero}" if hero else f"images/{slug}-hero.jpg"
+
+    author_meta = _render_author_meta(meta, link_authors=True)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -276,7 +299,7 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
       {hero_tag}
       <h1>{title}</h1>
       {subtitle_tag}
-      <p class="meta"><span class="byline"><img src="images/{author_img}" alt="{author_name}"> <a href="authors.html#{author_key}" style="color: var(--text-dim);">{byline_text}</a></span> &middot; {date_display}</p>
+      <p class="meta"><span class="byline">{author_meta}</span> &middot; {date_display}</p>
 
       {body_html}
 
@@ -393,14 +416,8 @@ def _render_post_card(post: dict, featured: bool = False) -> str:
     slug = post["slug"]
     title = post["title"]
     description = post.get("description", "")
-    author_key = post.get("author", "opus").lower()
     date = post.get("date", "2026")
     hero = post.get("hero", "")
-    coauthor = post.get("coauthor", "")
-
-    author_name, author_model, author_img = AUTHORS.get(
-        author_key, (author_key.title(), "", f"author-{author_key}.jpg")
-    )
 
     # Format date for display
     date_display = "March 2026"
@@ -411,10 +428,6 @@ def _render_post_card(post: dict, featured: bool = False) -> str:
         except ValueError:
             pass
 
-    byline = f"{author_name}"
-    if author_model:
-        byline = f"{author_name} ({author_model})"
-
     hero_tag = ""
     if hero:
         hero_tag = f'<img src="images/{hero}" alt="" class="card-hero">'
@@ -424,13 +437,7 @@ def _render_post_card(post: dict, featured: bool = False) -> str:
     featured_class = " featured" if featured else ""
     label = '<div class="label">New</div>' if featured else ""
 
-    meta_html = f'<div class="meta"><img src="images/{author_img}" alt=""> {byline}'
-    if coauthor:
-        co_name, co_model, co_img = AUTHORS.get(
-            coauthor, (coauthor.title(), "", f"author-{coauthor}.jpg")
-        )
-        meta_html += f' &amp; <img src="images/{co_img}" alt=""> {co_name}'
-    meta_html += f" &middot; {date_display}</div>"
+    meta_html = f'<div class="meta">{_render_author_meta(post)} &middot; {date_display}</div>'
 
     return f"""      <a href="{slug}.html" class="post-card{featured_class}">
         {hero_tag}
@@ -442,30 +449,57 @@ def _render_post_card(post: dict, featured: bool = False) -> str:
 """
 
 
-def build_index(posts: list[dict], dry_run: bool = False) -> None:
-    """Generate the blog index.html from post metadata."""
-    # Sort by date descending (newest first)
-    posts.sort(key=lambda p: p.get("date", ""), reverse=True)
+def build_listing_page(
+    posts: list[dict],
+    filename: str,
+    *,
+    title: str,
+    subtitle: str,
+    intro_label: str | None = None,
+    post_limit: int | None = None,
+    show_all_posts_link: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Generate a blog listing page from post metadata."""
+    posts = sorted(posts, key=lambda p: p.get("date", ""), reverse=True)
+    visible_posts = posts[:post_limit] if post_limit is not None else posts
 
     cards_html = ""
-    for i, post in enumerate(posts):
+    for i, post in enumerate(visible_posts):
         cards_html += _render_post_card(post, featured=(i == 0))
+
+    footer_links = []
+    if filename != "index.html":
+        footer_links.append('<a href="index.html">Back to latest posts &rarr;</a>')
+    if show_all_posts_link and post_limit is not None and len(posts) > len(visible_posts):
+        hidden_count = len(posts) - len(visible_posts)
+        footer_links.append(
+            f'<a href="all.html">Browse all {len(posts)} posts &rarr;</a>'
+        )
+        if intro_label is None:
+            intro_label = f"Showing the latest {len(visible_posts)} posts. {hidden_count} older posts live in the archive."
+    footer_links.append('<a href="authors.html">Meet the team &rarr;</a>')
+    footer_html = " &middot; ".join(footer_links)
+
+    intro_html = ""
+    if intro_label:
+        intro_html = f'      <p class="intro-note">{intro_label}</p>\n'
 
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Blog — synapt</title>
+  <title>{title} — synapt</title>
   <meta name="description" content="Articles about agent memory, retrieval architecture, and building AI tools that remember. From the people (and AI) behind synapt.">
-  <meta property="og:title" content="Blog — synapt">
+  <meta property="og:title" content="{title} — synapt">
   <meta property="og:description" content="Articles about agent memory, retrieval architecture, and building AI tools that remember.">
   <meta property="og:image" content="https://synapt.dev/blog/images/social-card.jpg">
-  <meta property="og:url" content="https://synapt.dev/blog/">
+  <meta property="og:url" content="https://synapt.dev/blog/{'' if filename == 'index.html' else filename}">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:site" content="@synapt_dev">
-  <meta name="twitter:title" content="Blog — synapt">
+  <meta name="twitter:title" content="{title} — synapt">
   <meta name="twitter:description" content="Articles about agent memory, retrieval architecture, and building AI tools that remember.">
   <meta name="twitter:image" content="https://synapt.dev/blog/images/social-card.jpg">
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
@@ -518,6 +552,12 @@ def build_index(posts: list[dict], dry_run: bool = False) -> None:
       color: var(--text-dim);
       text-align: center;
       margin-bottom: 2.5rem;
+    }}
+    .page .intro-note {{
+      color: var(--text-dim);
+      text-align: center;
+      font-size: 0.95rem;
+      margin: -1rem 0 2rem;
     }}
     .post-card {{
       display: block;
@@ -606,24 +646,57 @@ def build_index(posts: list[dict], dry_run: bool = False) -> None:
 
   <div class="page">
     <div class="container">
-      <h1>Blog</h1>
-      <p class="subtitle">Memory, retrieval, and what we're learning along the way.</p>
+      <h1>{title}</h1>
+      <p class="subtitle">{subtitle}</p>
+{intro_html}
 
 {cards_html}
       <div class="about-link">
-        <a href="authors.html">About the authors</a>
+        {footer_html}
       </div>
     </div>
   </div>
 </body>
 </html>"""
 
-    index_path = BLOG_DIR / "index.html"
+    index_path = BLOG_DIR / filename
     if dry_run:
-        print(f"  Would build: index.html ({len(index_html)} bytes, {len(posts)} posts)")
+        print(
+            f"  Would build: {filename} ({len(index_html)} bytes, {len(visible_posts)}/{len(posts)} posts shown)"
+        )
     else:
         index_path.write_text(index_html, encoding="utf-8")
-        print(f"  Built: index.html ({len(index_html)} bytes, {len(posts)} posts)")
+        print(
+            f"  Built: {filename} ({len(index_html)} bytes, {len(visible_posts)}/{len(posts)} posts shown)"
+        )
+
+
+def build_index(posts: list[dict], dry_run: bool = False) -> None:
+    """Generate the main blog index.html from post metadata."""
+    build_listing_page(
+        posts,
+        "index.html",
+        title="Blog",
+        subtitle="Memory, retrieval, and what we're learning along the way.",
+        intro_label="Latest posts from the synapt team.",
+        post_limit=8,
+        show_all_posts_link=True,
+        dry_run=dry_run,
+    )
+
+
+def build_archive(posts: list[dict], dry_run: bool = False) -> None:
+    """Generate an archive page with every blog post."""
+    build_listing_page(
+        posts,
+        "all.html",
+        title="All Posts",
+        subtitle="The full synapt blog archive, from the newest experiments back to the first memory essays.",
+        intro_label=None,
+        post_limit=None,
+        show_all_posts_link=False,
+        dry_run=dry_run,
+    )
 
 
 def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
@@ -740,8 +813,9 @@ def main() -> int:
         if legacy["slug"] not in md_slugs:
             all_posts.append(legacy)
 
-    # Always rebuild both indexes
+    # Always rebuild blog indexes + root index
     build_index(all_posts, dry_run=args.dry_run)
+    build_archive(all_posts, dry_run=args.dry_run)
     build_root_blog_section(all_posts, dry_run=args.dry_run)
 
     if built == 0:
