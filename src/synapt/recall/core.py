@@ -2961,7 +2961,7 @@ class TranscriptIndex:
                 source_candidates.sort(key=lambda x: x[1], reverse=True)
                 for i, overlap in source_candidates[:max_per_node]:
                     source_score = base_score * 0.6
-                    cblock = self._format_chunk_block(i, intent=intent)
+                    cblock = self._format_chunk_block(i, intent=intent, query=query)
                     emit_items.append(
                         (source_score, cblock, "chunk", self.chunks[i].id, self.chunks[i].timestamp)
                     )
@@ -2986,7 +2986,7 @@ class TranscriptIndex:
             if intent == "decision":
                 if chunk.turn_index < 0 and "Decisions:" in chunk.assistant_text:
                     score *= 1.3
-            block = self._format_chunk_block(idx, intent=intent)
+            block = self._format_chunk_block(idx, intent=intent, query=query)
             emit_items.append((score, block, "chunk", chunk.id, chunk.timestamp))
 
         # Apply adaptive score boosts before final sort:
@@ -3331,8 +3331,62 @@ class TranscriptIndex:
         from synapt.recall.clustering import generate_concat_summary
         return generate_concat_summary(member_chunks, max_tokens=200)
 
-    def _format_chunk_block(self, idx: int, intent: str = "") -> str:
-        """Format a single chunk as a display block."""
+    @staticmethod
+    def _find_query_span(
+        query: str, text: str, margin: int = 40,
+    ) -> tuple[int, int] | None:
+        """Find the best-matching sentence span in *text* for *query*.
+
+        Splits *text* into sentences, scores each by token overlap with
+        *query*, then returns ``(begin, end)`` covering the best contiguous
+        window of 1-3 sentences (plus *margin* chars of context).
+
+        Returns ``None`` if no sentence has ≥2 overlapping tokens.
+        """
+        if not query or not text:
+            return None
+
+        sentence_spans: list[tuple[int, int, str]] = []
+        for m in re.finditer(r'[^.!?\n]*[.!?\n]+(?:\s|$)|[^.!?\n]+$', text):
+            sentence_spans.append((m.start(), m.end(), m.group()))
+        if not sentence_spans:
+            return None
+
+        query_toks = set(_tokenize(query))
+        if not query_toks:
+            return None
+
+        scored: list[tuple[int, int, int]] = []
+        for begin, end, sent in sentence_spans:
+            sent_toks = set(_tokenize(sent))
+            overlap = len(query_toks & sent_toks)
+            scored.append((begin, end, overlap))
+
+        best_score = 0
+        best_begin = 0
+        best_end = 0
+        for window in range(1, min(4, len(scored) + 1)):
+            for i in range(len(scored) - window + 1):
+                total = sum(scored[j][2] for j in range(i, i + window))
+                if total > best_score:
+                    best_score = total
+                    best_begin = scored[i][0]
+                    best_end = scored[i + window - 1][1]
+
+        if best_score < 2:
+            return None
+
+        begin = max(0, best_begin - margin)
+        end = min(len(text), best_end + margin)
+        return (begin, end)
+
+    def _format_chunk_block(self, idx: int, intent: str = "", query: str = "") -> str:
+        """Format a single chunk as a display block.
+
+        When *query* is provided, attempts to extract the best-matching
+        sentence span and emits a focused snippet instead of the full turn.
+        Falls back to the full turn if no good span is found.
+        """
         chunk = self.chunks[idx]
         ts_display = _format_timestamp_display(chunk.timestamp, intent=intent)
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
@@ -3355,6 +3409,20 @@ class TranscriptIndex:
             except (ValueError, TypeError):
                 pass
         header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label}{freshness} ---"
+
+        # Query-aware snippet extraction: if the full turn is long enough
+        # to benefit from focusing, find the best-matching span.
+        if query:
+            full_text = (chunk.user_text or "") + "\n" + (chunk.assistant_text or "")
+            # Only snippet if the turn is long enough that focusing saves tokens
+            if len(full_text) > 300:
+                span = self._find_query_span(query, full_text)
+                if span:
+                    begin, end = span
+                    snippet = full_text[begin:end].strip()
+                    prefix = "..." if begin > 0 else ""
+                    suffix = "..." if end < len(full_text) else ""
+                    return f"{header}\n{prefix}{snippet}{suffix}"
 
         parts = [header]
         # Sub-chunks already embed context in their user_text — skip

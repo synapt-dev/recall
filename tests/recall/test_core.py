@@ -2102,3 +2102,128 @@ def test_format_results_respects_dedup_threshold_override(monkeypatch):
 
     deploy_count = result.count("To deploy, run deploy.sh")
     assert deploy_count == 3, f"Expected override to keep all 3 chunks, got {deploy_count}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _find_query_span (query-aware snippet extraction)
+# ---------------------------------------------------------------------------
+
+def test_find_query_span_basic():
+    """_find_query_span finds the sentence matching the query."""
+    text = (
+        "The weather was nice today. "
+        "We deployed the application to production using Docker containers. "
+        "Then we had lunch."
+    )
+    span = TranscriptIndex._find_query_span("deploy application Docker", text)
+    assert span is not None
+    begin, end = span
+    snippet = text[begin:end]
+    assert "deployed the application" in snippet
+    # Should NOT include the unrelated sentences in the tight span
+    # (margin may include a few chars of context, but core match is deploy)
+
+
+def test_find_query_span_no_match():
+    """Returns None when query has no overlap with text."""
+    text = "The weather was nice today. We had lunch."
+    span = TranscriptIndex._find_query_span("kubernetes orchestration", text)
+    assert span is None
+
+
+def test_find_query_span_empty_inputs():
+    """Returns None for empty query or text."""
+    assert TranscriptIndex._find_query_span("", "some text") is None
+    assert TranscriptIndex._find_query_span("query", "") is None
+
+
+def test_find_query_span_short_text():
+    """Returns None when text is a single short sentence with < 2 overlapping tokens."""
+    text = "Hello world."
+    span = TranscriptIndex._find_query_span("goodbye universe", text)
+    assert span is None
+
+
+def test_find_query_span_multi_sentence_window():
+    """Finds a contiguous multi-sentence window when query spans sentences."""
+    text = (
+        "First we set up the database schema. "
+        "Then we ran the migration scripts. "
+        "The migration completed successfully with zero errors. "
+        "Finally we cleaned up temp files."
+    )
+    span = TranscriptIndex._find_query_span("migration scripts database schema", text)
+    assert span is not None
+    begin, end = span
+    snippet = text[begin:end]
+    # Should cover the migration/database region
+    assert "migration" in snippet
+
+
+def test_format_chunk_block_with_query_snippets():
+    """_format_chunk_block emits focused snippet when query matches a subspan."""
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Can you help me set up the deployment pipeline?",
+            assistant_text=(
+                "Sure! First, you need to configure your CI/CD pipeline. "
+                "Create a Dockerfile in the project root. "
+                "Then add a GitHub Actions workflow file. "
+                "The workflow should build the image, run tests, "
+                "and push to your container registry. "
+                "After that, set up ArgoCD for continuous deployment. "
+                "ArgoCD will watch your registry and auto-deploy new images. "
+                "Make sure to configure health checks and rollback policies. "
+                "You should also set up monitoring with Prometheus and Grafana. "
+                "Finally, add alerting rules for critical metrics."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    # With query — should get focused snippet
+    block_with_query = index._format_chunk_block(0, query="ArgoCD continuous deployment")
+    # Without query — should get full turn
+    block_without_query = index._format_chunk_block(0)
+    # The snippet version should be shorter (focused on ArgoCD section)
+    assert len(block_with_query) < len(block_without_query)
+    assert "ArgoCD" in block_with_query
+    # Full version should have the full content
+    assert "User:" in block_without_query
+    assert "Assistant:" in block_without_query
+
+
+def test_format_chunk_block_query_no_match_falls_back():
+    """When query doesn't match well, falls back to full turn format."""
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Hello",
+            assistant_text="Hi there! How can I help you today?",
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    # Short text — won't snippet (< 300 chars)
+    block = index._format_chunk_block(0, query="kubernetes orchestration")
+    assert "User: Hello" in block
+    assert "Assistant: Hi there" in block
