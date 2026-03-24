@@ -58,6 +58,8 @@ def _project_roots(project_dir: Path | None = None) -> list[Path]:
 
     grip_root = _find_gripspace_root(actual_dir)
     if grip_root is not None:
+        # Match Claude transcript discovery semantics: in a gripspace we treat
+        # direct child repos as part of the same shared recall surface.
         try:
             children = sorted(grip_root.iterdir())
         except OSError:
@@ -82,7 +84,7 @@ def _session_cwd(path: Path) -> Path | None:
                 except json.JSONDecodeError:
                     continue
                 if entry.get("type") != "session_meta":
-                    continue
+                    return None
                 cwd = entry.get("payload", {}).get("cwd", "")
                 if not cwd:
                     return None
