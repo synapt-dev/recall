@@ -1690,5 +1690,66 @@ def test_find_best_span_empty_inputs():
     assert _find_best_span("query", "") is None
 
 
+# ---------------------------------------------------------------------------
+# Tests: content-type-aware dedup thresholds (#337)
+# ---------------------------------------------------------------------------
+
+def test_get_dedup_thresholds_personal():
+    """Personal content gets higher thresholds (more permissive)."""
+    from synapt.recall.consolidate import _get_dedup_thresholds
+
+    class FakeProfile:
+        content_type = "personal"
+
+    j, c = _get_dedup_thresholds(FakeProfile())
+    assert j == 0.6, f"Expected Jaccard 0.6, got {j}"
+    assert c == 0.88, f"Expected cosine 0.88, got {c}"
+
+
+def test_get_dedup_thresholds_code():
+    """Code content gets lower thresholds (more aggressive dedup)."""
+    from synapt.recall.consolidate import _get_dedup_thresholds
+
+    class FakeProfile:
+        content_type = "code"
+
+    j, c = _get_dedup_thresholds(FakeProfile())
+    assert j == 0.4, f"Expected Jaccard 0.4, got {j}"
+    assert c == 0.75, f"Expected cosine 0.75, got {c}"
+
+
+def test_get_dedup_thresholds_mixed_default():
+    """Mixed/unknown content gets default thresholds."""
+    from synapt.recall.consolidate import _get_dedup_thresholds
+
+    class FakeProfile:
+        content_type = "mixed"
+
+    j, c = _get_dedup_thresholds(FakeProfile())
+    assert j == 0.5
+    assert c == 0.80
+
+
+def test_get_dedup_thresholds_none_fallback():
+    """None content_profile falls back to mixed thresholds."""
+    from synapt.recall.consolidate import _get_dedup_thresholds
+
+    j, c = _get_dedup_thresholds(None)
+    assert j == 0.5
+    assert c == 0.80
+
+
+def test_get_dedup_thresholds_unknown_type():
+    """Unknown content type falls back to mixed thresholds."""
+    from synapt.recall.consolidate import _get_dedup_thresholds
+
+    class FakeProfile:
+        content_type = "unknown_type"
+
+    j, c = _get_dedup_thresholds(FakeProfile())
+    assert j == 0.5
+    assert c == 0.80
+
+
 if __name__ == "__main__":
     unittest.main()

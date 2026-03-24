@@ -508,6 +508,24 @@ _inline_emb_loaded = False
 
 _INLINE_COSINE_THRESHOLD = 0.80
 
+# Content-type-aware dedup thresholds.
+# Personal content gets more permissive thresholds (preserve nuanced facts).
+# Code content gets more aggressive thresholds (filter generic tool output).
+_DEDUP_THRESHOLDS: dict[str, tuple[float, float]] = {
+    # (jaccard_threshold, cosine_threshold)
+    "personal": (0.6, 0.88),
+    "code": (0.4, 0.75),
+    "mixed": (0.5, 0.80),
+}
+
+
+def _get_dedup_thresholds(content_profile=None) -> tuple[float, float]:
+    """Return (jaccard_threshold, cosine_threshold) for the given content type."""
+    if content_profile is None:
+        return _DEDUP_THRESHOLDS["mixed"]
+    ct = getattr(content_profile, "content_type", "mixed")
+    return _DEDUP_THRESHOLDS.get(ct, _DEDUP_THRESHOLDS["mixed"])
+
 
 def _inline_embedding_dedup(
     candidate_content: str,
@@ -1167,8 +1185,11 @@ def _apply_consolidation_result(
         if action == "create":
             # Dedup: if content is very similar to an existing node,
             # auto-convert to corroborate instead of creating a duplicate.
-            # Two signals: (1) keyword Jaccard >= 0.5, (2) embedding
-            # cosine >= 0.80.  Either can trigger auto-corroborate.
+            # Two signals: (1) keyword Jaccard, (2) embedding cosine.
+            # Thresholds adapt to content type: personal content uses
+            # higher thresholds (preserve nuance), code uses lower
+            # thresholds (aggressively merge generic tool output).
+            jaccard_thresh, cosine_thresh = _get_dedup_thresholds(content_profile)
             new_kw = _extract_keywords(content)
             best_match = None
             best_sim = 0.0
@@ -1184,16 +1205,16 @@ def _apply_consolidation_result(
                     all_sims.append((sim, existing))
 
             # If Jaccard didn't trigger, try embedding cosine similarity
-            if best_sim < 0.5 and existing_nodes:
+            if best_sim < jaccard_thresh and existing_nodes:
                 emb_match, emb_sim = _inline_embedding_dedup(
-                    content, existing_nodes,
+                    content, existing_nodes, threshold=cosine_thresh,
                 )
                 if emb_match and emb_sim > best_sim:
                     best_match = emb_match
                     best_sim = emb_sim
                     best_method = "cosine"
 
-            if best_match and best_sim >= 0.5:
+            if best_match and best_sim >= jaccard_thresh:
                 logger.info(
                     "Auto-corroborate (%s=%.2f): %s",
                     best_method, best_sim, content[:80],
@@ -1528,9 +1549,11 @@ def consolidate(
             # Post-consolidation dedup — merges near-duplicates that the
             # inline Jaccard check missed (e.g. semantic duplicates with
             # different wording, or nodes created within the same batch).
+            # Uses content-type-aware thresholds.
+            _jt, _ct = _get_dedup_thresholds(content_profile)
             merged = dedup_knowledge_nodes(
-                threshold=0.5, project_dir=project_dir,
-                embedding_threshold=_INLINE_COSINE_THRESHOLD,
+                threshold=_jt, project_dir=project_dir,
+                embedding_threshold=_ct,
             )
             if merged:
                 logger.info(
