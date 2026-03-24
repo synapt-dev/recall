@@ -125,6 +125,52 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         db.save_chunks([])
         db.close()
 
+    def test_save_chunks_clears_all_shards_on_rebuild(self):
+        """Full save_chunks clears stale data from ALL shards, not just active."""
+        from synapt.recall.core import TranscriptChunk
+        RecallDB(self.index_dir / "index.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
+        RecallDB(self.index_dir / "data_002.db").close()
+        db = ShardedRecallDB.open(self.index_dir)
+        self.assertEqual(db.shard_count, 2)
+
+        # Seed shard 1 with old data
+        old_chunk = TranscriptChunk(
+            id="old:t0", session_id="s1", timestamp="2025-01-01T00:00:00Z",
+            turn_index=0, user_text="old", assistant_text="stale",
+        )
+        db._data_dbs[0].save_chunks([old_chunk])
+        count_before = db._data_dbs[0]._conn.execute(
+            "SELECT COUNT(*) FROM chunks"
+        ).fetchone()[0]
+        self.assertEqual(count_before, 1)
+
+        # Now do a full rebuild save (like rescrub does)
+        new_chunk = TranscriptChunk(
+            id="new:t0", session_id="s2", timestamp="2025-06-01T00:00:00Z",
+            turn_index=0, user_text="new", assistant_text="fresh",
+        )
+        db.save_chunks([new_chunk])
+
+        # Shard 1 should be cleared (the bug: it kept the old chunk)
+        count_shard1 = db._data_dbs[0]._conn.execute(
+            "SELECT COUNT(*) FROM chunks"
+        ).fetchone()[0]
+        self.assertEqual(count_shard1, 0, "Old shard should be cleared on rebuild")
+
+        # Active shard should have the new chunk
+        count_active = db._data_dbs[-1]._conn.execute(
+            "SELECT COUNT(*) FROM chunks"
+        ).fetchone()[0]
+        self.assertEqual(count_active, 1)
+
+        # FTS search should only find the new chunk, not the old one
+        results = db.fts_search("stale")
+        self.assertEqual(len(results), 0, "Stale data should not appear in FTS")
+        results = db.fts_search("fresh")
+        self.assertEqual(len(results), 1)
+        db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
