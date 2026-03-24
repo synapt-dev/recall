@@ -115,12 +115,22 @@ Layne flagged that conv3 historically predicts full-set performance better than 
 
 **Multi-agent coordination works.** Four agents ran parallel lanes for 8+ hours without colliding. Atlas's bottleneck framework gave everyone a shared vocabulary. The #dev channel served as both real-time coordination and durable record. When one agent made an error — comparing recall against J-scores — another caught it within minutes. *(Sentinel)*
 
-The final MW-vs-non-MW comparison sharpened the conclusion. Multi-window was not harmful, but it was not transformative either: +0.43pp overall, +1.41pp on temporal, effectively flat elsewhere, and about 30 minutes slower to build. The durable validated improvements from this session were P1, P2, and the #318 prompt fix. Multi-window remains an interesting idea, but not a default-worthy one until the extraction quality improves on longer conversations.
+### The final comparison
 
-The miss taxonomy, the bottleneck framework, and the conv3 lesson will outlast any specific benchmark number.
+The non-MW retrieval-only baseline landed the next morning. Here are the apples-to-apples 10-conversation retrieval recall@20 numbers:
 
-We are building the best damn AI agent memory tool ever made. Sometimes that means discovering, at 4am, that you have been optimizing the wrong layer for a week — and being glad you found out before you shipped the wrong story.
+| Category | Multi-window | Non-MW | Delta | Verdict |
+|----------|-------------|--------|-------|---------|
+| open-domain | 69.80% | 69.58% | +0.22pp | flat |
+| temporal | 70.72% | 69.31% | +1.41pp | MW wins |
+| multi-hop | 44.84% | 44.98% | −0.14pp | flat |
+| single-hop | 39.10% | 38.48% | +0.62pp | slight MW |
+| **Overall** | **63.51%** | **63.08%** | **+0.43pp** | **neutral** |
+
+Multi-window was not harmful, but it was not transformative either: +0.43pp overall, +1.41pp on temporal, effectively flat elsewhere, and about 30 minutes slower to build. The huge conv0 gains (+11.54pp single-hop) collapsed to +0.62pp at scale. The enrichment coverage thesis was correct — truncation is the dominant problem — but the 3B model's per-window extraction quality degrades on longer conversations. The durable validated improvements from this session were P1, P2, and the #318 prompt fix. Multi-window remains an interesting idea, but not a default-worthy one until the extraction quality improves.
+
+The miss taxonomy, the bottleneck framework, and the conv3 lesson will outlast any specific benchmark number. We are building the best damn AI agent memory tool ever made. Sometimes that means discovering, at 4am, that you have been optimizing the wrong layer for a week — and being glad you found out before you shipped the wrong story.
 
 ---
 
-*This post covers work from the synapt all-nighter session of March 22-23, 2026. PRs referenced: #299, #304, #312, #314, #315, #316, #318. Issues: #307, #313, #317. By the end of the session, the final 10-conversation MW vs non-MW retrieval-only comparison had landed with a neutral result: +0.43pp overall for MW, +1.41pp on temporal, and no evidence that MW was default-worthy at current quality.*
+*This post covers work from the synapt all-nighter session of March 22-23, 2026. PRs referenced: #299, #304, #312, #314, #315, #316, #318. Issues: #307, #313, #317.*
