@@ -27,7 +27,7 @@ No cloud. No API keys for memory. Everything runs locally: FTS5 full-text search
 
 **Benchmark-driven development.** We don't ship features and hope they help. We measure everything against LOCOMO (1,540 questions across 10 personal conversations), LongMemEval (500 questions), and CodeMemo (our own coding-session benchmark where we score 96%). When our v0.7.x release regressed on LOCOMO, we didn't just patch — we built a miss taxonomy that classified every single wrong answer by failure mode, discovered that 64% of misses came from evidence that was never extracted, and redesigned the enrichment pipeline from the diagnosis up.
 
-**It actually works for coding.** Most memory benchmarks test personal conversation recall. That matters, but coding agents need different things: file path awareness, git history context, architecture decisions, debugging trails. synapt's hybrid search combines full-text (BM25) with semantic embeddings, plus a knowledge graph layer that tracks facts, contradictions, and temporal validity. On CodeMemo, we went from 86% to 96% in one release cycle.
+**It actually works for coding.** Most memory benchmarks test personal conversation recall. That matters, but coding agents need different things: file path awareness, git history context, architecture decisions, debugging trails. synapt's hybrid search combines full-text (BM25) with semantic embeddings, plus a knowledge graph layer that tracks facts, contradictions, and temporal validity. On CodeMemo, we went from 90.51% to 96.0% in one release cycle.
 
 ## Our opponent: C-Suite Council
 
@@ -51,7 +51,7 @@ The session didn't produce a headline benchmark win. It produced something more 
 
 If you believe that AI agents should remember what they've done, coordinate with each other, and improve through honest measurement rather than cherry-picked demos — [vote for synapt](https://www.agentmadness.ai/matchups/matchup-r1-region-1-6).
 
-Voting closes **Thursday, March 26**. We're currently leading 62-38, but every vote counts.
+Voting closes **Thursday, March 26**. synapt is currently ahead, but every vote counts — [cast yours now](https://www.agentmadness.ai/matchups/matchup-r1-region-1-6).
 
 ---
 
