@@ -319,6 +319,92 @@ def build_index(blog_dir: Path) -> str:
     return TEMPLATE.format(cards="\n".join(cards))
 
 
+def render_root_blog_section(posts: list[dict], max_grid: int = 3) -> str:
+    """Render the blog section for the root docs/index.html.
+
+    Returns the inner HTML of <section id="blog">...</section> — the featured
+    post plus up to max_grid grid cards. Paths are prefixed with blog/ since
+    the root index sits one level up.
+    """
+    if not posts:
+        return ""
+    featured = posts[0]
+    grid = posts[1:1 + max_grid]
+
+    # Featured card
+    hero = featured.get("hero", "")
+    hero_src = f'blog/{hero}' if hero else ""
+    author_html = render_author_meta(featured.get("author", ""))
+    lines = [
+        '    <div class="container">',
+        '      <h2 style="text-align: center; font-size: 2rem; margin-bottom: 2.5rem;">'
+        '<a href="blog/" style="color: var(--text); text-decoration: none;">From the blog</a></h2>',
+        f'      <a href="blog/{featured["stem"]}.html" style="display: block; padding: 2rem; '
+        'background: var(--bg-card); border: 1px solid var(--purple); border-radius: 12px; '
+        'text-decoration: none; transition: border-color 0.2s; margin-bottom: 1.5rem;">',
+    ]
+    if hero_src:
+        lines.append(f'        <img src="{hero_src}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 1rem;">')
+    lines.append(f'        <div style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; '
+                 f'letter-spacing: 0.05em; color: var(--purple-light); margin-bottom: 0.75rem;">'
+                 f'New &mdash; by {author_html}</div>')
+    lines.append(f'        <h3 style="color: var(--text); font-size: 1.4rem; margin-bottom: 0.5rem;">{featured["title"]}</h3>')
+    if featured.get("description"):
+        lines.append(f'        <p style="color: var(--text-dim); font-size: 1rem; line-height: 1.6; '
+                     f'max-width: 600px;">{featured["description"]}</p>')
+    lines.append('      </a>')
+
+    # Grid cards
+    if grid:
+        lines.append('      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem;">')
+        for post in grid:
+            post_hero = post.get("hero", "")
+            post_hero_src = f'blog/{post_hero}' if post_hero else ""
+            lines.append(f'        <a href="blog/{post["stem"]}.html" style="display: block; padding: 1.5rem; '
+                         'background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; '
+                         'text-decoration: none; transition: border-color 0.2s;">')
+            if post_hero_src:
+                lines.append(f'          <img src="{post_hero_src}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 0.75rem;">')
+            lines.append(f'          <h3 style="color: var(--teal); font-size: 1.1rem; margin-bottom: 0.5rem;">{post["title"]}</h3>')
+            if post.get("description"):
+                lines.append(f'          <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.5;">{post["description"]}</p>')
+            lines.append('        </a>')
+        lines.append('      </div>')
+
+    lines.append('    </div>')
+    return "\n".join(lines)
+
+
+def update_root_index(root_index: Path, blog_dir: Path, posts: list[dict]) -> bool:
+    """Update the blog section in docs/index.html. Returns True if updated."""
+    if not root_index.exists():
+        return False
+
+    text = root_index.read_text(encoding="utf-8")
+
+    # Find the blog section boundaries
+    start_marker = '<section id="blog"'
+    end_marker = '</section>'
+
+    start_idx = text.find(start_marker)
+    if start_idx == -1:
+        return False
+
+    # Find the closing tag after the start
+    section_start = text.find('>', start_idx) + 1
+    section_end = text.find(end_marker, section_start)
+    if section_end == -1:
+        return False
+
+    new_section = render_root_blog_section(posts)
+    new_text = text[:section_start] + "\n" + new_section + "\n  " + text[section_end:]
+
+    if new_text != text:
+        root_index.write_text(new_text, encoding="utf-8")
+        return True
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate blog index from markdown frontmatter")
     parser.add_argument("--blog-dir", default="docs/blog", help="Path to blog directory")
@@ -337,7 +423,31 @@ def main():
     else:
         out = blog_dir / "index.html"
         out.write_text(html, encoding="utf-8")
-        print(f"Generated {out} ({len(html)} bytes, {len(list(blog_dir.glob('*.md')))} posts)")
+        md_count = len(list(blog_dir.glob("*.md")))
+        print(f"Generated {out} ({len(html)} bytes, {md_count} posts)")
+
+        # Also update root index blog section
+        root_index = blog_dir.parent / "index.html"
+        # Re-parse posts for root section
+        posts = []
+        for md in sorted(blog_dir.glob("*.md")):
+            fm = parse_frontmatter(md)
+            if not fm or "title" not in fm:
+                continue
+            posts.append({
+                "stem": md.stem,
+                "title": fm.get("title", md.stem),
+                "author": fm.get("author", ""),
+                "date": fm.get("date", ""),
+                "description": fm.get("description", ""),
+                "hero": find_hero_image(md.stem, blog_dir),
+            })
+        posts.sort(key=lambda p: p.get("date", ""), reverse=True)
+
+        if update_root_index(root_index, blog_dir, posts):
+            print(f"Updated {root_index} blog section")
+        else:
+            print(f"Skipped {root_index} (no blog section found or no changes)")
 
     return 0
 
