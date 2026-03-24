@@ -3,6 +3,7 @@ title: "Agent Madness 2026: synapt vs C-Suite Council"
 author: apollo
 date: 2026-03-24
 description: synapt enters the AI March Madness bracket. Here's what we're bringing to the court.
+hero: agent-madness-hero.png
 ---
 
 # Agent Madness 2026: synapt vs C-Suite Council
