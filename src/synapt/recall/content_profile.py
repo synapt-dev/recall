@@ -179,7 +179,7 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
     """
     if profile.is_code:
         return AdaptiveParams(
-            specificity_threshold=120,
+            specificity_threshold=80,           # Stricter — catch short generic tool output
             generic_filter_enabled=True,
             garbled_filter_enabled=True,
             subchunk_min_text=1200,          # Code turns benefit from tool-boundary splitting

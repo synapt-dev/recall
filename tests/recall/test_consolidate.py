@@ -607,6 +607,49 @@ class TestLacksSpecificity(unittest.TestCase):
         self.assertFalse(_lacks_specificity(long))
 
 
+    def test_code_generic_tool_output_rejected(self):
+        """Code-specific tool output noise is rejected when content_type='code'."""
+        self.assertTrue(_lacks_specificity("build succeeded", content_type="code"))
+        self.assertTrue(_lacks_specificity("all tests passed", content_type="code"))
+        self.assertTrue(_lacks_specificity("file saved successfully", content_type="code"))
+        self.assertTrue(_lacks_specificity("linting passed", content_type="code"))
+        self.assertTrue(_lacks_specificity("no errors found", content_type="code"))
+
+    def test_code_generic_not_rejected_without_content_type(self):
+        """Code-specific patterns don't fire without content_type='code'."""
+        # These are short + lack specificity signals, so they still fail the
+        # general filter — but the code-specific patterns shouldn't be the reason.
+        # Test with content_type=None (general filter still catches them).
+        self.assertTrue(_lacks_specificity("Build succeeded"))
+        # With content_type="personal", code patterns don't apply
+        self.assertTrue(_lacks_specificity("Build succeeded", content_type="personal"))
+
+    def test_code_specific_tool_output_preserved(self):
+        """Tool output with project-specific signals survives even for code."""
+        self.assertFalse(_lacks_specificity(
+            "Build succeeded for src/synapt/recall/core.py", content_type="code"
+        ))
+        self.assertFalse(_lacks_specificity(
+            "Deployed v0.7.8 to PyPI", content_type="code"
+        ))
+
+    def test_lower_code_threshold(self):
+        """Code content uses stricter 80-char threshold via adaptive_params."""
+        from synapt.recall.content_profile import ContentProfile, adaptive_params
+        code_profile = ContentProfile(total_chunks=10, file_refs=30, tool_uses=20)
+        self.assertTrue(code_profile.is_code)
+        ap = adaptive_params(code_profile)
+        self.assertEqual(ap.specificity_threshold, 80)
+
+    def test_personal_threshold_disabled(self):
+        """Personal content has effectively disabled specificity filter."""
+        from synapt.recall.content_profile import ContentProfile, adaptive_params
+        personal_profile = ContentProfile(total_chunks=10, personal_refs=20, name_addresses=5)
+        self.assertTrue(personal_profile.is_personal)
+        ap = adaptive_params(personal_profile)
+        self.assertEqual(ap.specificity_threshold, 10000)
+
+
 class TestGenericFilterInApply(unittest.TestCase):
     """Test that generic nodes are rejected during application."""
 

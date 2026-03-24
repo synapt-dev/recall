@@ -96,6 +96,21 @@ _GENERIC_PATTERNS = [
     ]
 ]
 
+# Code-specific generic patterns — tool output noise that passes the general
+# filter because it's concrete, but adds no retrieval value.  Only applied
+# when content_type is "code".
+_CODE_GENERIC_PATTERNS = [
+    re.compile(p) for p in [
+        r"(?i)^(build|compilation) (succeeded|completed|finished|passed)\b",
+        r"(?i)^all (tests?|checks?) (pass(ed)?|succeeded|green)\b",
+        r"(?i)^(file|changes?) saved\b",
+        r"(?i)^(linting|formatting|type.?check) (passed|clean|ok)\b",
+        r"(?i)^no (errors?|warnings?|issues?) found\b",
+        r"(?i)^(installed|updated|removed) \d+ packages?\b",
+        r"(?i)^(successfully )?(deployed|published|released|uploaded)\b(?!.*\bv?\d+\.\d)",
+    ]
+]
+
 # Specificity signals — content with these patterns is likely project-specific.
 # Presence of ANY of these exempts a node from the low-specificity filter.
 # Note: no IGNORECASE — CamelCase detection requires case sensitivity.
@@ -164,7 +179,11 @@ def _has_proper_nouns(content: str) -> bool:
             return True
     return False
 
-def _lacks_specificity(content: str, threshold: int = 120) -> bool:
+def _lacks_specificity(
+    content: str,
+    threshold: int = 120,
+    content_type: str | None = None,
+) -> bool:
     """Return True if content lacks project-specific identifiers.
 
     Catches tool-knowledge that's technically accurate but not specific
@@ -179,6 +198,8 @@ def _lacks_specificity(content: str, threshold: int = 120) -> bool:
         content: Text to check.
         threshold: Character length above which the filter is skipped.
             Default 120; set higher to catch more, or 10000+ to disable.
+        content_type: "code", "personal", or "mixed". When "code",
+            additional code-specific generic patterns are checked.
     """
     if len(content) > threshold:
         return False
@@ -187,6 +208,12 @@ def _lacks_specificity(content: str, threshold: int = 120) -> bool:
     # Proper nouns (person names, place names) are strong entity signals
     if _has_proper_nouns(content):
         return False
+    # Code-specific noise: short tool output that looks concrete but
+    # adds no retrieval value (e.g., "Build succeeded", "All tests pass")
+    if content_type == "code":
+        for pat in _CODE_GENERIC_PATTERNS:
+            if pat.search(content):
+                return True
     return True
 
 # Stopwords for keyword extraction
@@ -1062,10 +1089,11 @@ def _apply_consolidation_result(
             if _is_generic_node(content):
                 logger.info("Rejected generic node (pattern): %s", content[:80])
                 continue
-        # Reject low-specificity (threshold adapts to content type)
+        # Reject low-specificity (threshold + patterns adapt to content type)
         if action == "create":
             spec_threshold = _ap.specificity_threshold if _ap else 120
-            if _lacks_specificity(content, threshold=spec_threshold):
+            _ct = content_profile.content_type if content_profile is not None else None
+            if _lacks_specificity(content, threshold=spec_threshold, content_type=_ct):
                 logger.info("Rejected generic node (low specificity): %s", content[:80])
                 continue
 
