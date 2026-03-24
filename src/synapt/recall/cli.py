@@ -219,6 +219,7 @@ def _archive_and_build_locked(
     import time as _time
 
     from synapt.recall.archive import archive_transcripts
+    from synapt.recall.codex import archive_codex_transcripts
     from synapt.recall.storage import RecallDB
 
     build_t0 = _time.monotonic()
@@ -234,6 +235,10 @@ def _archive_and_build_locked(
             copied = archive_transcripts(project_dir, src)
             if copied:
                 print(f"  Archived {len(copied)} new transcript(s) from {src}")
+
+    codex_copied = archive_codex_transcripts(project_dir)
+    if codex_copied:
+        print(f"  Archived {len(codex_copied)} Codex transcript(s)")
 
     # Step 2: Determine what to build from — aggregate all worktree archives
     build_sources: list[Path] = []
@@ -315,23 +320,6 @@ def _archive_and_build_locked(
         chatgpt_chunks = parse_chatgpt_archive(archive_path)
         print(f"[build] Parsed {len(chatgpt_chunks)} ChatGPT chunks")
         all_chunks.extend(chatgpt_chunks)
-
-    # Codex CLI transcripts (cross-editor memory)
-    try:
-        from synapt.recall.codex import discover_codex_sessions, list_codex_transcripts, parse_codex_transcript
-        codex_dir = discover_codex_sessions()
-        if codex_dir:
-            codex_files = list_codex_transcripts(codex_dir)
-            if codex_files:
-                codex_chunks = []
-                seen = set()
-                for cf in codex_files:
-                    codex_chunks.extend(parse_codex_transcript(cf, seen_uuids=seen))
-                if codex_chunks:
-                    all_chunks.extend(codex_chunks)
-                    print(f"  Codex: {len(codex_chunks)} chunks from {len(codex_files)} sessions")
-    except Exception as exc:
-        logger.debug("Codex transcript parsing failed: %s", exc)
 
     # Channel messages → searchable chunks
     try:
@@ -1981,6 +1969,16 @@ def cmd_setup(args: argparse.Namespace) -> None:
     step += 1
 
     transcript_dir = project_transcript_dir(project)
+    codex_count = 0
+    try:
+        from synapt.recall.codex import discover_codex_sessions, list_codex_transcripts
+        codex_dir = discover_codex_sessions()
+        if codex_dir:
+            codex_count = len(list_codex_transcripts(codex_dir, project_dir=project))
+            if codex_count:
+                print(f"  Found {codex_count} Codex transcript files")
+    except Exception:
+        codex_count = 0
     if transcript_dir:
         jsonl_count = len(list(transcript_dir.glob("*.jsonl")))
         print(f"  Found {jsonl_count} transcript files at {transcript_dir}")
@@ -1992,9 +1990,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
         if archive_count:
             print(f"  Found {archive_count} archived transcript(s)")
 
-    if not transcript_dir and not (archive_dir.exists() and any(archive_dir.glob("*.jsonl"))):
+    if not transcript_dir and codex_count == 0 and not (archive_dir.exists() and any(archive_dir.glob("*.jsonl"))):
         print(f"  No transcripts found for this project.", file=sys.stderr)
-        print(f"  Start a Claude Code session in this project first,", file=sys.stderr)
+        print(f"  Start a Claude Code or Codex session in this project first,", file=sys.stderr)
         print(f"  or use --sync to pull from HuggingFace.", file=sys.stderr)
         sys.exit(1)
 

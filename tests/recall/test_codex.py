@@ -8,8 +8,12 @@ from pathlib import Path
 from synapt.recall.codex import (
     parse_codex_transcript,
     list_codex_transcripts,
+    archive_codex_transcripts,
+    is_codex_transcript,
     _extract_file_paths,
 )
+from synapt.recall.core import build_index
+from synapt.recall.journal import auto_extract_entry, extract_session_id
 
 
 def _write_codex_transcript(tmpdir: str, entries: list[dict], name: str = "rollout-test.jsonl") -> Path:
@@ -199,6 +203,26 @@ class TestParseCodexTranscript(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertIn("via event_msg", chunks[0].user_text)
 
+    def test_journal_helpers_support_codex_transcript(self):
+        local_file = str(Path(self.tmpdir) / "example.py")
+        entries = [
+            {"timestamp": "2026-03-01T10:00:00Z", "type": "session_meta",
+             "payload": {"id": "journal-codex-session", "cwd": self.tmpdir}},
+            {"timestamp": "2026-03-01T10:00:01Z", "type": "response_item",
+             "payload": {"role": "user", "content": [
+                 {"type": "input_text", "text": f"inspect {local_file}"}
+             ]}},
+            {"timestamp": "2026-03-01T10:00:02Z", "type": "response_item",
+             "payload": {"type": "function_call", "name": "exec_command",
+                          "arguments": json.dumps({"cmd": f"sed -n 1,20p {local_file}"}), "call_id": "call_1"}},
+        ]
+        path = _write_codex_transcript(self.tmpdir, entries, name="rollout-journal.jsonl")
+
+        self.assertEqual(extract_session_id(path), "journal-codex-session")
+        entry = auto_extract_entry(transcript_path=path, cwd=self.tmpdir)
+        self.assertEqual(entry.session_id, "journal-codex-session")
+        self.assertIn("example.py", entry.files_modified)
+
 
 class TestListCodexTranscripts(unittest.TestCase):
     """Test transcript discovery."""
@@ -219,6 +243,78 @@ class TestListCodexTranscripts(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         found = list_codex_transcripts(Path(tmpdir))
         self.assertEqual(found, [])
+
+    def test_filters_to_project_scope(self):
+        tmpdir = tempfile.mkdtemp()
+        sessions = Path(tmpdir) / "2026" / "03" / "01"
+        sessions.mkdir(parents=True)
+
+        project_root = Path(tmpdir) / "project"
+        project_root.mkdir()
+        other_root = Path(tmpdir) / "other-project"
+        other_root.mkdir()
+
+        matching = _write_codex_transcript(
+            str(sessions),
+            [{"type": "session_meta", "payload": {"id": "match", "cwd": str(project_root / "subdir")}}],
+            name="rollout-match.jsonl",
+        )
+        _write_codex_transcript(
+            str(sessions),
+            [{"type": "session_meta", "payload": {"id": "miss", "cwd": str(other_root)}}],
+            name="rollout-miss.jsonl",
+        )
+
+        found = list_codex_transcripts(Path(tmpdir), project_dir=project_root)
+        self.assertEqual(found, [matching])
+
+    def test_archive_codex_transcripts_filters_to_project(self):
+        tmpdir = tempfile.mkdtemp()
+        sessions = Path(tmpdir) / "2026" / "03" / "01"
+        sessions.mkdir(parents=True)
+
+        project_root = Path(tmpdir) / "project"
+        project_root.mkdir()
+        archive_root = project_root / ".synapt" / "recall" / "worktrees" / "project" / "transcripts"
+        archive_root.mkdir(parents=True)
+        other_root = Path(tmpdir) / "other-project"
+        other_root.mkdir()
+
+        matching = _write_codex_transcript(
+            str(sessions),
+            [{"type": "session_meta", "payload": {"id": "match", "cwd": str(project_root)}}],
+            name="rollout-match.jsonl",
+        )
+        _write_codex_transcript(
+            str(sessions),
+            [{"type": "session_meta", "payload": {"id": "miss", "cwd": str(other_root)}}],
+            name="rollout-miss.jsonl",
+        )
+
+        copied = archive_codex_transcripts(project_root, sessions_dir=Path(tmpdir))
+        self.assertEqual([p.name for p in copied], [matching.name])
+        self.assertTrue((archive_root / matching.name).exists())
+
+    def test_build_index_parses_codex_archived_file(self):
+        tmpdir = tempfile.mkdtemp()
+        entries = [
+            {"timestamp": "2026-03-01T10:00:00Z", "type": "session_meta",
+             "payload": {"id": "build-codex-session", "cwd": tmpdir}},
+            {"timestamp": "2026-03-01T10:00:01Z", "type": "response_item",
+             "payload": {"role": "user", "content": [
+                 {"type": "input_text", "text": "question from codex"}
+             ]}},
+            {"timestamp": "2026-03-01T10:00:02Z", "type": "response_item",
+             "payload": {"role": "assistant", "content": [
+                 {"type": "output_text", "text": "answer from codex"}
+             ]}},
+        ]
+        path = _write_codex_transcript(tmpdir, entries, name="rollout-build.jsonl")
+
+        self.assertTrue(is_codex_transcript(path))
+        index = build_index(Path(tmpdir), use_embeddings=False)
+        self.assertEqual(len(index.chunks), 1)
+        self.assertIn("question from codex", index.chunks[0].user_text)
 
 
 class TestExtractFilePaths(unittest.TestCase):
