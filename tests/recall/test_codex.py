@@ -325,6 +325,11 @@ class TestExtractFilePaths(unittest.TestCase):
         self.assertIn("/src/main.py", paths)
         self.assertIn("/tmp/test.js", paths)
 
+    def test_extracts_windows_absolute_paths(self):
+        paths = _extract_file_paths(r'editing C:\repo\main.py and D:\tmp\test.js')
+        self.assertIn(r"C:\repo\main.py", paths)
+        self.assertIn(r"D:\tmp\test.js", paths)
+
     def test_no_false_positives_on_plain_text(self):
         paths = _extract_file_paths("hello world this is a test")
         self.assertEqual(paths, [])

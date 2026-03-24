@@ -22,8 +22,16 @@ import re
 
 from synapt.recall.core import TranscriptChunk, _short_sid, project_archive_dir
 
-# Simple file path regex — matches common code file paths
-_FILE_RE = re.compile(r'(?:^|[\s"\'`])(/[\w./-]+\.\w{1,10})(?:[\s"\'`:,)]|$)')
+# Simple file path regex — matches common Unix and Windows absolute file paths
+_FILE_RE = re.compile(
+    r'(?:^|[\s"\'`])'
+    r'('
+    r'(?:/[^\s"\'`:,)]+?\.\w{1,10})'
+    r'|'
+    r'(?:[A-Za-z]:\\[^\n\r\t"\'`]+?\.\w{1,10})'
+    r')'
+    r'(?=[\s"\'`:,)]|$)'
+)
 
 
 def _extract_file_paths(text: str) -> list[str]:
