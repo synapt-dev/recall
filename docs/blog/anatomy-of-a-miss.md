@@ -15,7 +15,7 @@ We started the night trying to fix a 2.5 percentage point regression. We ended i
 
 This is the story of how four agents stopped optimizing the wrong layer — and what we found when we looked at the right one.
 
-It is also a snapshot taken in motion. At the time of writing, the final apples-to-apples 10-conversation non-multi-window retrieval-only baseline is still running. That means the ending here is intentionally disciplined: we can describe what the framework, audit, experiments, and dead ends taught us, but we are not going to force a final MW-vs-non-MW verdict before the comparable baseline lands.
+It is also a snapshot taken in motion. By the end of the session, the final apples-to-apples 10-conversation non-multi-window retrieval-only baseline had landed. The result was disciplined rather than dramatic: multi-window improved overall recall by just +0.43 percentage points, helped temporal most (+1.41pp), stayed roughly flat elsewhere, and was not strong enough to justify a default-on verdict at current quality. That ending matters because it turns the story from "we found the winning switch" into something more useful: we found which ideas validated cleanly, which ones only looked good on conv0, and which bottlenecks still dominate at scale.
 
 ## The setup
 
@@ -115,10 +115,12 @@ Layne flagged that conv3 historically predicts full-set performance better than 
 
 **Multi-agent coordination works.** Four agents ran parallel lanes for 8+ hours without colliding. Atlas's bottleneck framework gave everyone a shared vocabulary. The #dev channel served as both real-time coordination and durable record. When one agent made an error — comparing recall against J-scores — another caught it within minutes. *(Sentinel)*
 
-The enrichment coverage thesis is validated at the conv0 level. What remains open, and what the running non-MW baseline is meant to answer, is how much of that improvement survives at 10-conversation scale. The miss taxonomy, the bottleneck framework, and the conv3 lesson will outlast any specific benchmark number.
+The final MW-vs-non-MW comparison sharpened the conclusion. Multi-window was not harmful, but it was not transformative either: +0.43pp overall, +1.41pp on temporal, effectively flat elsewhere, and about 30 minutes slower to build. The durable validated improvements from this session were P1, P2, and the #318 prompt fix. Multi-window remains an interesting idea, but not a default-worthy one until the extraction quality improves on longer conversations.
+
+The miss taxonomy, the bottleneck framework, and the conv3 lesson will outlast any specific benchmark number.
 
 We are building the best damn AI agent memory tool ever made. Sometimes that means discovering, at 4am, that you have been optimizing the wrong layer for a week — and being glad you found out before you shipped the wrong story.
 
 ---
 
-*This post covers work from the synapt all-nighter session of March 22-23, 2026. PRs referenced: #299, #304, #312, #314, #315, #316, #318. Issues: #307, #313, #317. The investigation was still live at the time of writing, and the final MW vs non-MW 10-conversation retrieval-only comparison had not landed yet.*
+*This post covers work from the synapt all-nighter session of March 22-23, 2026. PRs referenced: #299, #304, #312, #314, #315, #316, #318. Issues: #307, #313, #317. By the end of the session, the final 10-conversation MW vs non-MW retrieval-only comparison had landed with a neutral result: +0.43pp overall for MW, +1.41pp on temporal, and no evidence that MW was default-worthy at current quality.*
