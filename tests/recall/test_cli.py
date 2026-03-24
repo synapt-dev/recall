@@ -11,6 +11,37 @@ from synapt.recall.core import project_slug, project_index_dir, project_archive_
 from synapt.recall.cli import discover_transcript_dirs, _ensure_gitignore, _install_global_hooks, cmd_rebuild, cmd_sync, main
 
 
+def _write_codex_transcript(path: Path, cwd: Path) -> None:
+    """Write a minimal Codex-format transcript."""
+    entries = [
+        {
+            "timestamp": "2026-03-01T10:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-session-001", "cwd": str(cwd)},
+        },
+        {
+            "timestamp": "2026-03-01T10:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "How does Codex indexing work?"}],
+            },
+        },
+        {
+            "timestamp": "2026-03-01T10:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "It should index project-scoped Codex transcripts."}],
+            },
+        },
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+
 def test_discover_transcript_dirs_finds_dirs(tmp_path):
     """discover_transcript_dirs finds directories with .jsonl files."""
     projects = tmp_path / ".claude" / "projects"
@@ -232,6 +263,38 @@ def test_cmd_setup_orchestrates_all_steps(tmp_path):
     assert ".synapt/" in gitignore.read_text()
 
 
+def test_cmd_setup_with_codex_only_transcripts(tmp_path):
+    """setup succeeds for a Codex-only project with no Claude transcripts."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+
+    codex_sessions = tmp_path / ".codex" / "sessions" / "2026" / "03" / "01"
+    _write_codex_transcript(codex_sessions / "rollout-test.jsonl", project_dir)
+
+    mock_run = MagicMock()
+    mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+    with patch("synapt.recall.core.Path.home", return_value=tmp_path), \
+         patch("synapt.recall.cli.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.journal.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.codex.Path.home", return_value=tmp_path), \
+         patch("synapt.recall.cli.subprocess.run", mock_run), \
+         patch("synapt.recall.cli.shutil.which", return_value="/usr/bin/claude"):
+        from synapt.recall.cli import cmd_setup
+        args = argparse.Namespace(
+            no_embeddings=True,
+            no_hook=False,
+            global_scope=False,
+            sync=None,
+        )
+        cmd_setup(args)
+
+    index_dir = project_index_dir(project_dir)
+    assert (index_dir / "recall.db").exists()
+    archive_dir = project_archive_dir(project_dir)
+    assert (archive_dir / "rollout-test.jsonl").exists()
+
+
 def test_ensure_gitignore_creates_file(tmp_path):
     """_ensure_gitignore creates .gitignore with .synapt/ entry if missing."""
     _ensure_gitignore(tmp_path)
@@ -449,7 +512,30 @@ def test_recall_setup_no_transcripts(tmp_path):
          patch("synapt.recall.cli.Path.cwd", return_value=project_dir):
         result = recall_setup()
 
-    assert "No Claude Code transcripts found" in result
+    assert "No Claude Code or Codex transcripts found" in result
+
+
+def test_recall_setup_mcp_tool_with_codex_only_transcripts(tmp_path):
+    """recall_setup succeeds for a Codex-only project."""
+    from synapt.recall.server import recall_setup
+
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+
+    codex_sessions = tmp_path / ".codex" / "sessions" / "2026" / "03" / "01"
+    _write_codex_transcript(codex_sessions / "rollout-test.jsonl", project_dir)
+
+    with patch("synapt.recall.core.Path.home", return_value=tmp_path), \
+         patch("synapt.recall.cli.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.server.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.journal.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.codex.Path.home", return_value=tmp_path):
+        result = recall_setup(no_hook=True)
+
+    assert "Setup complete" in result
+    assert "chunks from" in result
+    archive_dir = project_archive_dir(project_dir)
+    assert (archive_dir / "rollout-test.jsonl").exists()
 
 
 def test_main_dispatches_export_command(tmp_path):
@@ -601,3 +687,57 @@ def test_catchup_skips_already_journaled_session(tmp_path):
     entries = read_entries(journal_path, n=10)
     assert len(entries) == 1
     assert entries[0].focus == "Previous work"
+
+
+def test_catchup_writes_journal_for_codex_session(tmp_path):
+    """_catchup_archive_and_journal handles Codex transcripts from the archive source."""
+    from synapt.recall.cli import _catchup_archive_and_journal
+    from synapt.recall.journal import read_entries
+
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    transcript = source / "rollout-test.jsonl"
+    local_file = project / "src" / "main.py"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {
+            "timestamp": "2026-03-01T10:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-session-001", "cwd": str(project)},
+        },
+        {
+            "timestamp": "2026-03-01T10:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"inspect {local_file}"}],
+            },
+        },
+        {
+            "timestamp": "2026-03-01T10:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"sed -n 1,20p {local_file}"}),
+                "call_id": "call_1",
+            },
+        },
+    ]
+    with open(transcript, "w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+    with patch("synapt.recall.core.Path.cwd", return_value=project):
+        _catchup_archive_and_journal(project, source)
+
+    archive_dir = project_archive_dir(project)
+    assert (archive_dir / "rollout-test.jsonl").exists()
+
+    journal_path = project_worktree_dir(project) / "journal.jsonl"
+    entries = read_entries(journal_path, n=1)
+    assert len(entries) == 1
+    assert entries[0].session_id == "codex-session-001"

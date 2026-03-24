@@ -4242,6 +4242,8 @@ def build_index(
         for src in incremental_manifest.get("source_files", []):
             already_indexed[src["name"]] = (src.get("mtime", 0), src.get("size", 0))
 
+    from synapt.recall.codex import is_codex_transcript, parse_codex_transcript
+
     all_chunks: list[TranscriptChunk] = []
     seen_uuids: set[str] = set()
     skipped = 0
@@ -4255,8 +4257,11 @@ def build_index(
                 skipped += 1
                 continue
         try:
-            chunks = parse_transcript(filepath, seen_uuids=seen_uuids,
-                                      subchunk_min_text=subchunk_min_text)
+            if is_codex_transcript(filepath):
+                chunks = parse_codex_transcript(filepath, seen_uuids=seen_uuids)
+            else:
+                chunks = parse_transcript(filepath, seen_uuids=seen_uuids,
+                                          subchunk_min_text=subchunk_min_text)
             all_chunks.extend(chunks)
             parsed_files.append(filepath)
             print(f"  {filepath.name}: {len(chunks)} turns")
@@ -4289,8 +4294,11 @@ def build_index(
                 seen_uuids_reparse: set[str] = set()
                 for filepath in parsed_files:
                     try:
-                        chunks = parse_transcript(filepath, seen_uuids=seen_uuids_reparse,
-                                                  subchunk_min_text=0)
+                        if is_codex_transcript(filepath):
+                            chunks = parse_codex_transcript(filepath, seen_uuids=seen_uuids_reparse)
+                        else:
+                            chunks = parse_transcript(filepath, seen_uuids=seen_uuids_reparse,
+                                                      subchunk_min_text=0)
                         all_chunks.extend(chunks)
                     except Exception:
                         pass

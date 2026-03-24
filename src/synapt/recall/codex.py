@@ -20,10 +20,18 @@ from pathlib import Path
 
 import re
 
-from synapt.recall.core import TranscriptChunk, _short_sid
+from synapt.recall.core import TranscriptChunk, _short_sid, project_archive_dir
 
-# Simple file path regex — matches common code file paths
-_FILE_RE = re.compile(r'(?:^|[\s"\'`])(/[\w./-]+\.\w{1,10})(?:[\s"\'`:,)]|$)')
+# Simple file path regex — matches common Unix and Windows absolute file paths
+_FILE_RE = re.compile(
+    r'(?:^|[\s"\'`])'
+    r'('
+    r'(?:/[^\s"\'`:,)]+?\.\w{1,10})'
+    r'|'
+    r'(?:[A-Za-z]:\\[^\n\r\t"\'`]+?\.\w{1,10})'
+    r')'
+    r'(?=[\s"\'`:,)]|$)'
+)
 
 
 def _extract_file_paths(text: str) -> list[str]:
@@ -39,13 +47,137 @@ def discover_codex_sessions() -> Path | None:
     return None
 
 
-def list_codex_transcripts(sessions_dir: Path | None = None) -> list[Path]:
-    """List all Codex transcript JSONL files, sorted by name."""
+def _project_roots(project_dir: Path | None = None) -> list[Path]:
+    """Return project roots whose Codex sessions should be indexed."""
+    from synapt.recall.core import _find_gripspace_root, _git_main_worktree_root
+
+    actual_dir = (project_dir or Path.cwd()).resolve()
+    roots: list[Path] = []
+
+    def _add_root(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+
+    _add_root(actual_dir)
+    _add_root(_git_main_worktree_root(actual_dir))
+
+    grip_root = _find_gripspace_root(actual_dir)
+    if grip_root is not None:
+        # Match Claude transcript discovery semantics: in a gripspace we treat
+        # direct child repos as part of the same shared recall surface.
+        try:
+            children = sorted(grip_root.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir() and (child / ".git").exists():
+                _add_root(child)
+
+    return roots
+
+
+def _session_cwd(path: Path) -> Path | None:
+    """Return the session cwd recorded in a Codex transcript, if present."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "session_meta":
+                    return None
+                cwd = entry.get("payload", {}).get("cwd", "")
+                if not cwd:
+                    return None
+                try:
+                    return Path(cwd).resolve()
+                except OSError:
+                    return None
+    except OSError:
+        return None
+    return None
+
+
+def is_codex_transcript(path: Path) -> bool:
+    """True when *path* looks like a Codex CLI transcript."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                return entry.get("type") == "session_meta"
+    except OSError:
+        return False
+    return False
+
+
+def _matches_project(path: Path, project_dir: Path | None = None) -> bool:
+    """True when the Codex transcript belongs to the current project scope."""
+    session_cwd = _session_cwd(path)
+    if session_cwd is None:
+        return False
+
+    for root in _project_roots(project_dir):
+        if session_cwd == root or root in session_cwd.parents:
+            return True
+    return False
+
+
+def list_codex_transcripts(
+    sessions_dir: Path | None = None,
+    project_dir: Path | None = None,
+) -> list[Path]:
+    """List project-relevant Codex transcript JSONL files, sorted by name."""
     if sessions_dir is None:
         sessions_dir = discover_codex_sessions()
     if sessions_dir is None:
         return []
-    return sorted(sessions_dir.rglob("rollout-*.jsonl"))
+
+    files = sorted(sessions_dir.rglob("rollout-*.jsonl"))
+    if project_dir is None:
+        return files
+    return [path for path in files if _matches_project(path, project_dir)]
+
+
+def archive_codex_transcripts(
+    project_dir: Path,
+    sessions_dir: Path | None = None,
+) -> list[Path]:
+    """Copy project-relevant Codex transcripts into the project archive.
+
+    Uses the same size-based semantics as Claude transcript archiving:
+    unchanged files are skipped, grown files overwrite the archive copy,
+    and shrunken sources do not replace larger archived copies.
+    """
+    archive_dir = project_archive_dir(project_dir)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[Path] = []
+    for src_file in list_codex_transcripts(sessions_dir, project_dir=project_dir):
+        dst_file = archive_dir / src_file.name
+        src_size = src_file.stat().st_size
+        if dst_file.exists():
+            dst_size = dst_file.stat().st_size
+            if src_size == dst_size:
+                continue
+            if src_size < dst_size:
+                continue
+        dst_file.write_bytes(src_file.read_bytes())
+        copied.append(dst_file)
+
+    return copied
 
 
 def parse_codex_transcript(

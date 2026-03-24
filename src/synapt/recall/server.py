@@ -480,7 +480,7 @@ def recall_build(incremental: bool = True) -> str:
         _invalidate_cache()
 
     if not final_index or not final_index.chunks:
-        return "No Claude Code transcripts found for this project."
+        return "No Claude Code or Codex transcripts found for this project."
 
     stats = final_index.stats()
     index_dir = project_index_dir(project)
@@ -514,8 +514,8 @@ def recall_setup(no_hook: bool = False) -> str:
 
     if not final_index or not final_index.chunks:
         return (
-            "No Claude Code transcripts found for this project. "
-            "Start a Claude Code session first, then run recall_setup again."
+            "No Claude Code or Codex transcripts found for this project. "
+            "Start a Claude Code or Codex session first, then run recall_setup again."
         )
 
     stats = final_index.stats()

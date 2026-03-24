@@ -333,6 +333,8 @@ def extract_session_id(path: Path | str) -> str:
                     continue
                 try:
                     d = json.loads(line)
+                    if d.get("type") == "session_meta":
+                        return d.get("payload", {}).get("id", "")
                     if d.get("type") == "progress" and d.get("sessionId"):
                         return d["sessionId"]
                 except (json.JSONDecodeError, ValueError):
@@ -360,14 +362,24 @@ def _transcript_sort_key(f: Path) -> tuple:
 def latest_transcript_path(project: Path | None = None) -> str | None:
     """Find the most recently modified transcript file for the project."""
     project = (project or Path.cwd()).resolve()
+    candidates: list[Path] = []
+
     transcript_dir = project_transcript_dir(project)
-    if not transcript_dir:
+    if transcript_dir:
+        candidates.extend(transcript_dir.glob("*.jsonl"))
+
+    try:
+        from synapt.recall.codex import discover_codex_sessions, list_codex_transcripts
+        codex_dir = discover_codex_sessions()
+        if codex_dir:
+            candidates.extend(list_codex_transcripts(codex_dir, project_dir=project))
+    except Exception:
+        pass
+
+    if not candidates:
         return None
-    jsonl_files = sorted(
-        transcript_dir.glob("*.jsonl"),
-        key=_transcript_sort_key,
-        reverse=True,
-    )
+
+    jsonl_files = sorted(candidates, key=_transcript_sort_key, reverse=True)
     return str(jsonl_files[0]) if jsonl_files else None
 
 
@@ -414,21 +426,34 @@ def auto_extract_entry(
     # Parse transcript if available
     if transcript_path and Path(transcript_path).exists():
         files_set: set[str] = set()
-        with open(transcript_path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    d = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if d.get("type") == "progress" and not session_id:
-                    session_id = d.get("sessionId", "")
-                if d.get("type") == "assistant":
-                    for block in d.get("message", {}).get("content", []) or []:
-                        if not isinstance(block, dict):
-                            continue
-                        fp = block.get("input", {}).get("file_path", "") if isinstance(block.get("input"), dict) else ""
-                        if fp:
-                            files_set.add(fp)
+        try:
+            from synapt.recall.codex import is_codex_transcript, parse_codex_transcript
+            is_codex = is_codex_transcript(Path(transcript_path))
+        except Exception:
+            is_codex = False
+
+        if is_codex:
+            chunks = parse_codex_transcript(Path(transcript_path))
+            if chunks:
+                session_id = chunks[0].session_id
+            for chunk in chunks:
+                files_set.update(chunk.files_touched)
+        else:
+            with open(transcript_path, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        d = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if d.get("type") == "progress" and not session_id:
+                        session_id = d.get("sessionId", "")
+                    if d.get("type") == "assistant":
+                        for block in d.get("message", {}).get("content", []) or []:
+                            if not isinstance(block, dict):
+                                continue
+                            fp = block.get("input", {}).get("file_path", "") if isinstance(block.get("input"), dict) else ""
+                            if fp:
+                                files_set.add(fp)
         files_modified = _filter_project_files(files_set, project_root=cwd)
 
     # Capture agent identity if channel system is available

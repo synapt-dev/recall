@@ -77,6 +77,7 @@ def _get_live_chunks(transcript_path: str) -> tuple[str, list[TranscriptChunk]]:
     # TYPE_CHECKING guard already covers type annotations, and the deferred
     # import documents that we only need parse_transcript at call time.
     from synapt.recall.core import parse_transcript
+    from synapt.recall.codex import is_codex_transcript, parse_codex_transcript
 
     try:
         size = Path(transcript_path).stat().st_size
@@ -96,7 +97,11 @@ def _get_live_chunks(transcript_path: str) -> tuple[str, list[TranscriptChunk]]:
         # self-contained and safe for any future caller that lacks one.
         try:
             session_id = extract_session_id(transcript_path)
-            chunks = parse_transcript(Path(transcript_path))
+            path_obj = Path(transcript_path)
+            if is_codex_transcript(path_obj):
+                chunks = parse_codex_transcript(path_obj)
+            else:
+                chunks = parse_transcript(path_obj)
         except Exception:
             return "", []
 
