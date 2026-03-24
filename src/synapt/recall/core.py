@@ -3410,18 +3410,28 @@ class TranscriptIndex:
                 pass
         header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label}{freshness} ---"
 
-        # Query-aware snippet extraction: if the full turn is long enough
-        # to benefit from focusing, find the best-matching span.
+        # Query-aware snippet extraction: prefer assistant text (where
+        # evidence lives) over user text (which just echoes the question).
         if query:
-            full_text = (chunk.user_text or "") + "\n" + (chunk.assistant_text or "")
-            # Only snippet if the turn is long enough that focusing saves tokens
-            if len(full_text) > 300:
-                span = self._find_query_span(query, full_text)
+            asst = chunk.assistant_text or ""
+            user = chunk.user_text or ""
+            # Try assistant text first — that's the evidence source
+            if len(asst) > 200:
+                span = self._find_query_span(query, asst)
                 if span:
                     begin, end = span
-                    snippet = full_text[begin:end].strip()
+                    snippet = asst[begin:end].strip()
                     prefix = "..." if begin > 0 else ""
-                    suffix = "..." if end < len(full_text) else ""
+                    suffix = "..." if end < len(asst) else ""
+                    return f"{header}\nAssistant: {prefix}{snippet}{suffix}"
+            # Fall back to user text only for journal entries or user-heavy turns
+            if len(user) > 300 and chunk.turn_index < 0:
+                span = self._find_query_span(query, user)
+                if span:
+                    begin, end = span
+                    snippet = user[begin:end].strip()
+                    prefix = "..." if begin > 0 else ""
+                    suffix = "..." if end < len(user) else ""
                     return f"{header}\n{prefix}{snippet}{suffix}"
 
         parts = [header]

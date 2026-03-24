@@ -2203,6 +2203,57 @@ def test_format_chunk_block_with_query_snippets():
     assert "Assistant:" in block_without_query
 
 
+def test_format_chunk_block_prefers_assistant_over_user():
+    """Snippet extraction prefers assistant text over user question.
+
+    Regression test for Atlas's review: concatenated user+assistant scoring
+    would anchor on the user question and clip the actual answer evidence.
+    """
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T00:00:00Z",
+            turn_index=0,
+            user_text="What did Caroline say about adoption at therapy last week?",
+            assistant_text=(
+                "She paused for a while before answering and talked through "
+                "several unrelated details about the week. "
+                "She mentioned that the commute to the office had been terrible "
+                "because of the construction on Highway 101. "
+                "She also talked about a new recipe she tried for dinner. "
+                "The weather had been unusually cold for this time of year. "
+                "She described a movie she watched over the weekend in detail. "
+                "Later she explained that counseling had made the decision feel "
+                "less overwhelming and that she now had a concrete plan to "
+                "pursue adoption. "
+                "She also said the therapy session reduced her anxiety about "
+                "the whole process significantly. "
+                "After that she shifted topics to discuss her garden project. "
+                "She planted tomatoes and basil in the raised beds last Sunday. "
+                "The neighborhood association meeting was also brought up. "
+                "She mentioned they discussed parking regulations at length. "
+                "Finally she said she was looking forward to the weekend trip."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    block = index._format_chunk_block(0, query="Caroline adoption therapy last week")
+    # Must contain the actual answer evidence from assistant, not just the question
+    assert "adoption" in block
+    assert "concrete plan" in block or "counseling" in block
+    # Should be a snippet (shorter than full turn)
+    full_block = index._format_chunk_block(0)
+    assert len(block) < len(full_block)
+
+
 def test_format_chunk_block_query_no_match_falls_back():
     """When query doesn't match well, falls back to full turn format."""
     chunks = [
