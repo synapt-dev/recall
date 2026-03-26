@@ -1140,13 +1140,14 @@ def recall_correct(
 ) -> str:
     """Capture a user correction as benchmark data and update knowledge.
 
-    Call this when a user corrects a wrong answer from recall. It does two
-    things in one call:
+    Call this when a user corrects a wrong answer from recall. It does
+    three things in one call:
 
     1. Logs the correction to `.synapt/recall/corrections.jsonl` for
        benchmark use (question + wrong + correct + category + timestamp)
-    2. Flags a knowledge contradiction so the wrong information gets
-       superseded by the correct answer
+    2. Immediately creates a high-confidence knowledge node with the
+       correct answer (no contradiction queue — corrections are pre-confirmed)
+    3. Supersedes any existing knowledge node containing the wrong answer
 
     Args:
         question: The question that was answered incorrectly.
@@ -1166,12 +1167,52 @@ def recall_correct(
             category=category,
         )
 
-        # Step 2: Flag a contradiction to update knowledge
-        contradict_result = recall_contradict(
-            action="flag",
-            claim=correct_answer,
-            reason=f"User correction: was \"{wrong_answer}\"",
+        # Step 2: Immediately create a knowledge node (bypass contradiction queue)
+        # User corrections are already confirmed — no need for a second confirmation step.
+        from synapt.recall.knowledge import KnowledgeNode, append_node
+        node_content = f"{correct_answer} (re: {question})"
+        node_category = category if category else "fact"
+        node = KnowledgeNode.create(
+            content=node_content,
+            category=node_category,
+            confidence=0.9,  # High confidence — human-verified correction
         )
+        kn_path = append_node(node)
+
+        # Step 3: Sync to DB so the node is immediately searchable
+        try:
+            from synapt.recall.consolidate import _sync_knowledge_to_db
+            from synapt.recall.core import project_data_dir
+            project_dir = project_data_dir()
+            _sync_knowledge_to_db(project_dir, kn_path)
+            synced = "  Synced to search index."
+        except Exception:
+            synced = "  (Will sync on next consolidation.)"
+
+        # Step 4: Search for and supersede any matching wrong knowledge node
+        supersede_note = ""
+        try:
+            from synapt.recall.knowledge import read_nodes, update_node
+            existing = read_nodes(kn_path, status="active")
+            for existing_node in existing:
+                if existing_node.id == node.id:
+                    continue
+                # Check if existing node matches the wrong answer
+                # Require minimum length to avoid overly broad substring matches
+                if len(wrong_answer) >= 5 and wrong_answer.lower() in existing_node.content.lower():
+                    update_node(
+                        existing_node.id,
+                        {
+                            "status": "contradicted",
+                            "superseded_by": node.id,
+                            "contradiction_note": f"Corrected by user: {correct_answer}",
+                        },
+                        kn_path,
+                    )
+                    supersede_note = f"\n  Superseded old node: {existing_node.content[:60]}"
+                    break
+        except Exception:
+            pass
 
         return (
             f"Correction captured:\n"
@@ -1179,7 +1220,8 @@ def recall_correct(
             f"  Wrong: {wrong_answer}\n"
             f"  Correct: {correct_answer}\n"
             f"  Logged to: {path.name}\n"
-            f"  {contradict_result}"
+            f"  Knowledge node created: {node.id}\n"
+            f"{synced}{supersede_note}"
         )
     except Exception as exc:
         return f"Failed to capture correction: {exc}"
