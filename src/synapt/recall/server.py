@@ -1132,6 +1132,59 @@ def format_contradictions_for_session_start() -> str:
         return ""
 
 
+def recall_correct(
+    question: str,
+    wrong_answer: str,
+    correct_answer: str,
+    category: str = "",
+) -> str:
+    """Capture a user correction as benchmark data and update knowledge.
+
+    Call this when a user corrects a wrong answer from recall. It does two
+    things in one call:
+
+    1. Logs the correction to `.synapt/recall/corrections.jsonl` for
+       benchmark use (question + wrong + correct + category + timestamp)
+    2. Flags a knowledge contradiction so the wrong information gets
+       superseded by the correct answer
+
+    Args:
+        question: The question that was answered incorrectly.
+        wrong_answer: The incorrect answer that was given.
+        correct_answer: The correct/updated answer from the user.
+        category: Optional category (e.g., "convention", "factual",
+                  "temporal", "debug", "architecture").
+    """
+    from synapt.recall.corrections import log_correction
+
+    try:
+        # Step 1: Log the correction for benchmark data
+        path = log_correction(
+            question=question,
+            wrong_answer=wrong_answer,
+            correct_answer=correct_answer,
+            category=category,
+        )
+
+        # Step 2: Flag a contradiction to update knowledge
+        contradict_result = recall_contradict(
+            action="flag",
+            claim=correct_answer,
+            reason=f"User correction: was \"{wrong_answer}\"",
+        )
+
+        return (
+            f"Correction captured:\n"
+            f"  Q: {question}\n"
+            f"  Wrong: {wrong_answer}\n"
+            f"  Correct: {correct_answer}\n"
+            f"  Logged to: {path.name}\n"
+            f"  {contradict_result}"
+        )
+    except Exception as exc:
+        return f"Failed to capture correction: {exc}"
+
+
 def recall_context(
     chunk_id: str | None = None,
     cluster_id: str | None = None,
@@ -1887,6 +1940,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(recall_enrich)
     mcp.tool()(recall_consolidate)
     mcp.tool()(_with_directive_check(recall_contradict))
+    mcp.tool()(_with_directive_check(recall_correct))
     mcp.tool()(_with_directive_check(recall_context))
     mcp.tool()(_with_directive_check(recall_timeline))
     mcp.tool()(_with_directive_check(recall_channel))
