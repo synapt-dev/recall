@@ -1198,7 +1198,8 @@ def recall_correct(
                 if existing_node.id == node.id:
                     continue
                 # Check if existing node matches the wrong answer
-                if wrong_answer.lower() in existing_node.content.lower():
+                # Require minimum length to avoid overly broad substring matches
+                if len(wrong_answer) >= 5 and wrong_answer.lower() in existing_node.content.lower():
                     update_node(
                         existing_node.id,
                         {
