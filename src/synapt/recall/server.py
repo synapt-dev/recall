@@ -1550,7 +1550,7 @@ def recall_channel(
     Args:
         action: "join", "leave", "post", "read", "who", "heartbeat", "unread",
                 "pin", "directive", "mute", "unmute", "kick", "broadcast",
-                "list", "search".
+                "list", "search", "rename", "claim", "unclaim", "intent".
         channel: Channel name (default "dev"). Any name works -- created on first post.
         message: Message body (required for "post", "directive", "broadcast" actions).
         to: Target agent for "directive" action.
@@ -1560,6 +1560,11 @@ def recall_channel(
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
         attachments: Semicolon-separated file paths to attach (copied into channel store on post).
         show_pins: If False with "read" action, omit pinned messages from output (default True).
+
+    Coordination actions:
+        claim: Claim a message/task by message_id (prevents duplicate work).
+        unclaim: Release a previously claimed message_id.
+        intent: Declare intent to create something (message = description of planned work).
     """
     try:
         from synapt.recall.channel import (
