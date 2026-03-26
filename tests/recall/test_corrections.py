@@ -107,5 +107,104 @@ class TestReadCorrections(unittest.TestCase):
         self.assertEqual(len(entries), 2)
 
 
+class TestRecallCorrectTool(unittest.TestCase):
+    """Test the recall_correct MCP tool end-to-end."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project = Path(self.tmpdir) / "project"
+        self.project.mkdir()
+
+    def test_recall_correct_logs_and_contradicts(self):
+        """recall_correct both logs the correction AND flags a contradiction."""
+        from synapt.recall.server import recall_correct
+
+        with patch("synapt.recall.corrections.project_data_dir",
+                    return_value=self.project), \
+             patch("synapt.recall.server.recall_contradict",
+                    return_value="Contradiction flagged (#1)") as mock_contradict:
+            result = recall_correct(
+                question="What model does CodeMemo use?",
+                wrong_answer="claude-haiku",
+                correct_answer="gpt-5-mini",
+                category="convention",
+            )
+
+        # Verify logging happened
+        with patch("synapt.recall.corrections.project_data_dir",
+                    return_value=self.project):
+            entries = read_corrections(project=self.project)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["question"], "What model does CodeMemo use?")
+        self.assertEqual(entries[0]["correct_answer"], "gpt-5-mini")
+
+        # Verify contradiction was flagged
+        mock_contradict.assert_called_once_with(
+            action="flag",
+            claim="gpt-5-mini",
+            reason='User correction: was "claude-haiku"',
+        )
+
+        # Verify result message
+        self.assertIn("Correction captured", result)
+        self.assertIn("gpt-5-mini", result)
+        self.assertIn("claude-haiku", result)
+        self.assertIn("Contradiction flagged", result)
+
+    def test_recall_correct_includes_category_in_log(self):
+        """Category is preserved in the correction log."""
+        from synapt.recall.server import recall_correct
+
+        with patch("synapt.recall.corrections.project_data_dir",
+                    return_value=self.project), \
+             patch("synapt.recall.server.recall_contradict",
+                    return_value="No matching nodes found"):
+            recall_correct(
+                question="When was the merge freeze?",
+                wrong_answer="March 1",
+                correct_answer="March 5",
+                category="temporal",
+            )
+
+        with patch("synapt.recall.corrections.project_data_dir",
+                    return_value=self.project):
+            entries = read_corrections(project=self.project)
+        self.assertEqual(entries[0]["category"], "temporal")
+
+    def test_recall_correct_handles_contradict_failure(self):
+        """recall_correct still logs even if contradiction fails."""
+        from synapt.recall.server import recall_correct
+
+        with patch("synapt.recall.corrections.project_data_dir",
+                    return_value=self.project), \
+             patch("synapt.recall.server.recall_contradict",
+                    side_effect=Exception("index not loaded")):
+            result = recall_correct(
+                question="Q",
+                wrong_answer="wrong",
+                correct_answer="right",
+            )
+
+        # Should report failure but not crash
+        self.assertIn("Failed", result)
+
+    def test_recall_correct_reason_includes_wrong_answer(self):
+        """The contradiction reason references the original wrong answer."""
+        from synapt.recall.server import recall_correct
+
+        with patch("synapt.recall.corrections.project_data_dir",
+                    return_value=self.project), \
+             patch("synapt.recall.server.recall_contradict",
+                    return_value="ok") as mock_contradict:
+            recall_correct(
+                question="Q",
+                wrong_answer="old info",
+                correct_answer="new info",
+            )
+
+        call_kwargs = mock_contradict.call_args
+        self.assertIn("old info", call_kwargs.kwargs.get("reason", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
