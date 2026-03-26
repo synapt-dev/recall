@@ -1,0 +1,16 @@
+{
+  "codememo": {
+    "judge_model": "gpt-5-mini",
+    "enrichment_model": "mlx-community/Ministral-3-3B-Instruct-2512-4bit",
+    "enrichment_backend": "mlx"
+  },
+  "locomo": {
+    "judge_model": "gpt-4o-mini",
+    "enrichment_model": "mistralai/Ministral-8B-Instruct-2410",
+    "enrichment_backend": "modal",
+    "flags": {
+      "max_knowledge": 3,
+      "disable_boosts": true
+    }
+  }
+}

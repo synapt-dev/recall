@@ -1432,9 +1432,19 @@ def main():
         "--knowledge-boost", type=float, default=None,
         help="Override knowledge node boost factor",
     )
+    # Load default judge model from eval_config.json if available
+    _eval_config_model = "gpt-4o-mini"
+    _eval_config_path = Path(__file__).parent.parent / "eval_config.json"
+    if _eval_config_path.exists():
+        try:
+            _eval_config_model = json.loads(_eval_config_path.read_text()).get(
+                "codememo", {}
+            ).get("judge_model", _eval_config_model)
+        except Exception:
+            pass
     parser.add_argument(
-        "--model", type=str, default="gpt-4o-mini",
-        help="OpenAI model for answer generation and judging (default: gpt-4o-mini)",
+        "--model", type=str, default=_eval_config_model,
+        help=f"OpenAI model for answer generation and judging (default: {_eval_config_model} from eval_config.json)",
     )
     parser.add_argument(
         "--work-dir", type=str, default="",
