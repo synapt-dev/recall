@@ -2160,8 +2160,9 @@ def test_find_query_span_multi_sentence_window():
     assert "migration" in snippet
 
 
-def test_format_chunk_block_with_query_snippets():
-    """_format_chunk_block emits focused snippet when query matches a subspan."""
+def test_format_chunk_block_with_query_snippets(monkeypatch):
+    """_format_chunk_block emits focused snippet when SYNAPT_ENABLE_SNIPPETS=1."""
+    monkeypatch.setenv("SYNAPT_ENABLE_SNIPPETS", "1")
     chunks = [
         TranscriptChunk(
             id="s001:t0",
@@ -2203,12 +2204,13 @@ def test_format_chunk_block_with_query_snippets():
     assert "Assistant:" in block_without_query
 
 
-def test_format_chunk_block_prefers_assistant_over_user():
+def test_format_chunk_block_prefers_assistant_over_user(monkeypatch):
     """Snippet extraction prefers assistant text over user question.
 
     Regression test for Atlas's review: concatenated user+assistant scoring
     would anchor on the user question and clip the actual answer evidence.
     """
+    monkeypatch.setenv("SYNAPT_ENABLE_SNIPPETS", "1")
     chunks = [
         TranscriptChunk(
             id="s001:t0",

@@ -3412,7 +3412,10 @@ class TranscriptIndex:
 
         # Query-aware snippet extraction: prefer assistant text (where
         # evidence lives) over user text (which just echoes the question).
-        if query:
+        # Disabled by default — saves only 3.4% tokens but clips evidence
+        # that retrieval scoring and answer generation need. See #344.
+        # Enable with SYNAPT_ENABLE_SNIPPETS=1 for token-constrained use.
+        if query and os.environ.get("SYNAPT_ENABLE_SNIPPETS"):
             asst = chunk.assistant_text or ""
             user = chunk.user_text or ""
             # Try assistant text first — that's the evidence source
