@@ -115,14 +115,15 @@ class TestRecallCorrectTool(unittest.TestCase):
         self.project = Path(self.tmpdir) / "project"
         self.project.mkdir()
 
-    def test_recall_correct_logs_and_contradicts(self):
-        """recall_correct both logs the correction AND flags a contradiction."""
+    def test_recall_correct_logs_and_creates_node(self):
+        """recall_correct both logs the correction AND creates a knowledge node."""
         from synapt.recall.server import recall_correct
 
+        kn_path = self.project / "recall" / "knowledge.jsonl"
         with patch("synapt.recall.corrections.project_data_dir",
                     return_value=self.project), \
-             patch("synapt.recall.server.recall_contradict",
-                    return_value="Contradiction flagged (#1)") as mock_contradict:
+             patch("synapt.recall.knowledge._knowledge_path",
+                    return_value=kn_path):
             result = recall_correct(
                 question="What model does CodeMemo use?",
                 wrong_answer="claude-haiku",
@@ -138,18 +139,14 @@ class TestRecallCorrectTool(unittest.TestCase):
         self.assertEqual(entries[0]["question"], "What model does CodeMemo use?")
         self.assertEqual(entries[0]["correct_answer"], "gpt-5-mini")
 
-        # Verify contradiction was flagged
-        mock_contradict.assert_called_once_with(
-            action="flag",
-            claim="gpt-5-mini",
-            reason='User correction: was "claude-haiku"',
-        )
+        # Verify knowledge node was created (not a contradiction)
+        self.assertIn("Knowledge node created", result)
+        self.assertNotIn("contradiction", result.lower())
 
         # Verify result message
         self.assertIn("Correction captured", result)
         self.assertIn("gpt-5-mini", result)
         self.assertIn("claude-haiku", result)
-        self.assertIn("Contradiction flagged", result)
 
     def test_recall_correct_includes_category_in_log(self):
         """Category is preserved in the correction log."""
@@ -171,39 +168,47 @@ class TestRecallCorrectTool(unittest.TestCase):
             entries = read_corrections(project=self.project)
         self.assertEqual(entries[0]["category"], "temporal")
 
-    def test_recall_correct_handles_contradict_failure(self):
-        """recall_correct still logs even if contradiction fails."""
+    def test_recall_correct_creates_knowledge_node(self):
+        """recall_correct immediately creates a knowledge node."""
         from synapt.recall.server import recall_correct
 
+        kn_path = self.project / "recall" / "knowledge.jsonl"
         with patch("synapt.recall.corrections.project_data_dir",
                     return_value=self.project), \
-             patch("synapt.recall.server.recall_contradict",
-                    side_effect=Exception("index not loaded")):
+             patch("synapt.recall.knowledge._knowledge_path",
+                    return_value=kn_path):
             result = recall_correct(
-                question="Q",
-                wrong_answer="wrong",
-                correct_answer="right",
+                question="What model do we use?",
+                wrong_answer="wrong-model",
+                correct_answer="right-model",
+                category="convention",
             )
 
-        # Should report failure but not crash
-        self.assertIn("Failed", result)
+        self.assertIn("Knowledge node created", result)
+        self.assertNotIn("Failed", result)
+        # Verify the knowledge node was actually written
+        self.assertTrue(kn_path.exists())
 
-    def test_recall_correct_reason_includes_wrong_answer(self):
-        """The contradiction reason references the original wrong answer."""
+    def test_recall_correct_node_content_includes_context(self):
+        """Knowledge node content includes both answer and question context."""
         from synapt.recall.server import recall_correct
 
+        kn_path = self.project / "recall" / "knowledge.jsonl"
         with patch("synapt.recall.corrections.project_data_dir",
                     return_value=self.project), \
-             patch("synapt.recall.server.recall_contradict",
-                    return_value="ok") as mock_contradict:
-            recall_correct(
-                question="Q",
-                wrong_answer="old info",
-                correct_answer="new info",
+             patch("synapt.recall.knowledge._knowledge_path",
+                    return_value=kn_path):
+            result = recall_correct(
+                question="What judge for LOCOMO?",
+                wrong_answer="haiku",
+                correct_answer="gpt-4o-mini",
             )
 
-        call_kwargs = mock_contradict.call_args
-        self.assertIn("old info", call_kwargs.kwargs.get("reason", ""))
+        # Result should include the correct answer and mention knowledge node
+        self.assertIn("gpt-4o-mini", result)
+        self.assertIn("Knowledge node created", result)
+        # Should NOT mention contradiction queue
+        self.assertNotIn("contradiction", result.lower())
 
 
 if __name__ == "__main__":
