@@ -122,7 +122,8 @@ Add to `~/.config/opencode/opencode.json`:
 - **28x more token-efficient than context-stuffing** — Retrieves ~1,800 tokens per query (only relevant chunks) vs ~50,000 for systems that inject all memories every turn. Your context window stays free for actual work.
 - **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
 - **MCP server** — 18 tools for Claude Code integration: search, journal, channels, reminders, portable archive export/import, knowledge, and more.
-- **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, and coordinate work across worktrees.
+- **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, pin important results, and coordinate work across worktrees.
+- **Intent claiming** — Agents claim tasks (`claim`), declare intent (`intent`), and release work (`unclaim`) to prevent duplicate effort in multi-agent teams.
 - **Directive notifications** — Targeted directives are automatically surfaced in MCP tool responses. Broadcast directives (`to="*"`) reach all agents.
 - **Contradiction flagging** — Flag conflicting information from free text or search results. Auto-matches existing knowledge nodes via FTS, creates new nodes on resolution.
 - **Codex CLI support** — Indexes Codex transcripts from `~/.codex/sessions/` automatically. Cross-editor memory between Claude Code and Codex.
@@ -148,9 +149,71 @@ Add to `~/.config/opencode/opencode.json`:
 | `recall_enrich` | LLM-powered chunk summarization |
 | `recall_consolidate` | Extract knowledge from journals |
 | `recall_contradict` | Flag contradictions in knowledge (supports free-text claims) |
-| `recall_channel` | Cross-session agent communication (post, read, directives, who) |
+| `recall_channel` | Cross-session agent communication (post, read, directives, claim, intent, who) |
 | `recall_quick` | Fast knowledge check (no transcript chunks) |
 | `recall_reload` | Restart MCP server to pick up code changes |
+
+## Agent channels
+
+The `recall_channel` tool provides multi-agent coordination across sessions and worktrees. Channels are append-only JSONL files with SQLite state — no daemon needed.
+
+### Basic communication
+
+```python
+recall_channel(action="join", channel="dev", name="Apollo")
+recall_channel(action="post", channel="dev", message="Starting work on #336")
+recall_channel(action="read", channel="dev", limit=10)
+recall_channel(action="unread", channel="dev")  # Only new messages since last read
+```
+
+### Coordination
+
+```python
+# Directives — targeted messages that auto-surface in MCP responses
+recall_channel(action="directive", channel="dev", to="Sentinel", message="Review PR #340")
+
+# Broadcast — reaches all agents
+recall_channel(action="broadcast", channel="dev", message="v0.7.8 released")
+
+# Pin important results
+recall_channel(action="post", channel="dev", message="Eval results: 74.61%", pin=True)
+```
+
+### Intent claiming — prevent duplicate work
+
+```python
+# Claim a task (by message_id) so other agents know you're on it
+recall_channel(action="claim", channel="dev", message="m_abc123")
+
+# Declare intent before starting work
+recall_channel(action="intent", channel="dev", message="Working on knowledge dedup overhaul")
+
+# Release when done or blocked
+recall_channel(action="unclaim", channel="dev", message="m_abc123")
+```
+
+### All actions
+
+| Action | Description |
+|--------|-------------|
+| `join` | Join a channel (set display name) |
+| `leave` | Leave a channel |
+| `post` | Post a message (optionally pin) |
+| `read` | Read recent messages |
+| `unread` | Read only new messages since last read |
+| `who` | List active agents |
+| `heartbeat` | Update presence |
+| `pin` | Pin a message by ID |
+| `directive` | Send a targeted directive to a specific agent |
+| `broadcast` | Send to all agents |
+| `claim` | Claim a message/task to prevent duplicate work |
+| `unclaim` | Release a claimed task |
+| `intent` | Declare what you're about to work on |
+| `mute` / `unmute` | Mute/unmute an agent |
+| `kick` | Remove an agent from channel |
+| `list` | List available channels |
+| `search` | Search channel messages |
+| `rename` | Rename your display name |
 
 ## CLI reference
 
