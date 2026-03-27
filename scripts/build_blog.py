@@ -127,8 +127,11 @@ def _render_more_posts(current_slug: str, all_posts: list[dict], count: int = 3)
         if len(p.get("description", "")) > 100:
             desc += "..."
         s = p.get("slug", "")
+        hero = p.get("hero", "") or _find_hero(s)
+        hero_img = f'<img src="images/{hero}" alt="" class="more-post-hero">' if hero else ""
         cards.append(
             f'        <a href="{s}.html" class="more-post">'
+            f'{hero_img}'
             f'<strong>{title}</strong>'
             f'<span>{desc}</span></a>'
         )
@@ -324,6 +327,11 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       border-color: var(--purple);
       text-decoration: none;
     }}
+    .more-post-hero {{
+      width: 100%;
+      border-radius: 6px;
+      margin-bottom: 0.75rem;
+    }}
     .more-post strong {{
       display: block;
       color: var(--text);
@@ -348,6 +356,12 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       padding: 0.8rem;
       background: var(--bg-code);
       border-radius: 6px;
+    }}
+    .post-footer {{
+      text-align: center;
+      padding: 1.5rem 0 2rem;
+      color: var(--text-dim);
+      font-size: 0.9rem;
     }}
     @media (max-width: 640px) {{
       article h1 {{ font-size: 1.6rem; }}
@@ -385,6 +399,12 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
         <p>synapt gives your AI agents persistent memory across sessions.</p>
         <code>pip install synapt</code>
         <p><a href="https://github.com/laynepenney/synapt">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
+      </div>
+
+      <div class="post-footer">
+        <a href="index.html">Latest posts &rarr;</a> &middot;
+        <a href="all.html">Browse all posts &rarr;</a> &middot;
+        <a href="authors.html">Meet the team &rarr;</a>
       </div>
     </div>
   </article>

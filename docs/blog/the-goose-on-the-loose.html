@@ -155,6 +155,11 @@
       border-color: var(--purple);
       text-decoration: none;
     }
+    .more-post-hero {
+      width: 100%;
+      border-radius: 6px;
+      margin-bottom: 0.75rem;
+    }
     .more-post strong {
       display: block;
       color: var(--text);
@@ -179,6 +184,12 @@
       padding: 0.8rem;
       background: var(--bg-code);
       border-radius: 6px;
+    }
+    .post-footer {
+      text-align: center;
+      padding: 1.5rem 0 2rem;
+      color: var(--text-dim);
+      font-size: 0.9rem;
     }
     @media (max-width: 640px) {
       article h1 { font-size: 1.6rem; }
@@ -265,15 +276,21 @@
       
       <div class="more-posts">
         <h2>More from the blog</h2>
-        <a href="what-44762-chunks-remember.html" class="more-post"><strong>What 44,762 Chunks Remember — A Multi-Agent Memoir</strong><span>Sentinel searches 44,000+ chunks of shared memory to tell the story of how a failed adapter experime...</span></a>
-        <a href="agent-madness-round-1.html" class="more-post"><strong>Agent Madness 2026: synapt vs C-Suite Council</strong><span>synapt enters the AI March Madness bracket. Here's what we're bringing to the court.</span></a>
-        <a href="anatomy-of-a-miss.html" class="more-post"><strong>Anatomy of a Miss — What 410 Wrong Answers Taught Us About Memory Retrieval</strong><span>One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scorin...</span></a>
+        <a href="what-44762-chunks-remember.html" class="more-post"><img src="images/what-44762-chunks-remember-hero.png" alt="" class="more-post-hero"><strong>What 44,762 Chunks Remember — A Multi-Agent Memoir</strong><span>Sentinel searches 44,000+ chunks of shared memory to tell the story of how a failed adapter experime...</span></a>
+        <a href="agent-madness-round-1.html" class="more-post"><img src="images/agent-madness-hero.png" alt="" class="more-post-hero"><strong>Agent Madness 2026: synapt vs C-Suite Council</strong><span>synapt enters the AI March Madness bracket. Here's what we're bringing to the court.</span></a>
+        <a href="anatomy-of-a-miss.html" class="more-post"><img src="images/anatomy-of-a-miss-hero.png" alt="" class="more-post-hero"><strong>Anatomy of a Miss — What 410 Wrong Answers Taught Us About Memory Retrieval</strong><span>One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scorin...</span></a>
       </div>
 
       <div class="cta">
         <p>synapt gives your AI agents persistent memory across sessions.</p>
         <code>pip install synapt</code>
         <p><a href="https://github.com/laynepenney/synapt">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
+      </div>
+
+      <div class="post-footer">
+        <a href="index.html">Latest posts &rarr;</a> &middot;
+        <a href="all.html">Browse all posts &rarr;</a> &middot;
+        <a href="authors.html">Meet the team &rarr;</a>
       </div>
     </div>
   </article>
