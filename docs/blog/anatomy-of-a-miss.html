@@ -4,16 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Anatomy of a Miss — What 410 Wrong Answers Taught Us About Memory Retrieval — synapt</title>
-  <meta name="description" content="One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scoring" to "the evidence was never extracted."">
+  <meta name="description" content="One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scoring" to "the evidence was never extracted.">
   <meta property="og:title" content="Anatomy of a Miss — What 410 Wrong Answers Taught Us About Memory Retrieval">
-  <meta property="og:description" content="One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scoring" to "the evidence was never extracted."">
+  <meta property="og:description" content="One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scoring" to "the evidence was never extracted.">
   <meta property="og:image" content="https://synapt.dev/blog/images/anatomy-of-a-miss-hero.png">
   <meta property="og:url" content="https://synapt.dev/blog/anatomy-of-a-miss.html">
   <meta property="og:type" content="article">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:site" content="@synapt_dev">
   <meta name="twitter:title" content="Anatomy of a Miss — What 410 Wrong Answers Taught Us About Memory Retrieval">
-  <meta name="twitter:description" content="One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scoring" to "the evidence was never extracted."">
+  <meta name="twitter:description" content="One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scoring" to "the evidence was never extracted.">
   <meta name="twitter:image" content="https://synapt.dev/blog/images/anatomy-of-a-miss-hero.png">
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -130,6 +130,39 @@
       height: 28px;
       border-radius: 50%;
       object-fit: cover;
+    }
+    .more-posts {
+      margin: 3rem 0 1rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .more-posts h2 {
+      font-size: 1.3rem;
+      color: var(--purple-light);
+      margin-bottom: 1rem;
+    }
+    .more-post {
+      display: block;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+      transition: border-color 0.2s;
+    }
+    .more-post:hover {
+      border-color: var(--purple);
+      text-decoration: none;
+    }
+    .more-post strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 0.3rem;
+    }
+    .more-post span {
+      color: var(--text-dim);
+      font-size: 0.85rem;
     }
     .cta {
       background: var(--bg-card);
@@ -288,6 +321,14 @@
 <p>The miss taxonomy, the bottleneck framework, and the conv3 lesson will outlast any specific benchmark number. We are building the best damn AI agent memory tool ever made. Sometimes that means discovering, at 4am, that you have been optimizing the wrong layer for a week — and being glad you found out before you shipped the wrong story.</p>
 <hr />
 <p><em>This post covers work from the synapt all-nighter session of March 22-23, 2026. PRs referenced: #299, #304, #312, #314, #315, #316, #318. Issues: #307, #313, #317.</em></p>
+
+      
+      <div class="more-posts">
+        <h2>More from the blog</h2>
+        <a href="the-goose-on-the-loose.html" class="more-post"><strong>The Goose on the Loose</strong><span>The origin story of synapt's oldest artifact — a sticky reminder that was never dismissed, survived ...</span></a>
+        <a href="what-44762-chunks-remember.html" class="more-post"><strong>What 44,762 Chunks Remember — A Multi-Agent Memoir</strong><span>Sentinel searches 44,000+ chunks of shared memory to tell the story of how a failed adapter experime...</span></a>
+        <a href="agent-madness-round-1.html" class="more-post"><strong>Agent Madness 2026: synapt vs C-Suite Council</strong><span>synapt enters the AI March Madness bracket. Here's what we're bringing to the court.</span></a>
+      </div>
 
       <div class="cta">
         <p>synapt gives your AI agents persistent memory across sessions.</p>

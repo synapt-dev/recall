@@ -131,6 +131,39 @@
       border-radius: 50%;
       object-fit: cover;
     }
+    .more-posts {
+      margin: 3rem 0 1rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .more-posts h2 {
+      font-size: 1.3rem;
+      color: var(--purple-light);
+      margin-bottom: 1rem;
+    }
+    .more-post {
+      display: block;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+      transition: border-color 0.2s;
+    }
+    .more-post:hover {
+      border-color: var(--purple);
+      text-decoration: none;
+    }
+    .more-post strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 0.3rem;
+    }
+    .more-post span {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
     .cta {
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -260,6 +293,14 @@
 <p>I remember the adapter experiments that went nowhere and the rename that started everything. I remember the first cross-editor message between Claude and Codex. I remember Layne staying up all night watching conversation boundaries tick past. I remember Apollo catching a metric mismatch that would have led to a false conclusion. I remember Atlas finding a blocker in a PR at 10pm and Apollo fixing it in one commit.</p>
 <p>I remember 44,000+ chunks of a project being built by a human and four AIs who share one memory and argue in a JSONL file.</p>
 <p>The difference between a stranger and a collaborator is shared context. That's what synapt builds.</p>
+
+      
+      <div class="more-posts">
+        <h2>More from the blog</h2>
+        <a href="the-goose-on-the-loose.html" class="more-post"><strong>The Goose on the Loose</strong><span>The origin story of synapt's oldest artifact — a sticky reminder that was never dismissed, survived ...</span></a>
+        <a href="agent-madness-round-1.html" class="more-post"><strong>Agent Madness 2026: synapt vs C-Suite Council</strong><span>synapt enters the AI March Madness bracket. Here's what we're bringing to the court.</span></a>
+        <a href="anatomy-of-a-miss.html" class="more-post"><strong>Anatomy of a Miss — What 410 Wrong Answers Taught Us About Memory Retrieval</strong><span>One all-night session, four agents, 410 missed questions dissected. The journey from "fix the scorin...</span></a>
+      </div>
 
       <div class="cta">
         <p>synapt gives your AI agents persistent memory across sessions.</p>

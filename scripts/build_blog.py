@@ -96,12 +96,44 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         line = line.strip()
         if ":" in line:
             key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip()
+            meta[key.strip()] = value.strip().strip('"').strip("'")
 
     return meta, body
 
 
-def render_post_html(meta: dict, body_html: str, slug: str) -> str:
+def _render_more_posts(current_slug: str, all_posts: list[dict], count: int = 3) -> str:
+    """Render a 'More from the blog' section with links to other posts."""
+    if not all_posts:
+        return ""
+    # Sort by date descending, exclude current post
+    others = [p for p in all_posts if p.get("slug") != current_slug]
+    others.sort(key=lambda p: p.get("date", ""), reverse=True)
+    # Pick up to `count` posts
+    picks = others[:count]
+    if not picks:
+        return ""
+
+    cards = []
+    for p in picks:
+        title = p.get("title", "Untitled")
+        desc = p.get("description", "")[:100]
+        if len(p.get("description", "")) > 100:
+            desc += "..."
+        s = p.get("slug", "")
+        cards.append(
+            f'        <a href="{s}.html" class="more-post">'
+            f'<strong>{title}</strong>'
+            f'<span>{desc}</span></a>'
+        )
+
+    return f"""
+      <div class="more-posts">
+        <h2>More from the blog</h2>
+{chr(10).join(cards)}
+      </div>"""
+
+
+def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict] | None = None) -> str:
     """Render a full blog post HTML page."""
     title = meta.get("title", "Untitled")
     description = meta.get("description", "")
@@ -123,6 +155,8 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
     og_image = f"images/{hero}" if hero else f"images/{slug}-hero.jpg"
 
     author_meta = _render_author_meta(meta, link_authors=True)
+
+    more_posts_html = _render_more_posts(slug, all_posts or [])
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -257,6 +291,39 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
       border-radius: 50%;
       object-fit: cover;
     }}
+    .more-posts {{
+      margin: 3rem 0 1rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }}
+    .more-posts h2 {{
+      font-size: 1.3rem;
+      color: var(--purple-light);
+      margin-bottom: 1rem;
+    }}
+    .more-post {{
+      display: block;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+      transition: border-color 0.2s;
+    }}
+    .more-post:hover {{
+      border-color: var(--purple);
+      text-decoration: none;
+    }}
+    .more-post strong {{
+      display: block;
+      color: var(--text);
+      margin-bottom: 0.3rem;
+    }}
+    .more-post span {{
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }}
     .cta {{
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -303,6 +370,8 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
 
       {body_html}
 
+      {more_posts_html}
+
       <div class="cta">
         <p>synapt gives your AI agents persistent memory across sessions.</p>
         <code>pip install synapt</code>
@@ -314,7 +383,7 @@ def render_post_html(meta: dict, body_html: str, slug: str) -> str:
 </html>"""
 
 
-def build_post(md_path: Path, force: bool = False, dry_run: bool = False) -> bool:
+def build_post(md_path: Path, force: bool = False, dry_run: bool = False, all_posts: list[dict] | None = None) -> bool:
     """Build a single blog post. Returns True if built."""
     slug = md_path.stem
     html_path = md_path.parent / f"{slug}.html"
@@ -338,7 +407,7 @@ def build_post(md_path: Path, force: bool = False, dry_run: bool = False) -> boo
     md = markdown.Markdown(extensions=["tables", "fenced_code", "codehilite"])
     body_html = md.convert(body_md)
 
-    html = render_post_html(meta, body_html, slug)
+    html = render_post_html(meta, body_html, slug, all_posts=all_posts)
 
     if dry_run:
         print(f"  Would build: {slug}.html ({len(html)} bytes)")
@@ -792,8 +861,9 @@ def main() -> int:
         return 1
 
     print(f"[build_blog] Scanning {len(md_files)} markdown files...")
+
+    # Pass 1: collect all post metadata (need full list for "More from the blog")
     all_posts: list[dict] = []
-    built = 0
     for md_path in md_files:
         text = md_path.read_text(encoding="utf-8")
         meta, body_md = parse_frontmatter(text)
@@ -804,14 +874,18 @@ def main() -> int:
         slug = md_path.stem
         meta["slug"] = slug
         all_posts.append(meta)
-        if build_post(md_path, force=args.force, dry_run=args.dry_run):
-            built += 1
 
     # Add legacy posts (hand-crafted HTML without markdown sources)
     md_slugs = {p["slug"] for p in all_posts}
     for legacy in LEGACY_POSTS:
         if legacy["slug"] not in md_slugs:
             all_posts.append(legacy)
+
+    # Pass 2: build posts with full post list for cross-linking
+    built = 0
+    for md_path in md_files:
+        if build_post(md_path, force=args.force, dry_run=args.dry_run, all_posts=all_posts):
+            built += 1
 
     # Always rebuild blog indexes + root index
     build_index(all_posts, dry_run=args.dry_run)
