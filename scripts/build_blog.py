@@ -75,6 +75,13 @@ def _render_author_meta(post: dict, *, link_authors: bool = False) -> str:
     return " ".join(parts)
 
 
+def _find_hero(slug: str) -> str:
+    """Find the hero image file for a slug, checking .png then .jpg."""
+    for ext in (".png", ".jpg"):
+        if (IMAGES_DIR / f"{slug}-hero{ext}").exists():
+            return f"{slug}-hero{ext}"
+    return ""
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML-style frontmatter from markdown text.
 
@@ -145,14 +152,16 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
     hero_tag = ""
     if hero:
         hero_tag = f'<img src="images/{hero}" alt="{title}" class="hero">'
-    elif (IMAGES_DIR / f"{slug}-hero.jpg").exists():
-        hero_tag = f'<img src="images/{slug}-hero.jpg" alt="{title}" class="hero">'
+    else:
+        _fh = _find_hero(slug)
+        if _fh:
+            hero_tag = f'<img src="images/{_fh}" alt="{title}" class="hero">'
 
     subtitle_tag = ""
     if subtitle:
         subtitle_tag = f'<p class="subtitle">{subtitle}</p>'
 
-    og_image = f"images/{hero}" if hero else f"images/{slug}-hero.jpg"
+    og_image = f"images/{hero}" if hero else f"images/{_find_hero(slug) or slug + '-hero.jpg'}"
 
     author_meta = _render_author_meta(meta, link_authors=True)
 
@@ -500,8 +509,10 @@ def _render_post_card(post: dict, featured: bool = False) -> str:
     hero_tag = ""
     if hero:
         hero_tag = f'<img src="images/{hero}" alt="" class="card-hero">'
-    elif (IMAGES_DIR / f"{slug}-hero.jpg").exists():
-        hero_tag = f'<img src="images/{slug}-hero.jpg" alt="" class="card-hero">'
+    else:
+        _fh = _find_hero(slug)
+        if _fh:
+            hero_tag = f'<img src="images/{_fh}" alt="" class="card-hero">'
 
     featured_class = " featured" if featured else ""
     label = '<div class="label">New</div>' if featured else ""
@@ -805,8 +816,10 @@ def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
         f_hero_tag = ""
         if f_hero:
             f_hero_tag = f'<img src="blog/images/{f_hero}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 1rem;">'
-        elif (IMAGES_DIR / f"{f_slug}-hero.jpg").exists():
-            f_hero_tag = f'<img src="blog/images/{f_slug}-hero.jpg" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 1rem;">'
+        else:
+            _fh = _find_hero(f_slug)
+            if _fh:
+                f_hero_tag = f'<img src="blog/images/{_fh}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 1rem;">'
         featured_html = f"""      <a href="blog/{f_slug}.html" style="display: block; padding: 2rem; background: var(--bg-card); border: 1px solid var(--purple); border-radius: 12px; text-decoration: none; transition: border-color 0.2s; margin-bottom: 1.5rem;">
         {f_hero_tag}
         <div style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--purple-light); margin-bottom: 0.75rem;">New &mdash; by {f_byline}</div>
@@ -822,8 +835,10 @@ def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
         p_hero_tag = ""
         if p_hero:
             p_hero_tag = f'<img src="blog/images/{p_hero}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 0.75rem;">'
-        elif (IMAGES_DIR / f"{p_slug}-hero.jpg").exists():
-            p_hero_tag = f'<img src="blog/images/{p_slug}-hero.jpg" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 0.75rem;">'
+        else:
+            _fh = _find_hero(p_slug)
+            if _fh:
+                p_hero_tag = f'<img src="blog/images/{_fh}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 0.75rem;">'
         grid_cards += f"""        <a href="blog/{p_slug}.html" style="display: block; padding: 1.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; text-decoration: none; transition: border-color 0.2s;">
           {p_hero_tag}
           <h3 style="color: var(--teal); font-size: 1.1rem; margin-bottom: 0.5rem;">{p["title"]}</h3>
