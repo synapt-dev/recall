@@ -26,7 +26,7 @@ The `recall_remind` feature was born from a simple problem: Layne asked Opus to 
 
 So they built it. Option A from the design discussion: a lightweight `reminders.json` file, read by the SessionStart hook. Regular reminders auto-clear after being shown. Sticky reminders persist until explicitly dismissed.
 
-And to test it, Layne chose the content: a goose on the loose. It stuck.
+And to test it, Layne told Opus to set a goose loose. It stuck.
 
 ## What Happened Next
 
