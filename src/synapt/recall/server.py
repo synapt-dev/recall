@@ -189,6 +189,7 @@ def recall_search(
     before: str | None = None,
     half_life: float = 60.0,
     threshold_ratio: float = 0.2,
+    min_score: float | None = None,
     depth: str = "full",
     include_archived: bool = False,
     include_historical: bool = False,
@@ -209,6 +210,15 @@ def recall_search(
     - Making a design decision → check if it was discussed before
     - Starting a new feature → check for prior attempts or related work
 
+    RESULT QUALITY:
+        Use min_score to filter by relevance instead of fixed chunk counts.
+        Results scoring below min_score × (best match score) are dropped.
+        - min_score=0.3 (default): keep results ≥30% as relevant as the best match
+        - min_score=0.5: stricter — only strong matches
+        - min_score=0.0: return everything up to max_chunks (no quality filter)
+        Combine with max_tokens to control context budget: "give me everything
+        relevant, up to 2000 tokens."
+
     Args:
         query: Natural language query or keywords to search for.
         max_chunks: Maximum number of result chunks to return.
@@ -221,7 +231,11 @@ def recall_search(
                    making work from past quarters still discoverable.
                    Passed as None to lookup() so intent classification can
                    override when the caller uses the MCP default.
-        threshold_ratio: Drop results scoring below this fraction of the top score. 0 disables.
+        min_score: Minimum relevance threshold (0.0-1.0). Results scoring below
+                   min_score × (top result score) are dropped. Default 0.3 via
+                   threshold_ratio. Higher = fewer, more relevant results.
+                   Lower = more results, potentially noisy. 0 = no filter.
+        threshold_ratio: Deprecated — use min_score instead. Same behavior.
         depth: "full" returns knowledge + journal + transcript results.
                "summary" returns only knowledge nodes + journal entries.
                "concise" returns knowledge + cluster summaries (no raw chunks).
@@ -237,6 +251,9 @@ def recall_search(
                             in results. When multiple versions exist in the same lineage,
                             the highest-confidence one is kept (confidence-based fallback).
     """
+    # min_score takes precedence over threshold_ratio when explicitly set
+    if min_score is not None:
+        threshold_ratio = min_score
     max_tokens = _cap_tokens(max_tokens)
     index = _get_index()
 
