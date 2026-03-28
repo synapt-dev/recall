@@ -741,3 +741,72 @@ def test_catchup_writes_journal_for_codex_session(tmp_path):
     entries = read_entries(journal_path, n=1)
     assert len(entries) == 1
     assert entries[0].session_id == "codex-session-001"
+
+
+# ---------------------------------------------------------------------------
+# Channel CLI flag tests
+# ---------------------------------------------------------------------------
+
+
+def test_channel_cli_dispatches_read_with_defaults():
+    """CLI dispatches channel read with default args."""
+    with patch.object(sys, "argv", ["synapt", "channel", "read"]), \
+         patch("synapt.recall.cli.cmd_channel") as mock:
+        main()
+    mock.assert_called_once()
+    args = mock.call_args[0][0]
+    assert args.action == "read"
+    assert args.channel == "dev"
+    assert args.limit == 20
+    assert args.detail is None
+
+
+def test_channel_cli_read_with_detail_flag():
+    """CLI passes --detail to channel read."""
+    with patch.object(sys, "argv", ["synapt", "channel", "read", "dev", "--detail", "low"]), \
+         patch("synapt.recall.cli.cmd_channel") as mock:
+        main()
+    args = mock.call_args[0][0]
+    assert args.action == "read"
+    assert args.detail == "low"
+
+
+def test_channel_cli_join_with_name_flag():
+    """CLI passes --name to channel join."""
+    with patch.object(sys, "argv", ["synapt", "channel", "join", "dev", "--name", "Opus"]), \
+         patch("synapt.recall.cli.cmd_channel") as mock:
+        main()
+    args = mock.call_args[0][0]
+    assert args.action == "join"
+    assert args.name == "Opus"
+
+
+def test_channel_cli_join_name_wired_to_display_name(tmp_path):
+    """--name on join passes through as display_name kwarg."""
+    with patch.object(sys, "argv", ["synapt", "channel", "join", "dev", "--name", "TestAgent"]), \
+         patch("synapt.recall.channel.channel_join", return_value="Joined #dev as TestAgent") as mock_join:
+        from synapt.recall.cli import main
+        main()
+    mock_join.assert_called_once()
+    assert mock_join.call_args[1].get("display_name") == "TestAgent"
+
+
+def test_channel_cli_read_detail_wired_to_channel_read(tmp_path):
+    """--detail on read passes through to channel_read."""
+    with patch.object(sys, "argv", ["synapt", "channel", "read", "dev", "--detail", "min"]), \
+         patch("synapt.recall.channel.channel_read", return_value="## #dev") as mock_read:
+        from synapt.recall.cli import main
+        main()
+    mock_read.assert_called_once()
+    assert mock_read.call_args[1].get("detail") == "min"
+
+
+def test_channel_cli_post_without_name():
+    """CLI dispatches channel post without --name (no display_name kwarg)."""
+    with patch.object(sys, "argv", ["synapt", "channel", "post", "dev", "hello"]), \
+         patch("synapt.recall.cli.cmd_channel") as mock:
+        main()
+    args = mock.call_args[0][0]
+    assert args.action == "post"
+    assert args.message == "hello"
+    assert args.name is None
