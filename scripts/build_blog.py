@@ -82,6 +82,26 @@ def _find_hero(slug: str) -> str:
             return f"{slug}-hero{ext}"
     return ""
 
+
+def _find_og_image(slug: str, hero: str = "") -> str:
+    """Prefer a dedicated OG card when one exists for the post."""
+    candidates: list[str] = []
+
+    if hero:
+        candidates.append(f"{Path(hero).stem}-og.png")
+
+    fallback_hero = _find_hero(slug)
+    if fallback_hero:
+        candidates.append(f"{Path(fallback_hero).stem}-og.png")
+
+    for name in candidates:
+        if (IMAGES_DIR / "og" / name).exists():
+            return f"images/og/{name}"
+
+    if hero:
+        return f"images/{hero}"
+    return f"images/{fallback_hero or slug + '-hero.jpg'}"
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML-style frontmatter from markdown text.
 
@@ -164,7 +184,7 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
     if subtitle:
         subtitle_tag = f'<p class="subtitle">{subtitle}</p>'
 
-    og_image = f"images/{hero}" if hero else f"images/{_find_hero(slug) or slug + '-hero.jpg'}"
+    og_image = _find_og_image(slug, hero)
 
     author_meta = _render_author_meta(meta, link_authors=True)
 
