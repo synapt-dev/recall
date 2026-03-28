@@ -148,9 +148,22 @@ class TestOnnxRouterIntegration:
         assert is_encoder_decoder(client)
 
 
+def _optimum_importable() -> bool:
+    """Check if optimum seq2seq models can be imported (requires compatible transformers)."""
+    try:
+        from optimum.onnxruntime.modeling_seq2seq import ORTModelForSeq2SeqLM  # noqa: F401
+        return True
+    except (ImportError, Exception):
+        return False
+
+
 @pytest.mark.skipif(
     not os.path.isdir(os.path.expanduser("~/.synapt/models/onnx")),
     reason="No converted ONNX model available",
+)
+@pytest.mark.skipif(
+    not _optimum_importable(),
+    reason="optimum incompatible with installed transformers",
 )
 class TestOnnxIntegration:
     """Integration tests requiring a pre-converted ONNX model."""

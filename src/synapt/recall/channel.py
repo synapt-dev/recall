@@ -852,12 +852,32 @@ def channel_read(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     show_pins: bool = True,
+    detail: str = "medium",
 ) -> str:
     """Read recent messages from a channel.
 
     Filters muted agents, highlights directives targeted at the reader.
     Uses a single DB connection for all operations.
+
+    Detail levels control output verbosity and override show_pins:
+        max   — pins, full messages, all metadata (IDs, claims, attachments)
+        high  — pins, full messages, message IDs only
+        medium — respects show_pins param, full messages, message IDs
+        low   — no pins, truncated messages (200 chars), no IDs
+        min   — no pins, one-line summary per message, skip join/leave noise
     """
+    # Resolve detail-driven flags
+    _detail = detail.lower()
+    if _detail in ("max", "high"):
+        show_pins = True
+    elif _detail in ("low", "min"):
+        show_pins = False
+    # "medium" leaves show_pins as the caller passed it (backward compat)
+    _show_ids = _detail in ("max", "high", "medium")
+    _show_claims = _detail in ("max", "high", "medium")
+    _show_attachments = _detail in ("max", "high", "medium")
+    _truncate = 200 if _detail == "low" else (80 if _detail == "min" else 0)
+    _one_line = _detail == "min"
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -943,27 +963,38 @@ def channel_read(
     for msg in messages:
         ts = msg.timestamp[:16]
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
-        mid = f" [{msg.id}]" if msg.id else ""
+        mid = f" [{msg.id}]" if msg.id and _show_ids else ""
         # Role marker — human messages get a distinct prefix
         is_human = role_map.get(msg.from_agent) == "human"
         role_tag = " [human]" if is_human else ""
         # Claim annotation
-        claimer_id = claim_map.get(msg.id)
         claim_tag = ""
-        if claimer_id:
-            claimer_name = display_map.get(claimer_id, claimer_id)
-            claim_tag = f" [CLAIMED by {claimer_name}]"
+        if _show_claims:
+            claimer_id = claim_map.get(msg.id)
+            if claimer_id:
+                claimer_name = display_map.get(claimer_id, claimer_id)
+                claim_tag = f" [CLAIMED by {claimer_name}]"
         attachment_tag = ""
-        if msg.attachments:
+        if _show_attachments and msg.attachments:
             attachment_tag = f" [attachments: {', '.join(msg.attachments)}]"
+
+        body = msg.body
+        if _truncate and len(body) > _truncate:
+            body = body[:_truncate] + "..."
+        if _one_line:
+            # Collapse to single line — strip newlines
+            body = body.replace("\n", " ").strip()
+
         if msg.type in ("join", "leave"):
-            lines.append(f"  {ts}{mid}  -- {msg.body}")
+            if _one_line:
+                continue  # Skip join/leave noise in min mode
+            lines.append(f"  {ts}{mid}  -- {body}")
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
-            lines.append(f"  {ts}{mid}  {prefix}{target} {display}{role_tag}: {msg.body}{attachment_tag}{claim_tag}")
+            lines.append(f"  {ts}{mid}  {prefix}{target} {display}{role_tag}: {body}{attachment_tag}{claim_tag}")
         else:
-            lines.append(f"  {ts}{mid}  {display}{role_tag}: {msg.body}{attachment_tag}{claim_tag}")
+            lines.append(f"  {ts}{mid}  {display}{role_tag}: {body}{attachment_tag}{claim_tag}")
 
     return "\n".join(lines)
 
@@ -1099,12 +1130,16 @@ def channel_unread_read(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     limit: int = 20,
+    detail: str = "low",
 ) -> str:
     """Read unread messages across all joined channels and advance cursors.
 
     Keeps ``channel_unread()`` as the lightweight count primitive used by
     chat UI and directive checks, while giving the MCP ``unread`` action a
     single-call catchup path that includes message content.
+
+    Default detail is "low" — unread is a polling action, so skip pins and
+    trim metadata to save context budget.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -1143,6 +1178,7 @@ def channel_unread_read(
             since=last_read,
             agent_name=aid,
             project_dir=project_dir,
+            detail=detail,
         )
         sections.append(rendered)
 

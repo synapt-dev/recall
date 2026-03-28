@@ -77,7 +77,15 @@ MCP_INSTRUCTIONS = (
     "\n"
     "IMPORTANT: When in doubt, search. A quick recall_quick check costs ~500 tokens "
     "and takes <100ms. Missing relevant past context costs far more in wasted work "
-    "and repeated mistakes. Err on the side of searching too much, not too little."
+    "and repeated mistakes. Err on the side of searching too much, not too little.\n"
+    "\n"
+    "CONTEXT BUDGET:\n"
+    "- recall_channel has a `detail` parameter: max/high/medium/low/min.\n"
+    "- Use detail='low' or 'min' for monitoring loops and periodic polling.\n"
+    "- Use detail='high' or 'max' only when you need the full picture (e.g. catching up after being away).\n"
+    "- 'unread' action defaults to detail='low' (no pins, trimmed metadata). This is intentional.\n"
+    "- Pins are large — they contain full benchmark tables. Read them once at session start with detail='high', then poll with 'low'.\n"
+    "- Prefer pin=False for routine posts. Reserve pins for durable reference material."
 )
 
 # ---------------------------------------------------------------------------
@@ -1635,6 +1643,7 @@ def recall_channel(
     name: str | None = None,
     attachments: str | None = None,
     show_pins: bool = True,
+    detail: str = "medium",
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -1655,6 +1664,14 @@ def recall_channel(
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
         attachments: Semicolon-separated file paths to attach (copied into channel store on post).
         show_pins: If False with "read" action, omit pinned messages from output (default True).
+            Deprecated — use detail instead.
+        detail: Output verbosity level. Controls pins, metadata, and truncation.
+            "max"    — all pins, full messages, all metadata (IDs, claims, attachments)
+            "high"   — all pins, full messages, message IDs only
+            "medium" — no pins, full messages, message IDs (default for "read")
+            "low"    — no pins, truncated messages (200 chars), no IDs (default for "unread")
+            "min"    — no pins, one-line per message, skip join/leave noise
+            Use "low" or "min" for monitoring loops to save context budget.
 
     Coordination actions:
         claim: Claim a message/task by message_id (prevents duplicate work).
@@ -1695,7 +1712,7 @@ def recall_channel(
             return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list)
 
         if action == "read":
-            return channel_read(channel=channel, limit=limit, show_pins=show_pins)
+            return channel_read(channel=channel, limit=limit, show_pins=show_pins, detail=detail)
 
         if action == "who":
             return channel_who()
@@ -1704,7 +1721,9 @@ def recall_channel(
             return channel_heartbeat()
 
         if action == "unread":
-            return channel_unread_read(limit=limit)
+            # Default to "low" for unread — it's a polling action
+            _detail = detail if detail != "medium" else "low"
+            return channel_unread_read(limit=limit, detail=_detail)
 
         if action == "pin":
             if not message:
