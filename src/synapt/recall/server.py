@@ -83,7 +83,6 @@ MCP_INSTRUCTIONS = (
     "- recall_channel has a `detail` parameter: max/high/medium/low/min.\n"
     "- Use detail='low' or 'min' for monitoring loops and periodic polling.\n"
     "- Use detail='high' or 'max' only when you need the full picture (e.g. catching up after being away).\n"
-    "- 'unread' action defaults to detail='low' (no pins, trimmed metadata). This is intentional.\n"
     "- Pins are large — they contain full benchmark tables. Read them once at session start with detail='high', then poll with 'low'.\n"
     "- Prefer pin=False for routine posts. Reserve pins for durable reference material."
 )
@@ -1669,11 +1668,11 @@ def recall_channel(
     State (presence, cursors, pins) is stored in SQLite.
 
     Args:
-        action: "join", "leave", "post", "read", "who", "heartbeat", "unread",
+        action: "join", "leave", "post", "read", "read_message", "who", "heartbeat", "unread",
                 "pin", "directive", "mute", "unmute", "kick", "broadcast",
                 "list", "search", "rename", "claim", "unclaim", "intent".
         channel: Channel name (default "dev"). Any name works -- created on first post.
-        message: Message body (required for "post", "directive", "broadcast" actions).
+        message: Message body (required for "post", "directive", "broadcast") or message_id for "read_message"/pin actions.
         to: Target agent for "directive" action.
         target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
         limit: Max messages to return for "read" action (default 20).
@@ -1686,7 +1685,7 @@ def recall_channel(
             "max"    — all pins, full messages, all metadata (IDs, claims, attachments)
             "high"   — all pins, full messages, message IDs only
             "medium" — full messages, IDs, claims, attachments; pins follow show_pins (default for "read")
-            "low"    — no pins, truncated messages (200 chars), no IDs
+            "low"    — no pins, truncated messages (200 chars), with refs for truncated messages
             "min"    — no pins, one-line per message, skip join/leave noise
             Use "low" or "min" for monitoring loops to save context budget.
 
@@ -1701,6 +1700,7 @@ def recall_channel(
             channel_leave,
             channel_post,
             channel_read,
+            channel_read_message,
             channel_rename,
             channel_who,
             channel_heartbeat,
@@ -1730,6 +1730,11 @@ def recall_channel(
 
         if action == "read":
             return channel_read(channel=channel, limit=limit, show_pins=show_pins, detail=detail)
+
+        if action == "read_message":
+            if not message:
+                return "Error: message_id is required for 'read_message' action."
+            return channel_read_message(channel=channel, message_id=message)
 
         if action == "who":
             return channel_who()

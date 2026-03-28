@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from synapt.recall.channel import (
     ChannelMessage,
+    _channel_path,
     _channels_dir,
     _db_path,
     _open_db,
@@ -23,6 +24,7 @@ from synapt.recall.channel import (
     channel_leave,
     channel_post,
     channel_read,
+    channel_read_message,
     channel_who,
     channel_heartbeat,
     channel_unread,
@@ -1364,11 +1366,15 @@ class TestReadDetailLevels(unittest.TestCase):
         channel_join("dev", agent_name="reader", display_name="Apollo")
         long_message = ("x" * 220) + " tail"
         channel_post("dev", long_message, agent_name="writer")
+        message_id = _read_messages(_channel_path("dev"))[-1].id
 
         result = channel_read("dev", agent_name="reader", detail="low")
 
         self.assertIn("...", result)
         self.assertNotIn("tail", result)
+        self.assertIn(message_id, result)
+        self.assertIn("truncated 1 message(s)", result)
+        self.assertIn("tok omitted", result)
 
     def test_low_preserves_long_message_that_mentions_reader(self):
         channel_join("dev", agent_name="reader", display_name="Apollo")
@@ -1389,6 +1395,31 @@ class TestReadDetailLevels(unittest.TestCase):
 
         self.assertIn("urgent follow-up", result)
         self.assertNotIn("...", result)
+
+    def test_low_summary_lists_only_truncated_messages(self):
+        channel_join("dev", agent_name="reader", display_name="Apollo")
+        channel_post("dev", "short message", agent_name="writer")
+        channel_post("dev", ("x" * 220) + " tail", agent_name="writer")
+        messages = _read_messages(_channel_path("dev"))
+        short_id = messages[-2].id
+        long_id = messages[-1].id
+
+        result = channel_read("dev", agent_name="reader", detail="low")
+
+        self.assertIn(long_id, result)
+        self.assertNotIn(short_id, result)
+
+    def test_read_message_returns_full_body_by_id(self):
+        channel_join("dev", agent_name="reader", display_name="Apollo")
+        long_message = ("x" * 220) + " tail"
+        channel_post("dev", long_message, agent_name="writer")
+        message_id = _read_messages(_channel_path("dev"))[-1].id
+
+        result = channel_read_message(message_id, channel="dev")
+
+        self.assertIn(f"[{message_id}]", result)
+        self.assertIn(long_message, result)
+        self.assertIn("Type: message", result)
 
 
 class TestMuteUnmute(unittest.TestCase):

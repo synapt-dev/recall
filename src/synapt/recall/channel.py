@@ -658,6 +658,13 @@ def _read_messages(
     return messages
 
 
+def _estimate_token_count(text: str) -> int:
+    """Approximate token count using the project's standard 4 chars/token heuristic."""
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
 def _read_last_timestamp(path: Path) -> str | None:
     """Read the timestamp of the last message in a JSONL file.
 
@@ -903,7 +910,7 @@ def channel_read(
         max    -- pins, full messages, all metadata (IDs, claims, attachments)
         high   -- pins, full messages, message IDs only
         medium -- full messages, IDs, claims, attachments; pins follow show_pins
-        low    -- no pins, truncated messages (200 chars), no IDs
+        low    -- no pins, truncated messages (200 chars), with refs for truncated messages
         min    -- no pins, one-line per message, skip join/leave noise
     """
     _detail = detail.lower()
@@ -1002,10 +1009,12 @@ def channel_read(
     own_display = display_map.get(aid)
     if own_display:
         self_names.add(own_display.casefold())
+    truncated_messages: list[tuple[str, int]] = []
     for msg in messages:
         ts = msg.timestamp[:16]
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
         mid = f" [{msg.id}]" if msg.id and _show_ids else ""
+        inline_mid = mid
         # Role marker — human messages get a distinct prefix
         is_human = role_map.get(msg.from_agent) == "human"
         role_tag = " [human]" if is_human else ""
@@ -1025,22 +1034,77 @@ def channel_read(
             for mention in _extract_mentions(body)
         )
         actionable = (msg.type == "directive" and msg.to in (aid, "*")) or mentions_self
+        truncation_tag = ""
         if _truncate and not actionable and len(body) > _truncate:
-            body = body[:_truncate] + "..."
+            omitted_tokens = _estimate_token_count(body[_truncate:])
+            truncated_messages.append((msg.id or "(no-id)", omitted_tokens))
+            body = body[:_truncate].rstrip() + "..."
+            if msg.id and not _show_ids:
+                inline_mid = f" [{msg.id}]"
+            truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
         if _one_line:
             body = body.replace("\n", " ").strip()
         if msg.type in ("join", "leave"):
             if _one_line:
                 continue
-            lines.append(f"  {ts}{mid}  -- {body}")
+            lines.append(f"  {ts}{inline_mid}  -- {body}{truncation_tag}")
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
-            lines.append(f"  {ts}{mid}  {prefix}{target} {display}{role_tag}: {body}{attachment_tag}{claim_tag}")
+            lines.append(
+                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}: "
+                f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
+            )
         else:
-            lines.append(f"  {ts}{mid}  {display}{role_tag}: {body}{attachment_tag}{claim_tag}")
+            lines.append(
+                f"  {ts}{inline_mid}  {display}{role_tag}: "
+                f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
+            )
+
+    if truncated_messages:
+        total_omitted = sum(tokens for _, tokens in truncated_messages)
+        refs = ", ".join(f"{message_id} (~{tokens} tok)" for message_id, tokens in truncated_messages)
+        lines.insert(
+            len(lines) if not lines else lines.index(f"## #{channel} ({len(messages)} messages)") + 1,
+            (
+                f"  truncated {len(truncated_messages)} message(s), "
+                f"~{total_omitted} tok omitted total: {refs}. "
+                "Use action='read_message' with message=<id> to inspect the full body."
+            ),
+        )
 
     return "\n".join(lines)
+
+
+def channel_read_message(
+    message_id: str,
+    channel: str = "dev",
+    project_dir: Path | None = None,
+) -> str:
+    """Read a specific channel message by id."""
+    path = _channel_path(channel, project_dir)
+    if not path.exists():
+        return f"Channel #{channel} has no messages yet."
+
+    for msg in _read_messages(path):
+        if msg.id != message_id:
+            continue
+
+        display = msg.from_display or msg.from_agent
+        lines = [f"## #{channel} [{msg.id}]", f"Timestamp: {msg.timestamp}", f"Type: {msg.type}"]
+        if display and display != msg.from_agent:
+            lines.append(f"From: {display} ({msg.from_agent})")
+        else:
+            lines.append(f"From: {display}")
+        if msg.to:
+            lines.append(f"To: {msg.to}")
+        if msg.attachments:
+            lines.append(f"Attachments: {', '.join(msg.attachments)}")
+        lines.append("")
+        lines.append(msg.body or "(empty body)")
+        return "\n".join(lines)
+
+    return f"Message {message_id} not found in #{channel}."
 
 
 def channel_who(project_dir: Path | None = None) -> str:
