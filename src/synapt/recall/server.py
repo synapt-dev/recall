@@ -213,7 +213,7 @@ def recall_search(
     RESULT QUALITY:
         Use min_score to filter by relevance instead of fixed chunk counts.
         Results scoring below min_score × (best match score) are dropped.
-        - min_score=0.3 (default): keep results ≥30% as relevant as the best match
+        - min_score=0.2 (default): keep results ≥20% as relevant as the best match
         - min_score=0.5: stricter — only strong matches
         - min_score=0.0: return everything up to max_chunks (no quality filter)
         Combine with max_tokens to control context budget: "give me everything
@@ -232,7 +232,7 @@ def recall_search(
                    Passed as None to lookup() so intent classification can
                    override when the caller uses the MCP default.
         min_score: Minimum relevance threshold (0.0-1.0). Results scoring below
-                   min_score × (top result score) are dropped. Default 0.3 via
+                   min_score × (top result score) are dropped. Default 0.2 via
                    threshold_ratio. Higher = fewer, more relevant results.
                    Lower = more results, potentially noisy. 0 = no filter.
         threshold_ratio: Deprecated — use min_score instead. Same behavior.
