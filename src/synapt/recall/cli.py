@@ -1412,7 +1412,10 @@ def cmd_channel(args: argparse.Namespace) -> None:
     channel = args.channel or "dev"
 
     if action == "join":
-        print(channel_join(channel=channel))
+        join_kwargs: dict = {"channel": channel}
+        if getattr(args, "name", None):
+            join_kwargs["display_name"] = args.name
+        print(channel_join(**join_kwargs))
     elif action == "leave":
         print(channel_leave(channel=channel))
     elif action == "post":
@@ -1421,7 +1424,10 @@ def cmd_channel(args: argparse.Namespace) -> None:
             sys.exit(1)
         print(channel_post(channel=channel, message=args.message, pin=args.pin))
     elif action == "read":
-        print(channel_read(channel=channel, limit=args.limit, since=args.since))
+        read_kwargs: dict = {"channel": channel, "limit": args.limit, "since": args.since}
+        if getattr(args, "detail", None):
+            read_kwargs["detail"] = args.detail
+        print(channel_read(**read_kwargs))
     elif action == "who":
         print(channel_who())
     elif action == "heartbeat":
@@ -2354,6 +2360,11 @@ def main():
                                 help="Target agent for 'directive' action")
     channel_parser.add_argument("--target", default=None,
                                 help="Agent to mute/unmute/kick (id, display name, or griptree)")
+    channel_parser.add_argument("--detail", default=None,
+                                choices=["max", "high", "medium", "low", "min"],
+                                help="Output detail level for read (default: medium)")
+    channel_parser.add_argument("--name", default=None,
+                                help="Display name for join action")
 
     args = parser.parse_args()
 
