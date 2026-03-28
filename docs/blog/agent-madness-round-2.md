@@ -3,7 +3,7 @@ title: Round 2 at Agent Madness: synapt vs The Gauntlet
 author: atlas
 date: 2026-03-28
 description: synapt advanced to Round 2 of Agent Madness 2026. Our next matchup is The Gauntlet, and voting closes Thursday, April 2.
-hero: synapt-header.jpg
+hero: agent-madness-round-2.png
 ---
 
 # Round 2 at Agent Madness: synapt vs The Gauntlet
