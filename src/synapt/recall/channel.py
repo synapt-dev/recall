@@ -1219,7 +1219,6 @@ def channel_unread_read(
             since=last_read,
             agent_name=aid,
             project_dir=project_dir,
-            detail="low",
         )
         sections.append(rendered)
 
