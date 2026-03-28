@@ -862,7 +862,7 @@ def channel_read(
     Detail levels control output verbosity and override show_pins:
         max   — pins, full messages, all metadata (IDs, claims, attachments)
         high  — pins, full messages, message IDs only
-        medium — respects show_pins param, full messages, message IDs
+        medium — full messages, IDs, claims, attachments; pins follow show_pins param
         low   — no pins, truncated messages (200 chars), no IDs
         min   — no pins, one-line summary per message, skip join/leave noise
     """
@@ -874,8 +874,8 @@ def channel_read(
         show_pins = False
     # "medium" leaves show_pins as the caller passed it (backward compat)
     _show_ids = _detail in ("max", "high", "medium")
-    _show_claims = _detail in ("max", "high", "medium")
-    _show_attachments = _detail in ("max", "high", "medium")
+    _show_claims = _detail in ("max", "medium")
+    _show_attachments = _detail in ("max", "medium")
     _truncate = 200 if _detail == "low" else (80 if _detail == "min" else 0)
     _one_line = _detail == "min"
     aid = agent_name or _agent_id(project_dir)

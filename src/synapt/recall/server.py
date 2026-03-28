@@ -1668,7 +1668,7 @@ def recall_channel(
         detail: Output verbosity level. Controls pins, metadata, and truncation.
             "max"    — all pins, full messages, all metadata (IDs, claims, attachments)
             "high"   — all pins, full messages, message IDs only
-            "medium" — no pins, full messages, message IDs (default for "read")
+            "medium" — full messages, IDs, claims, attachments; pins follow show_pins (default for "read")
             "low"    — no pins, truncated messages (200 chars), no IDs (default for "unread")
             "min"    — no pins, one-line per message, skip join/leave noise
             Use "low" or "min" for monitoring loops to save context budget.
