@@ -1738,9 +1738,7 @@ def recall_channel(
             return channel_heartbeat()
 
         if action == "unread":
-            # Default to "low" for unread — it's a polling action
-            _detail = detail if detail != "medium" else "low"
-            return channel_unread_read(limit=limit, detail=_detail)
+            return channel_unread_read(limit=limit)
 
         if action == "pin":
             if not message:
