@@ -1686,7 +1686,7 @@ def recall_channel(
             "max"    — all pins, full messages, all metadata (IDs, claims, attachments)
             "high"   — all pins, full messages, message IDs only
             "medium" — full messages, IDs, claims, attachments; pins follow show_pins (default for "read")
-            "low"    — no pins, truncated messages (200 chars), no IDs (default for "unread")
+            "low"    — no pins, truncated messages (200 chars), no IDs
             "min"    — no pins, one-line per message, skip join/leave noise
             Use "low" or "min" for monitoring loops to save context budget.
 
@@ -1738,9 +1738,7 @@ def recall_channel(
             return channel_heartbeat()
 
         if action == "unread":
-            # Default to "low" for unread — it's a polling action
-            _detail = detail if detail != "medium" else "low"
-            return channel_unread_read(limit=limit, detail=_detail)
+            return channel_unread_read(limit=limit)
 
         if action == "pin":
             if not message:

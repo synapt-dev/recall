@@ -551,6 +551,16 @@ class TestUnreadMessages(unittest.TestCase):
         self.assertEqual(unread["dev"], 1)
         self.assertEqual(unread["eval"], 2)
 
+    def test_unread_read_low_preserves_actionable_mention(self):
+        channel_join("dev", agent_name="agent-a", display_name="Apollo")
+        long_message = ("x" * 220) + " @Apollo please take #371"
+        channel_post("dev", long_message, agent_name="agent-b")
+
+        result = channel_unread_read(agent_name="agent-a")
+
+        self.assertIn("@Apollo please take #371", result)
+        self.assertNotIn("...", result)
+
 
 class TestPins(unittest.TestCase):
     """Test pin creation and display in read output."""
@@ -1339,6 +1349,48 @@ class TestDirective(unittest.TestCase):
             mock_add.assert_not_called()
 
 
+class TestReadDetailLevels(unittest.TestCase):
+    """Test detail-level truncation behavior."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_low_truncates_non_actionable_message(self):
+        channel_join("dev", agent_name="reader", display_name="Apollo")
+        long_message = ("x" * 220) + " tail"
+        channel_post("dev", long_message, agent_name="writer")
+
+        result = channel_read("dev", agent_name="reader", detail="low")
+
+        self.assertIn("...", result)
+        self.assertNotIn("tail", result)
+
+    def test_low_preserves_long_message_that_mentions_reader(self):
+        channel_join("dev", agent_name="reader", display_name="Apollo")
+        long_message = ("x" * 220) + " @Apollo please review this"
+        channel_post("dev", long_message, agent_name="writer")
+
+        result = channel_read("dev", agent_name="reader", detail="low")
+
+        self.assertIn("@Apollo please review this", result)
+        self.assertNotIn("...", result)
+
+    def test_low_preserves_directive_for_target_agent(self):
+        channel_join("dev", agent_name="reader")
+        long_message = ("x" * 220) + " urgent follow-up"
+        channel_directive("dev", long_message, to="reader", agent_name="writer")
+
+        result = channel_read("dev", agent_name="reader", detail="low")
+
+        self.assertIn("urgent follow-up", result)
+        self.assertNotIn("...", result)
+
+
 class TestMuteUnmute(unittest.TestCase):
     """Test muting and unmuting agents."""
 
@@ -1540,6 +1592,52 @@ class TestRename(unittest.TestCase):
             self.assertEqual(row["display_name"], "Ghost")
         finally:
             conn.close()
+
+    def test_join_rejects_duplicate_display_name(self):
+        channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+
+        result = channel_join("dev", agent_name="s_agent2", display_name="Apollo")
+
+        self.assertIn("already in use", result)
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_agent2'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+
+    def test_join_rejects_casefold_duplicate_display_name(self):
+        channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+
+        result = channel_join("dev", agent_name="s_agent2", display_name="apollo")
+
+        self.assertIn("already in use", result)
+
+    def test_rename_rejects_duplicate_display_name(self):
+        channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+        channel_join("dev", agent_name="s_agent2", display_name="Sentinel")
+
+        result = channel_rename("Apollo", agent_name="s_agent2")
+
+        self.assertIn("already in use", result)
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_agent2'"
+            ).fetchone()
+            self.assertEqual(row["display_name"], "Sentinel")
+        finally:
+            conn.close()
+
+    def test_display_name_can_be_reused_after_owner_leaves(self):
+        channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+        channel_leave("dev", agent_name="s_agent1")
+
+        result = channel_join("dev", agent_name="s_agent2", display_name="Apollo")
+
+        self.assertIn("Joined #dev as Apollo", result)
 
 
 class TestFromDisplay(unittest.TestCase):

@@ -163,6 +163,37 @@ def _resolve_display_name(project_dir: Path | None = None) -> str:
     return _resolve_griptree(project_dir)
 
 
+def _normalize_display_name(name: str) -> str:
+    """Normalize a display name for uniqueness checks."""
+    return " ".join(name.split()).strip().casefold()
+
+
+def _find_display_name_conflict(
+    conn: sqlite3.Connection,
+    display_name: str,
+    agent_id: str,
+) -> sqlite3.Row | None:
+    """Return another online/active agent already using this display name."""
+    normalized = _normalize_display_name(display_name)
+    if not normalized:
+        return None
+
+    rows = conn.execute(
+        "SELECT agent_id, display_name, status, last_seen FROM presence WHERE agent_id != ?",
+        (agent_id,),
+    ).fetchall()
+    for row in rows:
+        existing = row["display_name"] or ""
+        if not existing:
+            continue
+        if _normalize_display_name(existing) != normalized:
+            continue
+        if _agent_status(row["last_seen"]) == "offline":
+            continue
+        return row
+    return None
+
+
 def _resolve_target_id(target: str, conn: sqlite3.Connection) -> str:
     """Resolve a target to an agent_id.
 
@@ -708,6 +739,15 @@ def channel_join(
 
     conn = _open_db(project_dir)
     try:
+        if display_name is not None:
+            conflict = _find_display_name_conflict(conn, display, aid)
+            if conflict:
+                existing = conflict["display_name"] or conflict["agent_id"]
+                return (
+                    f"Display name '{display}' is already in use by {existing} "
+                    f"({conflict['agent_id']}). Choose a different name."
+                )
+
         # Upsert presence with identity
         conn.execute(
             "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
@@ -860,19 +900,17 @@ def channel_read(
     Uses a single DB connection for all operations.
 
     Detail levels control output verbosity and override show_pins:
-        max   — pins, full messages, all metadata (IDs, claims, attachments)
-        high  — pins, full messages, message IDs only
-        medium — full messages, IDs, claims, attachments; pins follow show_pins param
-        low   — no pins, truncated messages (200 chars), no IDs
-        min   — no pins, one-line summary per message, skip join/leave noise
+        max    -- pins, full messages, all metadata (IDs, claims, attachments)
+        high   -- pins, full messages, message IDs only
+        medium -- full messages, IDs, claims, attachments; pins follow show_pins
+        low    -- no pins, truncated messages (200 chars), no IDs
+        min    -- no pins, one-line per message, skip join/leave noise
     """
-    # Resolve detail-driven flags
     _detail = detail.lower()
     if _detail in ("max", "high"):
         show_pins = True
     elif _detail in ("low", "min"):
         show_pins = False
-    # "medium" leaves show_pins as the caller passed it (backward compat)
     _show_ids = _detail in ("max", "high", "medium")
     _show_claims = _detail in ("max", "medium")
     _show_attachments = _detail in ("max", "medium")
@@ -955,11 +993,15 @@ def channel_read(
         for pin in pins:
             ts = pin["pinned_at"][:16]
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
-            mid = f" [{pin['message_id']}]" if pin["message_id"] else ""
+            mid = f" [{pin['message_id']}]" if pin["message_id"] and _show_ids else ""
             lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
         lines.append("")
 
     lines.append(f"## #{channel} ({len(messages)} messages)")
+    self_names = {aid.casefold()}
+    own_display = display_map.get(aid)
+    if own_display:
+        self_names.add(own_display.casefold())
     for msg in messages:
         ts = msg.timestamp[:16]
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
@@ -977,17 +1019,19 @@ def channel_read(
         attachment_tag = ""
         if _show_attachments and msg.attachments:
             attachment_tag = f" [attachments: {', '.join(msg.attachments)}]"
-
         body = msg.body
-        if _truncate and len(body) > _truncate:
+        mentions_self = any(
+            mention.casefold() in self_names
+            for mention in _extract_mentions(body)
+        )
+        actionable = (msg.type == "directive" and msg.to in (aid, "*")) or mentions_self
+        if _truncate and not actionable and len(body) > _truncate:
             body = body[:_truncate] + "..."
         if _one_line:
-            # Collapse to single line — strip newlines
             body = body.replace("\n", " ").strip()
-
         if msg.type in ("join", "leave"):
             if _one_line:
-                continue  # Skip join/leave noise in min mode
+                continue
             lines.append(f"  {ts}{mid}  -- {body}")
         elif msg.type == "directive":
             target = f" @{msg.to}" if msg.to else ""
@@ -1130,7 +1174,6 @@ def channel_unread_read(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     limit: int = 20,
-    detail: str = "low",
 ) -> str:
     """Read unread messages across all joined channels and advance cursors.
 
@@ -1138,8 +1181,6 @@ def channel_unread_read(
     chat UI and directive checks, while giving the MCP ``unread`` action a
     single-call catchup path that includes message content.
 
-    Default detail is "low" — unread is a polling action, so skip pins and
-    trim metadata to save context budget.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -1178,7 +1219,6 @@ def channel_unread_read(
             since=last_read,
             agent_name=aid,
             project_dir=project_dir,
-            detail=detail,
         )
         sections.append(rendered)
 
@@ -1403,6 +1443,14 @@ def channel_rename(
 
     conn = _open_db(project_dir)
     try:
+        conflict = _find_display_name_conflict(conn, new_name, aid)
+        if conflict:
+            existing = conflict["display_name"] or conflict["agent_id"]
+            return (
+                f"Display name '{new_name}' is already in use by {existing} "
+                f"({conflict['agent_id']}). Choose a different name."
+            )
+
         row = conn.execute(
             "SELECT agent_id FROM presence WHERE agent_id = ?", (aid,)
         ).fetchone()
