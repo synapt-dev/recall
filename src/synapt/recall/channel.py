@@ -1238,6 +1238,8 @@ def channel_unread_read(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     limit: int = 20,
+    show_pins: bool = False,
+    detail: str = "medium",
 ) -> str:
     """Read unread messages across all joined channels and advance cursors.
 
@@ -1245,6 +1247,8 @@ def channel_unread_read(
     chat UI and directive checks, while giving the MCP ``unread`` action a
     single-call catchup path that includes message content.
 
+    Default show_pins=False — unread is a polling action, pins are static
+    and don't need to be re-sent every tick.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -1283,6 +1287,8 @@ def channel_unread_read(
             since=last_read,
             agent_name=aid,
             project_dir=project_dir,
+            show_pins=show_pins,
+            detail=detail,
         )
         sections.append(rendered)
 

@@ -1743,7 +1743,7 @@ def recall_channel(
             return channel_heartbeat()
 
         if action == "unread":
-            return channel_unread_read(limit=limit)
+            return channel_unread_read(limit=limit, show_pins=show_pins, detail=detail)
 
         if action == "pin":
             if not message:
