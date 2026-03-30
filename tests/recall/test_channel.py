@@ -1750,6 +1750,39 @@ class TestRename(unittest.TestCase):
 
         self.assertIn("Joined #dev as Apollo", result)
 
+    def test_stale_display_name_claim_is_cleared_before_reuse(self):
+        stale_time = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        channel_join("dev", agent_name="s_old", display_name="Sentinel")
+
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = 's_old'",
+                (stale_time,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = channel_join("dev", agent_name="s_new", display_name="Sentinel")
+        self.assertIn("Joined #dev as Sentinel", result)
+
+        conn = _open_db()
+        try:
+            old_row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_old'"
+            ).fetchone()
+            new_row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_new'"
+            ).fetchone()
+            self.assertEqual(old_row["display_name"], "")
+            self.assertEqual(new_row["display_name"], "Sentinel")
+            self.assertEqual(_resolve_target_id("Sentinel", conn), "s_new")
+        finally:
+            conn.close()
+
 
 class TestFromDisplay(unittest.TestCase):
     """Test from_display persistence in JSONL messages (#292)."""
