@@ -7,12 +7,35 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
+
+try:
+    import markdown as _md
+
+    def _render_markdown(text: str) -> str:
+        """Convert markdown to HTML with fenced code blocks and tables."""
+        html = _md.markdown(
+            text,
+            extensions=["fenced_code", "tables", "nl2br"],
+        )
+        # Strip wrapping <p> for single-line messages
+        if html.startswith("<p>") and html.count("<p>") == 1:
+            html = html[3:]
+            if html.endswith("</p>"):
+                html = html[:-4]
+        return html
+
+except ImportError:
+
+    def _render_markdown(text: str) -> str:
+        """Fallback: escape HTML and convert newlines to <br>."""
+        return escape(text).replace("\n", "<br>")
 
 from synapt.recall.channel import (
     ChannelMessage,
@@ -90,7 +113,7 @@ def _render_message(msg: dict) -> str:
             f'</div>'
         )
     color = _agent_color(name)
-    body_html = escape(body).replace("\n", "<br>")
+    body_html = _render_markdown(body)
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
