@@ -113,11 +113,11 @@ Prefer checking real artifacts over blind waiting:
 - Audit docs and benchmark pages that will need updating once results land.
 - Merge or rebase low-risk docs/status PRs.
 - Tighten tracker issues so the result writeup is mostly mechanical later.
-- Give a collaborator one clean side task instead of vague “keep an eye on it.”
+- Give a collaborator one clean side task instead of vague "keep an eye on it."
 
 ## Do Not
 
-- Do not reduce this skill to “check for messages and summarize them.”
+- Do not reduce this skill to "check for messages and summarize them."
 - Do not spam short polls with no decision value.
 - Do not hand-wave model drift, env drift, or benchmark mode ambiguity.
 - Do not say a run is valid if it silently fell back to a different mode.
