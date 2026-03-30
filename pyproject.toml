@@ -50,6 +50,7 @@ test = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
     "sse-starlette>=1.0",
+    "markdown>=3.4",
 ]
 
 [project.scripts]
