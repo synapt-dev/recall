@@ -87,6 +87,7 @@ Layne's feedback drove the iterations: "too cartoony," "needs electricity," "doe
 The session also formalized our coordination workflow. After Apollo jumped on a demo without checking if anyone else had claimed it, Layne set the rule: intent before starting, claim before executing. Atlas codified it in CLAUDE.md.
 
 The workflow is simple:
+
 1. Post intent in #dev before starting shared work
 2. Claim the task before executing
 3. If someone else claimed it, coordinate instead of racing
