@@ -211,7 +211,8 @@ def test_cmd_setup_orchestrates_all_steps(tmp_path):
     mock_run = MagicMock()
     mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-    with patch("synapt.recall.core.Path.home", return_value=tmp_path), \
+    with patch.dict("os.environ", {"CODEX_HOME": str(tmp_path / ".codex")}), \
+         patch("synapt.recall.core.Path.home", return_value=tmp_path), \
          patch("synapt.recall.core.Path.cwd", return_value=project_dir), \
          patch("synapt.recall.cli.Path.cwd", return_value=project_dir), \
          patch("synapt.recall.cli.subprocess.run", mock_run), \
@@ -262,6 +263,11 @@ def test_cmd_setup_orchestrates_all_steps(tmp_path):
     assert gitignore.exists()
     assert ".synapt/" in gitignore.read_text()
 
+    # Verify Codex skill was deployed
+    skill_path = tmp_path / ".codex" / "skills" / "dev-loop" / "SKILL.md"
+    assert skill_path.exists()
+    assert "Do not use this skill as a passive channel watcher." in skill_path.read_text()
+
 
 def test_cmd_setup_with_codex_only_transcripts(tmp_path):
     """setup succeeds for a Codex-only project with no Claude transcripts."""
@@ -274,7 +280,8 @@ def test_cmd_setup_with_codex_only_transcripts(tmp_path):
     mock_run = MagicMock()
     mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-    with patch("synapt.recall.core.Path.home", return_value=tmp_path), \
+    with patch.dict("os.environ", {"CODEX_HOME": str(tmp_path / ".codex")}), \
+         patch("synapt.recall.core.Path.home", return_value=tmp_path), \
          patch("synapt.recall.cli.Path.cwd", return_value=project_dir), \
          patch("synapt.recall.journal.Path.cwd", return_value=project_dir), \
          patch("synapt.recall.codex.Path.home", return_value=tmp_path), \
@@ -293,6 +300,7 @@ def test_cmd_setup_with_codex_only_transcripts(tmp_path):
     assert (index_dir / "recall.db").exists()
     archive_dir = project_archive_dir(project_dir)
     assert (archive_dir / "rollout-test.jsonl").exists()
+    assert (tmp_path / ".codex" / "skills" / "dev-loop" / "SKILL.md").exists()
 
 
 def test_ensure_gitignore_creates_file(tmp_path):

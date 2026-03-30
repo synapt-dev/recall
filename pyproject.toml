@@ -81,3 +81,6 @@ addopts = "--benchmark-disable"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"synapt.resources" = ["skills/dev-loop/SKILL.md"]

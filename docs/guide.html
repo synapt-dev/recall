@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MCP Server Setup Guide — Synapt</title>
-  <meta name="description" content="Set up synapt's MCP server for persistent memory in Claude Code and other MCP-compatible clients. Configuration, available tools, troubleshooting, and performance tuning.">
-  <meta property="og:title" content="Synapt MCP Server Setup Guide">
-  <meta property="og:description" content="Persistent memory for AI coding assistants via MCP. Setup, configuration, and tool reference.">
+  <title>Setup Guide — Synapt</title>
+  <meta name="description" content="Set up synapt for Claude Code, Codex CLI, and OpenCode. Install the MCP server, initialize project memory, deploy the dev-loop skill, and connect your team to one local-first operational memory system.">
+  <meta property="og:title" content="Synapt Setup Guide">
+  <meta property="og:description" content="Install synapt, connect Claude Code, Codex CLI, and OpenCode, and initialize project memory in one pass.">
   <meta property="og:url" content="https://synapt.dev/guide.html">
   <meta property="og:type" content="article">
   <meta name="twitter:card" content="summary">
@@ -174,8 +174,8 @@
 <article>
   <div class="container">
 
-    <h1>MCP Server Setup Guide</h1>
-    <p class="subtitle">Persistent memory for AI coding assistants via the Model Context Protocol.</p>
+    <h1>Setup Guide</h1>
+    <p class="subtitle">Install synapt, connect your MCP client, and initialize project memory in one pass.</p>
     <div class="meta">Last updated March 2026</div>
 
     <div class="toc">
@@ -185,10 +185,8 @@
         <li><a href="#configure">2. Configure Your Client</a></li>
         <li><a href="#initialize">3. Initialize a Project</a></li>
         <li><a href="#tools">4. Available Tools</a></li>
-        <li><a href="#plugins">5. Plugins</a></li>
-        <li><a href="#config">6. Configuration Files</a></li>
-        <li><a href="#troubleshooting">7. Troubleshooting</a></li>
-        <li><a href="#tuning">8. Performance Tuning</a></li>
+        <li><a href="#troubleshooting">5. Troubleshooting</a></li>
+        <li><a href="#tuning">6. Performance Tuning</a></li>
       </ul>
     </div>
 
@@ -207,25 +205,37 @@ synapt recall stats</code></pre>
     <h2 id="configure">2. Configure Your Client</h2>
 
     <h3>Claude Code</h3>
-    <p>Add to your <code>~/.claude.json</code> or project <code>.mcp.json</code>:</p>
-    <pre><code>{
-  "mcpServers": {
-    "synapt": {
-      "type": "stdio",
-      "command": "synapt",
-      "args": ["server"]
-    }
-  }
-}</code></pre>
+    <p>Recommended path:</p>
+    <pre><code>pip install synapt
+claude mcp add synapt -- synapt server
+synapt init</code></pre>
 
     <div class="callout">
       <p>For development, use <code>"args": ["server", "--dev"]</code> to enable auto-reload on code changes. The server watches <code>src/synapt/</code> and restarts the child process when <code>.py</code> files change.</p>
     </div>
 
+    <h3>Codex CLI</h3>
+    <p>Add to <code>~/.codex/config.toml</code>:</p>
+    <pre><code>[mcp_servers.synapt]
+command = "synapt"
+args = ["server"]</code></pre>
+    <p>Then run <code>synapt init</code>. This also deploys the packaged <code>dev-loop</code> skill into your Codex home.</p>
+
+    <h3>OpenCode</h3>
+    <p>Add to <code>~/.config/opencode/opencode.json</code>:</p>
+    <pre><code>{
+  "mcp": {
+    "synapt": {
+      "type": "local",
+      "command": ["synapt", "server"],
+      "enabled": true
+    }
+  }
+}</code></pre>
+
     <h3>Other MCP Clients</h3>
     <p>Any MCP-compatible client can connect via stdio. The server command is:</p>
     <pre><code>synapt server</code></pre>
-    <p>Point your client's MCP configuration at this command using the stdio transport.</p>
 
     <h2 id="initialize">3. Initialize a Project</h2>
 
@@ -240,12 +250,10 @@ synapt init</code></pre>
       <li><code>.synapt/recall/</code> &mdash; project index directory</li>
       <li><code>.synapt/recall/index/recall.db</code> &mdash; SQLite FTS5 + metadata database</li>
       <li>Global hooks for <code>SessionStart</code>, <code>SessionEnd</code>, and <code>PreCompact</code> (Claude Code)</li>
+      <li>Packaged Codex <code>dev-loop</code> skill under <code>${CODEX_HOME:-~/.codex}/skills/dev-loop/</code></li>
     </ul>
 
-    <p>Build the initial index from your existing Claude Code transcripts:</p>
-    <pre><code>synapt recall build</code></pre>
-
-    <p>For subsequent sessions, the index rebuilds automatically via the SessionStart hook.</p>
+    <p>For subsequent sessions, the index rebuilds automatically via the installed hooks.</p>
 
     <h2 id="tools">4. Available Tools</h2>
 
