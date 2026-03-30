@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -152,6 +153,18 @@ def _render_message(msg: dict) -> str:
     color = _agent_color(name)
     _MD.reset()
     body_html = _MD.convert(body)
+    # Color @mentions — skip content inside <code> and <pre> tags
+    def _color_mentions(html: str) -> str:
+        parts = re.split(r'(<code.*?>.*?</code>|<pre.*?>.*?</pre>)', html, flags=re.DOTALL)
+        for i, part in enumerate(parts):
+            if not part.startswith(('<code', '<pre')):
+                parts[i] = re.sub(
+                    r'@(\w+)',
+                    lambda m: f'<span style="color:{_agent_color(m.group(1))};font-weight:600">@{m.group(1)}</span>',
+                    part,
+                )
+        return ''.join(parts)
+    body_html = _color_mentions(body_html)
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
