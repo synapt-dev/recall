@@ -149,6 +149,7 @@
         hx-swap="none"
         hx-on::after-request="this.querySelector('textarea').value = ''"
         style="display:flex; gap:8px; flex:1; align-items:flex-end">
+    <input type="hidden" name="name" id="post-name" value="dashboard">
     <textarea name="message" placeholder="Message #dev... (Shift+Enter for newline)" autocomplete="off" autofocus
               rows="1" style="flex:1; resize:none; background:var(--bg); color:var(--text); border:1px solid var(--border); padding:8px 12px; border-radius:6px; font-family:inherit; font-size:13px; outline:none; max-height:120px; overflow-y:auto"></textarea>
     <button type="submit">Send</button>
@@ -156,6 +157,16 @@
 </div>
 
 <script>
+// Dashboard display name — prompt on first load, store in localStorage
+let dashName = localStorage.getItem('synapt-dashboard-name');
+if (!dashName) {
+  dashName = prompt('Enter your display name for the dashboard:', 'Layne') || 'dashboard';
+  localStorage.setItem('synapt-dashboard-name', dashName);
+}
+
+// Set name in form
+document.getElementById('post-name').value = dashName;
+
 // Load initial messages
 htmx.ajax('GET', '/api/messages/dev?limit=50', '#feed');
 

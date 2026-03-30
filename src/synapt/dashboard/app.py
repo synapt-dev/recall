@@ -151,8 +151,11 @@ def create_app() -> FastAPI:
         return _render_messages_html(msgs)
 
     @app.post("/api/post/{channel}")
-    async def api_post(channel: str, message: str = Form(...)):
-        channel_post(channel=channel, message=message, agent_name="dashboard")
+    async def api_post(channel: str, message: str = Form(...), name: str = Form("dashboard")):
+        from synapt.recall.channel import channel_join
+        agent_name = "dashboard"
+        channel_join(channel=channel, agent_name=agent_name, display_name=name, role="human")
+        channel_post(channel=channel, message=message, agent_name=agent_name)
         return {"ok": True}
 
     @app.get("/api/stream")
