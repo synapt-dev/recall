@@ -1708,12 +1708,33 @@ def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
         if not agents:
             return []
 
-        # Dedup by (griptree, display_name) — keep most recently seen
+        # If a human has both a fallback identity (display_name == griptree/empty)
+        # and a better named identity in the same griptree, collapse those into
+        # the named identity so the dashboard does not show duplicate humans.
+        preferred_human_name: dict[str, tuple[str, str]] = {}
+        for row in agents:
+            if (row["role"] or "agent") != "human":
+                continue
+            gt = row["griptree"] or row["agent_id"]
+            dn = row["display_name"] or ""
+            if not dn:
+                continue
+            if _normalize_display_name(dn) == _normalize_display_name(gt):
+                continue
+            existing = preferred_human_name.get(gt)
+            if existing is None or row["last_seen"] > existing[1]:
+                preferred_human_name[gt] = (dn, row["last_seen"])
+
+        # Dedup by identity — keep most recently seen
         best: dict[tuple[str, str], sqlite3.Row] = {}
         for row in agents:
             gt = row["griptree"] or row["agent_id"]
             dn = row["display_name"] or ""
-            key = (gt, dn)
+            role = row["role"] or "agent"
+            if role == "human" and gt in preferred_human_name:
+                key = (gt, preferred_human_name[gt][0])
+            else:
+                key = (gt, dn)
             existing = best.get(key)
             if existing is None or row["last_seen"] > existing["last_seen"]:
                 best[key] = row
