@@ -146,7 +146,7 @@ def _render_message(msg: dict) -> str:
     if msg_type in ("join", "leave"):
         return (
             f'<div class="msg sys">'
-            f'<span class="ts">{ts_short}</span> '
+            f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
             f'<span class="sys-text">-- {escape(name)} {"joined" if msg_type == "join" else "left"}</span>'
             f'</div>'
         )
@@ -168,14 +168,14 @@ def _render_message(msg: dict) -> str:
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
-            f'<span class="ts">{ts_short}</span> '
+            f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
             f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: {body_html}'
             f'{attachments_html}'
             f'</div>'
         )
     return (
         f'<div class="msg">'
-        f'<span class="ts">{ts_short}</span> '
+        f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
         f'<b style="color:{color}">{escape(name)}</b>: {body_html}'
         f'{attachments_html}'
         f'</div>'

@@ -268,12 +268,29 @@ textarea.addEventListener('input', function() {
   this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
 
-// Auto-scroll feed
+// Convert UTC timestamps to local time
+function localizeTimestamps(root) {
+  root.querySelectorAll('.ts[data-utc]').forEach(el => {
+    const utc = el.getAttribute('data-utc');
+    if (!utc || el.dataset.localized) return;
+    try {
+      const d = new Date(utc.endsWith('Z') ? utc : utc + 'Z');
+      if (!isNaN(d)) {
+        el.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        el.dataset.localized = '1';
+      }
+    } catch(e) {}
+  });
+}
+localizeTimestamps(document);
+
+// Auto-scroll feed + localize new timestamps
 const feed = document.getElementById('feed');
 const observer = new MutationObserver(() => {
+  localizeTimestamps(feed);
   feed.scrollTop = feed.scrollHeight;
 });
-observer.observe(feed, { childList: true });
+observer.observe(feed, { childList: true, subtree: true });
 </script>
 
 </body>
