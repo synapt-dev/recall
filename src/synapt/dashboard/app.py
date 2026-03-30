@@ -90,17 +90,18 @@ def _render_message(msg: dict) -> str:
             f'</div>'
         )
     color = _agent_color(name)
+    body_html = escape(body).replace("\n", "<br>")
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
             f'<span class="ts">{ts_short}</span> '
-            f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: {escape(body)}'
+            f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: {body_html}'
             f'</div>'
         )
     return (
         f'<div class="msg">'
         f'<span class="ts">{ts_short}</span> '
-        f'<b style="color:{color}">{escape(name)}</b>: {escape(body)}'
+        f'<b style="color:{color}">{escape(name)}</b>: {body_html}'
         f'</div>'
     )
 
@@ -150,11 +151,16 @@ def create_app() -> FastAPI:
         msgs = channel_messages_json(channel=channel, limit=limit, since=since)
         return _render_messages_html(msgs)
 
+    _dashboard_joined: set[tuple[str, str]] = set()
+
     @app.post("/api/post/{channel}")
     async def api_post(channel: str, message: str = Form(...), name: str = Form("dashboard")):
         from synapt.recall.channel import channel_join
         agent_name = "dashboard"
-        channel_join(channel=channel, agent_name=agent_name, display_name=name, role="human")
+        join_key = (channel, name)
+        if join_key not in _dashboard_joined:
+            channel_join(channel=channel, agent_name=agent_name, display_name=name, role="human")
+            _dashboard_joined.add(join_key)
         channel_post(channel=channel, message=message, agent_name=agent_name)
         return {"ok": True}
 
