@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 from html import escape
 from pathlib import Path
 from urllib.parse import quote
@@ -19,6 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 
 from synapt.recall.channel import _channels_dir
+from synapt.recall.core import project_data_dir
 from synapt.recall.channel import (
     ChannelMessage,
     channel_agents_json,
@@ -188,6 +194,132 @@ def _load_template() -> str:
     return _TEMPLATE
 
 
+def _dashboard_pid_path(project_dir: Path | None = None) -> Path:
+    """Return the dashboard PID file under the project .synapt root."""
+    return project_data_dir(project_dir).parent / "dashboard.pid"
+
+
+def _dashboard_log_path(project_dir: Path | None = None) -> Path:
+    """Return the dashboard log file under the project .synapt root."""
+    return project_data_dir(project_dir).parent / "dashboard.log"
+
+
+def _read_pid(pid_path: Path) -> int | None:
+    """Read a PID file, returning None for missing or invalid content."""
+    try:
+        raw = pid_path.read_text().strip()
+    except FileNotFoundError:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Return True when the process exists and is signalable."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _cleanup_stale_pidfile(pid_path: Path) -> None:
+    """Remove the PID file if it points at no live process."""
+    pid = _read_pid(pid_path)
+    if pid is None or not _pid_is_running(pid):
+        pid_path.unlink(missing_ok=True)
+
+
+def _stop_dashboard(project_dir: Path | None = None) -> bool:
+    """Stop a background dashboard server if one is running."""
+    pid_path = _dashboard_pid_path(project_dir)
+    pid = _read_pid(pid_path)
+    if pid is None:
+        pid_path.unlink(missing_ok=True)
+        return False
+    if not _pid_is_running(pid):
+        pid_path.unlink(missing_ok=True)
+        return False
+
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if not _pid_is_running(pid):
+            pid_path.unlink(missing_ok=True)
+            return True
+        time.sleep(0.1)
+    os.kill(pid, signal.SIGKILL)
+    pid_path.unlink(missing_ok=True)
+    return True
+
+
+def _background_command(host: str, port: int) -> list[str]:
+    """Build the detached child command for the dashboard server."""
+    return [
+        sys.executable,
+        "-m",
+        "synapt.cli",
+        "dashboard",
+        "--foreground",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--no-open",
+    ]
+
+
+def _start_dashboard_background(
+    host: str,
+    port: int,
+    no_open: bool,
+    project_dir: Path | None = None,
+) -> int:
+    """Spawn the dashboard server in the background and persist its PID."""
+    synapt_dir = project_data_dir(project_dir).parent
+    synapt_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = _dashboard_pid_path(project_dir)
+    log_path = _dashboard_log_path(project_dir)
+    _cleanup_stale_pidfile(pid_path)
+
+    existing_pid = _read_pid(pid_path)
+    if existing_pid is not None and _pid_is_running(existing_pid):
+        if not no_open:
+            import webbrowser
+
+            webbrowser.open(f"http://{host}:{port}")
+        return existing_pid
+
+    cmd = _background_command(host, port)
+    with log_path.open("ab") as log:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            cwd=str(Path.cwd()),
+            start_new_session=True,
+        )
+
+    time.sleep(0.2)
+    if proc.poll() is not None:
+        raise RuntimeError(
+            f"Dashboard exited immediately with status {proc.returncode}. "
+            f"See {log_path}."
+        )
+
+    pid_path.write_text(f"{proc.pid}\n")
+    if not no_open:
+        import webbrowser
+
+        webbrowser.open(f"http://{host}:{port}")
+    return proc.pid
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="synapt dashboard", docs_url=None, redoc_url=None)
 
@@ -307,22 +439,43 @@ def create_app() -> FastAPI:
 
 def main():
     import argparse
-    import webbrowser
 
     parser = argparse.ArgumentParser(description="synapt dashboard")
     parser.add_argument("--port", type=int, default=8420)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-open", action="store_true", help="Don't auto-open browser")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--foreground", action="store_true", help="Run server in the terminal")
+    group.add_argument("--stop", action="store_true", help="Stop the background dashboard server")
+    group.add_argument("--launch", action="store_true", help="Explicitly launch in background mode")
     args = parser.parse_args()
 
     url = f"http://{args.host}:{args.port}"
-    print(f"synapt dashboard: {url}")
+    if args.stop:
+        if _stop_dashboard():
+            print("synapt dashboard: stopped")
+        else:
+            print("synapt dashboard: not running")
+        return
 
-    if not args.no_open:
-        webbrowser.open(url)
+    if args.foreground:
+        print(f"synapt dashboard: {url}")
+        if not args.no_open:
+            import webbrowser
 
-    import uvicorn
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+            webbrowser.open(url)
+
+        import uvicorn
+
+        uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+        return
+
+    pid = _start_dashboard_background(
+        host=args.host,
+        port=args.port,
+        no_open=args.no_open,
+    )
+    print(f"synapt dashboard: {url} (pid {pid})")
 
 
 if __name__ == "__main__":
