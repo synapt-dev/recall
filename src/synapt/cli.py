@@ -97,6 +97,7 @@ def _print_help(extra_commands: dict | None = None):
         "Commands:",
         "  init      One-command project setup",
         "  recall    Search and manage past session transcripts",
+        "  dashboard Launch mission control UI",
         "  server    Start the unified MCP server (--dev for auto-reload)",
     ]
     if extra_commands:
