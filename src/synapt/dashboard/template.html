@@ -86,14 +86,17 @@
   .msg { font-size: 13px; line-height: 1.5; padding: 8px 0; border-bottom: 1px solid var(--border); }
   .msg .ts { color: var(--text-dim); font-size: 12px; }
   .msg b { font-weight: 600; }
-  .msg p { margin: 0; display: inline; }
-  .msg code { background: var(--bg); padding: 2px 5px; border-radius: 3px; font-size: 12px; }
-  .msg pre { background: var(--bg); padding: 8px 12px; border-radius: 6px; margin: 4px 0; overflow-x: auto; }
-  .msg pre code { padding: 0; background: none; }
+  .msg p { margin: 3px 0; }
+  .msg code { background: rgba(139,92,246,0.12); padding: 2px 6px; border-radius: 3px; font-size: 12px; color: #c4b5fd; }
+  .msg pre { background: #141420; border: 1px solid var(--border); padding: 10px 14px; border-radius: 6px; margin: 6px 0; overflow-x: auto; line-height: 1.5; }
+  .msg pre code { padding: 0; background: none; color: var(--text); }
   .msg strong { color: inherit; }
-  .msg ul, .msg ol { margin: 4px 0 4px 20px; }
-  .msg table { border-collapse: collapse; margin: 4px 0; font-size: 12px; }
-  .msg th, .msg td { border: 1px solid var(--border); padding: 4px 8px; }
+  .msg ul, .msg ol { margin: 6px 0 6px 24px; line-height: 1.6; }
+  .msg li { margin: 2px 0; }
+  .msg table { border-collapse: collapse; margin: 6px 0; font-size: 12px; width: auto; }
+  .msg th, .msg td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+  .msg th { background: var(--surface); font-weight: 600; }
+  .msg blockquote { border-left: 3px solid var(--accent); padding-left: 12px; margin: 6px 0; color: var(--text-dim); }
   .msg.sys { color: var(--text-dim); font-size: 12px; }
   .msg.sys .sys-text { font-style: italic; }
   .msg.directive b { color: var(--orange); }
