@@ -194,6 +194,22 @@ def _load_template() -> str:
     return _TEMPLATE
 
 
+def _ensure_dashboard_join(
+    joined: set[tuple[str, str]],
+    channel: str,
+    name: str,
+) -> None:
+    """Ensure the dashboard user has an explicit human presence entry."""
+    from synapt.recall.channel import channel_join
+
+    clean_name = (name or "dashboard").strip() or "dashboard"
+    join_key = (channel, clean_name)
+    if join_key in joined:
+        return
+    channel_join(channel=channel, agent_name="dashboard", display_name=clean_name, role="human")
+    joined.add(join_key)
+
+
 def _dashboard_pid_path(project_dir: Path | None = None) -> Path:
     """Return the dashboard PID file under the project .synapt root."""
     return project_data_dir(project_dir).parent / "dashboard.pid"
@@ -349,6 +365,11 @@ def create_app() -> FastAPI:
 
     _dashboard_joined: set[tuple[str, str]] = set()
 
+    @app.post("/api/join/{channel}")
+    async def api_join(channel: str, name: str = Form("dashboard")):
+        _ensure_dashboard_join(_dashboard_joined, channel=channel, name=name)
+        return {"ok": True}
+
     @app.post("/api/post/{channel}")
     async def api_post(
         channel: str,
@@ -356,13 +377,8 @@ def create_app() -> FastAPI:
         name: str = Form("dashboard"),
         attachment: UploadFile | None = File(None),
     ):
-        from synapt.recall.channel import channel_join
-
         agent_name = "dashboard"
-        join_key = (channel, name)
-        if join_key not in _dashboard_joined:
-            channel_join(channel=channel, agent_name=agent_name, display_name=name, role="human")
-            _dashboard_joined.add(join_key)
+        _ensure_dashboard_join(_dashboard_joined, channel=channel, name=name)
 
         attachment_paths: list[str] | None = None
         tmp_path: Path | None = None

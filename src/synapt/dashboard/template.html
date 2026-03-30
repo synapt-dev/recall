@@ -208,6 +208,16 @@ if (!dashName) {
 // Set name in form
 document.getElementById('post-name').value = dashName;
 
+function ensureDashboardJoin(channel) {
+  return fetch('/api/join/' + channel, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ name: dashName }),
+  });
+}
+
+ensureDashboardJoin('dev');
+
 // Load initial messages
 htmx.ajax('GET', '/api/messages/dev?limit=50', '#feed');
 
@@ -231,6 +241,7 @@ document.getElementById('channel-select').addEventListener('change', function() 
   htmx.process(document.getElementById('post-form'));
   // Update placeholder
   document.querySelector('#input-bar textarea').placeholder = 'Message #' + ch + '... (Shift+Enter for newline)';
+  ensureDashboardJoin(ch);
   // Reload messages
   document.getElementById('feed').innerHTML = '';
   htmx.ajax('GET', '/api/messages/' + ch + '?limit=50', '#feed');
