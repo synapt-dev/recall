@@ -33,6 +33,27 @@ _STATUS_COLORS = {
     "offline": "#6b7280",
 }
 
+# Distinct colors per agent for the message feed
+_AGENT_COLORS = [
+    "#8b5cf6",  # purple (Opus)
+    "#06b6d4",  # cyan (Apollo)
+    "#4ade80",  # green (Sentinel)
+    "#fb923c",  # orange (Atlas)
+    "#f472b6",  # pink
+    "#facc15",  # yellow
+    "#a78bfa",  # light purple
+    "#34d399",  # emerald
+]
+_agent_color_cache: dict[str, str] = {}
+
+
+def _agent_color(name: str) -> str:
+    """Assign a stable color to an agent name."""
+    if name not in _agent_color_cache:
+        idx = len(_agent_color_cache) % len(_AGENT_COLORS)
+        _agent_color_cache[name] = _AGENT_COLORS[idx]
+    return _agent_color_cache[name]
+
 
 def _render_agent_tile(agent: dict) -> str:
     status = agent["status"]
@@ -68,17 +89,18 @@ def _render_message(msg: dict) -> str:
             f'<span class="sys-text">-- {escape(name)} {"joined" if msg_type == "join" else "left"}</span>'
             f'</div>'
         )
+    color = _agent_color(name)
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
             f'<span class="ts">{ts_short}</span> '
-            f'<b>{escape(name)}</b> &rarr; @{escape(to)}: {escape(body)}'
+            f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: {escape(body)}'
             f'</div>'
         )
     return (
         f'<div class="msg">'
         f'<span class="ts">{ts_short}</span> '
-        f'<b>{escape(name)}</b>: {escape(body)}'
+        f'<b style="color:{color}">{escape(name)}</b>: {escape(body)}'
         f'</div>'
     )
 
@@ -129,8 +151,11 @@ def create_app() -> FastAPI:
         return _render_messages_html(msgs)
 
     @app.post("/api/post/{channel}")
-    async def api_post(channel: str, message: str = Form(...)):
-        channel_post(channel=channel, message=message, agent_name="dashboard")
+    async def api_post(channel: str, message: str = Form(...), name: str = Form("dashboard")):
+        from synapt.recall.channel import channel_join
+        agent_name = "dashboard"
+        channel_join(channel=channel, agent_name=agent_name, display_name=name, role="human")
+        channel_post(channel=channel, message=message, agent_name=agent_name)
         return {"ok": True}
 
     @app.get("/api/stream")

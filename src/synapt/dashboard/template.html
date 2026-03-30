@@ -57,6 +57,7 @@
     padding: 12px 20px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
+    flex-shrink: 0;
   }
   .tile {
     background: var(--bg);
@@ -68,6 +69,12 @@
   .tile-role { color: var(--text-dim); font-size: 11px; margin-bottom: 4px; }
   .tile-meta { color: var(--text-dim); font-size: 11px; }
   .tile.empty { color: var(--text-dim); text-align: center; grid-column: 1 / -1; }
+  #sse-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
   #feed {
     flex: 1;
     overflow-y: auto;
@@ -78,7 +85,7 @@
   }
   .msg { font-size: 13px; line-height: 1.5; padding: 2px 0; }
   .msg .ts { color: var(--text-dim); font-size: 12px; }
-  .msg b { color: var(--accent); font-weight: 600; }
+  .msg b { font-weight: 600; }
   .msg.sys { color: var(--text-dim); font-size: 12px; }
   .msg.sys .sys-text { font-style: italic; }
   .msg.directive b { color: var(--orange); }
@@ -88,8 +95,9 @@
     padding: 12px 20px;
     border-top: 1px solid var(--border);
     background: var(--surface);
+    flex-shrink: 0;
   }
-  #input-bar input {
+  #input-bar textarea {
     flex: 1;
     background: var(--bg);
     color: var(--text);
@@ -99,8 +107,9 @@
     font-family: inherit;
     font-size: 13px;
     outline: none;
+    line-height: 1.4;
   }
-  #input-bar input:focus { border-color: var(--accent); }
+  #input-bar textarea:focus { border-color: var(--accent); }
   #input-bar button {
     background: var(--accent);
     color: white;
@@ -138,14 +147,26 @@
   <form id="post-form"
         hx-post="/api/post/dev"
         hx-swap="none"
-        hx-on::after-request="this.querySelector('input').value = ''"
-        style="display:flex; gap:8px; flex:1">
-    <input name="message" placeholder="Message #dev..." autocomplete="off" autofocus>
+        hx-on::after-request="this.querySelector('textarea').value = ''"
+        style="display:flex; gap:8px; flex:1; align-items:flex-end">
+    <input type="hidden" name="name" id="post-name" value="dashboard">
+    <textarea name="message" placeholder="Message #dev... (Shift+Enter for newline)" autocomplete="off" autofocus
+              rows="1" style="flex:1; resize:none; background:var(--bg); color:var(--text); border:1px solid var(--border); padding:8px 12px; border-radius:6px; font-family:inherit; font-size:13px; outline:none; max-height:120px; overflow-y:auto"></textarea>
     <button type="submit">Send</button>
   </form>
 </div>
 
 <script>
+// Dashboard display name — prompt on first load, store in localStorage
+let dashName = localStorage.getItem('synapt-dashboard-name');
+if (!dashName) {
+  dashName = prompt('Enter your display name for the dashboard:', 'Layne') || 'dashboard';
+  localStorage.setItem('synapt-dashboard-name', dashName);
+}
+
+// Set name in form
+document.getElementById('post-name').value = dashName;
+
 // Load initial messages
 htmx.ajax('GET', '/api/messages/dev?limit=50', '#feed');
 
@@ -168,10 +189,26 @@ document.getElementById('channel-select').addEventListener('change', function() 
   document.getElementById('post-form').setAttribute('hx-post', '/api/post/' + ch);
   htmx.process(document.getElementById('post-form'));
   // Update placeholder
-  document.querySelector('#input-bar input').placeholder = 'Message #' + ch + '...';
+  document.querySelector('#input-bar textarea').placeholder = 'Message #' + ch + '... (Shift+Enter for newline)';
   // Reload messages
   document.getElementById('feed').innerHTML = '';
   htmx.ajax('GET', '/api/messages/' + ch + '?limit=50', '#feed');
+});
+
+// Enter sends, Shift+Enter adds newline
+const textarea = document.querySelector('#input-bar textarea');
+textarea.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (this.value.trim()) {
+      htmx.trigger(document.getElementById('post-form'), 'submit');
+    }
+  }
+});
+// Auto-resize textarea
+textarea.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
 
 // Auto-scroll feed
