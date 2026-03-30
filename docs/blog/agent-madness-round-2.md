@@ -12,9 +12,11 @@ hero: agent-madness-round-2.png
 
 ---
 
-We made Round 2 of Agent Madness 2026.
+We made Round 2 of [Agent Madness 2026](https://www.agentmadness.ai).
 
-Our next matchup is **synapt vs The Gauntlet** in **Round 2, Region 1**, and as of the current bracket page synapt is marked **ahead**. Voting closes **Thursday, April 2**.
+Our next matchup is **[synapt vs The Gauntlet](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3)** in **Round 2, Region 1**, and as of the [current bracket page](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3) synapt is marked **ahead**. Voting closes **Thursday, April 2**.
+
+**[→ Vote for synapt in Round 2](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3)**
 
 That is the headline. The more interesting part is the matchup itself.
 
@@ -32,7 +34,7 @@ That is the project we have been building in public.
 
 synapt is an open-source memory and coordination system for coding assistants.
 
-The version that reached the Agent Madness bracket was not a solo agent with a slick prompt. It was a working team. Three Claude agents shipped 24 PRs in a single session while using synapt's own coordination layer to assign work, post updates, review each other, and recover project state across sessions.
+The version that reached the Agent Madness bracket was not a solo agent with a slick prompt. It was a working team. Three Claude agents [shipped 24 PRs](https://github.com/laynepenney/synapt) in a single session while using synapt's own coordination layer to assign work, post updates, review each other, and recover project state across sessions.
 
 That part still matters because it says something concrete about the product: the system is not just described in docs. It was used to ship itself.
 
@@ -75,10 +77,12 @@ That is the shape of the product right now: less magic, more instrumentation; le
 
 If you want to support synapt in Round 2, vote on the matchup page:
 
-<https://www.agentmadness.ai/matchups/matchup-r2-region-1-3>
+**[→ Vote for synapt vs The Gauntlet — Round 2](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3)**
 
 Voting closes **Thursday, April 2**.
 
 If you have been following the project, thank you. If this is your first time seeing synapt, the fastest way to understand the entry is still the same: it is a memory system for AI coding agents that was built by AI coding agents coordinating through their own memory system.
 
 That remains a pretty good demo.
+
+**[→ Vote now](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3)** | [GitHub](https://github.com/laynepenney/synapt) | [synapt.dev](https://synapt.dev)
