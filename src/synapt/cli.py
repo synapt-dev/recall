@@ -66,6 +66,18 @@ def main():
         from synapt.server import main as server_main
 
         server_main()
+    elif subcmd == "dashboard":
+        sys.argv = [f"synapt {subcmd}"] + sys.argv[2:]
+        try:
+            from synapt.dashboard.app import main as dashboard_main
+        except ImportError:
+            print(
+                "Dashboard requires extra dependencies.\n"
+                "Install with: pip install synapt[dashboard]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        dashboard_main()
     elif subcmd in extra_commands:
         # Remove the subcommand from argv so the plugin sees correct args.
         sys.argv = [f"synapt {subcmd}"] + sys.argv[2:]
