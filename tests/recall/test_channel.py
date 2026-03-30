@@ -34,7 +34,9 @@ from synapt.recall.channel import (
     channel_unmute,
     channel_kick,
     channel_broadcast,
+    channel_agents_json,
     channel_list_channels,
+    channel_messages_json,
     channel_search,
     channel_rename,
     channel_claim,
@@ -550,6 +552,64 @@ class TestUnreadMessages(unittest.TestCase):
         unread = channel_unread(agent_name="agent-a")
         self.assertEqual(unread["dev"], 1)
         self.assertEqual(unread["eval"], 2)
+
+
+class TestDashboardJsonViews(unittest.TestCase):
+    """Test public JSON-friendly channel wrappers for dashboard consumers."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_channel_agents_json_returns_active_agents_and_channels(self):
+        channel_join("dev", agent_name="agent-a", role="human", display_name="Atlas")
+        channel_join("eval", agent_name="agent-a", role="human", display_name="Atlas")
+        channel_join("dev", agent_name="agent-b", display_name="Sentinel")
+
+        agents = channel_agents_json()
+
+        self.assertEqual([agent["display_name"] for agent in agents], ["Atlas", "Sentinel"])
+        atlas = agents[0]
+        self.assertEqual(atlas["agent_id"], "agent-a")
+        self.assertEqual(atlas["role"], "human")
+        self.assertEqual(atlas["status"], "online")
+        self.assertEqual(atlas["channels"], ["dev", "eval"])
+
+    def test_channel_messages_json_returns_pins_messages_and_claims(self):
+        channel_join("dev", agent_name="admin", display_name="Admin")
+        channel_post("dev", "pinned rule", agent_name="admin")
+        first_msg = _read_messages(_channels_dir() / "dev.jsonl")[-1]
+        channel_pin("dev", first_msg.id, agent_name="admin")
+
+        channel_post("dev", "work item", agent_name="agent-a")
+        work_msg = _read_messages(_channels_dir() / "dev.jsonl")[-1]
+        channel_claim(work_msg.id, agent_name="agent-b")
+
+        payload = channel_messages_json("dev")
+
+        self.assertEqual(payload["channel"], "dev")
+        self.assertEqual(len(payload["pins"]), 1)
+        self.assertEqual(payload["pins"][0]["message_id"], first_msg.id)
+        self.assertEqual(payload["pins"][0]["pinned_by_display"], "Admin")
+        self.assertEqual(payload["messages"][-1]["id"], work_msg.id)
+        self.assertEqual(payload["messages"][-1]["claimed_by"], "agent-b")
+
+    def test_channel_messages_json_since_and_show_pins_filters_output(self):
+        channel_post("dev", "first", agent_name="agent-a")
+        first = _read_messages(_channels_dir() / "dev.jsonl")[-1]
+        channel_pin("dev", first.id, agent_name="agent-a")
+        time.sleep(0.01)
+        channel_post("dev", "second", agent_name="agent-a")
+        second = _read_messages(_channels_dir() / "dev.jsonl")[-1]
+
+        payload = channel_messages_json("dev", since=first.timestamp, show_pins=False)
+
+        self.assertEqual(payload["pins"], [])
+        self.assertEqual([msg["id"] for msg in payload["messages"]], [second.id])
 
     def test_unread_read_low_preserves_actionable_mention(self):
         channel_join("dev", agent_name="agent-a", display_name="Apollo")

@@ -1043,6 +1043,141 @@ def channel_read(
     return "\n".join(lines)
 
 
+def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
+    """Return active agent state as structured JSON-friendly dicts.
+
+    Intended for UI/dashboard consumers that need stable machine-readable
+    data without importing private SQLite helpers directly.
+    """
+    conn = _open_db(project_dir)
+    try:
+        _reap_stale_agents(conn, project_dir)
+
+        agents = conn.execute(
+            "SELECT agent_id, griptree, display_name, role, status, last_seen, joined_at FROM presence"
+        ).fetchall()
+
+        best_by_identity: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in agents:
+            gt = row["griptree"] or row["agent_id"]
+            dn = row["display_name"] or ""
+            key = (gt, dn)
+            existing = best_by_identity.get(key)
+            if existing is None or row["last_seen"] > existing["last_seen"]:
+                best_by_identity[key] = row
+
+        result: list[dict] = []
+        for row in sorted(
+            best_by_identity.values(),
+            key=lambda r: r["display_name"] or r["griptree"] or r["agent_id"],
+        ):
+            status = _agent_status(row["last_seen"])
+            if status == "offline":
+                continue
+
+            channels = [
+                ch_row["channel"]
+                for ch_row in conn.execute(
+                    "SELECT channel FROM memberships WHERE agent_id = ? ORDER BY channel",
+                    (row["agent_id"],),
+                ).fetchall()
+            ]
+
+            result.append({
+                "agent_id": row["agent_id"],
+                "griptree": row["griptree"],
+                "display_name": row["display_name"] or row["griptree"] or row["agent_id"],
+                "role": row["role"],
+                "status": status,
+                "last_seen": row["last_seen"],
+                "joined_at": row["joined_at"],
+                "channels": channels,
+            })
+
+        return result
+    finally:
+        conn.close()
+
+
+def channel_messages_json(
+    channel: str = "dev",
+    limit: int = 20,
+    since: str | None = None,
+    project_dir: Path | None = None,
+    show_pins: bool = True,
+) -> dict:
+    """Return channel feed state as structured JSON-friendly dicts.
+
+    Unlike ``channel_read()``, this is read-only and does not update cursors.
+    Intended for dashboards and other machine consumers.
+    """
+    conn = _open_db(project_dir)
+    try:
+        _reap_stale_agents(conn, project_dir)
+
+        pins = []
+        if show_pins:
+            pins = conn.execute(
+                "SELECT body, message_id, pinned_by, pinned_at FROM pins WHERE channel = ? "
+                "ORDER BY pinned_at",
+                (channel,),
+            ).fetchall()
+
+        display_map = {}
+        role_map: dict[str, str] = {}
+        for row in conn.execute(
+            "SELECT agent_id, display_name, griptree, role FROM presence"
+        ).fetchall():
+            display_map[row["agent_id"]] = row["display_name"] or row["griptree"] or row["agent_id"]
+            role_map[row["agent_id"]] = row["role"]
+
+        claim_map = {}
+        for row in conn.execute(
+            "SELECT message_id, claimed_by FROM claims WHERE channel = ?",
+            (channel,),
+        ).fetchall():
+            claim_map[row["message_id"]] = row["claimed_by"]
+    finally:
+        conn.close()
+
+    path = _channel_path(channel, project_dir)
+    messages = _read_messages(path, since=since) if path.exists() else []
+    messages = messages[-limit:]
+
+    return {
+        "channel": channel,
+        "pins": [
+            {
+                "body": row["body"],
+                "message_id": row["message_id"],
+                "pinned_at": row["pinned_at"],
+                "pinned_by": row["pinned_by"],
+                "pinned_by_display": display_map.get(row["pinned_by"], row["pinned_by"]),
+            }
+            for row in pins
+        ],
+        "messages": [
+            {
+                "timestamp": msg.timestamp,
+                "id": msg.id,
+                "type": msg.type,
+                "body": msg.body,
+                "from_agent": msg.from_agent,
+                "from_display": msg.from_display or display_map.get(msg.from_agent, msg.from_agent),
+                "role": role_map.get(msg.from_agent, "agent"),
+                "to": msg.to,
+                "attachments": list(msg.attachments),
+                "claimed_by": claim_map.get(msg.id, ""),
+                "claimed_by_display": display_map.get(
+                    claim_map.get(msg.id, ""),
+                    claim_map.get(msg.id, ""),
+                ) if claim_map.get(msg.id) else "",
+            }
+            for msg in messages
+        ],
+    }
+
+
 def channel_who(project_dir: Path | None = None) -> str:
     """Show which agents are currently online and in which channels.
 
