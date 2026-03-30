@@ -192,8 +192,8 @@ All systems use gpt-4o-mini as the shared generation + judge backbone for fair c
 | Memobase | 75.78 | 46.88 | **85.05** | cloud |
 | memOS | 72.99 ± 0.14 | — | — | cloud |
 | Full-Context | 72.90 | — | — | upper bound |
-| **synapt v0.8.0 (8B)** | **72.47** | **70.92** | 59.19 | Ministral 8B cloud enrich |
-| **synapt v0.6.1 (3B)** | **72.40** | 67.02 | 61.06 | **local 3B on M2 Air** |
+| **synapt (audited)** | **72.4** | **70.92** | 59.19 | Ministral 8B cloud enrich |
+| **synapt local-first** | **72.4** | 67.02 | 61.06 | **local 3B on M2 Air** |
 | Mem0 | 64.73 ± 0.17 | 51.15 | 55.51 | cloud GPT-4 |
 | Zep | 42.29 ± 0.18 | — | — | cloud |
 
@@ -201,6 +201,7 @@ What matters for the pitch:
 - synapt is competitive with the best published systems
 - the local-first path remains strong on commodity hardware
 - the system is explicit about benchmark methodology, retrieval tradeoffs, and judge-model drift
+- the 72.4 LOCOMO score is the audited, reproducible number to cite
 
 Sources:
 - [LOCOMO](https://snap-research.github.io/locomo/)
