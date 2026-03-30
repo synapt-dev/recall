@@ -22,11 +22,23 @@ claims to have run at a specific ref.
 
 ## Current Best
 
-**v0.6.1 Full Pipeline (Ministral 8B cloud, 10 convs) — J-Score: 76.04%** — #2 on LOCOMO, within 1.5pp of Engram (77.55%), ahead of Memobase (75.78%) and all other competitors.
-
-**v0.6.1 Full Pipeline (Ministral 3B local, 10 convs) — J-Score: 73.38%** — beats Full-Context upper bound (72.90%) with a local 3B model.
+**LOCOMO (audited, 2026-03-26):** All versions (v0.6.1, v0.7.8, v0.8.0) converge at **~72.4% J-score** when re-evaluated with the current gpt-4o-mini API. The original 76.04% is not reproducible — it reflected an earlier gpt-4o-mini API version, not a code regression. See "Judge model drift" note below.
 
 **CodeMemo v0.6.2 (local 3B, no cloud) — J-Score: 90.51%** (158 questions, 3 projects) — beats Mem0 (cloud OpenAI) by +14.51pp on coding memory.
+
+### Judge model drift (2026-03-26)
+
+The original v0.6.1 LOCOMO score of 76.04% was obtained with gpt-4o-mini in March 2026. When re-evaluated with the same code at the same commit, all three versions score ~72.4%:
+
+| Version | Original J-Score | Re-run J-Score | Delta |
+|---------|-----------------|----------------|-------|
+| v0.6.1 | 76.04% | 72.40% | -3.64pp |
+| v0.7.8 | — | 72.47% | — |
+| v0.8.0 | — | 72.47% | — |
+
+The regression was in the judge model API (silent gpt-4o-mini version update), not our code. There was never a real code regression between v0.6.1 and v0.8.0. Our honest, audited LOCOMO J-score is **72.4%** with current gpt-4o-mini.
+
+**Mem0 gpt-5-mini CodeMemo rerun:** Attempted but failed (0 memories stored, 0 questions evaluated). Harness patched, rerun pending. The canonical Mem0 comparison remains the gpt-4o-mini run (90.51% vs 76.0%).
 
 ## Current Results
 
