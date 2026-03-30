@@ -22,7 +22,7 @@
 
 ---
 
-**#2 on LOCOMO** (76.04%, within 1.5pp of Engram) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
+**72.47% on LOCOMO** (8B cloud enrichment, matching Full-Context upper bound) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
 
 Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code, Codex CLI, OpenCode, and other MCP-compatible tools.
 
@@ -34,23 +34,36 @@ pip install synapt
 
 ## Quick start
 
-### 1. Build the index
+### Claude Code (recommended)
 
-Synapt discovers Claude Code transcripts automatically:
-
-```bash
-synapt recall build
-```
-
-### 2. Search past sessions
+Two commands — install and connect:
 
 ```bash
-synapt recall search "how did we fix the auth bug"
+pip install synapt
+claude mcp add synapt -- synapt server
 ```
 
-### 3. Use as an MCP server
+That's it. Your AI assistant now has persistent memory — it knows when to search past sessions, manage a journal, set reminders, and build a durable knowledge base. No config files needed.
 
-Add to your Claude Code config (`~/.claude/mcp.json`):
+### Codex CLI
+
+```bash
+pip install synapt
+```
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.synapt]
+command = "synapt"
+args = ["server"]
+```
+
+Synapt automatically discovers and indexes Codex transcripts from `~/.codex/sessions/`.
+
+### Manual MCP config
+
+If you prefer manual setup, add to `~/.claude/mcp.json`:
 
 ```json
 {
@@ -64,19 +77,15 @@ Add to your Claude Code config (`~/.claude/mcp.json`):
 }
 ```
 
-This gives your AI assistant tools for searching past sessions, managing a journal, setting reminders, and building a durable knowledge base.
+### Build and search
 
-### Codex CLI
+```bash
+# Build the index (discovers Claude Code / Codex transcripts automatically)
+synapt recall build
 
-Add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.synapt]
-command = "synapt"
-args = ["server"]
+# Search past sessions
+synapt recall search "how did we fix the auth bug"
 ```
-
-Synapt automatically discovers and indexes Codex transcripts from `~/.codex/sessions/`.
 
 If you want Codex to re-check `#dev` or continue autonomous work on a timer, the repo includes a simple loop wrapper:
 
@@ -241,19 +250,19 @@ All systems use gpt-4o-mini as shared backbone (generation + judge) for fair com
 | System | **Overall** | Multi-Hop | Temporal | Infra |
 |--------|-------------|-----------|----------|-------|
 | Engram | 77.55 ± 0.13 | — | — | cloud (BM25+ColBERT+KG) |
-| **synapt v0.6.1 (8B)** | **76.04** | **70.92** | 66.36 | Ministral 8B cloud enrich |
 | Memobase | 75.78 | 46.88 | **85.05** | cloud |
-| **synapt v0.6.1 (3B)** | **73.38** | 70.21 | 61.68 | **local 3B on M2 Air** |
 | memOS | 72.99 ± 0.14 | — | — | cloud |
 | Full-Context | 72.90 | — | — | upper bound |
+| **synapt v0.8.0 (8B)** | **72.47** | **70.92** | 59.19 | Ministral 8B cloud enrich |
+| **synapt v0.6.1 (3B)** | **72.40** | 67.02 | 61.06 | **local 3B on M2 Air** |
 | Mem0 | 64.73 ± 0.17 | 51.15 | 55.51 | cloud GPT-4 |
 | Zep | 42.29 ± 0.18 | — | — | cloud |
 
-Synapt is **#2 on LOCOMO** at 76.04% — 1.51pp behind Engram (within their stddev of ±0.13) and ahead of Memobase (75.78%), the Full-Context upper bound (72.90%), and all other systems. The 3B local configuration (73.38%) beats the Full-Context upper bound using only a Ministral 3B model running on an M2 MacBook Air.
+Synapt scores **72.47%** on LOCOMO — matching the Full-Context upper bound (72.90%) and ahead of Mem0 (+7.7pp) and Zep (+30pp). All three synapt versions (v0.6.1, v0.7.8, v0.8.0) score 72.4-72.5% with current gpt-4o-mini, confirming stable retrieval quality across releases.
 
 **Best-in-class multi-hop**: 70.92% — highest of any system tested, including those using GPT-4 for memory extraction. Engram is cloud-only; synapt runs entirely on a laptop.
 
-> **What is Full-Context?** The entire conversation history is passed directly to the LLM as context — no retrieval, no memory extraction. It represents the theoretical upper bound: the LLM has access to every fact. Synapt beats it because focused retrieval surfaces only what's relevant, reducing noise for the answer model.
+> **Note on prior 76.04% score:** An earlier v0.6.1 run scored 76.04%, but this is not reproducible with the current gpt-4o-mini API. Re-running the identical v0.6.1 code scores 72.40% — consistent with v0.7.8 (72.47%) and v0.8.0 (72.47%). The difference is attributed to gpt-4o-mini API version drift (the judge model), not a code regression. All scores in this table use the current API.
 
 ### CodeMemo — Coding Memory
 
