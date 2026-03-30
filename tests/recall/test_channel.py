@@ -245,8 +245,12 @@ class TestDashboardJsonWrappers(unittest.TestCase):
         self.assertEqual(msgs[0]["from_display"], "Atlas")
 
     def test_channel_agents_json_collapses_fallback_human_identity_when_named_human_exists(self):
-        older = "2026-03-30T07:15:00.000000Z"
-        newer = "2026-03-30T07:18:00.000000Z"
+        older = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000000Z"
+        )
+        newer = (datetime.now(timezone.utc) - timedelta(minutes=2)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000000Z"
+        )
 
         conn = _open_db()
         try:
