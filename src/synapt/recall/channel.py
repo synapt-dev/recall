@@ -173,7 +173,12 @@ def _find_display_name_conflict(
     display_name: str,
     agent_id: str,
 ) -> sqlite3.Row | None:
-    """Return another online/active agent already using this display name."""
+    """Return another online/active agent already using this display name.
+
+    Stale agents (idle or worse — >30 min since last heartbeat) do not
+    block name claims. This handles crashes, force-quits, and OOM kills
+    that leave orphaned name claims without a clean channel leave.
+    """
     normalized = _normalize_display_name(display_name)
     if not normalized:
         return None
@@ -188,7 +193,10 @@ def _find_display_name_conflict(
             continue
         if _normalize_display_name(existing) != normalized:
             continue
-        if _agent_status(row["last_seen"]) == "offline":
+        status = _agent_status(row["last_seen"])
+        # Release name claims from stale agents (idle, away, offline)
+        # Only "online" (<5 min) agents truly hold a name claim
+        if status != "online":
             continue
         return row
     return None
