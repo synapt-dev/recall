@@ -36,6 +36,7 @@ from synapt.recall.channel import (
     channel_unmute,
     channel_kick,
     channel_broadcast,
+    channel_agents_json,
     channel_list_channels,
     channel_messages_json,
     channel_search,
@@ -242,6 +243,39 @@ class TestDashboardJsonWrappers(unittest.TestCase):
         msgs = channel_messages_json("dev")
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0]["from_display"], "Atlas")
+
+    def test_channel_agents_json_collapses_fallback_human_identity_when_named_human_exists(self):
+        older = "2026-03-30T07:15:00.000000Z"
+        newer = "2026-03-30T07:18:00.000000Z"
+
+        conn = _open_db()
+        try:
+            conn.execute(
+                "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("s_synapt", "synapt", "synapt", "human", "online", older, older),
+            )
+            conn.execute(
+                "INSERT INTO memberships (agent_id, channel, joined_at) VALUES (?, ?, ?)",
+                ("s_synapt", "dev", older),
+            )
+            conn.execute(
+                "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("dashboard", "synapt", "Layne", "human", "online", newer, newer),
+            )
+            conn.execute(
+                "INSERT INTO memberships (agent_id, channel, joined_at) VALUES (?, ?, ?)",
+                ("dashboard", "dev", newer),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        agents = channel_agents_json()
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["display_name"], "Layne")
+        self.assertEqual(agents[0]["agent_id"], "dashboard")
 
     def test_leave_last_channel_removes_presence(self):
         channel_join("dev", agent_name="agent-a")

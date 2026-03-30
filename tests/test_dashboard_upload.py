@@ -95,3 +95,32 @@ def test_post_message_accepts_attachment_upload(tmp_path):
     assert resp.status_code == 200
     assert captured["channel"] == "dev"
     assert captured["agent_name"] == "dashboard"
+
+
+def test_join_route_registers_dashboard_presence():
+    from synapt.dashboard.app import create_app
+
+    joined: dict = {}
+
+    def fake_join(**kwargs):
+        joined.update(kwargs)
+        return "joined"
+
+    with patch("synapt.recall.channel.channel_join", side_effect=fake_join):
+        client = TestClient(create_app())
+        resp = client.post("/api/join/dev", data={"name": "Layne"})
+
+    assert resp.status_code == 200
+    assert joined == {
+        "channel": "dev",
+        "agent_name": "dashboard",
+        "display_name": "Layne",
+        "role": "human",
+    }
+
+
+def test_template_initializes_dashboard_join():
+    template = Path("src/synapt/dashboard/template.html").read_text()
+
+    assert "ensureDashboardJoin('dev');" in template
+    assert "ensureDashboardJoin(ch);" in template
