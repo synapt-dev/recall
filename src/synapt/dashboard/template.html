@@ -97,7 +97,7 @@
     background: var(--surface);
     flex-shrink: 0;
   }
-  #input-bar input {
+  #input-bar textarea {
     flex: 1;
     background: var(--bg);
     color: var(--text);
@@ -107,8 +107,9 @@
     font-family: inherit;
     font-size: 13px;
     outline: none;
+    line-height: 1.4;
   }
-  #input-bar input:focus { border-color: var(--accent); }
+  #input-bar textarea:focus { border-color: var(--accent); }
   #input-bar button {
     background: var(--accent);
     color: white;
@@ -146,9 +147,10 @@
   <form id="post-form"
         hx-post="/api/post/dev"
         hx-swap="none"
-        hx-on::after-request="this.querySelector('input').value = ''"
-        style="display:flex; gap:8px; flex:1">
-    <input name="message" placeholder="Message #dev..." autocomplete="off" autofocus>
+        hx-on::after-request="this.querySelector('textarea').value = ''"
+        style="display:flex; gap:8px; flex:1; align-items:flex-end">
+    <textarea name="message" placeholder="Message #dev... (Shift+Enter for newline)" autocomplete="off" autofocus
+              rows="1" style="flex:1; resize:none; background:var(--bg); color:var(--text); border:1px solid var(--border); padding:8px 12px; border-radius:6px; font-family:inherit; font-size:13px; outline:none; max-height:120px; overflow-y:auto"></textarea>
     <button type="submit">Send</button>
   </form>
 </div>
@@ -176,10 +178,26 @@ document.getElementById('channel-select').addEventListener('change', function() 
   document.getElementById('post-form').setAttribute('hx-post', '/api/post/' + ch);
   htmx.process(document.getElementById('post-form'));
   // Update placeholder
-  document.querySelector('#input-bar input').placeholder = 'Message #' + ch + '...';
+  document.querySelector('#input-bar textarea').placeholder = 'Message #' + ch + '... (Shift+Enter for newline)';
   // Reload messages
   document.getElementById('feed').innerHTML = '';
   htmx.ajax('GET', '/api/messages/' + ch + '?limit=50', '#feed');
+});
+
+// Enter sends, Shift+Enter adds newline
+const textarea = document.querySelector('#input-bar textarea');
+textarea.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (this.value.trim()) {
+      htmx.trigger(document.getElementById('post-form'), 'submit');
+    }
+  }
+});
+// Auto-resize textarea
+textarea.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
 
 // Auto-scroll feed
