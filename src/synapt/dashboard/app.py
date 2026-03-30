@@ -170,30 +170,39 @@ def create_app() -> FastAPI:
             last_agents_hash = ""
             last_msg_ts = ""
 
-            while True:
-                if await request.is_disconnected():
-                    break
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return
 
-                # Agent status
-                agents = channel_agents_json()
-                agents_hash = json.dumps(agents, sort_keys=True)
-                if agents_hash != last_agents_hash:
-                    last_agents_hash = agents_hash
-                    html = _render_agents_html(agents)
-                    yield {"event": "agents", "data": html}
+                    # Agent status
+                    try:
+                        agents = channel_agents_json()
+                    except Exception:
+                        agents = []
+                    agents_hash = json.dumps(agents, sort_keys=True)
+                    if agents_hash != last_agents_hash:
+                        last_agents_hash = agents_hash
+                        html = _render_agents_html(agents)
+                        yield {"event": "agents", "data": html}
 
-                # New messages
-                msgs = channel_messages_json(
-                    channel=channel,
-                    limit=20,
-                    since=last_msg_ts or None,
-                )
-                if msgs:
-                    last_msg_ts = msgs[-1].get("timestamp", last_msg_ts)
-                    html = _render_messages_html(msgs)
-                    yield {"event": "messages", "data": html}
+                    # New messages
+                    try:
+                        msgs = channel_messages_json(
+                            channel=channel,
+                            limit=20,
+                            since=last_msg_ts or None,
+                        )
+                    except Exception:
+                        msgs = []
+                    if msgs:
+                        last_msg_ts = msgs[-1].get("timestamp", last_msg_ts)
+                        html = _render_messages_html(msgs)
+                        yield {"event": "messages", "data": html}
 
-                await asyncio.sleep(2)
+                    await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                return
 
         return EventSourceResponse(generate())
 
