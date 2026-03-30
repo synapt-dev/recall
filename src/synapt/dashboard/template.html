@@ -98,6 +98,31 @@
   .msg.sys { color: var(--text-dim); font-size: 12px; }
   .msg.sys .sys-text { font-style: italic; }
   .msg.directive b { color: var(--orange); }
+  .attachments { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .attachment-link { color: var(--accent); text-decoration: none; }
+  .attachment-image { max-width: min(420px, 100%); max-height: 320px; display: block; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); }
+  .upload-label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  #attachment-name {
+    color: var(--text-dim);
+    font-size: 12px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    align-self: center;
+  }
   #input-bar {
     display: flex;
     gap: 8px;
@@ -155,10 +180,14 @@
 <div id="input-bar">
   <form id="post-form"
         hx-post="/api/post/dev"
+        hx-encoding="multipart/form-data"
         hx-swap="none"
-        hx-on::after-request="this.querySelector('textarea').value = ''"
+        hx-on::after-request="this.querySelector('textarea').value = ''; this.querySelector('#attachment-input').value=''; this.querySelector('#attachment-name').textContent='';"
         style="display:flex; gap:8px; flex:1; align-items:flex-end">
     <input type="hidden" name="name" id="post-name" value="dashboard">
+    <label class="upload-label" for="attachment-input">Screenshot</label>
+    <input id="attachment-input" type="file" name="attachment" accept="image/*" style="display:none">
+    <span id="attachment-name"></span>
     <textarea name="message" placeholder="Message #dev... (Shift+Enter for newline)" autocomplete="off" autofocus
               rows="1" style="flex:1; resize:none; background:var(--bg); color:var(--text); border:1px solid var(--border); padding:8px 12px; border-radius:6px; font-family:inherit; font-size:13px; outline:none; max-height:120px; overflow-y:auto"></textarea>
     <button type="submit">Send</button>
@@ -206,13 +235,18 @@ document.getElementById('channel-select').addEventListener('change', function() 
 
 // Enter sends, Shift+Enter adds newline
 const textarea = document.querySelector('#input-bar textarea');
+const attachmentInput = document.getElementById('attachment-input');
+const attachmentName = document.getElementById('attachment-name');
 textarea.addEventListener('keydown', function(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    if (this.value.trim()) {
+    if (this.value.trim() || attachmentInput.files.length) {
       htmx.trigger(document.getElementById('post-form'), 'submit');
     }
   }
+});
+attachmentInput.addEventListener('change', function() {
+  attachmentName.textContent = this.files.length ? this.files[0].name : '';
 });
 // Auto-resize textarea
 textarea.addEventListener('input', function() {
