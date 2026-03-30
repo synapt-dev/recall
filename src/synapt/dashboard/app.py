@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import tempfile
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
 import markdown as _md
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 
-_MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
-
+from synapt.recall.channel import _channels_dir
 from synapt.recall.channel import (
     ChannelMessage,
     channel_agents_json,
@@ -24,6 +26,8 @@ from synapt.recall.channel import (
     channel_messages_json,
     channel_post,
 )
+
+_MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
 
 # ---------------------------------------------------------------------------
 # HTML fragment renderers
@@ -77,6 +81,52 @@ def _render_agent_tile(agent: dict) -> str:
     )
 
 
+def _attachment_url(rel_path: str) -> str:
+    """Return the dashboard URL for a stored attachment."""
+    return f"/api/attachments/{quote(rel_path, safe='/')}"
+
+
+def _is_image_attachment(rel_path: str) -> bool:
+    """Return True when the attachment should render inline as an image."""
+    suffix = Path(rel_path).suffix.lower()
+    return suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _render_attachments(msg: dict) -> str:
+    """Render stored attachments as inline images or links."""
+    attachments = msg.get("attachments") or []
+    if not attachments:
+        return ""
+
+    parts: list[str] = ['<div class="attachments">']
+    for rel_path in attachments:
+        url = _attachment_url(rel_path)
+        label = escape(Path(rel_path).name)
+        if _is_image_attachment(rel_path):
+            parts.append(
+                '<a class="attachment-link image-link" href="{}" target="_blank" rel="noopener">'
+                '<img class="attachment-image" src="{}" alt="{}">'
+                "</a>".format(url, url, label)
+            )
+        else:
+            parts.append(
+                '<a class="attachment-link" href="{}" target="_blank" rel="noopener">{}</a>'.format(
+                    url, label
+                )
+            )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _resolve_attachment_path(rel_path: str) -> Path:
+    """Resolve a stored attachment path safely inside the channel store."""
+    base = _channels_dir().resolve()
+    candidate = (base / rel_path).resolve()
+    if not candidate.is_relative_to(base):
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    return candidate
+
+
 def _render_message(msg: dict) -> str:
     ts = msg.get("timestamp", "")
     ts_short = ts[11:16] if len(ts) > 16 else ts
@@ -84,6 +134,7 @@ def _render_message(msg: dict) -> str:
     body = msg.get("body", "")
     msg_type = msg.get("type", "message")
     to = msg.get("to", "")
+    attachments_html = _render_attachments(msg)
 
     if msg_type in ("join", "leave"):
         return (
@@ -100,12 +151,14 @@ def _render_message(msg: dict) -> str:
             f'<div class="msg directive">'
             f'<span class="ts">{ts_short}</span> '
             f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: {body_html}'
+            f'{attachments_html}'
             f'</div>'
         )
     return (
         f'<div class="msg">'
         f'<span class="ts">{ts_short}</span> '
         f'<b style="color:{color}">{escape(name)}</b>: {body_html}'
+        f'{attachments_html}'
         f'</div>'
     )
 
@@ -155,17 +208,51 @@ def create_app() -> FastAPI:
         msgs = channel_messages_json(channel=channel, limit=limit, since=since)
         return _render_messages_html(msgs)
 
+    @app.get("/api/attachments/{attachment_path:path}")
+    async def api_attachment(attachment_path: str):
+        path = _resolve_attachment_path(attachment_path)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        return FileResponse(path)
+
     _dashboard_joined: set[tuple[str, str]] = set()
 
     @app.post("/api/post/{channel}")
-    async def api_post(channel: str, message: str = Form(...), name: str = Form("dashboard")):
+    async def api_post(
+        channel: str,
+        message: str = Form(""),
+        name: str = Form("dashboard"),
+        attachment: UploadFile | None = File(None),
+    ):
         from synapt.recall.channel import channel_join
+
         agent_name = "dashboard"
         join_key = (channel, name)
         if join_key not in _dashboard_joined:
             channel_join(channel=channel, agent_name=agent_name, display_name=name, role="human")
             _dashboard_joined.add(join_key)
-        channel_post(channel=channel, message=message, agent_name=agent_name)
+
+        attachment_paths: list[str] | None = None
+        tmp_path: Path | None = None
+        if attachment is not None and attachment.filename:
+            suffix = Path(attachment.filename).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                shutil.copyfileobj(attachment.file, tmp)
+                tmp_path = Path(tmp.name)
+            attachment_paths = [str(tmp_path)]
+
+        try:
+            if not message.strip() and not attachment_paths:
+                raise HTTPException(status_code=400, detail="Message or attachment required")
+            channel_post(
+                channel=channel,
+                message=message,
+                agent_name=agent_name,
+                attachment_paths=attachment_paths,
+            )
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
         return {"ok": True}
 
     @app.get("/api/stream")
