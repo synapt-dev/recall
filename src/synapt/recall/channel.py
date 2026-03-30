@@ -175,9 +175,9 @@ def _find_display_name_conflict(
 ) -> sqlite3.Row | None:
     """Return another online/active agent already using this display name.
 
-    Stale agents (idle or worse — >30 min since last heartbeat) do not
-    block name claims. This handles crashes, force-quits, and OOM kills
-    that leave orphaned name claims without a clean channel leave.
+    Stale agents (anything no longer "online" in the <5 minute heartbeat
+    window) do not block name claims. Their old claim is cleared eagerly
+    so display-name targeting stays unambiguous after the new join/rename.
     """
     normalized = _normalize_display_name(display_name)
     if not normalized:
@@ -194,9 +194,13 @@ def _find_display_name_conflict(
         if _normalize_display_name(existing) != normalized:
             continue
         status = _agent_status(row["last_seen"])
-        # Release name claims from stale agents (idle, away, offline)
-        # Only "online" (<5 min) agents truly hold a name claim
+        # Release name claims from stale agents before allowing reuse.
+        # Only "online" (<5 min) agents truly hold a live claim.
         if status != "online":
+            conn.execute(
+                "UPDATE presence SET display_name = '' WHERE agent_id = ?",
+                (row["agent_id"],),
+            )
             continue
         return row
     return None
