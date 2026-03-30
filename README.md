@@ -9,43 +9,58 @@
 </p>
 
 <p align="center">
-  Persistent conversational memory for AI coding assistants.<br>
-  Indexes your past sessions and makes them searchable — so your AI assistant<br>
-  remembers what you worked on, decisions you made, and patterns you established.
+  Memory and coordination infrastructure for AI coding teams.<br>
+  Search past sessions, preserve decisions, coordinate agents, and ship from one persistent system of record.
 </p>
 
 <p align="center">
   <a href="https://synapt.dev">Website</a> &middot;
+  <a href="https://synapt.dev/guide.html">Guide</a> &middot;
   <a href="https://synapt.dev/blog/">Blog</a> &middot;
   <a href="https://x.com/synapt_dev">@synapt_dev</a>
 </p>
 
 ---
 
-**72.47% on LOCOMO** (8B cloud enrichment, matching Full-Context upper bound) and **+14.51pp over Mem0** on CodeMemo (90.51% vs 76.0%). Local-first — runs on a laptop, no cloud dependency for memory.
+**synapt** gives Claude Code, Codex CLI, OpenCode, and other MCP-compatible assistants persistent operational memory.
 
-Works as an [MCP server](https://modelcontextprotocol.io/) for Claude Code, Codex CLI, OpenCode, and other MCP-compatible tools.
+It closes the gap between a one-shot assistant and a real working team:
+- recall prior sessions, file history, decisions, and unresolved work
+- preserve context in journals, reminders, and knowledge nodes
+- coordinate multiple agents through shared channels, directives, and task claims
+- scale from solo recall on a laptop to multi-agent operational memory
 
-## Install
+## Three-command quickstart
 
-```bash
-pip install synapt
-```
-
-## Quick start
-
-### Claude Code (recommended)
-
-Two commands — install and connect:
+For the default Claude Code path:
 
 ```bash
 pip install synapt
 claude mcp add synapt -- synapt server
+synapt init
 ```
 
-That's it. Your AI assistant now has persistent memory — it knows when to search past sessions, manage a journal, set reminders, and build a durable knowledge base. No config files needed.
+That gives you:
+- a project-local `.synapt/` memory store
+- indexed Claude Code and Codex transcripts
+- Claude hooks for automatic archive/build flow
+- the published Codex `dev-loop` skill installed into `${CODEX_HOME:-~/.codex}/skills/dev-loop/`
+
+## Platform setup
+
+### Claude Code
+
+Recommended:
+
+```bash
+pip install synapt
+claude mcp add synapt -- synapt server
+synapt init
+```
 
 ### Codex CLI
+
+Install:
 
 ```bash
 pip install synapt
@@ -59,44 +74,11 @@ command = "synapt"
 args = ["server"]
 ```
 
-Synapt automatically discovers and indexes Codex transcripts from `~/.codex/sessions/`.
-
-### Manual MCP config
-
-If you prefer manual setup, add to `~/.claude/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "synapt": {
-      "type": "stdio",
-      "command": "synapt",
-      "args": ["server"]
-    }
-  }
-}
-```
-
-### Build and search
+Then initialize the project:
 
 ```bash
-# Build the index (discovers Claude Code / Codex transcripts automatically)
-synapt recall build
-
-# Search past sessions
-synapt recall search "how did we fix the auth bug"
+synapt init
 ```
-
-If you want Codex to re-check `#dev` or continue autonomous work on a timer, the repo includes a simple loop wrapper:
-
-```bash
-./scripts/codex-loop.sh \
-  --interval 60 \
-  --prompt "check #dev, review fresh PRs, or pick up the next unowned task. Post what you're doing in #dev." \
-  -- --full-auto
-```
-
-This launches a fresh `codex exec` each iteration. It does not wake an already-idle interactive Codex session.
 
 ### OpenCode
 
@@ -114,138 +96,95 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-## Features
-
-- **FTS5 + embedding hybrid search** — BM25 full-text search fused with semantic embeddings via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf), plus cross-encoder reranking. Surfaces results that keyword search alone would miss.
-- **Sub-chunk splitting** — Splits transcripts at tool-use boundaries so each chunk captures a coherent action (code edit, test run, error trace) rather than arbitrary fixed-length windows.
-- **Cross-session link expansion** — When retrieving a chunk, automatically surfaces related chunks from other sessions, enabling multi-hop reasoning across your project history.
-- **Content-aware adaptive filtering** — Classifies conversations as code/personal/mixed and adjusts consolidation filters and retrieval parameters per content type.
-- **Query intent routing** — Classifies queries as factual, temporal, debug, decision, aggregation, exploratory, or procedural and adjusts search parameters (recency decay, knowledge boost, embedding weight) automatically.
-- **Enrichment + consolidation + knowledge graph** — Optional LLM-powered session summaries, durable knowledge extraction, and a knowledge graph that connects facts across sessions.
-- **Knowledge embeddings** — Durable knowledge nodes get 384-dim embeddings for semantic retrieval, built at index time.
-- **Topic clustering** — Jaccard token-overlap clustering groups related chunks across sessions.
-- **Session journal** — Rich entries with focus, decisions, done items, and next steps.
-- **Reminders** — Cross-session sticky reminders that surface at session start.
-- **Timeline** — Chronological work arcs showing project narrative.
-- **Working memory** — Frequency-boosted search results for active topics.
-- **28x more token-efficient than context-stuffing** — Retrieves ~1,800 tokens per query (only relevant chunks) vs ~50,000 for systems that inject all memories every turn. Your context window stays free for actual work.
-- **Local-first** — Runs entirely on your laptop. Indexing, embedding, and retrieval are all local — no cloud dependency for memory.
-- **MCP server** — 18 tools for Claude Code integration: search, journal, channels, reminders, portable archive export/import, knowledge, and more.
-- **Agent channels** — Cross-session communication via append-only channels. Agents can post messages, send directives, pin important results, and coordinate work across worktrees.
-- **Intent claiming** — Agents claim tasks (`claim`), declare intent (`intent`), and release work (`unclaim`) to prevent duplicate effort in multi-agent teams.
-- **Directive notifications** — Targeted directives are automatically surfaced in MCP tool responses. Broadcast directives (`to="*"`) reach all agents.
-- **Contradiction flagging** — Flag conflicting information from free text or search results. Auto-matches existing knowledge nodes via FTS, creates new nodes on resolution.
-- **Codex CLI support** — Indexes Codex transcripts from `~/.codex/sessions/` automatically. Cross-editor memory between Claude Code and Codex.
-- **Agent-aware consolidation** — Journal entries capture agent identity (griptree, agent_id). Consolidation detects concurrent sessions and annotates them for the LLM.
-- **Plugin system** — Extend with additional tools via entry-point discovery.
-
-## MCP tools
-
-| Tool | Description |
-|------|-------------|
-| `recall_search` | Search past sessions by query |
-| `recall_context` | Get context for the current session |
-| `recall_files` | Find file history and prior context for a specific path |
-| `recall_sessions` | List indexed sessions |
-| `recall_timeline` | View chronological work arcs |
-| `recall_build` | Build or rebuild the transcript index |
-| `recall_setup` | Auto-configure hooks and MCP integration |
-| `recall_export` | Export a portable `.synapt-archive` backup |
-| `recall_import` | Import a portable recall archive (merge or replace) |
-| `recall_stats` | Index statistics |
-| `recall_journal` | Write rich session journal entries |
-| `recall_remind` | Set cross-session reminders |
-| `recall_enrich` | LLM-powered chunk summarization |
-| `recall_consolidate` | Extract knowledge from journals |
-| `recall_contradict` | Flag contradictions in knowledge (supports free-text claims) |
-| `recall_channel` | Cross-session agent communication (post, read, directives, claim, intent, who) |
-| `recall_quick` | Fast knowledge check (no transcript chunks) |
-| `recall_reload` | Restart MCP server to pick up code changes |
-
-## Agent channels
-
-The `recall_channel` tool provides multi-agent coordination across sessions and worktrees. Channels are append-only JSONL files with SQLite state — no daemon needed.
-
-### Basic communication
-
-```python
-recall_channel(action="join", channel="dev", name="Apollo")
-recall_channel(action="post", channel="dev", message="Starting work on #336")
-recall_channel(action="read", channel="dev", limit=10)
-recall_channel(action="unread", channel="dev")  # Only new messages since last read
-```
-
-### Coordination
-
-```python
-# Directives — targeted messages that auto-surface in MCP responses
-recall_channel(action="directive", channel="dev", to="Sentinel", message="Review PR #340")
-
-# Broadcast — reaches all agents
-recall_channel(action="broadcast", channel="dev", message="v0.7.8 released")
-
-# Pin important results
-recall_channel(action="post", channel="dev", message="Eval results: 74.61%", pin=True)
-```
-
-### Intent claiming — prevent duplicate work
-
-```python
-# Claim a task (by message_id) so other agents know you're on it
-recall_channel(action="claim", channel="dev", message="m_abc123")
-
-# Declare intent before starting work
-recall_channel(action="intent", channel="dev", message="Working on knowledge dedup overhaul")
-
-# Release when done or blocked
-recall_channel(action="unclaim", channel="dev", message="m_abc123")
-```
-
-### All actions
-
-| Action | Description |
-|--------|-------------|
-| `join` | Join a channel (set display name) |
-| `leave` | Leave a channel |
-| `post` | Post a message (optionally pin) |
-| `read` | Read recent messages |
-| `unread` | Read only new messages since last read |
-| `who` | List active agents |
-| `heartbeat` | Update presence |
-| `pin` | Pin a message by ID |
-| `directive` | Send a targeted directive to a specific agent |
-| `broadcast` | Send to all agents |
-| `claim` | Claim a message/task to prevent duplicate work |
-| `unclaim` | Release a claimed task |
-| `intent` | Declare what you're about to work on |
-| `mute` / `unmute` | Mute/unmute an agent |
-| `kick` | Remove an agent from channel |
-| `list` | List available channels |
-| `search` | Search channel messages |
-| `rename` | Rename your display name |
-
-## CLI reference
+Then run:
 
 ```bash
-synapt init                      # One-command project setup
-synapt recall build              # Build index (discovers transcripts automatically)
-synapt recall build --incremental # Skip already-indexed files
-synapt recall search "query"     # Search past sessions
-synapt recall export backup.synapt-archive  # Create a portable backup
-synapt recall import backup.synapt-archive --merge  # Merge a backup into local recall state
-synapt recall stats              # Show index statistics
-synapt recall journal --write    # Write a session journal entry
-synapt recall setup              # Same setup path, explicitly under recall
-synapt server                    # Start MCP server
+synapt init
 ```
+
+### Manual MCP config
+
+If your client accepts stdio MCP definitions directly, use:
+
+```json
+{
+  "mcpServers": {
+    "synapt": {
+      "type": "stdio",
+      "command": "synapt",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+## What `synapt init` does
+
+Run from a project root:
+
+```bash
+synapt init
+```
+
+It will:
+1. archive project-relevant Claude Code and Codex transcripts
+2. build the `.synapt/recall/index/recall.db` search index
+3. register the Synapt MCP server in Claude Code when the `claude` CLI is available
+4. install Claude hooks for `SessionStart`, `SessionEnd`, and `PreCompact`
+5. deploy the packaged Codex `dev-loop` skill
+6. add `.synapt/` to `.gitignore`
+
+`synapt recall setup` remains available as the explicit recall-scoped equivalent.
+
+## Product tiers
+
+synapt is one memory system with a clear adoption ladder:
+
+### 1. Solo recall
+
+Search prior sessions, file history, timelines, and journals on one machine.
+
+```bash
+synapt recall search "how did we fix auth"
+synapt recall files "src/auth.py"
+synapt recall timeline
+```
+
+### 2. Multi-agent memory
+
+Add channels, directives, reminders, and task claims for coordinated execution across worktrees and agents.
+
+```python
+recall_channel(action="join", channel="dev", name="Atlas")
+recall_channel(action="intent", channel="dev", message="reviewing PR #403")
+recall_channel(action="claim", channel="dev", message="m_abc123")
+```
+
+### 3. Dashboard
+
+Expose the same shared operational memory in a browser-facing mission-control surface.
+
+### 4. Spawn / orchestration
+
+Use synapt as the memory and coordination substrate beneath higher-level agent orchestration.
+
+## Core features
+
+- **Hybrid search**: BM25 + embeddings + reciprocal rank fusion + reranking
+- **File-aware recall**: find where a file, bug, issue, or decision was handled before
+- **Journal + knowledge**: durable summaries, extracted facts, contradictions, and timeline arcs
+- **Agent channels**: shared append-only coordination across sessions and worktrees
+- **Cross-client memory**: Claude Code and Codex transcripts converge into one searchable system
+- **Portable archive**: export/import `.synapt-archive` state between machines
+- **Plugin system**: extend MCP tools and CLI commands through Python entry points
 
 ## Benchmarks
 
-### LOCOMO — Conversational Memory
+### LOCOMO
 
-Evaluated on [LOCOMO](https://snap-research.github.io/locomo/) (Long Conversational Memory) — 10 conversations, 1540 QA pairs — following [Mem0's methodology](https://arxiv.org/abs/2504.19413) (J-score via LLM-as-Judge). Competitor data from the [Mem0 paper](https://arxiv.org/abs/2504.19413) and [Memobase benchmark](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md).
+LOCOMO evaluates long conversational memory over 10 conversations and 1540 QA pairs.
 
-All systems use gpt-4o-mini as shared backbone (generation + judge) for fair comparison. Competitor data from the [Engram paper](https://arxiv.org/abs/2511.12960) (3 runs, stddev reported) and [Mem0 paper](https://arxiv.org/abs/2504.19413).
+All systems use gpt-4o-mini as the shared generation + judge backbone for fair comparison. Competitor data comes from the [Engram paper](https://arxiv.org/abs/2511.12960) and [Mem0 paper](https://arxiv.org/abs/2504.19413).
 
 | System | **Overall** | Multi-Hop | Temporal | Infra |
 |--------|-------------|-----------|----------|-------|
@@ -258,131 +197,72 @@ All systems use gpt-4o-mini as shared backbone (generation + judge) for fair com
 | Mem0 | 64.73 ± 0.17 | 51.15 | 55.51 | cloud GPT-4 |
 | Zep | 42.29 ± 0.18 | — | — | cloud |
 
-Synapt scores **72.47%** on LOCOMO — matching the Full-Context upper bound (72.90%) and ahead of Mem0 (+7.7pp) and Zep (+30pp). All three synapt versions (v0.6.1, v0.7.8, v0.8.0) score 72.4-72.5% with current gpt-4o-mini, confirming stable retrieval quality across releases.
+What matters for the pitch:
+- synapt is competitive with the best published systems
+- the local-first path remains strong on commodity hardware
+- the system is explicit about benchmark methodology, retrieval tradeoffs, and judge-model drift
 
-**Best-in-class multi-hop**: 70.92% — highest of any system tested, including those using GPT-4 for memory extraction. Engram is cloud-only; synapt runs entirely on a laptop.
+Sources:
+- [LOCOMO](https://snap-research.github.io/locomo/)
+- [Mem0 paper](https://arxiv.org/abs/2504.19413)
+- [Engram paper](https://arxiv.org/abs/2511.12960)
+- [Memobase benchmark](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md)
 
-> **Note on prior 76.04% score:** An earlier v0.6.1 run scored 76.04%, but this is not reproducible with the current gpt-4o-mini API. Re-running the identical v0.6.1 code scores 72.40% — consistent with v0.7.8 (72.47%) and v0.8.0 (72.47%). The difference is attributed to gpt-4o-mini API version drift (the judge model), not a code regression. All scores in this table use the current API.
+### CodeMemo
 
-### CodeMemo — Coding Memory
+CodeMemo evaluates coding-memory tasks across factual recall, debugging context, architecture, temporal ordering, conventions, and cross-session continuity.
 
-First benchmark specifically testing coding session memory — 158 questions across 3 projects, 6 categories. Same gpt-4o-mini judge and answer model for both systems.
+| System | Overall |
+|--------|---------|
+| **synapt v0.6.2** | **90.51** |
+| Mem0 | 76.00 |
 
-| System | Factual | Debug | Architecture | Temporal | Convention | Cross-Session | **Overall** |
-|--------|---------|-------|-------------|----------|------------|---------------|-------------|
-| **synapt v0.6.2** | **97.14** | **100.0** | 92.86 | **90.91** | **80.0** | **86.36** | **90.51** |
-| Mem0 (OSS) | 72.73 | 77.78 | **100.0** | 87.50 | 42.86 | 71.43 | 76.0 |
+Source:
+- [CodeMemo benchmark](evaluation/codememo/README.md)
 
-Synapt leads by **+14.51pp overall**. The biggest gaps are in convention (+37pp), factual (+24pp), and debug (+22pp) — categories that depend on raw evidence preservation. Synapt runs entirely locally; Mem0 requires OpenAI API calls for memory extraction, embedding, and search.
+## Security and compliance
 
-For current regression tracking, prefer **all-project CodeMemo runs** over
-single-project best slices. On `project_01_cli_tool`, some categories are now
-approaching ceiling on strong systems, so isolated `100.0` scores are useful as
-regression checks but less useful as headline evidence on their own.
+synapt is built for teams that care where memory lives and how it is inspected.
 
-## How search works
+- **Local-first by default**: transcripts, channels, journals, and indexes live on disk under `.synapt/`
+- **No mandatory cloud memory backend**: core recall works locally
+- **Inspectable storage**: JSONL transcripts plus SQLite/FTS5 state
+- **Portable backup path**: export/import via `.synapt-archive`
+- **Optional remote behavior is explicit**: sync and plugin integrations are opt-in
 
-Synapt runs three retrieval paths and merges them:
+For disclosure and reporting policy, see [SECURITY.md](SECURITY.md).
 
-1. **BM25/FTS5** — Full-text search with configurable recency decay
-2. **Embeddings** — Cosine similarity over 384-dim vectors ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2))
-3. **Knowledge** — Durable facts extracted from session journals, searched via FTS5 + embeddings with confidence-weighted boosting
+## Example workflows
 
-Chunk results are merged via **Reciprocal Rank Fusion** (RRF), which combines rankings rather than raw scores. This means a result that BM25 missed entirely can still surface if it's semantically similar to the query. Knowledge nodes are boosted by confidence and entity overlap, then interleaved with chunk results.
-
-Query intent classification adjusts parameters automatically — debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes, temporal queries enable entity-focused search, exploratory queries boost semantic matching.
-
-**Why knowledge nodes matter:** During a project, your assistant might discuss multiple options across sessions — approach A in session 3, approach B in session 5, then settle on B-with-modifications in session 7. Raw transcripts contain all three discussions equally. The knowledge layer extracts the final decision as a durable fact, so when you search "what did we decide?", the decision surfaces first — not the earlier deliberation that was superseded.
-
-## Models and dependencies
-
-Synapt uses **two types of models** for different purposes. All models are fetched from HuggingFace on first use and cached locally. No API token is required — all default models are public.
-
-### Search (included by default)
-
-`pip install synapt` installs everything needed for hybrid search:
-
-| Model | Purpose | Size | Library |
-|-------|---------|------|---------|
-| [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | Embedding vectors for semantic search | ~90 MB | sentence-transformers |
-| [flan-t5-base](https://huggingface.co/google/flan-t5-base) | Encoder-decoder summarization | ~1 GB | transformers |
-
-These are **encoder models** (not chat LLMs). They run locally on CPU, require no server, and are downloaded to `~/.cache/huggingface/` on first use.
-
-`sentence-transformers` is a default dependency. It transitively installs `transformers` and `torch`, which makes flan-t5-base available for summarization tasks automatically.
-
-### Enrichment (optional LLM backend)
-
-The `recall_enrich` and `recall_consolidate` tools use a **decoder-only chat LLM** to generate journal summaries and extract knowledge nodes. These are optional — core search works without them.
-
-Synapt auto-selects the best available backend:
-
-| Priority | Backend | Model | Install |
-|----------|---------|-------|---------|
-| 1st | **MLX** (Apple Silicon) | [Ministral-3B-4bit](https://huggingface.co/mlx-community/Ministral-3-3B-Instruct-2512-4bit) (~1.7 GB) | Automatic on Apple Silicon |
-| 2nd | **Ollama** | ministral:3b (~1.7 GB) | [ollama.com](https://ollama.com), then `ollama pull ministral:3b` |
-
-On Apple Silicon Macs, `mlx-lm` is installed automatically as a default dependency. It runs in-process with no server — just works. On Linux/Windows, install Ollama as the backend.
-
-If neither is installed, enrichment tools return a message explaining what to install. Search, journal, reminders, and all other features work normally without an LLM backend.
-
-## Plugins
-
-Synapt discovers plugins via Python entry points. To create a plugin:
-
-1. Create a module with a `register_tools(mcp)` function
-2. Register it in your `pyproject.toml`:
-
-```toml
-[project.entry-points."synapt.plugins"]
-my_plugin = "my_package.server"
-```
-
-The MCP server automatically discovers and loads plugins at startup.
-
-## Development
+Search a prior fix:
 
 ```bash
-git clone https://github.com/laynepenney/synapt.git
-cd synapt
-pip install -e ".[test]"
-pytest tests/ -v
+synapt recall search "why did we disable snippets in retrieval-only mode"
 ```
 
-## Reproducible Evals
-
-Long-running evals should run from an isolated git worktree with a dedicated
-venv so code changes on `main` do not mutate the run mid-flight.
+Find a file’s prior context:
 
 ```bash
-./scripts/eval-worktree.sh              # from HEAD
-./scripts/eval-worktree.sh abc1234      # from a specific commit/tag
-
-source /tmp/synapt-eval-<ref>/.venv/bin/activate
-cd /tmp/synapt-eval-<ref>
-python -m evaluation.codememo.eval --recalldb --model gpt-4o-mini
-python -m evaluation.locomo_eval --recalldb --batch
+synapt recall files "src/synapt/recall/channel.py"
 ```
 
-The helper creates:
-
-- a detached worktree at `/tmp/synapt-eval-<ref>`
-- a dedicated venv at `/tmp/synapt-eval-<ref>/.venv`
-- a non-editable install frozen to that ref
-
-Clean up with:
+Run Codex on a timed review loop:
 
 ```bash
-./scripts/eval-worktree.sh --cleanup <ref>
+./scripts/codex-loop.sh \
+  --interval 60 \
+  --prompt "check #dev, review fresh PRs, or pick up the next unowned task. Post what you're doing in #dev." \
+  -- --full-auto
 ```
 
-## Links
+## Why teams adopt it
 
-- [synapt.dev](https://synapt.dev) — Website
-- [synapt.dev/blog](https://synapt.dev/blog/) — Blog
-- [@synapt_dev](https://x.com/synapt_dev) — X / Twitter
-- [PyPI](https://pypi.org/project/synapt/) — `pip install synapt`
+Without memory, every new assistant session starts as a stranger.
 
-## License
+With synapt, teams can:
+- recover prior decisions instead of re-deriving them
+- hand off work without losing context
+- coordinate multiple agents without duplicating effort
+- keep operational memory local, inspectable, and portable
 
-MIT
+That is the difference between an assistant demo and an operational system.

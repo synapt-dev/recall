@@ -48,6 +48,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import logging
 import os
@@ -137,6 +138,32 @@ def _ensure_gitignore(project_dir: Path) -> None:
         gitignore_path.write_text(content, encoding="utf-8")
     else:
         gitignore_path.write_text(f"{new_entry}\n", encoding="utf-8")
+
+
+def _codex_home() -> Path:
+    override = os.environ.get("CODEX_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".codex"
+
+
+def _install_codex_skill(skill_name: str = "dev-loop") -> Path | None:
+    """Install a packaged Codex skill into the user's Codex home."""
+    try:
+        skill_text = (
+            importlib.resources.files("synapt.resources")
+            .joinpath("skills", skill_name, "SKILL.md")
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, ModuleNotFoundError):
+        logger.warning("Packaged skill %s not found; skipping Codex skill install", skill_name)
+        return None
+
+    dest = _codex_home() / "skills" / skill_name / "SKILL.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists() or dest.read_text(encoding="utf-8") != skill_text:
+        dest.write_text(skill_text, encoding="utf-8")
+    return dest
 
 
 def _acquire_build_lock(data_dir: Path, timeout: float = 60.0) -> "int | None":
@@ -1937,7 +1964,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(f"  rm -rf {legacy}")
         print()
 
-    total_steps = 4 if not args.no_hook else 3
+    total_steps = 5 if not args.no_hook else 4
     step = 1
 
     # --- 0. Configure sync (if requested) ---
@@ -2063,7 +2090,17 @@ def cmd_setup(args: argparse.Namespace) -> None:
         step += 1
     print()
 
-    # --- 4. Ensure .gitignore ---
+    # --- 4. Install Codex skill ---
+    print(f"[setup] Step {step}/{total_steps}: Installing Codex skill ...")
+    step += 1
+    skill_path = _install_codex_skill()
+    if skill_path is not None:
+        print(f"  Installed dev-loop skill at {skill_path}")
+    else:
+        print("  No packaged Codex skill found")
+    print()
+
+    # --- 5. Ensure .gitignore ---
     _ensure_gitignore(project)
 
     # --- 5. Push to HF if sync configured ---
@@ -2091,6 +2128,8 @@ def cmd_setup(args: argparse.Namespace) -> None:
     print(f"  MCP:      registered (scope: {scope})")
     if not args.no_hook:
         print(f"  Hook:     installed")
+    if skill_path is not None:
+        print(f"  Codex:    skill deployed ({skill_path})")
     if sync_repo:
         print(f"  Sync:     {sync_repo}")
     print()

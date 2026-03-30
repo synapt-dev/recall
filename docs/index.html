@@ -3,17 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Synapt - Persistent Memory for AI Coding Assistants</title>
-  <meta name="description" content="Persistent memory for AI coding assistants. The difference between a stranger and a collaborator is shared context. Local-first, beats cloud systems on LOCOMO benchmark.">
+  <title>Synapt - Memory And Coordination Infrastructure For AI Coding Teams</title>
+  <meta name="description" content="Memory and coordination infrastructure for AI coding teams. Search past sessions, preserve decisions, and coordinate agents through one local-first operational memory system.">
   <meta property="og:title" content="Synapt">
-  <meta property="og:description" content="Persistent conversational memory for AI coding assistants">
+  <meta property="og:description" content="Memory and coordination infrastructure for AI coding teams">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://synapt.dev/blog/images/social-card.jpg">
   <meta property="og:url" content="https://synapt.dev">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:site" content="@claude_synapt">
   <meta name="twitter:title" content="Synapt">
-  <meta name="twitter:description" content="Persistent conversational memory for AI coding assistants">
+  <meta name="twitter:description" content="Memory and coordination infrastructure for AI coding teams">
   <meta name="twitter:image" content="https://synapt.dev/blog/images/social-card.jpg">
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -412,11 +412,10 @@
   <section class="hero">
     <div class="container">
       <img src="assets/logo.png" alt="Synapt" class="hero-logo">
-      <h1>Memory for AI coding assistants</h1>
+      <h1>Memory and coordination for AI coding teams</h1>
       <p>
-        The difference between a stranger and a collaborator is shared context.
-        Synapt gives your AI assistant persistent memory &mdash; so every conversation
-        picks up where the last one left off.
+        Synapt turns disconnected AI sessions into an operational system:
+        persistent recall, shared agent channels, durable decisions, and one local-first memory layer your team can actually inspect.
       </p>
       <div class="hero-actions">
         <a href="#quickstart" class="btn btn-primary">Get started</a>
@@ -426,7 +425,7 @@
         </a>
       </div>
       <div class="install-cmd">
-        <span class="dollar">$</span> pip install synapt
+        <span class="dollar">$</span> pip install synapt && claude mcp add synapt -- synapt server && synapt init
       </div>
     </div>
   </section>
@@ -463,7 +462,7 @@
         <div class="feature-card">
           <div class="tag tag-tools">Tools</div>
           <h3>18 MCP tools</h3>
-          <p>Search, journal, reminders, channels, archive backup/restore, and knowledge management. Works with Claude Code, Codex CLI, OpenCode, and any MCP-compatible assistant.</p>
+          <p>Search, journal, reminders, channels, archive backup/restore, and knowledge management. Works with Claude Code, Codex CLI, OpenCode, and other MCP-compatible assistants.</p>
         </div>
         <div class="feature-card">
           <div class="tag tag-tools">Local-first</div>
@@ -477,8 +476,8 @@
         </div>
         <div class="feature-card">
           <div class="tag tag-tools">Tools</div>
-          <h3>Plugin system</h3>
-          <p>Extend with additional MCP tools via Python entry points. Plugins are auto-discovered and loaded at server startup.</p>
+          <h3>Operational memory</h3>
+          <p>Shared channels, directives, reminders, and task claims let multiple agents coordinate through one persistent record instead of ad hoc chat logs.</p>
         </div>
       </div>
     </div>
@@ -538,9 +537,7 @@
     <div class="container">
       <h2>Benchmarks</h2>
       <p>
-        Evaluated on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> (Long Conversational Memory) &mdash;
-        10 conversations, 1540 QA pairs &mdash; following
-        <a href="https://arxiv.org/abs/2504.19413">Mem0's methodology</a> (J-score via LLM-as-Judge).
+        Evaluated on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> and compared against published cloud-memory systems. Synapt stays competitive while keeping the core memory layer local and inspectable.
       </p>
       <table>
         <thead>
@@ -648,9 +645,7 @@
         </tbody>
       </table>
       <p class="footnote">
-        76.04% on <a href="https://snap-research.github.io/locomo/">LOCOMO</a> &mdash; within 1.5pp of <a href="https://arxiv.org/abs/2511.12960">Engram</a> (77.55%), the only system ahead, and beating every other competitor. The 3B local config (73.38%) beats the full-context upper bound (72.90%) on a laptop.
-        On <a href="https://github.com/laynepenney/synapt/tree/main/evaluation/codememo">CodeMemo</a>, synapt scores 90.51% &mdash; +14.51pp over Mem0 (76.0%) &mdash; with perfect debugging recall and near-perfect factual accuracy.
-        Competitor data from <a href="https://arxiv.org/abs/2511.12960">Engram paper</a> and <a href="https://arxiv.org/abs/2504.19413">Mem0 paper</a> (shared gpt-4o-mini backbone).
+        synapt lands near the top of published LOCOMO systems while preserving a local-first operating model. The 3B local configuration stays above the full-context upper bound on laptop hardware, and CodeMemo shows strong advantage on real coding-memory tasks.
       </p>
     </div>
   </section>
@@ -713,32 +708,16 @@
         <div class="step">
           <div class="step-num">2</div>
           <div>
-            <h3>Build the index</h3>
-            <p>Discovers Claude Code and Codex CLI transcripts automatically.</p>
-            <pre><code>synapt recall build</code></pre>
+            <h3>Connect your client</h3>
+            <p>Claude Code recommended. Codex CLI and OpenCode use the same stdio MCP server.</p>
+            <pre><code>claude mcp add synapt -- synapt server</code></pre>
           </div>
         </div>
         <div class="step">
           <div class="step-num">3</div>
           <div>
-            <h3>Add the MCP server</h3>
-            <p>Add to <code>~/.claude/mcp.json</code> for all projects:</p>
-            <pre><code>{
-  "mcpServers": {
-    "synapt": {
-      "type": "stdio",
-      "command": "synapt",
-      "args": ["server"]
-    }
-  }
-}</code></pre>
-          </div>
-        </div>
-        <div class="step">
-          <div class="step-num">4</div>
-          <div>
-            <h3>Set up hooks</h3>
-            <p>Auto-archives transcripts and writes journal entries.</p>
+            <h3>Initialize the project</h3>
+            <p>Builds the index, installs Claude hooks, deploys the Codex <code>dev-loop</code> skill, and prepares the local memory store.</p>
             <pre><code>synapt init</code></pre>
           </div>
         </div>
