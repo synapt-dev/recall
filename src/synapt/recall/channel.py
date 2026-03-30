@@ -1760,7 +1760,27 @@ def channel_messages_json(
         return []
     messages = _read_messages(path, since=since)
     messages = messages[-limit:]
-    return [m.to_dict() for m in messages]
+    conn = _open_db(project_dir)
+    try:
+        display_map = {
+            row["agent_id"]: row["display_name"] or row["griptree"] or row["agent_id"]
+            for row in conn.execute(
+                "SELECT agent_id, display_name, griptree FROM presence"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    result = []
+    for msg in messages:
+        d = msg.to_dict()
+        current_display = display_map.get(msg.from_agent, msg.from_agent)
+        # If the persisted display is missing or is just a raw session id,
+        # prefer the current resolved display name for dashboard/API clients.
+        if not d.get("from_display") or str(d.get("from_display", "")).startswith("s_"):
+            d["from_display"] = current_display
+        result.append(d)
+    return result
 
 
 def channel_search(
