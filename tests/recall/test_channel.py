@@ -37,6 +37,7 @@ from synapt.recall.channel import (
     channel_kick,
     channel_broadcast,
     channel_list_channels,
+    channel_messages_json,
     channel_search,
     channel_rename,
     channel_claim,
@@ -200,6 +201,47 @@ class TestSQLitePresenceCRUD(unittest.TestCase):
             self.assertIsNone(row)
         finally:
             conn.close()
+
+
+class TestDashboardJsonWrappers(unittest.TestCase):
+    """Test JSON-returning wrappers used by the web dashboard."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_channel_messages_json_prefers_current_display_name_over_raw_session_id(self):
+        conn = _open_db()
+        try:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            conn.execute(
+                "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("s_12345678", "main/synapt", "Atlas", "agent", "online", now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        path = _channel_path("dev")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        msg = ChannelMessage(
+            timestamp=now,
+            from_agent="s_12345678",
+            from_display="s_12345678",
+            channel="dev",
+            type="message",
+            body="hello from atlas",
+        )
+        path.write_text(json.dumps(msg.to_dict()) + "\n")
+
+        msgs = channel_messages_json("dev")
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0]["from_display"], "Atlas")
 
     def test_leave_last_channel_removes_presence(self):
         channel_join("dev", agent_name="agent-a")
