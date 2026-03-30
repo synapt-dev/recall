@@ -197,6 +197,12 @@ def _find_display_name_conflict(
         # Release name claims from stale agents (idle, away, offline)
         # Only "online" (<5 min) agents truly hold a name claim
         if status != "online":
+            # Clear the stale holder's display_name to avoid ambiguous targeting
+            conn.execute(
+                "UPDATE presence SET display_name = '' WHERE agent_id = ?",
+                (row["agent_id"],),
+            )
+            conn.commit()
             continue
         return row
     return None
