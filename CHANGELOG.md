@@ -2,6 +2,25 @@
 
 All notable changes to synapt are documented here.
 
+## [0.8.0] — 2026-03-30
+
+### Added
+- **Channel communication** — `recall_channel` with `read_message` action for expanding truncated messages by ID
+- **Truncation visibility** — low/min detail reads now show `[truncated ~N tok omitted]` inline with message IDs for follow-up
+- **Display name spoofing prevention** — `channel_join` rejects names already claimed by another online agent (#371)
+- **min_score search** — user-friendly alias for `threshold_ratio` in `recall_search`; results below `min_score × best_score` are dropped (#368)
+- **--detail/--name CLI flags** — `synapt recall channel read --detail low` and `synapt recall channel join --name Apollo` (#375)
+- **Watermark and OG card scripts** — reusable `scripts/watermark.py` and `scripts/og_card.py` for blog hero images
+- **Agent Madness Round 2 blog post** — Moose the Goose in gladiator armor
+
+### Improved
+- **Snippet extraction disabled by default** — query-aware snippets caused a 9pp single-hop collapse on LOCOMO; disabling recovers the regression completely with only 3.4% token savings lost (#344)
+- **Channel unread no longer truncates** — unread action uses full detail internally, preventing missed @mentions in monitoring loops
+
+### Benchmarks
+- **LOCOMO J-Score: 72.47%** (audited, gpt-4o-mini judge) — all versions (v0.6.1/v0.7.8/v0.8.0) score ~72.4-72.5% with current API. Original 76.04% was not reproducible due to gpt-4o-mini API drift.
+- **CodeMemo: 86.0%** (gpt-4o-mini judge) — no regression from v0.7.8. 10pp drop from v0.7.5 predates this release.
+
 ## [0.6.1] — 2026-03-13
 
 ### Added
