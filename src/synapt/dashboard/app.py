@@ -65,7 +65,7 @@ def _render_message(msg: dict) -> str:
         return (
             f'<div class="msg sys">'
             f'<span class="ts">{ts_short}</span> '
-            f'<span class="sys-text">-- {escape(name)} {msg_type}ed</span>'
+            f'<span class="sys-text">-- {escape(name)} {"joined" if msg_type == "join" else "left"}</span>'
             f'</div>'
         )
     if msg_type == "directive":
