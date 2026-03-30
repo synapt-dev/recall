@@ -41,11 +41,13 @@ hf = ["huggingface_hub>=0.20"]
 onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
 transformers = ["transformers>=4.30", "peft>=0.7"]
 x = ["tweepy>=4.14"]
+dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "sse-starlette>=1.0"]
 dev = ["watchfiles>=0.20"]
 test = ["pytest>=7.0", "numpy", "pytest-benchmark>=4.0"]
 
 [project.scripts]
 synapt = "synapt.cli:main"
+synapt-dashboard = "synapt.dashboard.app:main"
 synapt-recall = "synapt.recall.cli:main"
 synapt-recall-server = "synapt.recall.server:main"
 synapt-x-server = "synapt.x.server:main"

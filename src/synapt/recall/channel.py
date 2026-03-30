@@ -1688,6 +1688,81 @@ def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# JSON-returning wrappers for dashboard / API consumers
+# ---------------------------------------------------------------------------
+
+
+def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
+    """Return agent presence data as a list of dicts.
+
+    Each dict contains: agent_id, display_name, griptree, role, status,
+    last_seen, channels. Offline agents are excluded. Deduped by identity.
+    """
+    conn = _open_db(project_dir)
+    try:
+        _reap_stale_agents(conn, project_dir)
+        agents = conn.execute(
+            "SELECT agent_id, griptree, display_name, role, status, last_seen FROM presence"
+        ).fetchall()
+        if not agents:
+            return []
+
+        # Dedup by (griptree, display_name) — keep most recently seen
+        best: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in agents:
+            gt = row["griptree"] or row["agent_id"]
+            dn = row["display_name"] or ""
+            key = (gt, dn)
+            existing = best.get(key)
+            if existing is None or row["last_seen"] > existing["last_seen"]:
+                best[key] = row
+
+        result = []
+        for row in sorted(best.values(), key=lambda r: r["display_name"] or r["griptree"] or r["agent_id"]):
+            status = _agent_status(row["last_seen"])
+            if status == "offline":
+                continue
+            channels = [
+                r["channel"]
+                for r in conn.execute(
+                    "SELECT channel FROM memberships WHERE agent_id = ? ORDER BY channel",
+                    (row["agent_id"],),
+                ).fetchall()
+            ]
+            result.append({
+                "agent_id": row["agent_id"],
+                "display_name": row["display_name"] or "",
+                "griptree": row["griptree"] or "",
+                "role": row["role"] or "agent",
+                "status": status,
+                "last_seen": row["last_seen"],
+                "channels": channels,
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def channel_messages_json(
+    channel: str = "dev",
+    limit: int = 50,
+    since: str | None = None,
+    project_dir: Path | None = None,
+) -> list[dict]:
+    """Return recent channel messages as a list of dicts.
+
+    Each dict matches the ChannelMessage.to_dict() format with keys:
+    timestamp, channel, type, body, from, from_display, id, to, attachments.
+    """
+    path = _channel_path(channel, project_dir)
+    if not path.exists():
+        return []
+    messages = _read_messages(path, since=since)
+    messages = messages[-limit:]
+    return [m.to_dict() for m in messages]
+
+
 def channel_search(
     query: str,
     max_results: int = 10,
