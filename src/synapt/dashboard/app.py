@@ -10,9 +10,12 @@ import json
 from html import escape
 from pathlib import Path
 
+import markdown as _md
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
+
+_MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
 
 from synapt.recall.channel import (
     ChannelMessage,
@@ -90,7 +93,8 @@ def _render_message(msg: dict) -> str:
             f'</div>'
         )
     color = _agent_color(name)
-    body_html = escape(body).replace("\n", "<br>")
+    _MD.reset()
+    body_html = _MD.convert(body)
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
