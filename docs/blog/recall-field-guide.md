@@ -12,7 +12,7 @@ hero: recall-field-guide.png
 
 ---
 
-Synapt recall has nine search/read tools. That's too many to guess your way through. This guide maps real questions to the right tool call — with the gotchas we've learned from production use.
+Synapt recall has 19 tools — 10 for search/read, 9 for writes and admin. That's too many to guess your way through. This guide maps real questions to the right tool call — with the gotchas we've learned from production use.
 
 ## The decision tree
 
@@ -185,7 +185,7 @@ Every new session, run these two calls:
 
 ```
 1. recall_journal(action="read")     → what happened last time
-2. recall_remind(action="check")     → any cross-session reminders
+2. recall_remind(action="pending")    → any cross-session reminders
 ```
 
 This takes <1000 tokens and prevents the "didn't we already try this?" problem.
