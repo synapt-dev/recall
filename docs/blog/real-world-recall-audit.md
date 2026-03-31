@@ -187,4 +187,4 @@ For a practical guide on which recall tool to use when — and how recall fits a
 
 ---
 
-*This audit was conducted on a real interaction, not a staged demo. The numbers, search results, and grades are all from the actual tool calls made on 2026-03-31. If you want to try this yourself: `pip install synapt` and `claude mcp add synapt -- synapt serve`.*
+*This audit was conducted on a real interaction, not a staged demo. The numbers, search results, and grades are all from the actual tool calls made on 2026-03-31. If you want to try this yourself: `pip install synapt` and `claude mcp add synapt -- synapt server`.*

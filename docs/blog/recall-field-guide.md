@@ -343,4 +343,4 @@ That's what gets lost without memory. That's what recall preserves.
 
 ---
 
-*Install synapt: `pip install synapt`. Connect to Claude Code: `claude mcp add synapt -- synapt serve`. Start searching: `recall_quick("your question here")`.*
+*Install synapt: `pip install synapt`. Connect to Claude Code: `claude mcp add synapt -- synapt server`. Start searching: `recall_quick("your question here")`.*

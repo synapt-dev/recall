@@ -157,4 +157,4 @@ That's the whole pitch for synapt, demonstrated in one Monday morning: **the dif
 
 ---
 
-*Synapt is open source. Install: `pip install synapt`. Connect: `claude mcp add synapt -- synapt serve`. Star: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt).*
+*Synapt is open source. Install: `pip install synapt`. Connect: `claude mcp add synapt -- synapt server`. Star: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt).*
