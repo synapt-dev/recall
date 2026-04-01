@@ -44,6 +44,7 @@ from synapt.recall.core import (
 )
 from synapt.recall._llm_util import truncate_at_word as _tw
 from synapt.recall.embeddings import get_embedding_provider
+from synapt.recall.hybrid import classify_query_intent
 
 
 def _cap_tokens(requested: int) -> int:
@@ -364,9 +365,10 @@ def recall_quick(query: str) -> str:
     """Quick, low-cost memory check. Use this speculatively — when you're
     not sure if past context exists but want to check.
 
-    Returns only knowledge nodes and cluster summaries (no raw transcript
-    chunks), keeping output short and fast. If you find something relevant,
-    follow up with recall_search or recall_context for full detail.
+    Returns concise results by default, and for pending-work queries it
+    switches to summary mode so recent journal ``Next steps:`` entries can
+    surface. If you find something relevant, follow up with recall_search
+    or recall_context for full detail.
 
     Cost: ~500 tokens, <100ms. Cheaper than guessing wrong.
     Use BEFORE making assumptions about past work, decisions, or conventions.
@@ -375,8 +377,11 @@ def recall_quick(query: str) -> str:
         query: Natural language query or keywords to search for.
     """
     quick_budget = _cap_tokens(500)
-    # Skip embedding loading for quick checks — concise depth only uses
-    # BM25/FTS5 + knowledge nodes, not semantic embeddings (#472)
+    intent = classify_query_intent(query)
+    depth = "summary" if intent == "status" else "concise"
+    # Skip embedding loading for quick checks. Pending-work queries use
+    # summary mode (knowledge + journal), everything else uses concise
+    # mode (knowledge + cluster summaries).
     index = _get_index(use_embeddings=False)
     if index is None:
         index_dir = project_index_dir()
@@ -388,8 +393,8 @@ def recall_quick(query: str) -> str:
             max_chunks=5,
             max_tokens=quick_budget,
             half_life=None,
+            depth=depth,
             threshold_ratio=0.2,
-            depth="concise",
         )
         if result:
             return result

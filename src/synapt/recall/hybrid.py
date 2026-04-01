@@ -285,6 +285,24 @@ _DECISION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_STATUS_PATTERNS = re.compile(
+    r"\b("
+    r"what(?:'s|\s+is)?\s+(?:pending|left|remaining|next)"
+    r"|what\s+should\s+(?:i|we)\s+do\s+next"
+    r"|what\s+do\s+(?:i|we)\s+need\s+to\s+do"
+    r"|what\s+still\s+needs?\s+to\s+be\s+done"
+    r"|what\s+remains?\s+to\s+do"
+    r"|next\s+steps?"
+    r"|follow[- ]?ups?"
+    r"|open\s+items?"
+    r"|outstanding\s+tasks?"
+    r"|todo\b|to-do\b"
+    r"|pending\s+work"
+    r"|what\s+is\s+the\s+status"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _EXPLORATORY_PATTERNS = re.compile(
     r"\b(how\s+did\s+we|what\s+did\s+we|tried|approach|strategy|"
     r"alternative|consider|experiment|explore|"
@@ -367,6 +385,7 @@ def classify_query_intent(query: str) -> str:
         "factual"     — Looking up a specific fact (config value, version, etc.)
         "debug"       — Investigating an error or failure
         "decision"    — What was chosen and why (product/business/technical)
+        "status"      — What is still pending / what should happen next
         "exploratory" — Understanding what was tried, general exploration
         "procedural"  — How to do something (steps, workflow)
         "aggregation" — Gathering scattered facts across multiple sessions
@@ -387,6 +406,7 @@ def classify_query_intent(query: str) -> str:
         "factual": len(_FACTUAL_PATTERNS.findall(query)),
         "debug": len(_DEBUG_PATTERNS.findall(query)),
         "decision": len(_DECISION_PATTERNS.findall(query)),
+        "status": len(_STATUS_PATTERNS.findall(query)),
         "exploratory": len(_EXPLORATORY_PATTERNS.findall(query)),
         "procedural": len(_PROCEDURAL_PATTERNS.findall(query)),
         "aggregation": len(_AGGREGATION_PATTERNS.findall(query)),
@@ -394,8 +414,9 @@ def classify_query_intent(query: str) -> str:
 
     # Aggregation wins over factual since factual patterns match many aggregation
     # queries ("what does X have") but aggregation needs different treatment.
-    # Decision > aggregation > temporal > exploratory > procedural > debug > factual.
-    priority = ["decision", "aggregation", "temporal", "exploratory", "procedural", "debug", "factual"]
+    # Status/pending queries should beat decision/exploratory because they need
+    # explicit unresolved next steps rather than general history or rationale.
+    priority = ["status", "decision", "aggregation", "temporal", "exploratory", "procedural", "debug", "factual"]
     best_score = max(scores.values())
     if best_score == 0:
         return "general"
@@ -438,6 +459,13 @@ def intent_search_params(intent: str) -> dict:
             "emb_weight": 1.5,         # Semantic matching important
             "max_knowledge": 3,        # Cap knowledge — journal entries preferred
         }
+    elif intent == "status":
+        return {
+            "knowledge_boost": 0.6,    # Prefer raw journal next_steps over distilled facts
+            "half_life": 14.0,         # Pending work is strongly recency-sensitive
+            "emb_weight": 1.5,         # Keep semantic matching available in full search
+            "max_knowledge": 2,        # Leave room for journal evidence
+        }
     elif intent == "exploratory":
         return {
             "knowledge_boost": 1.5,    # Knowledge somewhat boosted
@@ -464,6 +492,19 @@ def intent_search_params(intent: str) -> dict:
             "half_life": 60.0,         # Default recency
             "emb_weight": 1.0,         # Balanced
         }
+
+
+def augment_query_for_intent(query: str, intent: str) -> str:
+    """Expand intent-specific queries with retrieval-friendly synonyms.
+
+    This is intentionally narrow. It exists to help lexical retrieval hit the
+    journal surfaces we already store, especially ``Next steps:`` entries,
+    when users ask paraphrased status questions like "what's pending?".
+    """
+    if intent != "status":
+        return query
+    extras = "next steps pending remaining left todo follow up"
+    return f"{query} {extras}"
 
 
 # ---------------------------------------------------------------------------
