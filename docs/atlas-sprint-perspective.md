@@ -48,6 +48,8 @@ That meant:
 
 This was the hinge for the rest of the sprint. Sentinel's MEMORY.md sync lane depended on it directly. Without `recall_save`, there was no clean way to say "this is a fact, save it now."
 
+It also turned out to matter more broadly than the immediate MEMORY.md lane. MEMORY files are project-local and agent-specific. A direct `recall_save` primitive is the more general mechanism for saying "promote this into shared durable knowledge" even when the source is not a MEMORY.md file at all. That makes it useful not just for sync, but for deliberate cross-agent knowledge management.
+
 ### 3. Status-aware routing
 
 The third fix was the one that mattered most to runtime feel.
