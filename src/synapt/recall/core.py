@@ -1488,6 +1488,38 @@ class TranscriptIndex:
                 pass
         return candidates
 
+    def _status_recency_multiplier(
+        self,
+        timestamp: str,
+        now: datetime | None = None,
+        half_life: float = 3.0,
+    ) -> float:
+        """Extra recency preference for status-style journal chunks.
+
+        Status queries are asking for *current* open work. The general recency
+        decay already helps, but old journal entries that happen to contain
+        ``Next steps:`` can still compete too well with the latest carry-forward
+        journal. This multiplier makes recent pending-work journals win more
+        decisively without changing other intents.
+        """
+        if not timestamp:
+            return 1.0
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        try:
+            ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_days = max((now - ts).total_seconds() / 86400.0, 0.0)
+        except (ValueError, TypeError):
+            return 1.0
+
+        decay_rate = math.log(2) / half_life
+        freshness = math.exp(-decay_rate * age_days)
+        return 1.0 + (1.5 * freshness)
+
     def _apply_threshold_with_diagnostics(
         self,
         candidates: list[tuple[int, float]],
@@ -2990,6 +3022,7 @@ class TranscriptIndex:
                     score *= 1.3
                 elif intent == "status" and "Next steps:" in chunk.assistant_text:
                     score *= 1.5
+                    score *= self._status_recency_multiplier(chunk.timestamp)
             block = self._format_chunk_block(idx, intent=intent, query=query)
             emit_items.append((score, block, "chunk", chunk.id, chunk.timestamp))
 
