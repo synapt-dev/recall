@@ -1,6 +1,6 @@
 """synapt.recall MCP server — expose transcript search as tools for Claude Code.
 
-Provides fourteen tools via the Model Context Protocol:
+Provides fifteen tools via the Model Context Protocol:
   - recall_search: Search past session transcripts by keyword/topic
   - recall_quick: Fast, low-cost knowledge-only search for speculative checks
   - recall_context: Drill down into a search result for full raw content
@@ -11,6 +11,7 @@ Provides fourteen tools via the Model Context Protocol:
   - recall_setup: Initialize synapt recall for the current project
   - recall_stats: Get index statistics
   - recall_journal: Read or write session journal entries
+  - recall_save: Explicitly save durable knowledge nodes
   - recall_remind: Manage cross-session reminders
   - recall_enrich: Enrich chunks with LLM-generated summaries
   - recall_consolidate: Extract durable knowledge from journal entries
@@ -38,9 +39,11 @@ _STARTUP_VERSION = getattr(_synapt_pkg, "__version__", "unknown")
 from synapt.recall.core import (
     TranscriptIndex,
     format_size,
+    project_data_dir,
     project_index_dir,
 )
 from synapt.recall._llm_util import truncate_at_word as _tw
+from synapt.recall.embeddings import get_embedding_provider
 
 
 def _cap_tokens(requested: int) -> int:
@@ -1410,6 +1413,67 @@ def recall_journal(
         return f"Journal failed: {exc}"
 
 
+def recall_save(
+    content: str,
+    category: str = "workflow",
+    confidence: float = 0.8,
+    tags: list[str] | None = None,
+    source_sessions: list[str] | None = None,
+    source_turns: list[str] | None = None,
+) -> str:
+    """Create a knowledge node directly and embed it for vector search.
+
+    Args:
+        content: Durable fact, convention, or decision to save.
+        category: Knowledge category (workflow, tooling, decision, etc.).
+        confidence: Confidence score from 0.0 to 1.0.
+        tags: Optional search tags.
+        source_sessions: Optional originating session IDs.
+        source_turns: Optional originating turn refs ("session_id:turn_num").
+    """
+    clean_content = (content or "").strip()
+    if not clean_content:
+        return "Error: content is required."
+
+    try:
+        from synapt.recall.knowledge import KnowledgeNode, append_node
+        from synapt.recall.storage import RecallDB
+
+        project = Path.cwd().resolve()
+        db = RecallDB(project_index_dir(project) / "recall.db")
+        try:
+            node = KnowledgeNode.create(
+                content=clean_content,
+                category=category,
+                source_sessions=[s for s in (source_sessions or []) if s],
+                confidence=confidence,
+                tags=[t for t in (tags or []) if t],
+                source_turns=[t for t in (source_turns or []) if t],
+            )
+            append_node(node, project_data_dir(project) / "knowledge.jsonl")
+            db.upsert_knowledge_node(node.to_dict())
+
+            embedded = False
+            provider = get_embedding_provider()
+            if provider:
+                rowid = db.get_knowledge_rowid(node.id)
+                if rowid is not None:
+                    embedding = provider.embed_single(node.content[:500])
+                    db.save_knowledge_embeddings({rowid: embedding})
+                    embedded = True
+        finally:
+            db.close()
+
+        _invalidate_cache()
+        status = "embedded for vector search" if embedded else "saved without embeddings"
+        return (
+            f"Knowledge node saved: {node.id} ({node.category}, confidence={node.confidence:.2f}). "
+            f"{status}."
+        )
+    except Exception as exc:
+        return f"Knowledge save failed: {exc}"
+
+
 def recall_remind(
     action: str = "add",
     text: str | None = None,
@@ -2017,6 +2081,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(recall_import)
     mcp.tool()(_with_directive_check(recall_stats))
     mcp.tool()(_with_directive_check(recall_journal))
+    mcp.tool()(_with_directive_check(recall_save))
     mcp.tool()(_with_directive_check(recall_remind))
     mcp.tool()(recall_enrich)
     mcp.tool()(recall_consolidate)

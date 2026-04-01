@@ -1412,6 +1412,15 @@ class RecallDB:
             return None
         return self._knowledge_dict_from_row(row)
 
+    def get_knowledge_rowid(self, node_id: str) -> int | None:
+        """Fetch the SQLite rowid for a knowledge node by ID."""
+        row = self._conn.execute(
+            "SELECT rowid FROM knowledge WHERE id = ?", (node_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row[0])
+
     def resolve_contradiction(
         self, contradiction_id: int, status: str = "confirmed",
     ) -> bool:

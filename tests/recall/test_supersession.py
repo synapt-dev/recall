@@ -1431,3 +1431,71 @@ class TestCoRetrievalConflictDetection:
         db.add_pending_contradiction("n1", "new fact")
         assert db.has_pending_contradiction_for("n1")
         assert not db.has_pending_contradiction_for("n2")
+
+
+class _FakeEmbeddingProvider:
+    def embed_single(self, text: str) -> list[float]:
+        return [0.01] * 384
+
+
+class TestRecallSave:
+    """Test the recall_save MCP tool."""
+
+    def test_recall_save_creates_and_embeds_node(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_save
+        from synapt.recall.storage import RecallDB
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=_FakeEmbeddingProvider()), \
+             patch("synapt.recall.server._invalidate_cache"):
+            result = recall_save(
+                content="Deploy previews expire after 7 days",
+                category="workflow",
+                confidence=0.9,
+                tags=["preview", "deploy"],
+                source_sessions=["sess-1"],
+                source_turns=["sess-1:12"],
+            )
+
+        assert "Knowledge node saved:" in result
+        assert "embedded for vector search" in result
+
+        db = RecallDB(project_index_dir(tmp_path) / "recall.db")
+        try:
+            nodes = db.load_knowledge_nodes(status="active")
+            assert len(nodes) == 1
+            assert nodes[0]["content"] == "Deploy previews expire after 7 days"
+            assert nodes[0]["tags"] == ["preview", "deploy"]
+            assert nodes[0]["source_sessions"] == ["sess-1"]
+            assert nodes[0]["source_turns"] == ["sess-1:12"]
+            emb_map = db.get_knowledge_embeddings_by_id()
+            assert nodes[0]["id"] in emb_map
+        finally:
+            db.close()
+
+    def test_recall_save_without_embeddings_still_saves_node(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_save
+        from synapt.recall.storage import RecallDB
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            result = recall_save(content="Use staging before production")
+
+        assert "saved without embeddings" in result
+
+        db = RecallDB(project_index_dir(tmp_path) / "recall.db")
+        try:
+            nodes = db.load_knowledge_nodes(status="active")
+            assert len(nodes) == 1
+            assert nodes[0]["content"] == "Use staging before production"
+            assert db.get_knowledge_embeddings_by_id() == {}
+        finally:
+            db.close()
+
+    def test_recall_save_requires_content(self):
+        from synapt.recall.server import recall_save
+
+        assert "required" in recall_save(content="   ").lower()

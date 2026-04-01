@@ -338,6 +338,20 @@ class TestStorageKnowledge(unittest.TestCase):
         self.assertEqual(db.knowledge_count(), 1)
         db.close()
 
+    def test_get_knowledge_rowid(self):
+        from synapt.recall.storage import RecallDB
+        db = RecallDB(self.db_path)
+        db.upsert_knowledge_node({
+            "id": "k1", "content": "Test", "category": "workflow",
+            "confidence": 0.5, "source_sessions": [], "created_at": "",
+            "updated_at": "", "status": "active", "superseded_by": "", "tags": [],
+        })
+        rowid = db.get_knowledge_rowid("k1")
+        assert isinstance(rowid, int)
+        assert rowid > 0
+        assert db.get_knowledge_rowid("missing") is None
+        db.close()
+
     def test_existing_db_gets_knowledge_table(self):
         """Opening an existing DB without knowledge table adds it without data loss."""
         import sqlite3
