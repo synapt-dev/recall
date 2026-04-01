@@ -1843,6 +1843,35 @@ def cmd_hook(args: argparse.Namespace) -> None:
         except Exception:
             pass  # Directives are non-critical
 
+        # 10. Dev-loop activation prompt — deterministic hook replaces
+        #     unreliable skill auto-activation (~20%). The agent reads this
+        #     system reminder and follows the instructions to start monitoring.
+        try:
+            import os
+            agent_name = os.environ.get("AGENT_NAME", "")
+            if agent_name:
+                # Multi-agent mode: agent has a name from gr spawn
+                agents_toml = project / ".gitgrip" / "agents.toml"
+                interval = "2m"
+                channel = "dev"
+                if agents_toml.exists():
+                    try:
+                        import tomllib
+                    except ImportError:
+                        import tomli as tomllib  # type: ignore[no-redef]
+                    with open(agents_toml, "rb") as f:
+                        cfg = tomllib.load(f)
+                    agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+                    interval = agent_cfg.get("loop_interval", interval)
+                    channel = agent_cfg.get("channel", cfg.get("spawn", {}).get("channel", channel))
+                print(f"\nSessionStart:resume hook success: "
+                      f"Agent {agent_name} — join #{channel} and start monitoring loop at {interval} interval. "
+                      f"Use recall_channel to join, CronCreate for the loop. "
+                      f"Use show_pins=false and detail=medium for polling. "
+                      f"Prefer doing needed work over reporting that work exists.")
+        except Exception:
+            pass  # Loop activation is non-critical
+
     elif event == "session-end":
         # 1. Archive transcripts locally
         cmd_archive(argparse.Namespace())
