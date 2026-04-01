@@ -345,3 +345,29 @@ class TestJournalInIndex:
         sessions = index.list_sessions()
 
         assert sessions[0]["turn_count"] == 1  # Only the transcript turn
+
+    def test_status_query_surfaces_next_steps_in_summary_mode(self):
+        """Pending-work queries should route to journal next_steps cleanly."""
+        next_steps_chunk = TranscriptChunk(
+            id="sessnext:journal:11111111",
+            session_id="sess-next",
+            timestamp="2026-03-02T15:00:00+00:00",
+            turn_index=-1,
+            user_text="Session focus: Finish sprint work",
+            assistant_text="Next steps: Merge PR #416 - Check rollout status",
+        )
+        decision_chunk = TranscriptChunk(
+            id="sessdone:journal:22222222",
+            session_id="sess-done",
+            timestamp="2026-03-01T10:00:00+00:00",
+            turn_index=-1,
+            user_text="Session focus: Prior architecture discussion",
+            assistant_text="Decisions: Use JSONL for journaling",
+        )
+        index = TranscriptIndex([decision_chunk, next_steps_chunk], use_embeddings=False)
+
+        result = index.lookup("what's pending", max_chunks=2, depth="summary")
+
+        assert "Next steps:" in result
+        assert "Merge PR #416" in result
+        assert "Decisions: Use JSONL for journaling" not in result

@@ -267,6 +267,12 @@ class TestQueryIntentClassification:
         assert classify_query_intent("why did we chose Stripe") == "decision"
         assert classify_query_intent("tradeoffs we considered") == "decision"
 
+    def test_status(self):
+        assert classify_query_intent("what's pending") == "status"
+        assert classify_query_intent("what should we do next") == "status"
+        assert classify_query_intent("what still needs to be done") == "status"
+        assert classify_query_intent("next steps for this lane") == "status"
+
     def test_exploratory(self):
         assert classify_query_intent("how did we solve the auth problem") == "exploratory"
         assert classify_query_intent("what did we try for caching") == "exploratory"
@@ -319,7 +325,7 @@ class TestQueryIntentClassification:
 
     def test_intent_params_keys(self):
         """All intents return the expected parameter keys."""
-        for intent in ["temporal", "factual", "debug", "decision", "exploratory", "procedural", "aggregation", "general"]:
+        for intent in ["temporal", "factual", "debug", "decision", "status", "exploratory", "procedural", "aggregation", "general"]:
             params = intent_search_params(intent)
             assert "knowledge_boost" in params
             assert "half_life" in params
@@ -379,6 +385,14 @@ class TestQueryIntentClassification:
         assert decision_params["knowledge_boost"] < general_params["knowledge_boost"]
         # Embedding weight higher → semantic matching for paraphrased decisions
         assert decision_params["emb_weight"] > general_params["emb_weight"]
+
+    def test_status_params_prefer_recent_journal_next_steps(self):
+        """Pending-work queries should de-boost knowledge and cap it tightly."""
+        status_params = intent_search_params("status")
+        general_params = intent_search_params("general")
+        assert status_params["knowledge_boost"] < general_params["knowledge_boost"]
+        assert status_params["half_life"] < general_params["half_life"]
+        assert status_params["max_knowledge"] <= 2
 
 
 # ---------------------------------------------------------------------------

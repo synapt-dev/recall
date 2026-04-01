@@ -34,7 +34,7 @@ from synapt.recall.scrub import scrub_text
 logger = logging.getLogger("synapt.recall")
 
 from synapt.recall.bm25 import BM25, _tokenize
-from synapt.recall.hybrid import extract_entities
+from synapt.recall.hybrid import augment_query_for_intent, extract_entities
 from synapt.recall.storage import RecallDB
 from synapt.recall.sharded_db import ShardedRecallDB
 
@@ -1662,7 +1662,9 @@ class TranscriptIndex:
         # Apply caller override for knowledge boost (after intent classification)
         _knowledge_boost = knowledge_boost if knowledge_boost is not None else kb_default
 
-        query_tokens = _tokenize(query)
+        retrieval_query = augment_query_for_intent(query, intent) if intent else query
+
+        query_tokens = _tokenize(retrieval_query)
         if not query_tokens:
             self._last_diagnostics = SearchDiagnostics(
                 total_chunks=len(self.chunks),
@@ -1675,7 +1677,7 @@ class TranscriptIndex:
 
         if max_sessions is not None:
             result = self._progressive_lookup(
-                query, query_tokens, max_chunks, max_tokens, max_sessions,
+                retrieval_query, query_tokens, max_chunks, max_tokens, max_sessions,
                 date_filter, after, before, half_life, threshold_ratio, depth,
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
@@ -1684,7 +1686,7 @@ class TranscriptIndex:
             )
         else:
             result = self._global_lookup(
-                query, query_tokens, max_chunks, max_tokens, date_filter,
+                retrieval_query, query_tokens, max_chunks, max_tokens, date_filter,
                 after, before,
                 half_life, threshold_ratio, depth, include_archived,
                 include_historical,
@@ -2983,9 +2985,11 @@ class TranscriptIndex:
             # Journal decision boost: journal chunks with "Decisions:" content
             # rank higher for decision-intent queries. This surfaces the raw
             # rationale instead of distilled knowledge nodes.
-            if intent == "decision":
-                if chunk.turn_index < 0 and "Decisions:" in chunk.assistant_text:
+            if chunk.turn_index < 0:
+                if intent == "decision" and "Decisions:" in chunk.assistant_text:
                     score *= 1.3
+                elif intent == "status" and "Next steps:" in chunk.assistant_text:
+                    score *= 1.5
             block = self._format_chunk_block(idx, intent=intent, query=query)
             emit_items.append((score, block, "chunk", chunk.id, chunk.timestamp))
 

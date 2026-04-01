@@ -574,6 +574,51 @@ class TestRecallSearchLiveIntegration(unittest.TestCase):
         self.assertIn("Run `synapt recall setup`", result)
 
 
+class TestRecallQuickStatusRouting(unittest.TestCase):
+
+    def test_pending_query_uses_summary_depth(self):
+        """Pending-work queries should let recall_quick surface journal entries."""
+        from synapt.recall.server import recall_quick
+
+        calls = []
+
+        class MockIndex:
+            _last_diagnostics = None
+            _embedding_status = "disabled"
+
+            def lookup(self, query, **kwargs):
+                calls.append((query, kwargs))
+                return "Past session context:\n--- journal result ---"
+
+        with patch("synapt.recall.server._get_index", return_value=MockIndex()):
+            result = recall_quick("what's pending")
+
+        self.assertIn("journal result", result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["depth"], "summary")
+
+    def test_non_status_query_keeps_concise_depth(self):
+        """Ordinary quick checks should preserve concise mode."""
+        from synapt.recall.server import recall_quick
+
+        calls = []
+
+        class MockIndex:
+            _last_diagnostics = None
+            _embedding_status = "disabled"
+
+            def lookup(self, query, **kwargs):
+                calls.append((query, kwargs))
+                return "Past session context:\n--- concise result ---"
+
+        with patch("synapt.recall.server._get_index", return_value=MockIndex()):
+            result = recall_quick("what is the database port")
+
+        self.assertIn("concise result", result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["depth"], "concise")
+
+
 # ---------------------------------------------------------------------------
 # PreCompact journal write
 # ---------------------------------------------------------------------------

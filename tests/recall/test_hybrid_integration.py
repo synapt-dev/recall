@@ -256,6 +256,7 @@ class TestIntentParameterFlow:
         queries = {
             "factual": "what is the database port",
             "debug": "error in the deployment pipeline",
+            "status": "what's pending",
             "exploratory": "how did we solve the auth problem",
             "procedural": "how to deploy the service",
             "general": "authentication token refresh",
