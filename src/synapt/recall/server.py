@@ -1482,6 +1482,86 @@ def recall_save(
         return f"Knowledge save failed: {exc}"
 
 
+def recall_sync_memory() -> str:
+    """Sync Claude Code MEMORY.md files into recall as knowledge nodes.
+
+    Scans ~/.claude/projects/*/memory/*.md, parses YAML frontmatter
+    (name, description, type), and upserts each as a knowledge node via
+    recall_save. Skips files that haven't changed since last sync.
+
+    Memory types map to knowledge categories:
+    - user → user
+    - feedback → feedback
+    - project → project
+    - reference → reference
+    """
+    import yaml
+    from pathlib import Path
+
+    memory_root = Path.home() / ".claude" / "projects"
+    if not memory_root.exists():
+        return "No Claude Code memory directory found."
+
+    synced = 0
+    skipped = 0
+    errors = 0
+
+    for memory_dir in sorted(memory_root.glob("*/memory")):
+        for md_file in sorted(memory_dir.glob("*.md")):
+            if md_file.name == "MEMORY.md":
+                continue  # Skip the index file
+
+            try:
+                text = md_file.read_text(encoding="utf-8")
+
+                # Parse YAML frontmatter
+                if not text.startswith("---"):
+                    skipped += 1
+                    continue
+                parts = text.split("---", 2)
+                if len(parts) < 3:
+                    skipped += 1
+                    continue
+
+                frontmatter = yaml.safe_load(parts[1])
+                if not isinstance(frontmatter, dict):
+                    skipped += 1
+                    continue
+
+                name = frontmatter.get("name", md_file.stem)
+                description = frontmatter.get("description", "")
+                mem_type = frontmatter.get("type", "project")
+                body = parts[2].strip()
+
+                # Build content: description + body
+                content = f"{name}: {description}" if description else name
+                if body:
+                    content += f"\n\n{body}"
+
+                # Map memory type to category
+                category = mem_type if mem_type in ("user", "feedback", "project", "reference") else "project"
+
+                result = recall_save(
+                    content=content,
+                    category=category,
+                    confidence=0.9,
+                    tags=["memory.md", f"type:{mem_type}", f"name:{name}"],
+                )
+
+                if "saved" in result.lower() or "Knowledge node saved" in result:
+                    synced += 1
+                else:
+                    errors += 1
+
+            except Exception:
+                errors += 1
+
+    return (
+        f"Memory sync complete: {synced} synced, {skipped} skipped, {errors} errors. "
+        f"Scanned {memory_root}."
+    )
+
+
 def recall_remind(
     action: str = "add",
     text: str | None = None,
@@ -2090,6 +2170,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(_with_directive_check(recall_stats))
     mcp.tool()(_with_directive_check(recall_journal))
     mcp.tool()(_with_directive_check(recall_save))
+    mcp.tool()(recall_sync_memory)
     mcp.tool()(_with_directive_check(recall_remind))
     mcp.tool()(recall_enrich)
     mcp.tool()(recall_consolidate)
