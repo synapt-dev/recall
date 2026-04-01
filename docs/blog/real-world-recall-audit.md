@@ -18,7 +18,7 @@ The question was simple. The answer required pulling from five different sources
 
 ## The question
 
-End of a long weekend. Layne sat down Monday morning and typed:
+After a busy day of shipping, Layne sat down Tuesday afternoon and typed:
 
 > "I can't remember what we have cooking and what we ate."
 
@@ -38,13 +38,13 @@ Five calls, in order:
 | 4 | `recall_quick` | "pending work items roadmap next steps backlog" | Backlog items not tracked in PRs |
 | 5 | `recall_quick` | "reddit post agent madness voting awesome-mcp-servers PR" | Specific loose threads |
 
-The agent then synthesized these into a structured answer: 17 merged PRs in "What We Ate," 6 open PRs in "What's Cooking," and 9 items in "Not Yet Started."
+The agent then synthesized these into a structured answer: 23 merged PRs in "What We Ate," 6 open PRs in "What's Cooking," and 9 items in "Not Yet Started."
 
 ## Where each part of the answer came from
 
 | Section | Primary source | Recall's contribution |
 |---------|---------------|----------------------|
-| 17 merged PRs | GitHub API | None — git is the source of truth |
+| 23 merged PRs | GitHub API | None — git is the source of truth |
 | Session narrative | **recall_journal** | Excellent — full structured summary |
 | 6 open PRs | GitHub API | None |
 | Backlog / loose threads | **recall_quick** + auto-memory | Partial — found some, missed others |
