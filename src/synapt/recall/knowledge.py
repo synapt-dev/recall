@@ -75,11 +75,12 @@ class KnowledgeNode:
         confidence: float = 0.5,
         tags: list[str] | None = None,
         source_turns: list[str] | None = None,
+        node_id: str | None = None,
     ) -> KnowledgeNode:
         """Create a new knowledge node with auto-generated ID and timestamps."""
         now = datetime.now(timezone.utc).isoformat()
         return cls(
-            id=_new_id(),
+            id=node_id or _new_id(),
             content=_tw(content, 300),
             category=category if category in VALID_CATEGORIES else "workflow",
             confidence=max(0.0, min(1.0, confidence)),
