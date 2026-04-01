@@ -1858,8 +1858,15 @@ def cmd_hook(args: argparse.Namespace) -> None:
             import os
             agent_name = os.environ.get("AGENT_NAME", "")
             if agent_name:
-                # Multi-agent mode: agent has a name from gr spawn
-                agents_toml = project / ".gitgrip" / "agents.toml"
+                # Multi-agent mode: agent has a name from gr spawn.
+                # Resolve gripspace root by walking up from cwd to find
+                # .gitgrip/ — griptrees don't have their own .gitgrip/.
+                gripspace_root = project
+                while gripspace_root != gripspace_root.parent:
+                    if (gripspace_root / ".gitgrip").is_dir():
+                        break
+                    gripspace_root = gripspace_root.parent
+                agents_toml = gripspace_root / ".gitgrip" / "agents.toml"
                 interval = "2m"
                 channel = "dev"
                 if agents_toml.exists():
