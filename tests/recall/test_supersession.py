@@ -1499,3 +1499,76 @@ class TestRecallSave:
         from synapt.recall.server import recall_save
 
         assert "required" in recall_save(content="   ").lower()
+
+    def test_recall_save_upserts_stable_node_id(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_save
+        from synapt.recall.storage import RecallDB
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            first = recall_save(
+                content="Original memory",
+                category="workflow",
+                node_id="stable-node1",
+            )
+            second = recall_save(
+                content="Updated memory",
+                category="workflow",
+                node_id="stable-node1",
+            )
+
+        assert "Knowledge node saved:" in first
+        assert "Knowledge node saved:" in second
+
+        db = RecallDB(project_index_dir(tmp_path) / "recall.db")
+        try:
+            nodes = db.load_knowledge_nodes(status="active")
+            assert len(nodes) == 1
+            assert nodes[0]["id"] == "stable-node1"
+            assert nodes[0]["content"] == "Updated memory"
+        finally:
+            db.close()
+
+
+class TestRecallSyncMemory:
+    """Tests for MEMORY.md sync into shared recall knowledge."""
+
+    def test_recall_sync_memory_is_idempotent_per_file(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_sync_memory
+        from synapt.recall.storage import RecallDB
+
+        home = tmp_path / "home"
+        project = tmp_path / "gripspace"
+        memory_dir = home / ".claude" / "projects" / "proj-a" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "policy.md").write_text(
+            "---\n"
+            "name: Ministral policy\n"
+            "description: Use the local model first\n"
+            "type: project\n"
+            "---\n"
+            "Prefer Ministral for quick local enrichment.\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=home), \
+             patch("synapt.recall.server.Path.cwd", return_value=project), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            first = recall_sync_memory()
+            second = recall_sync_memory()
+
+        assert "1 synced" in first
+        assert "1 synced" in second
+
+        db = RecallDB(project_index_dir(project) / "recall.db")
+        try:
+            nodes = db.load_knowledge_nodes(status="active")
+            assert len(nodes) == 1
+            assert nodes[0]["content"].startswith("Ministral policy: Use the local model first")
+            assert "memory.md" in nodes[0]["tags"]
+        finally:
+            db.close()

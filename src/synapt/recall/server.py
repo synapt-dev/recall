@@ -1433,6 +1433,7 @@ def recall_save(
     tags: list[str] | None = None,
     source_sessions: list[str] | None = None,
     source_turns: list[str] | None = None,
+    node_id: str | None = None,
 ) -> str:
     """Create a knowledge node directly and embed it for vector search.
 
@@ -1443,6 +1444,8 @@ def recall_save(
         tags: Optional search tags.
         source_sessions: Optional originating session IDs.
         source_turns: Optional originating turn refs ("session_id:turn_num").
+        node_id: Optional stable knowledge-node ID to upsert instead of creating
+            a fresh random node each time.
     """
     clean_content = (content or "").strip()
     if not clean_content:
@@ -1455,6 +1458,7 @@ def recall_save(
         project = Path.cwd().resolve()
         db = RecallDB(project_index_dir(project) / "recall.db")
         try:
+            existing = db.get_knowledge_node(node_id) if node_id else None
             node = KnowledgeNode.create(
                 content=clean_content,
                 category=category,
@@ -1462,7 +1466,10 @@ def recall_save(
                 confidence=confidence,
                 tags=[t for t in (tags or []) if t],
                 source_turns=[t for t in (source_turns or []) if t],
+                node_id=node_id,
             )
+            if existing:
+                node.created_at = existing.get("created_at", node.created_at)
             append_node(node, project_data_dir(project) / "knowledge.jsonl")
             db.upsert_knowledge_node(node.to_dict())
 
@@ -1500,6 +1507,7 @@ def recall_sync_memory() -> str:
     - project → project
     - reference → reference
     """
+    import hashlib
     import yaml
     from pathlib import Path
 
@@ -1545,12 +1553,16 @@ def recall_sync_memory() -> str:
 
                 # Map memory type to category
                 category = mem_type if mem_type in ("user", "feedback", "project", "reference") else "project"
+                stable_id = hashlib.sha1(
+                    str(md_file.resolve()).encode("utf-8")
+                ).hexdigest()[:12]
 
                 result = recall_save(
                     content=content,
                     category=category,
                     confidence=0.9,
                     tags=["memory.md", f"type:{mem_type}", f"name:{name}"],
+                    node_id=stable_id,
                 )
 
                 if "saved" in result.lower() or "Knowledge node saved" in result:
