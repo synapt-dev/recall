@@ -1176,8 +1176,10 @@ def cmd_journal(args: argparse.Namespace) -> None:
         format_entry_full,
         format_for_session_start,
         latest_transcript_path,
+        merge_carried_forward_next_steps,
         read_entries,
         read_latest,
+        read_previous_meaningful,
     )
 
     if args.read:
@@ -1224,6 +1226,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
     project = Path.cwd().resolve()
     transcript_path = latest_transcript_path(project)
     entry = auto_extract_entry(transcript_path=transcript_path, cwd=str(project))
+    previous_entry = read_previous_meaningful(entry.session_id)
 
     # Merge CLI-provided fields
     if args.focus:
@@ -1234,6 +1237,11 @@ def cmd_journal(args: argparse.Namespace) -> None:
         entry.decisions = [d.strip() for d in args.decisions.split(";")]
     if args.next:
         entry.next_steps = [n.strip() for n in args.next.split(";")]
+    entry.next_steps = merge_carried_forward_next_steps(
+        entry.next_steps,
+        entry.done,
+        previous_entry,
+    )
 
     # Clear auto flag if user provided rich content
     if entry.has_rich_content():

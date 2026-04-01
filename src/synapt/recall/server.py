@@ -1362,8 +1362,10 @@ def recall_journal(
             format_entry_full,
             format_for_session_start,
             latest_transcript_path,
+            merge_carried_forward_next_steps,
             read_entries,
             read_latest,
+            read_previous_meaningful,
         )
 
         if action == "read":
@@ -1382,6 +1384,7 @@ def recall_journal(
             project = Path.cwd().resolve()
             transcript_path = latest_transcript_path(project)
             entry = auto_extract_entry(transcript_path=transcript_path, cwd=str(project))
+            previous_entry = read_previous_meaningful(entry.session_id)
 
             if focus:
                 entry.focus = focus
@@ -1391,6 +1394,11 @@ def recall_journal(
                 entry.decisions = [d.strip() for d in decisions.split(";")]
             if next_steps:
                 entry.next_steps = [n.strip() for n in next_steps.split(";")]
+            entry.next_steps = merge_carried_forward_next_steps(
+                entry.next_steps,
+                entry.done,
+                previous_entry,
+            )
 
             # Clear auto flag when user provides rich content
             if entry.has_rich_content():
