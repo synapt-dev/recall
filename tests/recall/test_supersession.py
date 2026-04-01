@@ -1495,6 +1495,28 @@ class TestRecallSave:
         finally:
             db.close()
 
+    def test_recall_save_defaults_to_content_hash_upsert(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_save
+        from synapt.recall.storage import RecallDB
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            first = recall_save(content="Use staging before production")
+            second = recall_save(content="Use staging before production")
+
+        assert "Knowledge node saved:" in first
+        assert "Knowledge node saved:" in second
+
+        db = RecallDB(project_index_dir(tmp_path) / "recall.db")
+        try:
+            nodes = db.load_knowledge_nodes(status="active")
+            assert len(nodes) == 1
+            assert nodes[0]["content"] == "Use staging before production"
+        finally:
+            db.close()
+
     def test_recall_save_requires_content(self):
         from synapt.recall.server import recall_save
 
