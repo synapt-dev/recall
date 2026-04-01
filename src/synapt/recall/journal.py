@@ -143,6 +143,24 @@ def read_latest(path: Path | None = None, meaningful: bool = False) -> JournalEn
     return None
 
 
+def read_previous_meaningful(
+    current_session_id: str = "",
+    path: Path | None = None,
+) -> JournalEntry | None:
+    """Read the most recent meaningful entry from a prior session.
+
+    If *current_session_id* is provided, entries from the same session are
+    skipped so repeated writes do not carry forward their own next steps.
+    """
+    for entry in read_entries(path, n=50):
+        if not entry.has_rich_content():
+            continue
+        if current_session_id and entry.session_id == current_session_id:
+            continue
+        return entry
+    return None
+
+
 def read_entries(path: Path | None = None, n: int = 5) -> list[JournalEntry]:
     """Read the last N journal entries (most recent first).
 
@@ -316,6 +334,40 @@ def format_entry_full(entry: JournalEntry) -> str:
         for c in entry.git_log:
             lines.append(f"- {c}")
     return "\n".join(lines)
+
+
+def _step_key(step: str) -> str:
+    """Normalize a next-step string for exact matching."""
+    return " ".join(step.split()).casefold()
+
+
+def merge_carried_forward_next_steps(
+    current_next_steps: list[str],
+    current_done: list[str],
+    previous_entry: JournalEntry | None,
+) -> list[str]:
+    """Merge unresolved prior-session next steps into the current entry.
+
+    Carries forward prior next steps unless the current entry already includes
+    them or marks them done. New next steps stay first; carried items append.
+    """
+    merged = [step.strip() for step in current_next_steps if step and step.strip()]
+    seen = {_step_key(step) for step in merged}
+    done = {_step_key(item) for item in current_done if item and item.strip()}
+
+    if not previous_entry or not previous_entry.next_steps:
+        return merged
+
+    for step in previous_entry.next_steps:
+        clean = step.strip()
+        if not clean:
+            continue
+        key = _step_key(clean)
+        if key in seen or key in done:
+            continue
+        merged.append(clean)
+        seen.add(key)
+    return merged
 
 
 def extract_session_id(path: Path | str) -> str:

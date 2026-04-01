@@ -8,7 +8,15 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from synapt.recall.core import project_slug, project_index_dir, project_archive_dir, project_worktree_dir, project_transcript_dir
-from synapt.recall.cli import discover_transcript_dirs, _ensure_gitignore, _install_global_hooks, cmd_rebuild, cmd_sync, main
+from synapt.recall.cli import (
+    discover_transcript_dirs,
+    _ensure_gitignore,
+    _install_global_hooks,
+    cmd_journal,
+    cmd_rebuild,
+    cmd_sync,
+    main,
+)
 
 
 def _write_codex_transcript(path: Path, cwd: Path) -> None:
@@ -749,6 +757,51 @@ def test_catchup_writes_journal_for_codex_session(tmp_path):
     entries = read_entries(journal_path, n=1)
     assert len(entries) == 1
     assert entries[0].session_id == "codex-session-001"
+
+
+def test_cmd_journal_write_carries_forward_unresolved_next_steps(tmp_path, capsys):
+    """Journal write merges prior unresolved next_steps into the new entry."""
+    from synapt.recall.journal import JournalEntry, append_entry, read_latest
+
+    project = tmp_path / "project"
+    project.mkdir()
+    journal_path = project_worktree_dir(project) / "journal.jsonl"
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    append_entry(
+        JournalEntry(
+            timestamp="2026-03-31T10:00:00+00:00",
+            session_id="prior-session",
+            focus="previous work",
+            next_steps=["ship docs", "follow up with team"],
+        ),
+        journal_path,
+    )
+
+    args = argparse.Namespace(
+        read=False,
+        list=False,
+        show=None,
+        write=True,
+        focus="current work",
+        done="ship docs",
+        decisions=None,
+        next="close loop",
+    )
+
+    with patch("synapt.recall.cli.Path.cwd", return_value=project), \
+         patch("synapt.recall.journal.latest_transcript_path", return_value=None), \
+         patch("synapt.recall.journal.auto_extract_entry", return_value=JournalEntry(
+             timestamp="2026-04-01T12:00:00+00:00",
+             session_id="current-session",
+         )):
+        cmd_journal(args)
+
+    latest = read_latest(journal_path)
+    assert latest is not None
+    assert latest.next_steps == ["close loop", "follow up with team"]
+
+    captured = capsys.readouterr()
+    assert "Journal entry written" in captured.err
 
 
 # ---------------------------------------------------------------------------

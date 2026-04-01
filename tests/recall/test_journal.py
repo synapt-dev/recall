@@ -14,8 +14,10 @@ from synapt.recall.journal import (
     compact_journal,
     format_entry_full,
     format_for_session_start,
+    merge_carried_forward_next_steps,
     read_entries,
     read_latest,
+    read_previous_meaningful,
 )
 
 
@@ -419,6 +421,58 @@ class TestDedupAndCompact(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].focus, "focus + done")
         self.assertEqual(result[0].done, ["task"])
+
+
+class TestNextStepCarryForward(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.path = Path(self.tmpdir) / "journal.jsonl"
+
+    def test_read_previous_meaningful_skips_current_session(self):
+        append_entry(JournalEntry(
+            timestamp="2026-03-01T10:00:00",
+            session_id="prior",
+            focus="prior session",
+            next_steps=["follow up"],
+        ), self.path)
+        append_entry(JournalEntry(
+            timestamp="2026-03-02T10:00:00",
+            session_id="current",
+            focus="current session",
+            next_steps=["new task"],
+        ), self.path)
+
+        previous = read_previous_meaningful("current", self.path)
+        self.assertIsNotNone(previous)
+        self.assertEqual(previous.session_id, "prior")
+
+    def test_merge_carries_forward_unresolved_prior_steps(self):
+        previous = JournalEntry(
+            timestamp="2026-03-01T10:00:00",
+            next_steps=["ship docs", "follow up with team"],
+        )
+
+        merged = merge_carried_forward_next_steps(
+            current_next_steps=["write tests"],
+            current_done=["ship docs"],
+            previous_entry=previous,
+        )
+
+        self.assertEqual(merged, ["write tests", "follow up with team"])
+
+    def test_merge_deduplicates_existing_next_steps(self):
+        previous = JournalEntry(
+            timestamp="2026-03-01T10:00:00",
+            next_steps=["Write tests", "follow up with team"],
+        )
+
+        merged = merge_carried_forward_next_steps(
+            current_next_steps=["write tests", "close loop"],
+            current_done=[],
+            previous_entry=previous,
+        )
+
+        self.assertEqual(merged, ["write tests", "close loop", "follow up with team"])
 
 
 if __name__ == "__main__":
