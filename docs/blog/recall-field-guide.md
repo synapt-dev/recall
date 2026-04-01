@@ -12,7 +12,7 @@ hero: recall-field-guide.png
 
 ---
 
-Synapt recall has 19 tools — 10 for search/read, 9 for writes and admin. That's too many to guess your way through. This guide maps real questions to the right tool call — with the gotchas we've learned from production use.
+Synapt recall has 19 tools. That's too many to guess your way through. This guide maps real questions to the right tool call — with the gotchas we've learned from production use.
 
 ## The decision tree
 
@@ -29,13 +29,13 @@ Start here. What are you trying to do?
   └─ recall_journal action="list"
 
 "Who changed this file and why?"
-  └─ recall_files path="src/foo/bar.py"
+  └─ recall_files pattern="src/foo/bar.py"
 
 "What's the full context around topic X?"
   └─ recall_search query="topic X"
 
-"Show me everything from March 15"
-  └─ recall_timeline date="2026-03-15"
+"Show me the arc of work around March 15"
+  └─ recall_timeline after="2026-03-14" before="2026-03-16"
 
 "What did the team discuss in #dev?"
   └─ recall_channel action="search" message="keyword"
@@ -116,7 +116,7 @@ recall_search(query="why did we switch from Llama to Ministral")
 **Use when:** You're about to modify a file and want to know what's been said about it
 
 ```
-recall_files(path="src/synapt/recall/channel.py")
+recall_files(pattern="src/synapt/recall/channel.py")
 ```
 
 **Gotcha:** This searches recall's memory of discussions *about* the file, not the file's git history. For actual git history, use `git log -- path/to/file`. The two are complementary: git tells you *what* changed, recall tells you *why* it was discussed.
@@ -151,20 +151,21 @@ Using `detail="max"` in a monitoring loop will eat thousands of tokens per tick.
 ### 6. `recall_timeline` — date-based browsing
 
 **Cost:** ~500-1500 tokens
-**Returns:** What happened on a specific date
-**Use when:** "What did we do on Friday?" or anchoring context to a timeframe
+**Returns:** Work arcs — groups of consecutive sessions on the same branch/topic
+**Use when:** "What did we do last week?" or understanding the arc of work around a timeframe
 
 ```
-recall_timeline(date="2026-03-28")
+recall_timeline(after="2026-03-25", before="2026-03-29")
+recall_timeline(query="dashboard")
 ```
 
-### 7. `recall_context` — expand a specific chunk
+### 7. `recall_context` — drill into a search result
 
 **Cost:** ~200-500 tokens
-**Returns:** Surrounding context for a specific chunk ID
-**Use when:** `recall_search` returned a relevant chunk and you need more around it
+**Returns:** Full raw transcript content for a specific chunk or cluster
+**Use when:** `recall_search` returned a relevant chunk and you need the full raw content
 
-This is a follow-up tool, not a starting point. Use it to expand snippets found by other tools.
+This is a follow-up tool, not a starting point. Use it to expand snippets found by other tools. Accepts both `chunk_id` and `cluster_id`.
 
 ## Patterns that work
 
