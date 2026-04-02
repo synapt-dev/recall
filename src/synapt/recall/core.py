@@ -4120,8 +4120,9 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
     directories for both the main worktree and the current worktree (if
     different), so that ``recall build`` archives sessions from all worktrees.
 
-    In a gripspace, also discovers transcripts from all *direct child*
-    repos (directories with ``.git``).  Nested repos are not discovered.
+    In a gripspace, also discovers transcripts from:
+    - direct child repos (directories with ``.git``)
+    - linked worktrees under ``.worktrees/*`` (also directories with ``.git``)
     """
     actual_dir = (project_dir or Path.cwd()).resolve()
     dirs: list[Path] = []
@@ -4145,6 +4146,8 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
                 dirs.append(main_d)
 
     # If in a gripspace, discover transcripts from all constituent repos
+    # plus linked worktrees under .worktrees/*. Active agent sessions often
+    # run from those clean worktrees rather than from the main child repos.
     grip_root = _find_gripspace_root(actual_dir)
     if grip_root is not None:
         try:
@@ -4159,6 +4162,19 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
                     child_d = Path.home() / ".claude" / "projects" / child_slug
                     if child_d.is_dir() and any(child_d.glob("*.jsonl")):
                         dirs.append(child_d)
+            elif child.is_dir() and child.name == ".worktrees":
+                try:
+                    worktrees = sorted(child.iterdir())
+                except OSError:
+                    worktrees = []
+                for wt in worktrees:
+                    if wt.is_dir() and (wt / ".git").exists():
+                        wt_slug = project_slug(wt)
+                        if wt_slug not in seen_slugs:
+                            seen_slugs.add(wt_slug)
+                            wt_d = Path.home() / ".claude" / "projects" / wt_slug
+                            if wt_d.is_dir() and any(wt_d.glob("*.jsonl")):
+                                dirs.append(wt_d)
 
     return dirs
 

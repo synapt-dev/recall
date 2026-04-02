@@ -337,6 +337,28 @@ class TestProjectTranscriptDirsGripspace:
         assert td_root in dirs
         assert td_repo in dirs
 
+    def test_discovers_linked_worktree_transcripts_from_gripspace_root(self, tmp_path):
+        """Gripspace-root discovery should include linked repos under .worktrees/*."""
+        grip = _make_gripspace(tmp_path)
+        repo = _make_git_repo(grip, "repo-a")
+
+        worktrees_root = grip / ".worktrees"
+        worktrees_root.mkdir()
+        linked = worktrees_root / "atlas-repo-a"
+        linked.mkdir()
+        (linked / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'atlas'}\n")
+
+        fake_home = tmp_path / "home"
+        slug_linked = str(linked).replace("\\", "/").replace("/", "-")
+        td_linked = fake_home / ".claude" / "projects" / slug_linked
+        td_linked.mkdir(parents=True)
+        (td_linked / "session-linked.jsonl").write_text("{}")
+
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            dirs = project_transcript_dirs(grip)
+
+        assert td_linked in dirs
+
     def test_standalone_repo_returns_empty_when_no_transcripts(self, tmp_path):
         """Standalone git repo outside any gripspace."""
         repo = tmp_path / "standalone"
