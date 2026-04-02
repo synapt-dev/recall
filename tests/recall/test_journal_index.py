@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 
 from synapt.recall.core import parse_journal_entries, TranscriptChunk, TranscriptIndex
 
@@ -371,3 +372,30 @@ class TestJournalInIndex:
         assert "Next steps:" in result
         assert "Merge PR #416" in result
         assert "Decisions: Use JSONL for journaling" not in result
+
+    def test_status_query_prefers_latest_next_steps_journal(self):
+        """Status queries should prioritize the newest pending journal."""
+        now = datetime.now(timezone.utc)
+        older = TranscriptChunk(
+            id="sessold:journal:11111111",
+            session_id="sess-old",
+            timestamp=(now - timedelta(days=14)).isoformat(),
+            turn_index=-1,
+            user_text="Session focus: Earlier sprint work",
+            assistant_text="Next steps: Finish old migration plan",
+        )
+        latest = TranscriptChunk(
+            id="sessnew:journal:22222222",
+            session_id="sess-new",
+            timestamp=now.isoformat(),
+            turn_index=-1,
+            user_text="Session focus: Current sprint work",
+            assistant_text="Next steps: Merge the current PR",
+        )
+        index = TranscriptIndex([older, latest], use_embeddings=False)
+
+        result = index.lookup("what's pending", max_chunks=1, depth="summary")
+
+        assert "Merge the current PR" in result
+        assert "Finish old migration plan" in result
+        assert result.index("Merge the current PR") < result.index("Finish old migration plan")
