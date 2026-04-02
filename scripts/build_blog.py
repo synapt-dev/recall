@@ -46,6 +46,25 @@ PLAUSIBLE_SNIPPET = dedent("""\
       plausible.init()
     </script>""")
 
+LINKEDIN_SNIPPET = dedent("""\
+    <script type="text/javascript">
+    _linkedin_partner_id = "9854913";
+    window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || [];
+    window._linkedin_data_partner_ids.push(_linkedin_partner_id);
+    </script><script type="text/javascript">
+    (function(l) {
+    if (!l){window.lintrk = function(a,b){window.lintrk.q.push([a,b])};
+    window.lintrk.q=[]}
+    var s = document.getElementsByTagName("script")[0];
+    var b = document.createElement("script");
+    b.type = "text/javascript";b.async = true;
+    b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js";
+    s.parentNode.insertBefore(b, s);})(window.lintrk);
+    </script>
+    <noscript>
+    <img height="1" width="1" style="display:none;" alt="" src="https://px.ads.linkedin.com/collect/?pid=9854913&fmt=gif" />
+    </noscript>""")
+
 
 def _author_meta(author_key: str) -> tuple[str, str, str]:
     author_key = author_key.strip().lower()
@@ -428,6 +447,7 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       </div>
     </div>
   </article>
+{LINKEDIN_SNIPPET}
 </body>
 </html>"""
 
@@ -776,6 +796,7 @@ def build_listing_page(
       </div>
     </div>
   </div>
+{LINKEDIN_SNIPPET}
 </body>
 </html>"""
 
