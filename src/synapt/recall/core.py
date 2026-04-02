@@ -3907,17 +3907,21 @@ def _find_gripspace_root(path: Path) -> Path | None:
     while current != current.parent:
         gitgrip = current / ".gitgrip"
         if gitgrip.is_dir():
-            # Linked griptree has griptree.json (singular) — always resolve
-            # to parent gripspace, even if griptrees.json also exists (which
-            # happens when `gr` clones the full directory structure).
-            if (gitgrip / "griptree.json").exists():
+            has_griptrees = (gitgrip / "griptrees.json").exists()
+            has_griptree = (gitgrip / "griptree.json").exists()
+            # Some current workspaces carry both the root marker
+            # (griptrees.json) and the linked-worktree marker
+            # (griptree.json). In that mixed layout, prefer the current
+            # workspace as the gripspace root so recall state stays scoped
+            # to the active workspace instead of resolving upward into the
+            # parent workspace's shared store.
+            if has_griptrees:
+                _gripspace_cache[cache_key] = (current, time.monotonic())
+                return current
+            if has_griptree:
                 root = _resolve_griptree_parent(current)
                 _gripspace_cache[cache_key] = (root, time.monotonic())
                 return root
-            # Gripspace root has only griptrees.json (plural), no singular
-            if (gitgrip / "griptrees.json").exists():
-                _gripspace_cache[cache_key] = (current, time.monotonic())
-                return current
         # Don't walk above $HOME
         if current == home:
             break

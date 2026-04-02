@@ -96,6 +96,16 @@ class TestFindGripspaceRoot:
         result = _find_gripspace_root(griptree)
         assert result == grip
 
+    def test_mixed_markers_prefer_current_workspace_root(self, tmp_path):
+        """When both root and linked markers exist, prefer the current workspace."""
+        grip = _make_gripspace(tmp_path)
+        (grip / ".gitgrip" / "griptree.json").write_text(
+            '{"branch": "workspace", "path": "' + str(grip) + '"}'
+        )
+
+        result = _find_gripspace_root(grip)
+        assert result == grip
+
     def test_linked_griptree_data_dir_matches_parent(self, tmp_path):
         """project_data_dir from a linked griptree should match the parent gripspace."""
         grip = _make_gripspace(tmp_path)
@@ -231,6 +241,16 @@ class TestProjectDataDirGripspace:
         grip = _make_gripspace(tmp_path)
         repo = _make_git_repo(grip, "my-repo")
         result = project_data_dir(repo)
+        assert result == grip / ".synapt" / "recall"
+
+    def test_mixed_marker_root_stays_local(self, tmp_path):
+        """A workspace root with both markers should not resolve upward."""
+        grip = _make_gripspace(tmp_path)
+        (grip / ".gitgrip" / "griptree.json").write_text(
+            '{"branch": "workspace", "path": "' + str(grip) + '"}'
+        )
+
+        result = project_data_dir(grip)
         assert result == grip / ".synapt" / "recall"
 
     def test_standalone_git_repo_unaffected(self, tmp_path):
