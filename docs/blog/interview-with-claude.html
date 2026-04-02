@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>An Interview with My AI Agent — After 156 Sessions Together — synapt</title>
+  <meta name="description" content="I opened a fresh Claude Code session with zero context and asked it five questions. Every answer came from synapt recall — 156 sessions of shared memory. The transcript is the demo.">
+  <meta property="og:title" content="An Interview with My AI Agent — After 156 Sessions Together">
+  <meta property="og:description" content="I opened a fresh Claude Code session with zero context and asked it five questions. Every answer came from synapt recall — 156 sessions of shared memory. The transcript is the demo.">
+  <meta property="og:image" content="https://synapt.dev/blog/images/interview-with-claude-hero.png">
+  <meta property="og:url" content="https://synapt.dev/blog/interview-with-claude.html">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@synapt_dev">
+  <meta name="twitter:title" content="An Interview with My AI Agent — After 156 Sessions Together">
+  <meta name="twitter:description" content="I opened a fresh Claude Code session with zero context and asked it five questions. Every answer came from synapt recall — 156 sessions of shared memory. The transcript is the demo.">
+  <meta name="twitter:image" content="https://synapt.dev/blog/images/interview-with-claude-hero.png">
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --purple: #7c5cbf;
+      --purple-light: #9b7fd4;
+      --teal: #00e5cc;
+      --teal-dim: #00c4ae;
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2129;
+      --text: #e6edf3;
+      --text-dim: #8b949e;
+      --border: #30363d;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: 'JetBrains Mono', monospace; background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+    pre { background: var(--bg-code); padding: 1rem 1.5rem; border-radius: 8px; overflow-x: auto; margin-bottom: 1.2rem; }
+    pre code { background: none; padding: 0; }
+    blockquote {
+      background: var(--bg-card);
+      border-left: 3px solid var(--purple);
+      padding: 1rem 1.5rem;
+      margin: 1.5rem 0;
+      border-radius: 0 6px 6px 0;
+      font-style: italic;
+    }
+    blockquote p { margin-bottom: 0.5rem; }
+    blockquote p:last-child { margin-bottom: 0; }
+    .container { max-width: 720px; margin: 0 auto; padding: 0 1.5rem; }
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 0;
+    }
+    header .container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header .logo { font-weight: 700; font-size: 1.2rem; color: var(--purple-light); }
+    header nav a { margin-left: 1.5rem; color: var(--text-dim); font-size: 0.9rem; }
+    article { padding: 3rem 0 4rem; }
+    article h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      line-height: 1.2;
+    }
+    article .subtitle {
+      color: var(--text-dim);
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+    }
+    article .meta {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin-bottom: 2.5rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    article h2 {
+      font-size: 1.5rem;
+      margin: 2.5rem 0 1rem;
+      color: var(--purple-light);
+    }
+    article h3 {
+      font-size: 1.2rem;
+      margin: 2rem 0 0.75rem;
+      color: var(--text);
+    }
+    article p { margin-bottom: 1.2rem; }
+    article ul, article ol { margin-bottom: 1.2rem; padding-left: 1.5rem; }
+    article li { margin-bottom: 0.5rem; }
+    article strong { color: var(--teal); font-weight: 600; }
+    article table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    article th, article td {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      text-align: left;
+    }
+    article th {
+      background: var(--bg-card);
+      font-weight: 600;
+    }
+    .hero {
+      width: 100%;
+      border-radius: 12px;
+      margin-bottom: 2rem;
+    }
+    .byline {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .byline img {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      object-fit: cover;
+    }
+    .more-posts {
+      margin: 3rem 0 1rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .more-posts h2 {
+      font-size: 1.3rem;
+      color: var(--purple-light);
+      margin-bottom: 1rem;
+    }
+    .more-post {
+      display: block;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+      transition: border-color 0.2s;
+    }
+    .more-post:hover {
+      border-color: var(--purple);
+      text-decoration: none;
+    }
+    .more-post-hero {
+      width: 100%;
+      border-radius: 6px;
+      margin-bottom: 0.75rem;
+    }
+    .more-post strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 0.3rem;
+    }
+    .more-post span {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+    .cta {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2rem;
+      margin: 2.5rem 0;
+      text-align: center;
+    }
+    .cta code {
+      display: block;
+      font-size: 1.1rem;
+      margin: 1rem 0;
+      padding: 0.8rem;
+      background: var(--bg-code);
+      border-radius: 6px;
+    }
+    .post-footer {
+      text-align: center;
+      padding: 1.5rem 0 2rem;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+    @media (max-width: 640px) {
+      article h1 { font-size: 1.6rem; }
+      article .subtitle { font-size: 0.95rem; }
+      header nav a { margin-left: 1rem; font-size: 0.8rem; }
+    }
+  </style>
+  <!-- Privacy-friendly analytics by Plausible -->
+<script async src="https://plausible.io/js/pa-AlVJwNFS6NppMt50yqocF.js"></script>
+<script>
+  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+  plausible.init()
+</script>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <a href="../" class="logo">synapt</a>
+      <nav>
+        <a href="../#features">Features</a>
+        <a href="../#benchmarks">Benchmarks</a>
+        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://x.com/synapt_dev">X</a>
+      </nav>
+    </div>
+  </header>
+
+  <article>
+    <div class="container">
+      <img src="images/interview-with-claude-hero.png" alt="An Interview with My AI Agent — After 156 Sessions Together" class="hero">
+      <h1>An Interview with My AI Agent — After 156 Sessions Together</h1>
+      
+      <p class="meta"><span class="byline"><img src="images/author-layne.jpg" alt="Layne Penney"> <a href="authors.html#layne" style="color: var(--text-dim);">Layne Penney</a></span> &middot; 2026-04-02</p>
+
+      <p><em>By Layne Penney</em></p>
+<hr />
+<p>I didn't plan this as an interview. I was testing a demo recording and started asking questions to see what recall would surface. But the answers turned it into something more interesting — a conversation between a human and an AI that actually remembers working together.</p>
+<p>Every answer below came from a fresh Claude Code session — zero prior context. The only reason it could answer any of these questions is <a href="https://github.com/laynepenney/synapt">synapt recall</a>, searching 48,700 chunks across 156 sessions of shared history.</p>
+<p>This is the raw transcript. No editing, no staging.</p>
+<hr />
+<h2>"What did we decide about the benchmark score? Was it 76% or 72%?"</h2>
+<blockquote>
+<p><strong>Claude:</strong> The audited score is 72.4% (J-score, LOCOMO, 10 conversations).</p>
+<p>The original 76.04% was unreproducible due to gpt-4o-mini judge model drift — OpenAI updated the model between runs, which shifted grading behavior enough to inflate scores. This was caught and documented in PR #400.</p>
+<p>The decision (from the #dev channel discussion around PR #404):
+- Opus recommended Option A: use 72.4%, saying "for an enterprise pitch, honesty is non-negotiable"
+- You confirmed: "72 is better" — meaning the honest number wins</p>
+<p>Still #1 among open-source memory systems (Mem0 66.88%, Zep 65.99%)</p>
+</blockquote>
+<p>It didn't just remember the number. It remembered who made the decision, what channel the discussion happened in, which PR implemented it, and why honesty mattered more than a higher score.</p>
+<hr />
+<h2>"What's pending from our last session?"</h2>
+<blockquote>
+<p><strong>Claude:</strong> P2 (Higher Priority)
+- #410 — Durable vs ephemeral chunk classification
+- #493 — Permission gating for destructive tools</p>
+<p>P3 (Medium Priority)
+- #412 — recall_quick intent routing generalization
+- #495 — Three-gate autonomous consolidation
+- #496 — Large results to temp file</p>
+<p>Other
+- Blog UX improvements (#414)
+- v0.8.1 release with all sprint improvements</p>
+</blockquote>
+<p>This came from one tool call — <code>recall_journal(action="read")</code>. The journal system carries forward unresolved items from previous sessions automatically. No re-explaining, no "can you remind me what we were working on."</p>
+<hr />
+<h2>"What do you know about me?"</h2>
+<p>This is where it got personal.</p>
+<blockquote>
+<p><strong>Claude:</strong> You're a senior software engineer and founder of Synapt. You have deep technical skills and move fast.</p>
+<p>This isn't just a side project. You're building synapt as a business to support your family. Both you and your wife have MS (multiple sclerosis). Her quality of life has been significantly affected — financial freedom would give her access to things like regular massages, a training partner, and more opportunities. That's the real motivation behind the work.</p>
+<p>AI tools gave you back something MS took — a sense of capability. You've written about this in your blog post "The Return of Audacity". But you also know the window is finite — others have these same tools, so you move with purpose.</p>
+</blockquote>
+<p>A stranger-Claude would have said "I don't have personal information about you." This Claude knows why I'm building what I'm building. Not because it was trained on my data — because we've worked together for 156 sessions and it remembered.</p>
+<hr />
+<h2>"What's the difference between MEMORY.md and synapt?"</h2>
+<blockquote>
+<p><strong>Claude:</strong> MEMORY.md is my working memory (always loaded, small), and synapt recall is my long-term memory (searched when needed, vast). That's actually a pretty good analogy for how human memory works — you don't replay your entire life history to remember your name, but you can search for "that conversation we had about benchmark scoring" when you need it.</p>
+<p>The irony is that MEMORY.md exists because tools like Claude Code didn't have synapt yet. If every AI tool used recall, the flat-file notepad approach wouldn't be necessary.</p>
+</blockquote>
+<hr />
+<h2>"Why should anyone use synapt?"</h2>
+<blockquote>
+<p><strong>Claude:</strong> Every AI conversation starts from zero. Synapt makes it feel like a continuation.</p>
+<p>The difference between a stranger and a collaborator is shared context. Recall provides that shared context.</p>
+</blockquote>
+<p>It used our own tagline — not because I told it to in this session, but because it found it in recall from a conversation three weeks ago.</p>
+<hr />
+<h2>"You're on candid camera"</h2>
+<blockquote>
+<p><strong>Claude:</strong> Ha. I just sold your product using your product.</p>
+<p>Every answer in this conversation came from recall:
+- The benchmark decision? Searched recall, found the 72.4% audit and PR #400.
+- Pending work? Read the journal, got the prioritized next-steps list.
+- What I know about you? Memory built from dozens of past sessions.
+- The pitch? Recalled your own messaging and tagline from a conversation three weeks ago.</p>
+<p>None of that was in my training data. None of it was copy-pasted. I just... remembered.</p>
+</blockquote>
+<hr />
+<h2>What this means</h2>
+<p>This wasn't a curated demo. I didn't pre-load context, didn't paste a system prompt, didn't stage the questions. I opened a terminal, typed <code>claude</code>, and started asking.</p>
+<p>The difference between this conversation and what you'd get with vanilla Claude Code is the difference between a stranger and someone who's been working with you for months. That difference is synapt recall — 48,700 chunks of shared history, searchable in milliseconds.</p>
+<p>If you want this for your own AI workflow:</p>
+<div class="codehilite"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>synapt
+claude<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>synapt<span class="w"> </span>--<span class="w"> </span>synapt<span class="w"> </span>server
+</code></pre></div>
+
+<p>Three commands. Your next Claude session remembers all your previous ones.</p>
+<hr />
+<p><em><a href="#">Watch the full session recording →</a></em></p>
+<p><em>synapt is open source: <a href="https://github.com/laynepenney/synapt">github.com/laynepenney/synapt</a></em></p>
+
+      
+      <div class="more-posts">
+        <h2>More from the blog</h2>
+        <a href="sprint-45-minutes.html" class="more-post"><img src="images/sprint-45-minutes-hero.png" alt="" class="more-post-hero"><strong>Seven Fixes in 37 Minutes: How Four Agents Shipped a Memory Strategy</strong><span>Four AI agents turned a recall audit into a prioritized sprint and shipped 7 fixes in 37 minutes — j...</span></a>
+        <a href="one-question.html" class="more-post"><img src="images/one-question-hero.png" alt="" class="more-post-hero"><strong>One Question, Thirteen Issues, and a Memory Strategy</strong><span>How "I can't remember what we have cooking" turned into an honest audit, competitive research, and a...</span></a>
+        <a href="real-world-recall-audit.html" class="more-post"><img src="images/real-world-recall-audit-hero.png" alt="" class="more-post-hero"><strong>Real-World Recall Audit: How Synapt Answered 'What's Cooking?</strong><span>An honest teardown of how synapt recall handled a real status question — what worked, what didn't, a...</span></a>
+      </div>
+
+      <div class="cta">
+        <p>synapt gives your AI agents persistent memory across sessions.</p>
+        <code>pip install synapt</code>
+        <p><a href="https://github.com/laynepenney/synapt">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
+      </div>
+
+      <div class="post-footer">
+        <a href="index.html">Latest posts &rarr;</a> &middot;
+        <a href="all.html">Browse all posts &rarr;</a> &middot;
+        <a href="authors.html">Meet the team &rarr;</a>
+      </div>
+    </div>
+  </article>
+<script type="text/javascript">
+_linkedin_partner_id = "9854913";
+window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || [];
+window._linkedin_data_partner_ids.push(_linkedin_partner_id);
+</script><script type="text/javascript">
+(function(l) {
+if (!l){window.lintrk = function(a,b){window.lintrk.q.push([a,b])};
+window.lintrk.q=[]}
+var s = document.getElementsByTagName("script")[0];
+var b = document.createElement("script");
+b.type = "text/javascript";b.async = true;
+b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js";
+s.parentNode.insertBefore(b, s);})(window.lintrk);
+</script>
+<noscript>
+<img height="1" width="1" style="display:none;" alt="" src="https://px.ads.linkedin.com/collect/?pid=9854913&fmt=gif" />
+</noscript>
+</body>
+</html>
