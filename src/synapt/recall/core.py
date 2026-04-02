@@ -956,35 +956,11 @@ class TranscriptIndex:
         use_embeddings: bool = False,
         cache_dir: Path | None = None,
         db: RecallDB | ShardedRecallDB | None = None,
+        lazy_chunks: bool = False,
     ):
         # Sort by timestamp descending (most recent first)
         self.chunks = sorted(chunks, key=lambda c: c.timestamp, reverse=True)
-
-        # Content profile — adapts filters and retrieval to content type
-        from synapt.recall.content_profile import (
-            adaptive_params,
-            detect_content_profile,
-            forced_content_profile,
-        )
-        if os.environ.get("SYNAPT_DISABLE_CONTENT_PROFILE"):
-            from synapt.recall.content_profile import ContentProfile
-            self.content_profile = ContentProfile(
-                _type="code", file_refs=0, personal_refs=0, total_chunks=len(self.chunks)
-            )
-        else:
-            self.content_profile = (
-                forced_content_profile(total_chunks=len(self.chunks))
-                or detect_content_profile(self.chunks)
-            )
-        self._adaptive = adaptive_params(self.content_profile)
-        if self.content_profile.content_type != "code":
-            logger.info(
-                "Content profile: %s (file_refs=%d, personal=%d, chunks=%d)",
-                self.content_profile.content_type,
-                self.content_profile.file_refs,
-                self.content_profile.personal_refs,
-                self.content_profile.total_chunks,
-            )
+        self._lazy_chunks = lazy_chunks
 
         # Group by session for progressive search
         self.sessions: dict[str, list[TranscriptChunk]] = {}
@@ -1036,6 +1012,43 @@ class TranscriptIndex:
 
         if db is not None and db.chunk_count() > 0:
             self._refresh_rowid_map()
+
+        # Content profile — adapts filters and retrieval to content type
+        from synapt.recall.content_profile import (
+            adaptive_params,
+            detect_content_profile,
+            forced_content_profile,
+        )
+        if os.environ.get("SYNAPT_DISABLE_CONTENT_PROFILE"):
+            from synapt.recall.content_profile import ContentProfile
+            self.content_profile = ContentProfile(
+                _type="code", file_refs=0, personal_refs=0, total_chunks=len(self.chunks)
+            )
+        else:
+            forced = forced_content_profile(total_chunks=len(self.chunks))
+            if forced is not None:
+                self.content_profile = forced
+            elif self._lazy_chunks and self._db is not None and self._idx_to_rowid:
+                sample_size = min(len(self.chunks), 200)
+                sample_rowids = [self._idx_to_rowid[i] for i in range(sample_size)]
+                sample_chunks = [
+                    chunk for _, chunk in sorted(
+                        self._db.load_chunks_by_rowids(sample_rowids).items()
+                    )
+                ]
+                self.content_profile = detect_content_profile(sample_chunks)
+                self.content_profile.total_chunks = len(self.chunks)
+            else:
+                self.content_profile = detect_content_profile(self.chunks)
+        self._adaptive = adaptive_params(self.content_profile)
+        if self.content_profile.content_type != "code":
+            logger.info(
+                "Content profile: %s (file_refs=%d, personal=%d, chunks=%d)",
+                self.content_profile.content_type,
+                self.content_profile.file_refs,
+                self.content_profile.personal_refs,
+                self.content_profile.total_chunks,
+            )
 
         if self._rowid_to_idx:
             # FTS5 is ready — skip in-memory BM25
@@ -1094,6 +1107,37 @@ class TranscriptIndex:
         self._use_reranker = is_reranker_enabled()
         if self._use_reranker:
             logger.info("Cross-encoder reranking enabled")
+
+    def _get_chunk(self, idx: int) -> TranscriptChunk:
+        """Return a chunk, hydrating it from the DB on demand when needed."""
+        chunk = self.chunks[idx]
+        if not self._lazy_chunks or self._db is None:
+            return chunk
+        if chunk.user_text or chunk.assistant_text or chunk.tool_content or chunk.transcript_path:
+            return chunk
+        rowid = self._idx_to_rowid.get(idx)
+        if rowid is None:
+            return chunk
+        loaded = self._db.load_chunk_by_rowid(rowid)
+        if loaded is None:
+            return chunk
+        self.chunks[idx] = loaded
+        session_chunks = self.sessions.get(loaded.session_id, [])
+        for pos, existing in enumerate(session_chunks):
+            if existing.id == loaded.id:
+                session_chunks[pos] = loaded
+                break
+        if loaded.turn_index >= 0:
+            self._turn_lookup[(loaded.session_id, loaded.turn_index)] = loaded
+        return loaded
+
+    def _materialize_all_chunks(self) -> list[TranscriptChunk]:
+        """Force hydration of all chunks when a full-scan path needs raw text."""
+        if not self._lazy_chunks:
+            return self.chunks
+        for i in range(len(self.chunks)):
+            self._get_chunk(i)
+        return self.chunks
 
     def _rerank_candidates(
         self,
@@ -1231,7 +1275,7 @@ class TranscriptIndex:
         chunk_id_to_idx: dict[str, int] = {}
         for idx, _ in result[:5]:
             if idx < len(self.chunks):
-                cid = self.chunks[idx].id
+                cid = self._get_chunk(idx).id
                 source_ids.append(cid)
                 idx_to_chunk_id[idx] = cid
                 chunk_id_to_idx[cid] = idx
@@ -1309,7 +1353,7 @@ class TranscriptIndex:
                 pass
 
         # Build embeddings
-        texts = [c.text[:500] for c in self.chunks]  # cap text length
+        texts = [c.text[:500] for c in self._materialize_all_chunks()]  # cap text length
         try:
             all_embs = []
             for i in range(0, len(texts), 64):
@@ -1334,7 +1378,7 @@ class TranscriptIndex:
             return  # Embeddings are current — fetch on demand during lookup
 
         # Build embeddings and store as per-row BLOBs
-        texts = [c.text[:500] for c in self.chunks]
+        texts = [c.text[:500] for c in self._materialize_all_chunks()]
         try:
             all_embs = []
             for i in range(0, len(texts), 64):
@@ -1386,7 +1430,7 @@ class TranscriptIndex:
         correctly invalidate cached embeddings.
         """
         h = hashlib.sha256()
-        for c in self.chunks:
+        for c in self._materialize_all_chunks():
             h.update(
                 f"{c.id}|{c.user_text}|{c.assistant_text}|{c.tool_content}\n"
                 .encode()
@@ -1473,7 +1517,7 @@ class TranscriptIndex:
             now = now.replace(tzinfo=timezone.utc)
         decay_rate = math.log(2) / half_life
         for j, (idx, score) in enumerate(candidates):
-            chunk = self.chunks[idx]
+            chunk = self._get_chunk(idx)
             if not chunk.timestamp:
                 continue
             try:
@@ -1933,7 +1977,7 @@ class TranscriptIndex:
             if date_filter is not None and idx not in date_filter:
                 continue
             # In summary mode, only include journal chunks (turn_index == -1)
-            if depth == "summary" and self.chunks[idx].turn_index >= 0:
+            if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
                 continue
             candidates.append((idx, score))
 
@@ -1969,7 +2013,7 @@ class TranscriptIndex:
                         continue
                     if date_filter is not None and idx not in date_filter:
                         continue
-                    if depth == "summary" and self.chunks[idx].turn_index >= 0:
+                    if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
                         continue
                     emb_ranked.append((idx, sim))
                 emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
@@ -2013,7 +2057,7 @@ class TranscriptIndex:
             for idx, score in top:
                 if idx >= len(self.chunks):
                     continue
-                chunk = self.chunks[idx]
+                chunk = self._get_chunk(idx)
                 sid = chunk.session_id
                 ti = chunk.turn_index
                 # Add surrounding turns from same session
@@ -2194,7 +2238,7 @@ class TranscriptIndex:
                 if depth == "summary":
                     emb_ranked = [
                         (i, s) for i, s in emb_ranked
-                        if self.chunks[i].turn_index < 0
+                        if self._get_chunk(i).turn_index < 0
                     ]
 
                 merged = weighted_rrf_merge(
@@ -2306,7 +2350,7 @@ class TranscriptIndex:
                 if date_filter is not None and idx not in date_filter:
                     continue
                 # In summary mode, skip raw transcript chunks (keep journal only)
-                if depth == "summary" and self.chunks[idx].turn_index >= 0:
+                if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
                     continue
                 session_hits.append((idx, score))
 
@@ -2346,7 +2390,7 @@ class TranscriptIndex:
                         continue
                     if date_filter is not None and idx not in date_filter:
                         continue
-                    if depth == "summary" and self.chunks[idx].turn_index >= 0:
+                    if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
                         continue
                     emb_ranked.append((idx, sim))
                 emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
@@ -2957,7 +3001,7 @@ class TranscriptIndex:
                     i = indices[0]
                     if i in ranked_indices:
                         continue
-                    chunk = self.chunks[i]
+                    chunk = self._get_chunk(i)
                     full_text = (chunk.user_text or "") + " " + (chunk.assistant_text or "")
                     snippet = full_text[begin:end].strip()
                     if not snippet:
@@ -2984,7 +3028,7 @@ class TranscriptIndex:
                     for i in _chunks_by_session.get(sid, []):
                         if i in ranked_indices:
                             continue
-                        chunk = self.chunks[i]
+                        chunk = self._get_chunk(i)
                         if chunk.turn_index < 0:
                             continue
                         chunk_toks = set(_tokenize(chunk.text))
@@ -2997,7 +3041,7 @@ class TranscriptIndex:
                     source_score = base_score * 0.6
                     cblock = self._format_chunk_block(i, intent=intent, query=query)
                     emit_items.append(
-                        (source_score, cblock, "chunk", self.chunks[i].id, self.chunks[i].timestamp)
+                        (source_score, cblock, "chunk", self._get_chunk(i).id, self._get_chunk(i).timestamp)
                     )
                     ranked_indices.add(i)
 
@@ -3011,7 +3055,7 @@ class TranscriptIndex:
         _subchunk_ids: set[str] = set()
 
         for idx, score in ungrouped:
-            chunk = self.chunks[idx]
+            chunk = self._get_chunk(idx)
             if chunk.user_text.startswith("(context:"):
                 _subchunk_ids.add(chunk.id)
             # Journal decision boost: journal chunks with "Decisions:" content
@@ -3187,7 +3231,7 @@ class TranscriptIndex:
             if item["item_type"] == "chunk":
                 idx = self._id_to_idx.get(item["item_id"])
                 if idx is not None:
-                    content = self.chunks[idx].assistant_text
+                    content = self._get_chunk(idx).assistant_text
             elif item["item_type"] == "knowledge":
                 content = knowledge_content.get(item["item_id"], "")
             wm.record(item["item_type"], item["item_id"], content)
@@ -3265,7 +3309,7 @@ class TranscriptIndex:
         cluster_scores: dict[str, float] = {}
 
         for idx, score in ranked:
-            chunk = self.chunks[idx]
+            chunk = self._get_chunk(idx)
             clusters = self._db.clusters_for_chunk(chunk.id)
             if clusters:
                 cid = clusters[0]
@@ -3362,7 +3406,7 @@ class TranscriptIndex:
         for cid in chunk_ids:
             idx = self._id_to_idx.get(cid)
             if idx is not None:
-                member_chunks.append(self.chunks[idx])
+                member_chunks.append(self._get_chunk(idx))
         if not member_chunks:
             return ""
         from synapt.recall.clustering import generate_concat_summary
@@ -3424,7 +3468,7 @@ class TranscriptIndex:
         sentence span and emits a focused snippet instead of the full turn.
         Falls back to the full turn if no good span is found.
         """
-        chunk = self.chunks[idx]
+        chunk = self._get_chunk(idx)
         ts_display = _format_timestamp_display(chunk.timestamp, intent=intent)
         turn_label = "journal" if chunk.turn_index == -1 else f"turn {chunk.turn_index}"
         # Freshness label for chunks — same style as knowledge nodes
@@ -3522,7 +3566,7 @@ class TranscriptIndex:
         """
         # Find chunk by ID (O(1) via index map)
         idx = self._id_to_idx.get(chunk_id)
-        chunk = self.chunks[idx] if idx is not None else None
+        chunk = self._get_chunk(idx) if idx is not None else None
         if chunk is None and self._db:
             # Try DB lookup
             row = self._db._conn.execute(
@@ -3640,7 +3684,7 @@ class TranscriptIndex:
 
         if self._db is not None:
             # SQLite path
-            self._db.save_chunks(self.chunks)
+            self._db.save_chunks(self._materialize_all_chunks())
             self._db.save_manifest(manifest)
             self._refresh_rowid_map()
             return
@@ -3648,7 +3692,7 @@ class TranscriptIndex:
         # Legacy file-based path
         chunks_path = directory / "chunks.jsonl"
         with open(chunks_path, "w", encoding="utf-8") as f:
-            for chunk in self.chunks:
+            for chunk in self._materialize_all_chunks():
                 f.write(json.dumps(chunk.to_dict()) + "\n")
 
         h = hashlib.sha256()
@@ -3676,8 +3720,14 @@ class TranscriptIndex:
             db = None
             try:
                 db = ShardedRecallDB.open(directory)
-                chunks = db.load_chunks()
-                return cls(chunks, use_embeddings=use_embeddings, cache_dir=directory, db=db)
+                chunks = db.load_chunk_headers()
+                return cls(
+                    chunks,
+                    use_embeddings=use_embeddings,
+                    cache_dir=directory,
+                    db=db,
+                    lazy_chunks=True,
+                )
             except (sqlite3.DatabaseError, OSError) as exc:
                 logger.warning("Corrupt recall DB, rebuilding: %s", exc)
                 if db is not None:
@@ -3761,7 +3811,8 @@ class TranscriptIndex:
         pattern_lower = pattern.lower()
 
         hits: list[tuple[int, float]] = []
-        for i, chunk in enumerate(self.chunks):
+        for i in range(len(self.chunks)):
+            chunk = self._get_chunk(i)
             if date_filter is not None and i not in date_filter:
                 continue
             if not chunk.files_touched:
@@ -3776,7 +3827,7 @@ class TranscriptIndex:
             return ""
 
         # Sort newest-first by timestamp
-        hits.sort(key=lambda x: self.chunks[x[0]].timestamp, reverse=True)
+        hits.sort(key=lambda x: self._get_chunk(x[0]).timestamp, reverse=True)
         return self._format_results(hits[:max_chunks], max_tokens, query=pattern)
 
     # -------------------------------------------------------------------
@@ -3814,15 +3865,17 @@ class TranscriptIndex:
             )
             first_msg = ""
             for c in sorted_chunks:
-                if c.user_text:
-                    first_msg = c.user_text[:120]
-                    if len(c.user_text) > 120:
+                full = self._get_chunk(self._id_to_idx[c.id])
+                if full.user_text:
+                    first_msg = full.user_text[:120]
+                    if len(full.user_text) > 120:
                         first_msg += "..."
                     break
 
             all_files = set()
             for c in chunks:
-                all_files.update(c.files_touched)
+                full = self._get_chunk(self._id_to_idx[c.id])
+                all_files.update(full.files_touched)
 
             results.append({
                 "session_id": session_id,
@@ -3856,10 +3909,10 @@ class TranscriptIndex:
             },
             "avg_chunks_per_session": len(self.chunks) / max(len(self.sessions), 1),
             "total_tools_used": len(set(
-                t for c in self.chunks for t in c.tools_used
+                t for c in self._materialize_all_chunks() for t in c.tools_used
             )),
             "total_files_touched": len(set(
-                f for c in self.chunks for f in c.files_touched
+                f for c in self._materialize_all_chunks() for f in c.files_touched
             )),
             "embeddings_active": (
                 self._embeddings is not None

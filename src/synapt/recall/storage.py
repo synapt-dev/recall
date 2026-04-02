@@ -873,6 +873,73 @@ class RecallDB:
             ))
         return chunks
 
+    def load_chunk_headers(self) -> list[TranscriptChunk]:
+        """Load lightweight chunk metadata, ordered by rowid."""
+        from synapt.recall.core import TranscriptChunk
+
+        rows = self._conn.execute(
+            "SELECT id, session_id, timestamp, turn_index "
+            "FROM chunks ORDER BY rowid"
+        ).fetchall()
+
+        return [
+            TranscriptChunk(
+                id=r["id"],
+                session_id=r["session_id"],
+                timestamp=r["timestamp"],
+                turn_index=r["turn_index"],
+                user_text="",
+                assistant_text="",
+                tools_used=[],
+                files_touched=[],
+                tool_content="",
+                transcript_path="",
+                byte_offset=-1,
+                byte_length=0,
+            )
+            for r in rows
+        ]
+
+    def load_chunk_by_rowid(self, rowid: int) -> TranscriptChunk | None:
+        """Load one chunk by rowid."""
+        from synapt.recall.core import TranscriptChunk
+
+        r = self._conn.execute(
+            "SELECT id, session_id, timestamp, turn_index, "
+            "user_text, assistant_text, tools_used, files_touched, "
+            "tool_content, date_text, transcript_path, byte_offset, byte_length "
+            "FROM chunks WHERE rowid = ?",
+            (rowid,),
+        ).fetchone()
+        if r is None:
+            return None
+
+        return TranscriptChunk(
+            id=r["id"],
+            session_id=r["session_id"],
+            timestamp=r["timestamp"],
+            turn_index=r["turn_index"],
+            user_text=r["user_text"],
+            assistant_text=r["assistant_text"],
+            tools_used=json.loads(r["tools_used"]) if r["tools_used"] else [],
+            files_touched=json.loads(r["files_touched"]) if r["files_touched"] else [],
+            tool_content=r["tool_content"] or "",
+            date_text=r["date_text"] or "",
+            transcript_path=r["transcript_path"] or "",
+            byte_offset=r["byte_offset"] if r["byte_offset"] is not None else -1,
+            byte_length=r["byte_length"] if r["byte_length"] is not None else 0,
+        )
+
+    def load_chunks_by_rowids(self, rowids: list[int]) -> dict[int, TranscriptChunk]:
+        """Load multiple chunks by rowid."""
+        if not rowids:
+            return {}
+        return {
+            rowid: chunk
+            for rowid in rowids
+            if (chunk := self.load_chunk_by_rowid(rowid)) is not None
+        }
+
     def chunk_count(self) -> int:
         """Number of chunks in the database."""
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()

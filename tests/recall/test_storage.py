@@ -167,6 +167,23 @@ class TestChunksCRUD:
         assert got.files_touched == orig.files_touched
         assert got.date_text == orig.date_text
 
+    def test_load_chunk_by_rowid_and_headers(self, db, sample_chunks):
+        db.save_chunks(sample_chunks)
+
+        headers = db.load_chunk_headers()
+        assert len(headers) == len(sample_chunks)
+        assert headers[0].user_text == ""
+        assert headers[0].assistant_text == ""
+
+        loaded = db.load_chunk_by_rowid(1)
+        assert loaded is not None
+        assert loaded.id == sample_chunks[0].id
+        assert loaded.user_text == sample_chunks[0].user_text
+
+        batch = db.load_chunks_by_rowids([1, 2])
+        assert set(batch) == {1, 2}
+        assert batch[2].id == sample_chunks[1].id
+
     def test_save_replaces_existing(self, db, sample_chunks):
         db.save_chunks(sample_chunks)
         assert db.chunk_count() == 3

@@ -118,6 +118,39 @@ class ShardedRecallDB:
             return all_chunks
         return self._index.load_chunks()
 
+    def load_chunk_headers(self) -> list["TranscriptChunk"]:  # noqa: F821
+        """Load lightweight chunk metadata."""
+        if self._data_dbs:
+            all_chunks = []
+            for db in self._data_dbs:
+                all_chunks.extend(db.load_chunk_headers())
+            return all_chunks
+        return self._index.load_chunk_headers()
+
+    def load_chunk_by_rowid(self, rowid: int):
+        """Load one chunk by rowid."""
+        if self._data_dbs:
+            for db in self._data_dbs:
+                chunk = db.load_chunk_by_rowid(rowid)
+                if chunk is not None:
+                    return chunk
+            return None
+        return self._index.load_chunk_by_rowid(rowid)
+
+    def load_chunks_by_rowids(self, rowids: list[int]):
+        """Load multiple chunks by rowid."""
+        if self._data_dbs:
+            loaded = {}
+            remaining = set(rowids)
+            for db in self._data_dbs:
+                if not remaining:
+                    break
+                partial = db.load_chunks_by_rowids(list(remaining))
+                loaded.update(partial)
+                remaining.difference_update(partial)
+            return loaded
+        return self._index.load_chunks_by_rowids(rowids)
+
     def save_chunks(self, chunks: list["TranscriptChunk"]) -> None:  # noqa: F821
         """Save chunks to the appropriate database.
 

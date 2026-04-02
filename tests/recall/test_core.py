@@ -688,6 +688,27 @@ def test_save_load_sqlite_roundtrip(tmp_path):
     db.close()
 
 
+def test_load_sqlite_uses_lazy_chunk_headers(tmp_path):
+    """SQLite loads should defer full chunk hydration until needed."""
+    from synapt.recall.storage import RecallDB
+
+    chunks = make_test_chunks()
+
+    save_dir = tmp_path / "test-index"
+    save_dir.mkdir(parents=True)
+    db = RecallDB(save_dir / "recall.db")
+    index = TranscriptIndex(chunks, db=db)
+    index.save(save_dir)
+
+    loaded = TranscriptIndex.load(save_dir)
+    assert loaded._lazy_chunks is True
+    assert any(not c.user_text and not c.assistant_text for c in loaded.chunks)
+
+    result = loaded.lookup("quality curve")
+    assert "quality curve" in result.lower() or "hermite" in result.lower()
+    db.close()
+
+
 def test_lookup_via_fts5():
     """TranscriptIndex with a RecallDB uses FTS5, not BM25 fallback."""
     from synapt.recall.storage import RecallDB
