@@ -118,6 +118,6 @@ Three commands. Your next Claude session remembers all your previous ones.
 
 ---
 
-*[Watch the full session recording →](#)*
+*[Watch the full session recording →](https://github.com/laynepenney/synapt/blob/main/demo/interview-with-claude.mp4)*
 
 *synapt is open source: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt)*
