@@ -118,6 +118,9 @@ Three commands. Your next Claude session remembers all your previous ones.
 
 ---
 
-*[Watch the full session recording →](https://github.com/laynepenney/synapt/blob/main/demo/interview-with-claude.mp4)*
+<video controls width="100%" style="border-radius: 8px; margin: 1rem 0;">
+  <source src="images/interview-with-claude.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
 *synapt is open source: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt)*
