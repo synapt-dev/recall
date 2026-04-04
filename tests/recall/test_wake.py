@@ -206,6 +206,27 @@ class TestWakeConsumer(unittest.TestCase):
         self.assertGreater(deleted, 0)
         self.assertEqual(consumer.cursor, max_seq)
 
+    def test_ack_does_not_delete_other_targets(self):
+        consumer = WakeConsumer(agent_name="s_apollo")
+        raw = channel_read_wakes(consumer.targets)
+        if raw:
+            max_seq = max(w["seq"] for w in raw)
+            channel_ack_wakes(max_seq, targets=consumer.targets)
+            consumer._cursor = max_seq
+
+        channel_directive("dev", "review now", to="s_apollo", agent_name="s_admin")
+        channel_directive("dev", "review now", to="s_other", agent_name="s_admin")
+
+        wakes = consumer.poll()
+        max_seq = max(w["max_seq"] for w in wakes)
+        deleted = consumer.ack(max_seq)
+
+        self.assertGreater(deleted, 0)
+        self.assertEqual(channel_read_wakes("agent:s_apollo"), [])
+        other_wakes = channel_read_wakes("agent:s_other")
+        self.assertEqual(len(other_wakes), 1)
+        self.assertEqual(other_wakes[0]["target"], "agent:s_other")
+
     def test_ack_noop_when_cursor_not_advanced(self):
         consumer = WakeConsumer(agent_name="s_apollo")
         deleted = consumer.ack(0)

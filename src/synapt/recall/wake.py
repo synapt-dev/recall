@@ -118,7 +118,11 @@ class WakeConsumer:
         """
         if up_to_seq <= self._cursor:
             return 0
-        deleted = channel_ack_wakes(up_to_seq, self._project_dir)
+        deleted = channel_ack_wakes(
+            up_to_seq,
+            targets=self.targets,
+            project_dir=self._project_dir,
+        )
         self._cursor = up_to_seq
         return deleted
 
