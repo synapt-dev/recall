@@ -622,9 +622,6 @@ def _store_mentions(
                 created=msg.timestamp,
             )
         conn.commit()
-    except Exception as exc:
-        import logging
-        logging.getLogger("synapt.recall.channel").debug("Mention storage failed: %s", exc)
     finally:
         conn.close()
 
@@ -732,7 +729,11 @@ def channel_read_wakes(
     limit: int = 100,
     project_dir: Path | None = None,
 ) -> list[dict]:
-    """Read wake requests for one or more targets after a cursor."""
+    """Read wake requests for one or more targets after a cursor.
+
+    Intended for a single consumer per target set. Concurrent consumers
+    watching the same targets should coordinate cursor/ack handling.
+    """
     if isinstance(targets, str):
         target_list = [targets]
     else:
@@ -767,6 +768,23 @@ def channel_read_wakes(
                 "created": row["created"],
             })
         return result
+    finally:
+        conn.close()
+
+
+def channel_ack_wakes(
+    up_to_seq: int,
+    project_dir: Path | None = None,
+) -> int:
+    """Delete wake requests up to and including a sequence number."""
+    conn = _open_db(project_dir)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM wake_requests WHERE seq <= ?",
+            (up_to_seq,),
+        )
+        conn.commit()
+        return cursor.rowcount
     finally:
         conn.close()
 
