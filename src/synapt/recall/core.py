@@ -1426,10 +1426,11 @@ class TranscriptIndex:
     def _content_hash(self) -> str:
         """Hash of chunk IDs + text content for embedding cache invalidation.
 
-        Includes user_text, assistant_text, and tool_content so that
-        re-parsed transcripts with different content (but same IDs)
-        correctly invalidate cached embeddings.
+        Uses the DB-level content_hash() when available to avoid
+        materializing all chunks into Python objects (#435).
         """
+        if self._db is not None:
+            return self._db.content_hash()
         h = hashlib.sha256()
         for c in self._materialize_all_chunks():
             h.update(

@@ -1213,6 +1213,25 @@ class RecallDB:
         ).fetchone()
         return row is not None
 
+    def content_hash(self) -> str:
+        """Compute a content hash directly from the DB.
+
+        Streams rows in order without materializing Python objects,
+        avoiding the 48K-object overhead of _materialize_all_chunks().
+        """
+        import hashlib
+        h = hashlib.sha256()
+        cursor = self._conn.execute(
+            "SELECT id, user_text, assistant_text, tool_content "
+            "FROM chunks ORDER BY rowid"
+        )
+        for row in cursor:
+            h.update(
+                f"{row[0]}|{row[1] or ''}|{row[2] or ''}|{row[3] or ''}\n"
+                .encode()
+            )
+        return h.hexdigest()[:16]
+
     def get_all_embeddings(self) -> dict[int, list[float]]:
         """Load ALL chunk embeddings into memory for embedding-only search.
 
