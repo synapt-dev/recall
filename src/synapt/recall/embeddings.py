@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import urllib.request
 from typing import List, Optional
 
@@ -121,20 +122,45 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_singleton_lock = threading.Lock()
+_singleton_cache: dict[bool, tuple[bool, Optional[EmbeddingProvider]]] = {}
+
+
 def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvider]:
     """Auto-select the best available embedding provider.
 
+    Returns a cached singleton so the model is loaded at most once per
+    process.  Thread-safe via double-checked locking.  Caches separately
+    per ``prefer_local`` value.
+
+    Fixes #357 — previous behaviour created a new provider (and
+    re-loaded the model) on every call.
+
     Priority: local sentence-transformers -> Ollama -> None (BM25-only).
     """
+    cached = _singleton_cache.get(prefer_local)
+    if cached is not None:
+        return cached[1]
+
+    with _singleton_lock:
+        # Double-check after acquiring lock
+        cached = _singleton_cache.get(prefer_local)
+        if cached is not None:
+            return cached[1]
+
+        provider = _resolve_provider(prefer_local)
+        _singleton_cache[prefer_local] = (True, provider)
+        return provider
+
+
+def _resolve_provider(prefer_local: bool) -> Optional[EmbeddingProvider]:
+    """Resolve the embedding provider without caching."""
     import logging
     log = logging.getLogger(__name__)
 
     if prefer_local:
         try:
             import sentence_transformers  # noqa: F401
-            # Return provider without loading the model — lazy init defers
-            # actual model loading to first embed() call to avoid
-            # semaphore/deadlock issues when created before multiprocessing forks.
             return LocalEmbeddings()
         except ImportError:
             log.info(
