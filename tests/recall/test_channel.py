@@ -441,6 +441,29 @@ class TestWakeTransport(unittest.TestCase):
             all_wakes[1]["payload"]["message_id"],
         )
 
+    def test_channel_ack_wakes_scoped_to_targets(self):
+        """Ack with targets only deletes matching wakes (#473)."""
+        channel_join("dev", agent_name="s_apollo", display_name="Apollo")
+        channel_directive("dev", "do this", to="s_apollo", agent_name="s_admin")
+
+        # Both channel and agent wakes exist
+        channel_wakes = channel_read_wakes("channel:dev")
+        agent_wakes = channel_read_wakes("agent:s_apollo")
+        self.assertGreater(len(channel_wakes), 0)
+        self.assertGreater(len(agent_wakes), 0)
+        max_seq = max(
+            max(w["seq"] for w in channel_wakes),
+            max(w["seq"] for w in agent_wakes),
+        )
+
+        # Ack only agent:s_apollo — channel wakes should survive
+        channel_ack_wakes(max_seq, targets=["agent:s_apollo"])
+        remaining_agent = channel_read_wakes("agent:s_apollo")
+        remaining_channel = channel_read_wakes("channel:dev")
+
+        self.assertEqual(remaining_agent, [])
+        self.assertGreater(len(remaining_channel), 0)
+
 
 class TestStaleDetectionTiers(unittest.TestCase):
     """Test online/idle/away/offline status tiers."""

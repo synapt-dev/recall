@@ -195,16 +195,34 @@ class TestWakeConsumer(unittest.TestCase):
         wakes3 = consumer.poll()
         self.assertGreater(len(wakes3), 0)
 
-    def test_ack_returns_deleted_count(self):
+    def test_ack_advances_cursor_and_deletes_agent_wakes(self):
         consumer = WakeConsumer(agent_name="s_apollo")
-        channel_post("dev", "msg1", agent_name="s_writer")
-        channel_post("dev", "msg2", agent_name="s_writer")
+        # Ack existing
+        raw = channel_read_wakes(consumer.targets)
+        if raw:
+            max_seq = max(w["seq"] for w in raw)
+            channel_ack_wakes(max_seq)
+            consumer._cursor = max_seq
 
+        # Directive creates an agent:s_apollo wake
+        channel_directive("dev", "review", to="s_apollo", agent_name="s_admin")
         wakes = consumer.poll()
         max_seq = max(w["max_seq"] for w in wakes)
         deleted = consumer.ack(max_seq)
         self.assertGreater(deleted, 0)
         self.assertEqual(consumer.cursor, max_seq)
+
+    def test_ack_advances_cursor_for_channel_only_wakes(self):
+        consumer = WakeConsumer(agent_name="s_apollo")
+        channel_post("dev", "msg1", agent_name="s_writer")
+
+        wakes = consumer.poll()
+        max_seq = max(w["max_seq"] for w in wakes)
+        old_cursor = consumer.cursor
+        consumer.ack(max_seq)
+        # Cursor advances even though no agent wakes were deleted
+        self.assertEqual(consumer.cursor, max_seq)
+        self.assertGreater(consumer.cursor, old_cursor)
 
     def test_ack_noop_when_cursor_not_advanced(self):
         consumer = WakeConsumer(agent_name="s_apollo")
@@ -306,6 +324,42 @@ class TestWakeConsumer(unittest.TestCase):
         self.assertEqual(len(dev_wakes), 1)
         self.assertEqual(dev_wakes[0]["coalesced_count"], 3)
         self.assertEqual(len(dev_wakes[0]["message_ids"]), 3)
+
+    def test_ack_scopes_to_consumer_targets(self):
+        """Consumer.ack() only deletes its own targets' wakes (#473)."""
+        # Set up two agents on the same channel
+        channel_join("dev", agent_name="s_sentinel", display_name="Sentinel")
+        consumer_apollo = WakeConsumer(agent_name="s_apollo")
+        consumer_sentinel = WakeConsumer(agent_name="s_sentinel")
+
+        # Ack existing wakes for both consumers
+        for c in (consumer_apollo, consumer_sentinel):
+            raw = channel_read_wakes(c.targets)
+            if raw:
+                max_seq = max(w["seq"] for w in raw)
+                channel_ack_wakes(max_seq)
+                c._cursor = max_seq
+
+        # Directive targets apollo specifically — creates agent:s_apollo wake
+        channel_directive("dev", "apollo task", to="s_apollo", agent_name="s_admin")
+
+        # Both consumers see channel:dev wakes
+        apollo_wakes = consumer_apollo.poll()
+        sentinel_wakes = consumer_sentinel.poll()
+        self.assertGreater(len(apollo_wakes), 0)
+        self.assertGreater(len(sentinel_wakes), 0)
+
+        # Apollo acks — should NOT destroy sentinel's wakes
+        apollo_max = max(w["max_seq"] for w in apollo_wakes)
+        consumer_apollo.ack(apollo_max)
+
+        # Sentinel should still see its wakes
+        sentinel_wakes_after = channel_read_wakes(
+            consumer_sentinel.targets,
+            after_seq=consumer_sentinel._cursor,
+        )
+        sentinel_channel = [w for w in sentinel_wakes_after if w["target"] == "channel:dev"]
+        self.assertGreater(len(sentinel_channel), 0)
 
 
 if __name__ == "__main__":

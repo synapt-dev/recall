@@ -110,15 +110,24 @@ class WakeConsumer:
     def ack(self, up_to_seq: int) -> int:
         """Acknowledge processed wakes up to *up_to_seq*.
 
-        Deletes acknowledged rows from the transport table and advances
-        the internal cursor so future polls skip them.
+        Only deletes agent-specific wakes (``agent:<id>``).  Shared
+        channel wakes are left intact so other consumers can still
+        read them (#473).  The internal cursor advances regardless,
+        so :meth:`poll` won't re-deliver already-seen wakes.
 
         Returns:
             Number of wake rows deleted.
         """
         if up_to_seq <= self._cursor:
             return 0
-        deleted = channel_ack_wakes(up_to_seq, self._project_dir)
+        # Only delete agent-scoped wakes — channel wakes are shared
+        agent_targets = [t for t in self.targets if t.startswith("agent:")]
+        deleted = 0
+        if agent_targets:
+            deleted = channel_ack_wakes(
+                up_to_seq, targets=agent_targets,
+                project_dir=self._project_dir,
+            )
         self._cursor = up_to_seq
         return deleted
 

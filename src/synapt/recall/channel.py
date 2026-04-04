@@ -775,15 +775,29 @@ def channel_read_wakes(
 
 def channel_ack_wakes(
     up_to_seq: int,
+    targets: str | list[str] | None = None,
     project_dir: Path | None = None,
 ) -> int:
-    """Delete wake requests up to and including a sequence number."""
+    """Delete wake requests up to and including a sequence number.
+
+    Args:
+        targets: If provided, only delete wakes matching these targets.
+            Prevents one consumer from destroying another's unread wakes.
+    """
     conn = _open_db(project_dir)
     try:
-        cursor = conn.execute(
-            "DELETE FROM wake_requests WHERE seq <= ?",
-            (up_to_seq,),
-        )
+        if targets:
+            target_list = [targets] if isinstance(targets, str) else targets
+            placeholders = ",".join("?" for _ in target_list)
+            cursor = conn.execute(
+                f"DELETE FROM wake_requests WHERE seq <= ? AND target IN ({placeholders})",
+                (up_to_seq, *target_list),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM wake_requests WHERE seq <= ?",
+                (up_to_seq,),
+            )
         conn.commit()
         return cursor.rowcount
     finally:
