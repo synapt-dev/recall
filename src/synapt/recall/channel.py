@@ -38,6 +38,7 @@ _ONLINE_MINUTES = 5       # < 5 min  => online
 _IDLE_MINUTES = 30        # 5-30 min => idle
 _AWAY_MINUTES = 120       # 30-120 min => away
                           # > 120 min => offline (auto-leave)
+_JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on join
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -748,8 +749,10 @@ def channel_join(
     display = display_name or _resolve_display_name(project_dir)
     now = _now_iso()
 
-    # Determine cursor initial value: the timestamp of the last message
-    # currently in the channel (so only future messages are unread).
+    # Cursor init for first-time joins: set to last message so only future
+    # messages are unread.  For returning agents (cursor already exists),
+    # INSERT OR IGNORE preserves their old cursor — they'll catch up on
+    # everything since their last read.  Fixes #453.
     path = _channel_path(channel, project_dir)
     cursor_init = now
     last_ts = _read_last_timestamp(path)
@@ -805,7 +808,45 @@ def channel_join(
     )
     _append_message(msg, project_dir)
 
-    return f"Joined #{channel} as {display} ({aid})"
+    result = f"Joined #{channel} as {display} ({aid})"
+
+    # Surface recent @mentions with full content so agents don't miss
+    # assignments (#453).  Including the actual message text means the
+    # agent gets the directive regardless of cursor state.
+    try:
+        lookback = (datetime.now(timezone.utc) - timedelta(
+            minutes=_JOIN_MENTION_LOOKBACK_MINUTES,
+        )).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        conn = _open_db(project_dir)
+        try:
+            rows = conn.execute(
+                "SELECT m.message_id, m.channel, m.timestamp "
+                "FROM mentions m "
+                "WHERE m.mentioned IN (?, ?) AND m.channel = ? "
+                "AND m.timestamp > ? "
+                "ORDER BY m.timestamp DESC LIMIT 5",
+                (aid, display, channel, lookback),
+            ).fetchall()
+        finally:
+            conn.close()
+        if rows:
+            mention_lines = []
+            msg_ids = {r["message_id"] for r in rows}
+            for m in _read_messages(path):
+                if m.id in msg_ids:
+                    ts = m.timestamp[:16]
+                    sender = m.from_display or m.from_agent
+                    mention_lines.append(f"  {ts}  {sender}: {m.body}")
+            if mention_lines:
+                result += f"\n\n[channel] {len(mention_lines)} @mention(s):\n"
+                result += "\n".join(mention_lines)
+    except Exception as exc:
+        import logging
+        logging.getLogger("synapt.recall.channel").debug(
+            "Failed to check recent mentions on join: %s", exc,
+        )
+
+    return result
 
 
 def channel_leave(
