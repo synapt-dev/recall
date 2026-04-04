@@ -24,7 +24,8 @@ def find_icon() -> Path:
     """Find the best available logo icon."""
     candidates = [
         Path("/tmp/icon-nobg.png"),  # birefnet-cleaned (best)
-        Path(__file__).parent.parent / "assets" / "logo.png",
+        Path(__file__).parent.parent / "docs" / "assets" / "logo.png",  # transparent bg
+        Path(__file__).parent.parent / "assets" / "logo.png",  # fallback (has dark bg)
     ]
     for p in candidates:
         if p.exists():

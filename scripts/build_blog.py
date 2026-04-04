@@ -73,6 +73,14 @@ def _author_meta(author_key: str) -> tuple[str, str, str]:
 
 def _author_keys(post: dict) -> list[str]:
     keys: list[str] = []
+    # Support "authors" list (YAML array or bracketed string) and "author"/"coauthor" strings
+    authors_list = post.get("authors", "")
+    if isinstance(authors_list, list):
+        keys.extend(a.strip().lower() for a in authors_list if a and a.strip())
+    elif isinstance(authors_list, str) and authors_list.startswith("["):
+        # Parse bracketed string like '["Opus", "Atlas"]'
+        inner = authors_list.strip("[]")
+        keys.extend(a.strip().strip('"').strip("'").lower() for a in inner.split(",") if a.strip())
     for field in ("author", "coauthor"):
         value = post.get(field, "")
         if not value:
