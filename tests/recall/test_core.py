@@ -2241,8 +2241,8 @@ def test_find_query_span_multi_sentence_window():
 
 
 def test_format_chunk_block_with_query_snippets(monkeypatch):
-    """_format_chunk_block emits focused snippet when SYNAPT_ENABLE_SNIPPETS=1."""
-    monkeypatch.setenv("SYNAPT_ENABLE_SNIPPETS", "1")
+    """_format_chunk_block emits focused snippet when SYNAPT_SNIPPET_CONTEXT=1."""
+    monkeypatch.setenv("SYNAPT_SNIPPET_CONTEXT", "1")
     chunks = [
         TranscriptChunk(
             id="s001:t0",
@@ -2290,7 +2290,7 @@ def test_format_chunk_block_prefers_assistant_over_user(monkeypatch):
     Regression test for Atlas's review: concatenated user+assistant scoring
     would anchor on the user question and clip the actual answer evidence.
     """
-    monkeypatch.setenv("SYNAPT_ENABLE_SNIPPETS", "1")
+    monkeypatch.setenv("SYNAPT_SNIPPET_CONTEXT", "1")
     chunks = [
         TranscriptChunk(
             id="s001:t0",
@@ -2360,3 +2360,70 @@ def test_format_chunk_block_query_no_match_falls_back():
     block = index._format_chunk_block(0, query="kubernetes orchestration")
     assert "User: Hello" in block
     assert "Assistant: Hi there" in block
+
+
+def test_snippet_disabled_by_default():
+    """Without SYNAPT_SNIPPET_CONTEXT, snippeting is off (full chunk)."""
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Tell me about Docker",
+            assistant_text=(
+                "Docker is a containerization platform. "
+                "It lets you package applications into containers. "
+                "Containers are lightweight and portable. "
+                "You can deploy them anywhere. "
+                "Docker uses images as templates. "
+                "Images are built from Dockerfiles. "
+                "The Docker Hub hosts public images. "
+                "Kubernetes can orchestrate Docker containers at scale."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    block = index._format_chunk_block(0, query="Kubernetes orchestrate containers")
+    # Full block should include all content, not just the Kubernetes sentence
+    assert "Docker is a containerization platform" in block
+    assert "Kubernetes" in block
+
+
+def test_snippet_wider_margin(monkeypatch):
+    """SYNAPT_SNIPPET_CONTEXT=200 gives wider context around match."""
+    monkeypatch.setenv("SYNAPT_SNIPPET_CONTEXT", "200")
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Tell me about deployment",
+            assistant_text=(
+                "A" * 100 + ". "
+                "We deployed using ArgoCD for continuous delivery. "
+                "B" * 100 + ". "
+                "C" * 100 + "."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    block = index._format_chunk_block(0, query="ArgoCD continuous delivery deployed")
+    assert "ArgoCD" in block
+    # With 200-char margin, should include surrounding context
+    assert "..." in block  # Still a snippet, not full text

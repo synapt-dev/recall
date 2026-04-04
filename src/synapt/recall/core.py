@@ -3550,17 +3550,23 @@ class TranscriptIndex:
                 pass
         header = f"--- [{ts_display} session {_short_sid(chunk.session_id)}] {turn_label}{freshness} ---"
 
-        # Query-aware snippet extraction: prefer assistant text (where
-        # evidence lives) over user text (which just echoes the question).
-        # Disabled by default — saves only 3.4% tokens but clips evidence
-        # that retrieval scoring and answer generation need. See #344.
-        # Enable with SYNAPT_ENABLE_SNIPPETS=1 for token-constrained use.
-        if query and os.environ.get("SYNAPT_ENABLE_SNIPPETS"):
+        # Query-aware snippet extraction (#340).  Configurable via
+        # SYNAPT_SNIPPET_CONTEXT (#344):
+        #   -1 or unset → no snippeting (default — full chunk)
+        #    0           → tight snippets (40-char margin, original #340)
+        #    N           → N chars of context margin on each side
+        snippet_ctx = os.environ.get("SYNAPT_SNIPPET_CONTEXT", "-1")
+        try:
+            snippet_margin = int(snippet_ctx)
+        except ValueError:
+            snippet_margin = -1
+        if query and snippet_margin >= 0:
+            margin = max(40, snippet_margin) if snippet_margin > 0 else 40
             asst = chunk.assistant_text or ""
             user = chunk.user_text or ""
             # Try assistant text first — that's the evidence source
             if len(asst) > 200:
-                span = self._find_query_span(query, asst)
+                span = self._find_query_span(query, asst, margin=margin)
                 if span:
                     begin, end = span
                     snippet = asst[begin:end].strip()
@@ -3569,7 +3575,7 @@ class TranscriptIndex:
                     return f"{header}\nAssistant: {prefix}{snippet}{suffix}"
             # Fall back to user text only for journal entries or user-heavy turns
             if len(user) > 300 and chunk.turn_index < 0:
-                span = self._find_query_span(query, user)
+                span = self._find_query_span(query, user, margin=margin)
                 if span:
                     begin, end = span
                     snippet = user[begin:end].strip()
