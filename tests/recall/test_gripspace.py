@@ -1,5 +1,6 @@
 """Tests for GitGrip gripspace detection in recall path resolution."""
 
+import json
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -366,7 +367,7 @@ class TestProjectTranscriptDirsGripspace:
         sibling = tmp_path / "sibling-tree"
         sibling.mkdir()
         (grip / ".gitgrip" / "griptrees.json").write_text(
-            '{"griptrees": {"sibling-tree": {"path": "' + str(sibling) + '"}}}'
+            json.dumps({"griptrees": {"sibling-tree": {"path": str(sibling)}}})
         )
 
         fake_home = tmp_path / "home"
