@@ -22,6 +22,25 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+# Style guide — append to user prompts for visual consistency across blog posts.
+# All hero images should match this aesthetic.
+STYLE_SUFFIX = (
+    ", wireframe holographic style, glowing cyan and purple neon lines, "
+    "dark ethereal cave background with floating particles, "
+    "digital circuitry details, synapt brand aesthetic"
+)
+
+# Past prompts that produced good results (for reference):
+# - "Four holographic wireframe owls perched on glowing circuit boards, each owl a
+#    different color (purple, teal, blue, gold), connected by flowing data streams,
+#    sprint velocity dashboard with glowing metrics in the background"
+# - "Two owls building a bridge between glowing data towers, digital collaboration,
+#    dark ethereal background with flowing data streams connecting them"
+# - "Holographic owl examining floating memory fragments, some fading some bright,
+#    dark cave with crystal formations reflecting data patterns"
+# - "Wireframe owl standing at a crossroads of glowing neural pathways, debugging
+#    symbols floating around, dark atmospheric setting"
+
 BLOG_IMAGES = Path(__file__).resolve().parent.parent / "docs" / "blog" / "images"
 OG_DIR = BLOG_IMAGES / "og"
 LOGO_PATH = Path(__file__).resolve().parent.parent / "docs" / "assets" / "logo.png"
@@ -201,9 +220,11 @@ def main():
         description="Generate hero image + watermark + OG card in one command",
     )
     parser.add_argument("slug", help="Blog post slug (e.g. sprint-3-recap)")
-    parser.add_argument("prompt", help="Image generation prompt for nano-banana-2")
+    parser.add_argument("prompt", help="Image generation prompt (style suffix auto-appended)")
     parser.add_argument("--title", "-t", help="Title for OG card (default: from slug)")
     parser.add_argument("--subtitle", "-s", default="", help="Subtitle for OG card")
+    parser.add_argument("--no-style", action="store_true",
+                        help="Don't append the brand style suffix to prompt")
     parser.add_argument("--skip-generate", action="store_true",
                         help="Skip image generation, use existing hero")
     args = parser.parse_args()
@@ -213,7 +234,9 @@ def main():
 
     if not args.skip_generate:
         fal_key = _get_fal_key()
-        url = generate_hero(args.prompt, fal_key)
+        full_prompt = args.prompt if args.no_style else args.prompt + STYLE_SUFFIX
+        print(f"  Prompt: {full_prompt[:100]}...")
+        url = generate_hero(full_prompt, fal_key)
         print(f"  Downloading: {url}")
         urllib.request.urlretrieve(url, str(hero_path))
         print(f"  Saved: {hero_path}")
