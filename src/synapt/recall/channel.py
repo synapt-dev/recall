@@ -359,7 +359,29 @@ CREATE TABLE IF NOT EXISTS mentions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mentions_mentioned ON mentions(mentioned);
+
+CREATE TABLE IF NOT EXISTS wake_requests (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    source TEXT DEFAULT '',
+    payload TEXT DEFAULT '',
+    created TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wake_requests_target_seq
+    ON wake_requests(target, seq);
 """
+
+_WAKE_PRIORITIES = {
+    "retry": -1,
+    "interval": 0,
+    "channel_activity": 1,
+    "mention": 2,
+    "directive": 3,
+    "user_action": 4,
+}
 
 
 def _open_db(project_dir: Path | None = None) -> sqlite3.Connection:
@@ -587,10 +609,96 @@ def _store_mentions(
                 "VALUES (?, ?, ?, ?)",
                 (msg.id, msg.channel, mentioned, msg.timestamp),
             )
+            _enqueue_wake_request(
+                conn,
+                target=f"agent:{mentioned}",
+                reason="mention",
+                source=msg.from_agent,
+                payload={
+                    "message_id": msg.id,
+                    "channel": msg.channel,
+                    "type": msg.type,
+                    "mentioned": mentioned,
+                },
+                created=msg.timestamp,
+            )
         conn.commit()
-    except Exception as exc:
-        import logging
-        logging.getLogger("synapt.recall.channel").debug("Mention storage failed: %s", exc)
+    finally:
+        conn.close()
+
+
+def _wake_reason_for_message(
+    msg: ChannelMessage,
+    conn: sqlite3.Connection,
+) -> str:
+    """Classify the base wake reason for a channel message."""
+    if msg.type == "directive":
+        return "directive"
+    row = conn.execute(
+        "SELECT role FROM presence WHERE agent_id = ?",
+        (msg.from_agent,),
+    ).fetchone()
+    if row and row["role"] == "human":
+        return "user_action"
+    return "channel_activity"
+
+
+def _enqueue_wake_request(
+    conn: sqlite3.Connection,
+    target: str,
+    reason: str,
+    source: str,
+    payload: dict | None,
+    created: str,
+) -> None:
+    """Persist one wake request in the durable cross-process wake queue."""
+    conn.execute(
+        "INSERT INTO wake_requests (target, reason, priority, source, payload, created) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            target,
+            reason,
+            _WAKE_PRIORITIES[reason],
+            source,
+            json.dumps(payload or {}, sort_keys=True),
+            created,
+        ),
+    )
+
+
+def _emit_message_wakes(msg: ChannelMessage, project_dir: Path | None = None) -> None:
+    """Emit durable wake requests for channel-level activity."""
+    if msg.type not in {"message", "directive"}:
+        return
+
+    conn = _open_db(project_dir)
+    try:
+        reason = _wake_reason_for_message(msg, conn)
+        payload = {
+            "message_id": msg.id,
+            "channel": msg.channel,
+            "type": msg.type,
+        }
+        if msg.to:
+            payload["to"] = msg.to
+        _enqueue_wake_request(
+            conn,
+            target=f"channel:{msg.channel}",
+            reason=reason,
+            source=msg.from_agent,
+            payload=payload,
+            created=msg.timestamp,
+        )
+        if msg.type == "directive" and msg.to and msg.to != "*":
+            _enqueue_wake_request(
+                conn,
+                target=f"agent:{msg.to}",
+                reason="directive",
+                source=msg.from_agent,
+                payload=payload,
+                created=msg.timestamp,
+            )
+        conn.commit()
     finally:
         conn.close()
 
@@ -613,6 +721,93 @@ def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> Non
     # Store @mentions (non-blocking, best-effort)
     if msg.type in ("message", "directive") and "@" in msg.body:
         _store_mentions(msg, project_dir)
+    _emit_message_wakes(msg, project_dir)
+
+
+def channel_read_wakes(
+    targets: str | list[str],
+    after_seq: int = 0,
+    limit: int = 100,
+    project_dir: Path | None = None,
+) -> list[dict]:
+    """Read wake requests for one or more targets after a cursor.
+
+    Intended for a single consumer per target set. Concurrent consumers
+    watching the same targets should coordinate cursor/ack handling.
+    """
+    if isinstance(targets, str):
+        target_list = [targets]
+    else:
+        target_list = [t for t in targets if t]
+    if not target_list:
+        return []
+
+    conn = _open_db(project_dir)
+    try:
+        placeholders = ",".join("?" for _ in target_list)
+        rows = conn.execute(
+            f"SELECT seq, target, reason, priority, source, payload, created "
+            f"FROM wake_requests "
+            f"WHERE seq > ? AND target IN ({placeholders}) "
+            f"ORDER BY seq ASC LIMIT ?",
+            (after_seq, *target_list, limit),
+        ).fetchall()
+        result = []
+        for row in rows:
+            payload = row["payload"] or "{}"
+            try:
+                parsed_payload = json.loads(payload)
+            except json.JSONDecodeError:
+                parsed_payload = {}
+            result.append({
+                "seq": row["seq"],
+                "target": row["target"],
+                "reason": row["reason"],
+                "priority": row["priority"],
+                "source": row["source"],
+                "payload": parsed_payload,
+                "created": row["created"],
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def channel_ack_wakes(
+    up_to_seq: int,
+    project_dir: Path | None = None,
+) -> int:
+    """Delete wake requests up to and including a sequence number."""
+    conn = _open_db(project_dir)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM wake_requests WHERE seq <= ?",
+            (up_to_seq,),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def channel_wake_targets(
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> list[str]:
+    """Return wake targets an agent process should watch."""
+    aid = agent_name or _agent_id(project_dir)
+    conn = _open_db(project_dir)
+    try:
+        channels = [
+            row["channel"]
+            for row in conn.execute(
+                "SELECT channel FROM memberships WHERE agent_id = ? ORDER BY channel",
+                (aid,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    return [f"agent:{aid}", *(f"channel:{channel}" for channel in channels)]
 
 
 def _copy_attachments(

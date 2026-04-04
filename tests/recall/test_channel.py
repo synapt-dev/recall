@@ -43,6 +43,9 @@ from synapt.recall.channel import (
     channel_rename,
     channel_claim,
     channel_unclaim,
+    channel_ack_wakes,
+    channel_read_wakes,
+    channel_wake_targets,
     channel_claim_intent,
     is_claimed,
     check_directives,
@@ -341,6 +344,102 @@ class TestDashboardJsonWrappers(unittest.TestCase):
     def test_heartbeat_no_presence_returns_skip(self):
         result = channel_heartbeat(agent_name="ghost")
         self.assertIn("skipped", result)
+
+
+class TestWakeTransport(unittest.TestCase):
+    """Test durable wake request emission and transport reads."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_message_emits_channel_activity_wake(self):
+        channel_post("dev", "hello world", agent_name="s_writer")
+
+        wakes = channel_read_wakes("channel:dev")
+        self.assertEqual(len(wakes), 1)
+        self.assertEqual(wakes[0]["reason"], "channel_activity")
+        self.assertEqual(wakes[0]["priority"], 1)
+        self.assertEqual(wakes[0]["payload"]["channel"], "dev")
+        self.assertEqual(wakes[0]["payload"]["type"], "message")
+
+    def test_human_message_emits_user_action_wake(self):
+        channel_join("dev", agent_name="dashboard", role="human", display_name="Layne")
+        channel_post("dev", "human input", agent_name="dashboard")
+
+        wakes = channel_read_wakes("channel:dev")
+        self.assertEqual(len(wakes), 1)
+        self.assertEqual(wakes[0]["reason"], "user_action")
+        self.assertEqual(wakes[0]["priority"], 4)
+
+    def test_directive_emits_channel_and_agent_wakes(self):
+        channel_directive("dev", "review this", to="s_target", agent_name="s_admin")
+
+        channel_wakes = channel_read_wakes("channel:dev")
+        agent_wakes = channel_read_wakes("agent:s_target")
+        self.assertEqual(len(channel_wakes), 1)
+        self.assertEqual(channel_wakes[0]["reason"], "directive")
+        self.assertEqual(len(agent_wakes), 1)
+        self.assertEqual(agent_wakes[0]["reason"], "directive")
+        self.assertEqual(agent_wakes[0]["payload"]["to"], "s_target")
+
+    def test_broadcast_directive_emits_only_channel_wake(self):
+        channel_directive("dev", "everyone stop", to="*", agent_name="s_admin")
+
+        channel_wakes = channel_read_wakes("channel:dev")
+        agent_wakes = channel_read_wakes("agent:s_admin")
+        self.assertEqual(len(channel_wakes), 1)
+        self.assertEqual(channel_wakes[0]["reason"], "directive")
+        self.assertEqual(agent_wakes, [])
+
+    def test_mentions_emit_agent_wakes(self):
+        channel_join("dev", agent_name="s_apollo", display_name="Apollo")
+        channel_post("dev", "hey @Apollo please review", agent_name="s_writer")
+
+        wakes = channel_read_wakes("agent:s_apollo")
+        self.assertEqual(len(wakes), 1)
+        self.assertEqual(wakes[0]["reason"], "mention")
+        self.assertEqual(wakes[0]["priority"], 2)
+        self.assertEqual(wakes[0]["payload"]["mentioned"], "s_apollo")
+
+    def test_channel_wake_targets_include_agent_and_memberships(self):
+        channel_join("dev", agent_name="s_agent")
+        channel_join("eval", agent_name="s_agent")
+
+        targets = channel_wake_targets("s_agent")
+        self.assertEqual(targets, ["agent:s_agent", "channel:dev", "channel:eval"])
+
+    def test_channel_read_wakes_respects_after_seq(self):
+        channel_post("dev", "first", agent_name="s_writer")
+        channel_post("dev", "second", agent_name="s_writer")
+
+        all_wakes = channel_read_wakes("channel:dev")
+        later_wakes = channel_read_wakes("channel:dev", after_seq=all_wakes[0]["seq"])
+        self.assertEqual(len(all_wakes), 2)
+        self.assertEqual(len(later_wakes), 1)
+        self.assertEqual(
+            later_wakes[0]["payload"]["message_id"],
+            all_wakes[1]["payload"]["message_id"],
+        )
+
+    def test_channel_ack_wakes_deletes_consumed_rows(self):
+        channel_post("dev", "first", agent_name="s_writer")
+        channel_post("dev", "second", agent_name="s_writer")
+
+        all_wakes = channel_read_wakes("channel:dev")
+        deleted = channel_ack_wakes(all_wakes[0]["seq"])
+        remaining = channel_read_wakes("channel:dev")
+
+        self.assertEqual(deleted, 1)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(
+            remaining[0]["payload"]["message_id"],
+            all_wakes[1]["payload"]["message_id"],
+        )
 
 
 class TestStaleDetectionTiers(unittest.TestCase):
