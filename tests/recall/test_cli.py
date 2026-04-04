@@ -14,6 +14,7 @@ from synapt.recall.cli import (
     _install_global_hooks,
     cmd_journal,
     cmd_rebuild,
+    cmd_split,
     cmd_sync,
     main,
 )
@@ -438,6 +439,20 @@ def test_cmd_sync_errors_without_config(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "no sync target" in captured.err
+
+
+def test_cmd_split_prints_experimental_warning(tmp_path, capsys):
+    """split warns that sharded mode is still experimental."""
+    with patch("synapt.recall.cli.project_index_dir", return_value=tmp_path), \
+         patch("synapt.recall.sharding.split_monolithic_db", return_value={
+             "index.db": 0,
+             "data_001.db": 3,
+         }):
+        cmd_split(argparse.Namespace(dry_run=False))
+
+    captured = capsys.readouterr()
+    assert "experimental" in captured.err.lower()
+    assert "Split complete: 3 chunks across 1 quarterly shard(s)" in captured.out
 
 
 # ---------------------------------------------------------------------------

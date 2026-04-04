@@ -194,6 +194,28 @@ class TestSplitMonolithicDb(unittest.TestCase):
         finally:
             db.close()
 
+    def test_split_supports_real_transcript_index_search(self):
+        from synapt.recall.core import TranscriptIndex
+
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir, num_chunks=25)
+        d = Path(tmpdir)
+        split_monolithic_db(d, threshold=10)
+
+        index = TranscriptIndex.load(d, use_embeddings=False)
+        try:
+            self.assertEqual(index._db.chunk_count(), 25)
+            self.assertEqual(len(index._rowid_to_idx), 25)
+
+            late_result = index.lookup("unique_term_17", max_chunks=3, max_tokens=500)
+            early_result = index.lookup("unique_term_3", max_chunks=3, max_tokens=500)
+
+            self.assertIn("unique_term_17", late_result)
+            self.assertIn("unique_term_3", early_result)
+        finally:
+            if index._db is not None:
+                index._db.close()
+
     def test_dry_run_doesnt_write(self):
         tmpdir = tempfile.mkdtemp()
         self._create_monolithic(tmpdir)

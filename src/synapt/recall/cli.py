@@ -648,10 +648,17 @@ def discover_transcript_dirs() -> list[Path]:
 # Commands
 # ---------------------------------------------------------------------------
 
+_SPLIT_EXPERIMENTAL_WARNING = (
+    "WARNING: sharded split mode is still experimental. "
+    "Verify end-to-end sharded search results before treating split shards as production-safe."
+)
+
+
 def cmd_split(args: argparse.Namespace) -> None:
     """Split monolithic recall.db into quarterly shards."""
     from synapt.recall.sharding import split_monolithic_db, estimate_split
     index_dir = project_index_dir()
+    print(_SPLIT_EXPERIMENTAL_WARNING, file=sys.stderr)
 
     if args.dry_run:
         plan = split_monolithic_db(index_dir, dry_run=True)
@@ -2302,7 +2309,10 @@ def main():
     build_parser.add_argument("--rescrub", action="store_true", help="Re-scrub archived transcripts with latest patterns before building")
 
     # Split
-    split_parser = subparsers.add_parser("split", help="Split monolithic recall.db into quarterly shards")
+    split_parser = subparsers.add_parser(
+        "split",
+        help="Split monolithic recall.db into quarterly shards (experimental)",
+    )
     split_parser.add_argument("--dry-run", action="store_true", help="Show split plan without writing")
 
     # Search
