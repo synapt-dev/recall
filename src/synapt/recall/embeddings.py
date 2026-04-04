@@ -121,21 +121,33 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_singleton_provider: Optional[EmbeddingProvider] = None
+_singleton_resolved: bool = False
+
+
 def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvider]:
     """Auto-select the best available embedding provider.
 
+    Returns a cached singleton so the model is loaded at most once per
+    process.  Fixes #357 — previous behaviour created a new provider
+    (and re-loaded the model) on every call.
+
     Priority: local sentence-transformers -> Ollama -> None (BM25-only).
     """
+    global _singleton_provider, _singleton_resolved
+
+    if _singleton_resolved:
+        return _singleton_provider
+
     import logging
     log = logging.getLogger(__name__)
 
     if prefer_local:
         try:
             import sentence_transformers  # noqa: F401
-            # Return provider without loading the model — lazy init defers
-            # actual model loading to first embed() call to avoid
-            # semaphore/deadlock issues when created before multiprocessing forks.
-            return LocalEmbeddings()
+            _singleton_provider = LocalEmbeddings()
+            _singleton_resolved = True
+            return _singleton_provider
         except ImportError:
             log.info(
                 "sentence-transformers not installed. "
@@ -148,7 +160,9 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
         provider = OllamaEmbeddings()
         # Verify Ollama is reachable
         provider.embed(["test"])
-        return provider
+        _singleton_provider = provider
+        _singleton_resolved = True
+        return _singleton_provider
     except Exception:
         log.info("Ollama embeddings unavailable (server not running or model not pulled)")
 
@@ -157,4 +171,5 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
         "Install sentence-transformers for hybrid semantic search: "
         "pip install sentence-transformers"
     )
+    _singleton_resolved = True
     return None
