@@ -22,7 +22,7 @@ def test_adaptive_params_keep_personal_dedup_conservative():
 def test_adaptive_params_keep_mixed_profile_defaults():
     params = adaptive_params(ContentProfile(total_chunks=10, _type="mixed"))
 
-    assert params.dedup_jaccard == 0.75
+    assert params.dedup_jaccard == 0.70
     assert params.max_knowledge_default == 5
 
 
