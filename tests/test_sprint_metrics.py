@@ -39,7 +39,7 @@ def test_review_turnaround():
         {"user": "reviewer", "state": "APPROVED", "submitted_at": "2026-04-04T17:30:00Z"},
     ])]
     m = compute_metrics(prs)
-    assert m["review_turnaround"]["mean_hours"] == 0.25
+    assert m["review_turnaround_gh"]["mean_hours"] == 0.25
 
 
 def test_first_pass_approval():
@@ -81,6 +81,16 @@ def test_format_report_includes_title():
     m = compute_metrics([_make_pr(1)])
     report = format_report(m, sprint="4")
     assert "Sprint 4 Metrics" in report
+
+
+def test_claim_to_pr():
+    """Claim → PR latency when claim times provided."""
+    prs = [_make_pr(1, created="2026-04-04T17:30:00Z")]
+    prs[0]["title"] = "feat: broadcast mentions (#466)"
+    claim_times = {"466": "2026-04-04T17:00:00Z"}
+    m = compute_metrics(prs, claim_times)
+    assert m["claim_to_pr"]["mean_hours"] == 0.5
+    assert m["claim_to_pr"]["count"] == 1
 
 
 def test_empty_prs():

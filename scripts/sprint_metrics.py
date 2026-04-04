@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Sprint metrics — cycle time, review turnaround, approval rate.
 
-Scrapes GitHub PRs and channel JSONL for quantitative sprint data.
+Scrapes GitHub PRs for velocity/quality data, and optionally channel
+JSONL for claim timestamps (claim → PR created latency).
+
+Note: review turnaround and first-pass approval rate are GitHub-only
+metrics. In-channel approvals (which are common in multi-agent sprints)
+are not captured here — those would need channel JSONL parsing for
+"approved"/"LGTM" signals.
 
 Usage:
     python scripts/sprint_metrics.py [--sprint 4] [--repo laynepenney/synapt]
     python scripts/sprint_metrics.py --prs 471,472,475,477,478,479,481
+    python scripts/sprint_metrics.py --prs 471,472 --channel-dir ~/.synapt/recall/channels
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -34,6 +42,36 @@ def _parse_iso(ts: str) -> datetime:
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     return datetime.fromisoformat(ts)
+
+
+def parse_claim_times(channel_dir: Path | None) -> dict[str, str]:
+    """Parse claim timestamps from channel JSONL.
+
+    Returns {issue_number: timestamp} for claim messages.
+    Looks for type="claim" messages in dev.jsonl.
+    """
+    if not channel_dir:
+        return {}
+    dev_path = channel_dir / "dev.jsonl"
+    if not dev_path.exists():
+        return {}
+    claims: dict[str, str] = {}
+    for line in dev_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("type") == "claim":
+            # body format: "display claimed 466"
+            body = msg.get("body", "")
+            parts = body.rsplit(" ", 1)
+            if len(parts) == 2:
+                issue = parts[-1].strip()
+                if issue.isdigit():
+                    claims[issue] = msg.get("timestamp", "")
+    return claims
 
 
 def _hours_between(start: str, end: str) -> float:
@@ -78,12 +116,14 @@ def fetch_pr_data(repo: str, pr_numbers: list[int]) -> list[dict]:
     return prs
 
 
-def compute_metrics(prs: list[dict]) -> dict:
+def compute_metrics(prs: list[dict], claim_times: dict[str, str] | None = None) -> dict:
     """Compute sprint metrics from PR data."""
     if not prs:
         return {"error": "No PRs found"}
 
+    claim_times = claim_times or {}
     cycle_times: list[float] = []
+    claim_to_pr: list[float] = []
     review_turnarounds: list[float] = []
     first_pass_approvals = 0
     lines_changed: list[int] = []
@@ -100,7 +140,18 @@ def compute_metrics(prs: list[dict]) -> dict:
             hours = _hours_between(pr["created_at"], pr["merged_at"])
             cycle_times.append(hours)
 
-        # Review turnaround: created → first review
+        # Claim → PR created (from channel JSONL)
+        # PR title format: "feat: ... (#NNN)" — extract issue number
+        title = pr.get("title", "")
+        issue_match = re.search(r"#(\d+)", title)
+        if issue_match and pr["created_at"]:
+            issue_num = issue_match.group(1)
+            if issue_num in claim_times:
+                hours = _hours_between(claim_times[issue_num], pr["created_at"])
+                if hours >= 0:
+                    claim_to_pr.append(hours)
+
+        # Review turnaround (GitHub-only): created → first review
         reviews = pr.get("reviews", [])
         if reviews and pr["created_at"]:
             first_review = min(
@@ -125,7 +176,11 @@ def compute_metrics(prs: list[dict]) -> dict:
             "min_hours": round(min(cycle_times), 2) if cycle_times else None,
             "max_hours": round(max(cycle_times), 2) if cycle_times else None,
         },
-        "review_turnaround": {
+        "claim_to_pr": {
+            "mean_hours": round(sum(claim_to_pr) / len(claim_to_pr), 2) if claim_to_pr else None,
+            "count": len(claim_to_pr),
+        },
+        "review_turnaround_gh": {
             "mean_hours": round(sum(review_turnarounds) / len(review_turnarounds), 2) if review_turnarounds else None,
             "min_hours": round(min(review_turnarounds), 2) if review_turnarounds else None,
             "max_hours": round(max(review_turnarounds), 2) if review_turnarounds else None,
@@ -153,9 +208,14 @@ def format_report(metrics: dict, sprint: str = "") -> str:
         lines.append(f"**Cycle time** (created → merged): {ct['mean_hours']:.1f}h avg "
                       f"(min {ct['min_hours']:.1f}h, max {ct['max_hours']:.1f}h)")
 
-    rt = metrics.get("review_turnaround", {})
+    ctp = metrics.get("claim_to_pr", {})
+    if ctp.get("mean_hours") is not None:
+        lines.append(f"**Claim → PR** (channel claim → PR created): {ctp['mean_hours']:.1f}h avg "
+                      f"({ctp['count']} PRs matched)")
+
+    rt = metrics.get("review_turnaround_gh", {})
     if rt.get("mean_hours") is not None:
-        lines.append(f"**Review turnaround** (created → first review): {rt['mean_hours']:.1f}h avg "
+        lines.append(f"**Review turnaround (GH)** (created → first GH review): {rt['mean_hours']:.1f}h avg "
                       f"(min {rt['min_hours']:.1f}h, max {rt['max_hours']:.1f}h)")
 
     lines.append(f"**First-pass approval rate**: {metrics.get('first_pass_approval_rate', 0)}%")
@@ -183,6 +243,7 @@ def main():
     parser.add_argument("--repo", default="laynepenney/synapt")
     parser.add_argument("--prs", help="Comma-separated PR numbers")
     parser.add_argument("--sprint", default="")
+    parser.add_argument("--channel-dir", help="Path to channel JSONL dir for claim times")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     args = parser.parse_args()
 
@@ -194,7 +255,8 @@ def main():
     print(f"Fetching {len(pr_numbers)} PRs from {args.repo}...", file=sys.stderr)
 
     prs = fetch_pr_data(args.repo, pr_numbers)
-    metrics = compute_metrics(prs)
+    claim_times = parse_claim_times(Path(args.channel_dir) if args.channel_dir else None)
+    metrics = compute_metrics(prs, claim_times)
 
     if args.json:
         print(json.dumps(metrics, indent=2))
