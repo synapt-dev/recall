@@ -12,7 +12,9 @@ from synapt.recall.channel import (
     channel_read_wakes,
     channel_ack_wakes,
 )
-from synapt.recall.wake_bridge import TmuxAdapter, WakeBridge, _PROMPT_TEMPLATES
+from synapt.recall.wake_bridge import (
+    PromptAdapter, TmuxAdapter, WakeBridge, _PROMPT_TEMPLATES,
+)
 
 
 def _patch_data_dir(tmpdir):
@@ -65,6 +67,12 @@ class TestBuildPrompt(unittest.TestCase):
         wake = {"reason": "user_action", "source": "dashboard", "payload": {"channel": "dev"}}
         prompt = WakeBridge._build_prompt(wake)
         self.assertIn("Layne", prompt)
+
+    def test_channel_substituted_in_prompt(self):
+        wake = {"reason": "channel_activity", "source": "s_writer", "payload": {"channel": "eval"}}
+        prompt = WakeBridge._build_prompt(wake)
+        self.assertIn("#eval", prompt)
+        self.assertNotIn("#dev", prompt)
 
     def test_unknown_reason_falls_back(self):
         wake = {"reason": "unknown_reason", "source": "x", "payload": {}}
@@ -186,6 +194,16 @@ class TestWakeBridge(unittest.TestCase):
 
         self.assertEqual(count, 0)
         self.assertEqual(len(adapter.injections), 1)  # still just 1
+
+
+class TestProtocol(unittest.TestCase):
+    """Adapter Protocol conformance."""
+
+    def test_tmux_adapter_satisfies_protocol(self):
+        self.assertIsInstance(TmuxAdapter(), PromptAdapter)
+
+    def test_fake_adapter_satisfies_protocol(self):
+        self.assertIsInstance(FakeAdapter(), PromptAdapter)
 
 
 if __name__ == "__main__":

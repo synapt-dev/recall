@@ -16,6 +16,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from synapt.recall.wake import WakeConsumer
 
@@ -25,22 +26,22 @@ logger = logging.getLogger("synapt.recall.wake_bridge")
 # substituted from the wake payload.
 _PROMPT_TEMPLATES: dict[str, str] = {
     "user_action": (
-        'Check #dev for unread messages using recall_channel('
+        "Check #{channel} for unread messages using recall_channel("
         "action='unread', show_pins=false, detail='medium'). "
         "Layne posted — check immediately."
     ),
     "directive": (
-        'Check #dev for unread messages using recall_channel('
+        "Check #{channel} for unread messages using recall_channel("
         "action='unread', show_pins=false, detail='medium'). "
         "New directive from {source} — act on it."
     ),
     "mention": (
-        'Check #dev for unread messages using recall_channel('
+        "Check #{channel} for unread messages using recall_channel("
         "action='unread', show_pins=false, detail='medium'). "
         "You were @mentioned — check unread."
     ),
     "channel_activity": (
-        'Check #dev for unread messages using recall_channel('
+        "Check #{channel} for unread messages using recall_channel("
         "action='unread', show_pins=false, detail='medium'). "
         "If there are new messages, read them and act on any "
         "directives or assignments. If no unread, return empty."
@@ -51,8 +52,17 @@ _DEFAULT_PROMPT = _PROMPT_TEMPLATES["channel_activity"]
 
 
 # ---------------------------------------------------------------------------
-# Platform adapters
+# Platform adapter protocol
 # ---------------------------------------------------------------------------
+
+@runtime_checkable
+class PromptAdapter(Protocol):
+    """Interface for platform-specific prompt injection."""
+
+    def is_alive(self, target: str) -> bool: ...
+
+    def inject_prompt(self, target: str, prompt: str) -> bool: ...
+
 
 class TmuxAdapter:
     """Injects prompts into tmux panes.
@@ -75,10 +85,21 @@ class TmuxAdapter:
             return False
 
     def inject_prompt(self, target: str, prompt: str) -> bool:
-        """Send a prompt string into the agent's tmux pane."""
+        """Send a prompt string into the agent's tmux pane.
+
+        Uses ``-l`` (literal mode) to prevent tmux from interpreting
+        special characters in the prompt text.
+        """
         try:
             result = subprocess.run(
-                ["tmux", "send-keys", "-t", target, prompt, "Enter"],
+                ["tmux", "send-keys", "-t", target, "-l", prompt],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+            # Send Enter separately so -l doesn't escape it
+            result = subprocess.run(
+                ["tmux", "send-keys", "-t", target, "Enter"],
                 capture_output=True, text=True, timeout=5,
             )
             return result.returncode == 0
@@ -95,10 +116,14 @@ class AgentBinding:
     """Maps an agent to its WakeConsumer and platform target."""
     agent_name: str
     target: str  # opaque adapter target (e.g. "synapt:apollo")
+    project_dir: Path | None = None
     consumer: WakeConsumer = field(init=False)
 
     def __post_init__(self):
-        self.consumer = WakeConsumer(agent_name=self.agent_name)
+        self.consumer = WakeConsumer(
+            agent_name=self.agent_name,
+            project_dir=self.project_dir,
+        )
 
 
 class WakeBridge:
@@ -114,14 +139,16 @@ class WakeBridge:
     def __init__(
         self,
         agents: dict[str, str],
-        adapter: TmuxAdapter | None = None,
+        adapter: PromptAdapter | None = None,
         poll_interval: float = 10.0,
         project_dir: Path | None = None,
     ) -> None:
-        self._adapter = adapter or TmuxAdapter()
+        self._adapter: PromptAdapter = adapter or TmuxAdapter()
         self._poll_interval = poll_interval
         self._bindings: list[AgentBinding] = [
-            AgentBinding(agent_name=name, target=target)
+            AgentBinding(
+                agent_name=name, target=target, project_dir=project_dir,
+            )
             for name, target in agents.items()
         ]
 
@@ -144,10 +171,11 @@ class WakeBridge:
             # Build prompt from highest-priority wake
             top_wake = wakes[0]  # already priority-sorted by WakeConsumer
             prompt = self._build_prompt(top_wake)
-
-            # Inject
-            ok = self._adapter.inject_prompt(binding.target, prompt)
             max_seq = max(w["max_seq"] for w in wakes)
+
+            # No-overlap: mark target as processing during injection
+            with binding.consumer.processing(top_wake["target"]):
+                ok = self._adapter.inject_prompt(binding.target, prompt)
 
             if ok:
                 binding.consumer.ack(max_seq)
