@@ -1004,6 +1004,10 @@ def channel_read(
     # Take last N messages
     messages = messages[-limit:]
 
+    # Zero-token response for empty polls (#441)
+    if not messages and since:
+        return ""
+
     lines = []
 
     # Pins at top
@@ -1289,7 +1293,7 @@ def channel_unread_read(
         conn.close()
 
     if not unread_channels:
-        return "No unread messages."
+        return ""
 
     sections = []
     for ch, last_read, count in sorted(unread_channels):
