@@ -370,6 +370,40 @@ def merge_carried_forward_next_steps(
     return merged
 
 
+def pending_next_steps(path: Path | None = None) -> list[str]:
+    """Return unresolved next_steps from recent journal entries.
+
+    Scans all next_steps across recent entries and returns those that
+    have not appeared in any entry's ``done`` list.  Deduplicates by
+    normalized key, preserving the most recent wording.
+    """
+    entries = read_entries(path, n=20)
+    if not entries:
+        return []
+
+    # Collect all done items from all recent entries
+    all_done = set()
+    for entry in entries:
+        for item in entry.done:
+            if item and item.strip():
+                all_done.add(_step_key(item))
+
+    # Collect all next_steps across entries (newest first), dedup by key
+    seen: set[str] = set()
+    pending: list[str] = []
+    for entry in entries:
+        for step in entry.next_steps:
+            if not step or not step.strip():
+                continue
+            key = _step_key(step)
+            if key in all_done or key in seen:
+                continue
+            pending.append(step)
+            seen.add(key)
+
+    return pending
+
+
 def extract_session_id(path: Path | str) -> str:
     """Read the sessionId from the first progress entry in a transcript file.
 
