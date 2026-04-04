@@ -36,6 +36,7 @@ from synapt.recall.channel import (
     channel_unmute,
     channel_kick,
     channel_broadcast,
+    channel_board,
     channel_agents_json,
     channel_list_channels,
     channel_messages_json,
@@ -2592,6 +2593,70 @@ class TestCheckDirectives(unittest.TestCase):
         sentinel_unread = channel_unread_read(agent_name="s_sentinel")
         self.assertIn("deploy is frozen", atlas_unread)
         self.assertIn("deploy is frozen", sentinel_unread)
+
+
+class TestStatusBoard(unittest.TestCase):
+    """Tests for the mutable status board (#442)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self._tmpdir)
+        self._patcher.start()
+        channel_join("dev", agent_name="s_opus")
+        channel_join("dev", agent_name="s_atlas")
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_set_and_read_board(self):
+        """Setting a board entry makes it visible on read."""
+        channel_board("dev", message="PR #478: in review", agent_name="s_opus")
+        result = channel_board("dev", agent_name="s_atlas")
+        self.assertIn("PR #478: in review", result)
+        self.assertIn("Status Board", result)
+
+    def test_update_replaces_previous(self):
+        """Updating a board entry replaces the old value."""
+        channel_board("dev", message="working on #442", agent_name="s_opus")
+        channel_board("dev", message="done with #442", agent_name="s_opus")
+        result = channel_board("dev", agent_name="s_atlas")
+        self.assertIn("done with #442", result)
+        self.assertNotIn("working on #442", result)
+
+    def test_clear_entry(self):
+        """Empty string clears the agent's board entry."""
+        channel_board("dev", message="busy", agent_name="s_opus")
+        channel_board("dev", message="", agent_name="s_opus")
+        result = channel_board("dev", agent_name="s_atlas")
+        self.assertIn("No status board entries", result)
+
+    def test_multiple_agents(self):
+        """Each agent has their own board entry."""
+        channel_board("dev", message="reviewing PRs", agent_name="s_opus")
+        channel_board("dev", message="running evals", agent_name="s_atlas")
+        result = channel_board("dev", agent_name="s_opus")
+        self.assertIn("reviewing PRs", result)
+        self.assertIn("running evals", result)
+
+    def test_board_in_channel_read(self):
+        """Board entries appear in channel_read output."""
+        channel_board("dev", message="sprint planning", agent_name="s_opus")
+        channel_post("dev", "hello", agent_name="s_atlas")
+        result = channel_read("dev", agent_name="s_atlas")
+        self.assertIn("Status Board", result)
+        self.assertIn("sprint planning", result)
+
+    def test_history_preserved(self):
+        """Previous board states are archived in history table."""
+        channel_board("dev", message="v1", agent_name="s_opus")
+        channel_board("dev", message="v2", agent_name="s_opus")
+        conn = _open_db()
+        rows = conn.execute(
+            "SELECT body FROM status_board_history WHERE agent_id = 's_opus'"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["body"], "v1")
 
 
 if __name__ == "__main__":

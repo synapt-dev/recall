@@ -1881,7 +1881,7 @@ def recall_channel(
     Args:
         action: "join", "leave", "post", "read", "read_message", "who", "heartbeat", "unread",
                 "pin", "directive", "mute", "unmute", "kick", "broadcast",
-                "list", "search", "rename", "claim", "unclaim", "intent".
+                "list", "search", "rename", "claim", "unclaim", "intent", "board".
         channel: Channel name (default "dev"). Any name works -- created on first post.
         message: Message body (required for "post", "directive", "broadcast") or message_id for "read_message"/pin actions.
         to: Target agent for "directive" action.
@@ -1924,6 +1924,7 @@ def recall_channel(
             channel_unmute,
             channel_kick,
             channel_broadcast,
+            channel_board,
             channel_list_channels,
         )
 
@@ -1997,6 +1998,9 @@ def recall_channel(
                 return "Error: message is required for 'broadcast' action."
             return channel_broadcast(message=message)
 
+        if action == "board":
+            return channel_board(channel=channel, message=message)
+
         if action == "list":
             channels = channel_list_channels()
             if not channels:
@@ -2044,7 +2048,7 @@ def recall_channel(
         return (
             f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
             f"'who', 'heartbeat', 'unread', 'pin', 'directive', 'mute', "
-            f"'unmute', 'kick', 'broadcast', 'list', 'search', 'rename', "
+            f"'unmute', 'kick', 'broadcast', 'board', 'list', 'search', 'rename', "
             f"'claim', 'unclaim', or 'intent'."
         )
     except Exception as exc:
