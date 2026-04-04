@@ -30,16 +30,34 @@ STYLE_SUFFIX = (
     "digital circuitry details, synapt brand aesthetic"
 )
 
-# Past prompts that produced good results (for reference):
-# - "Four holographic wireframe owls perched on glowing circuit boards, each owl a
-#    different color (purple, teal, blue, gold), connected by flowing data streams,
-#    sprint velocity dashboard with glowing metrics in the background"
-# - "Two owls building a bridge between glowing data towers, digital collaboration,
+# Past prompts that produced good results (verified from recall transcripts):
+#
+# sprint-3-recap (2026-04-04):
+#   "Four holographic wireframe owls perched on glowing circuit boards, each owl a
+#    different color (purple, teal, blue, gold), connected by flowing data streams
+#    between them, sprint velocity dashboard with glowing metrics in the background,
+#    digital teamwork and coordination theme"
+#
+# building-collaboration (2026-03-20):
+#   "Two owls building a bridge between glowing data towers, digital collaboration,
 #    dark ethereal background with flowing data streams connecting them"
-# - "Holographic owl examining floating memory fragments, some fading some bright,
-#    dark cave with crystal formations reflecting data patterns"
-# - "Wireframe owl standing at a crossroads of glowing neural pathways, debugging
-#    symbols floating around, dark atmospheric setting"
+#
+# interview-with-claude (2026-04-02):
+#   "A wireframe holographic owl sitting across from a glowing holographic microphone
+#    on an ancient stone desk, interview setting, teal and purple neon glow, dark
+#    atmospheric background with starry sky, digital wireframe aesthetic,
+#    bioluminescent particles"
+#
+# agent-madness (2026-03-28):
+#   "A glowing purple owl with neural network wings versus a dark iron gauntlet with
+#    seven different colored energies, epic showdown in a cosmic arena, tournament
+#    bracket floating above, dark ethereal atmosphere, no text, no words, no letters"
+#
+# Key learnings:
+# - Add "no text, no words, no letters" when you don't want baked-in text
+# - Owls are the synapt mascot — always include
+# - Purple/teal/cyan are brand colors
+# - Dark backgrounds with particles/bioluminescence = consistent look
 
 BLOG_IMAGES = Path(__file__).resolve().parent.parent / "docs" / "blog" / "images"
 OG_DIR = BLOG_IMAGES / "og"
