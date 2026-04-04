@@ -602,26 +602,45 @@ def _store_mentions(
                 if len(parts) > 1:
                     identity_map[parts[-1].lower()] = aid
 
-        for name in names:
-            mentioned = identity_map.get(name.lower(), name)
+        # Collect all unique agent_ids from the identity map (for @team/@all)
+        all_agents = sorted(set(identity_map.values()))
+
+        def _insert_mention_and_wake(agent_id: str) -> None:
             conn.execute(
                 "INSERT INTO mentions (message_id, channel, mentioned, timestamp) "
                 "VALUES (?, ?, ?, ?)",
-                (msg.id, msg.channel, mentioned, msg.timestamp),
+                (msg.id, msg.channel, agent_id, msg.timestamp),
             )
             _enqueue_wake_request(
                 conn,
-                target=f"agent:{mentioned}",
+                target=f"agent:{agent_id}",
                 reason="mention",
                 source=msg.from_agent,
                 payload={
                     "message_id": msg.id,
                     "channel": msg.channel,
                     "type": msg.type,
-                    "mentioned": mentioned,
+                    "mentioned": agent_id,
                 },
                 created=msg.timestamp,
             )
+
+        seen: set[str] = set()
+        for name in names:
+            lower = name.lower()
+            if lower in ("team", "all"):
+                # Expand to all active agents except the sender
+                for aid in all_agents:
+                    if aid == msg.from_agent or aid in seen:
+                        continue
+                    seen.add(aid)
+                    _insert_mention_and_wake(aid)
+            else:
+                mentioned = identity_map.get(lower, name)
+                if mentioned in seen:
+                    continue
+                seen.add(mentioned)
+                _insert_mention_and_wake(mentioned)
         conn.commit()
     finally:
         conn.close()
