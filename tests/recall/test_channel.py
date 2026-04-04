@@ -619,7 +619,7 @@ class TestUnreadMessages(unittest.TestCase):
 
         result = channel_unread_read(agent_name="agent-a")
 
-        self.assertEqual(result, "No unread messages.")
+        self.assertEqual(result, "")
 
     def test_unread_multiple_channels(self):
         channel_join("dev", agent_name="agent-a")
