@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import urllib.request
 from typing import List, Optional
 
@@ -121,33 +122,46 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-_singleton_provider: Optional[EmbeddingProvider] = None
-_singleton_resolved: bool = False
+_singleton_lock = threading.Lock()
+_singleton_cache: dict[bool, tuple[bool, Optional[EmbeddingProvider]]] = {}
 
 
 def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvider]:
     """Auto-select the best available embedding provider.
 
     Returns a cached singleton so the model is loaded at most once per
-    process.  Fixes #357 — previous behaviour created a new provider
-    (and re-loaded the model) on every call.
+    process.  Thread-safe via double-checked locking.  Caches separately
+    per ``prefer_local`` value.
+
+    Fixes #357 — previous behaviour created a new provider (and
+    re-loaded the model) on every call.
 
     Priority: local sentence-transformers -> Ollama -> None (BM25-only).
     """
-    global _singleton_provider, _singleton_resolved
+    cached = _singleton_cache.get(prefer_local)
+    if cached is not None:
+        return cached[1]
 
-    if _singleton_resolved:
-        return _singleton_provider
+    with _singleton_lock:
+        # Double-check after acquiring lock
+        cached = _singleton_cache.get(prefer_local)
+        if cached is not None:
+            return cached[1]
 
+        provider = _resolve_provider(prefer_local)
+        _singleton_cache[prefer_local] = (True, provider)
+        return provider
+
+
+def _resolve_provider(prefer_local: bool) -> Optional[EmbeddingProvider]:
+    """Resolve the embedding provider without caching."""
     import logging
     log = logging.getLogger(__name__)
 
     if prefer_local:
         try:
             import sentence_transformers  # noqa: F401
-            _singleton_provider = LocalEmbeddings()
-            _singleton_resolved = True
-            return _singleton_provider
+            return LocalEmbeddings()
         except ImportError:
             log.info(
                 "sentence-transformers not installed. "
@@ -160,9 +174,7 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
         provider = OllamaEmbeddings()
         # Verify Ollama is reachable
         provider.embed(["test"])
-        _singleton_provider = provider
-        _singleton_resolved = True
-        return _singleton_provider
+        return provider
     except Exception:
         log.info("Ollama embeddings unavailable (server not running or model not pulled)")
 
@@ -171,5 +183,4 @@ def get_embedding_provider(prefer_local: bool = True) -> Optional[EmbeddingProvi
         "Install sentence-transformers for hybrid semantic search: "
         "pip install sentence-transformers"
     )
-    _singleton_resolved = True
     return None
