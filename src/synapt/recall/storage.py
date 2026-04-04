@@ -1216,14 +1216,15 @@ class RecallDB:
     def content_hash(self) -> str:
         """Compute a content hash directly from the DB.
 
-        Streams rows in order without materializing Python objects,
-        avoiding the 48K-object overhead of _materialize_all_chunks().
+        Streams rows in timestamp-descending order to match the ordering
+        used by TranscriptIndex (sorted newest-first).  This ensures the
+        hash is identical to the old _materialize_all_chunks() path.
         """
         import hashlib
         h = hashlib.sha256()
         cursor = self._conn.execute(
             "SELECT id, user_text, assistant_text, tool_content "
-            "FROM chunks ORDER BY rowid"
+            "FROM chunks ORDER BY timestamp DESC, rowid DESC"
         )
         for row in cursor:
             h.update(

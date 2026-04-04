@@ -11,12 +11,13 @@ def db(tmp_path):
     d.close()
 
 
-def _insert_chunk(db, chunk_id, user_text="", assistant_text="", tool_content=""):
+def _insert_chunk(db, chunk_id, user_text="", assistant_text="", tool_content="",
+                   timestamp="2026-01-01T00:00:00"):
     db._conn.execute(
         "INSERT INTO chunks (id, session_id, timestamp, turn_index, "
         "user_text, assistant_text, tool_content) "
-        "VALUES (?, 'sess', '2026-01-01', 0, ?, ?, ?)",
-        (chunk_id, user_text, assistant_text, tool_content),
+        "VALUES (?, 'sess', ?, 0, ?, ?, ?)",
+        (chunk_id, timestamp, user_text, assistant_text, tool_content),
     )
     db._conn.commit()
 
@@ -50,3 +51,25 @@ def test_content_hash_with_empty_fields(db):
     h = db.content_hash()
     assert isinstance(h, str)
     assert len(h) == 16
+
+
+def test_content_hash_orders_by_timestamp_desc(db):
+    """Hash must use timestamp DESC to match TranscriptIndex ordering.
+
+    Chunks inserted in rowid order (c1, c2, c3) but with timestamps
+    that sort differently (newest first = c3, c2, c1).  The hash
+    must match the timestamp-descending order, not rowid order.
+    """
+    _insert_chunk(db, "c1", user_text="oldest", timestamp="2026-01-01T00:00:00")
+    _insert_chunk(db, "c2", user_text="middle", timestamp="2026-01-02T00:00:00")
+    _insert_chunk(db, "c3", user_text="newest", timestamp="2026-01-03T00:00:00")
+
+    import hashlib
+    # Manually compute expected hash in timestamp DESC order (c3, c2, c1)
+    h = hashlib.sha256()
+    h.update("c3|newest||\n".encode())
+    h.update("c2|middle||\n".encode())
+    h.update("c1|oldest||\n".encode())
+    expected = h.hexdigest()[:16]
+
+    assert db.content_hash() == expected
