@@ -809,15 +809,15 @@ def channel_join(
 
     result = f"Joined #{channel} as {display} ({aid})"
 
-    # Surface recent @mentions so agents don't miss assignments (#453).
-    # Check mentions from the last 10 minutes that this agent hasn't seen.
+    # Surface recent @mentions with full content so agents don't miss
+    # assignments (#453).  Including the actual message text means the
+    # agent gets the directive regardless of cursor state.
     try:
         lookback = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
         conn = _open_db(project_dir)
         try:
-            # Find mentions of this agent (by agent_id or display name)
             rows = conn.execute(
                 "SELECT m.message_id, m.channel, m.timestamp "
                 "FROM mentions m "
@@ -825,11 +825,20 @@ def channel_join(
                 "ORDER BY m.timestamp DESC LIMIT 5",
                 (aid, display, lookback),
             ).fetchall()
-            if rows:
-                result += f"\n\n[channel] {len(rows)} recent @mention(s) found. "
-                result += "Use recall_channel(action='unread') to catch up."
         finally:
             conn.close()
+        if rows:
+            # Read message content from the JSONL log
+            mention_lines = []
+            msg_ids = {r["message_id"] for r in rows}
+            for m in _read_messages(path):
+                if m.id in msg_ids:
+                    ts = m.timestamp[:16]
+                    sender = m.from_display or m.from_agent
+                    mention_lines.append(f"  {ts}  {sender}: {m.body}")
+            if mention_lines:
+                result += f"\n\n[channel] {len(mention_lines)} @mention(s):\n"
+                result += "\n".join(mention_lines)
     except Exception:
         pass
 

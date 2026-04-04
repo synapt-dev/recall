@@ -644,8 +644,8 @@ class TestUnreadMessages(unittest.TestCase):
         self.assertNotIn("...", result)
 
 
-    def test_join_surfaces_recent_mentions(self):
-        """Join response includes recent @mentions so agents don't miss assignments (#453)."""
+    def test_join_surfaces_recent_mentions_with_content(self):
+        """Join response includes recent @mention content so agents get directives (#453)."""
         channel_join("dev", agent_name="agent-lead", display_name="Opus")
         channel_post("dev", "@Apollo please take #441", agent_name="agent-lead")
 
@@ -653,6 +653,7 @@ class TestUnreadMessages(unittest.TestCase):
 
         self.assertIn("Joined #dev as Apollo", result)
         self.assertIn("@mention", result)
+        self.assertIn("please take #441", result)
 
 
 class TestPins(unittest.TestCase):
