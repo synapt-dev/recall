@@ -179,7 +179,6 @@ class ShardedRecallDB:
                 })
             return loaded
         return self._index.load_chunks_by_rowids(rowids)
-
     def sample_chunk_texts(self, limit: int = 100) -> list[str]:
         """Return representative chunk text samples across all shards."""
         if self._data_dbs:

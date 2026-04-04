@@ -177,6 +177,14 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertTrue(all(rowid > (1 << 32) for rowid, _ in hits))
         db.close()
 
+    def test_fts_search_raw_returns_shard_qualified_rowids(self):
+        db = self._create_two_shard_layout()
+        hits = db.fts_search_raw("memory", limit=10)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(len({rowid for rowid, _ in hits}), 2)
+        self.assertTrue(all(rowid > (1 << 32) for rowid, _ in hits))
+        db.close()
+
     def test_get_all_embeddings_uses_shard_qualified_rowids(self):
         db = self._create_two_shard_layout()
         mapping = db.get_chunk_id_rowid_map()
@@ -210,6 +218,13 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertEqual(set(loaded.keys()), {mapping["s1:t0"], mapping["s2:t0"]})
         self.assertEqual(loaded[mapping["s1:t0"]].id, "s1:t0")
         self.assertEqual(loaded[mapping["s2:t0"]].id, "s2:t0")
+
+    def test_sample_chunk_texts_reads_across_shards(self):
+        db = self._create_two_shard_layout()
+        samples = db.sample_chunk_texts(limit=10)
+        joined = " ".join(samples)
+        self.assertIn("alpha memory", joined)
+        self.assertIn("beta memory", joined)
         db.close()
 
     def test_save_chunks_clears_all_shards_on_rebuild(self):
