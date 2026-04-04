@@ -1438,18 +1438,20 @@ def recall_journal(
 
 
 def recall_save(
-    content: str,
+    content: str = "",
     category: str = "workflow",
     confidence: float = 0.8,
     tags: list[str] | None = None,
     source_sessions: list[str] | None = None,
     source_turns: list[str] | None = None,
     node_id: str | None = None,
+    retract: bool = False,
 ) -> str:
-    """Create a knowledge node directly and embed it for vector search.
+    """Create, update, or retract a knowledge node.
 
     Args:
         content: Durable fact, convention, or decision to save.
+            Required for create/update, ignored for retract.
         category: Knowledge category (workflow, tooling, decision, etc.).
         confidence: Confidence score from 0.0 to 1.0.
         tags: Optional search tags.
@@ -1457,19 +1459,40 @@ def recall_save(
         source_turns: Optional originating turn refs ("session_id:turn_num").
         node_id: Optional stable knowledge-node ID to upsert. If omitted,
             recall_save derives a stable ID from the saved content.
+        retract: If True, mark the node as retracted (hidden from search
+            but preserved for audit). Requires node_id.
     """
-    clean_content = (content or "").strip()
-    if not clean_content:
-        return "Error: content is required."
-
     try:
         import hashlib
+        from datetime import datetime, timezone
+
         from synapt.recall.knowledge import KnowledgeNode, append_node
         from synapt.recall.storage import RecallDB
 
         project = Path.cwd().resolve()
         db = RecallDB(project_index_dir(project) / "recall.db")
         try:
+            # --- Retract path ---
+            if retract:
+                if not node_id:
+                    return "Error: node_id is required for retract."
+                existing = db.get_knowledge_node(node_id)
+                if not existing:
+                    return f"Error: node {node_id} not found."
+                now = datetime.now(timezone.utc).isoformat()
+                existing["status"] = "retracted"
+                existing["valid_until"] = now
+                existing["updated_at"] = now
+                db.upsert_knowledge_node(existing)
+                # db.close() handled by finally below
+                _invalidate_cache()
+                return f"Knowledge node retracted: {node_id}. Hidden from search, preserved for audit."
+
+            # --- Create/update path ---
+            clean_content = (content or "").strip()
+            if not clean_content:
+                return "Error: content is required."
+
             resolved_node_id = node_id or hashlib.sha1(
                 clean_content.encode("utf-8")
             ).hexdigest()[:12]
@@ -1485,6 +1508,8 @@ def recall_save(
             )
             if existing:
                 node.created_at = existing.get("created_at", node.created_at)
+                node.version = existing.get("version", 1) + 1
+                node.lineage_id = existing.get("lineage_id", "") or existing["id"]
             append_node(node, project_data_dir(project) / "knowledge.jsonl")
             db.upsert_knowledge_node(node.to_dict())
 
@@ -1500,10 +1525,12 @@ def recall_save(
             db.close()
 
         _invalidate_cache()
-        status = "embedded for vector search" if embedded else "saved without embeddings"
+        action = "updated" if existing else "saved"
+        emb_status = "embedded for vector search" if embedded else "saved without embeddings"
+        version_tag = f", v{node.version}" if node.version > 1 else ""
         return (
-            f"Knowledge node saved: {node.id} ({node.category}, confidence={node.confidence:.2f}). "
-            f"{status}."
+            f"Knowledge node {action}: {node.id} ({node.category}, "
+            f"confidence={node.confidence:.2f}{version_tag}). {emb_status}."
         )
     except Exception as exc:
         return f"Knowledge save failed: {exc}"
