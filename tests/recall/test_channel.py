@@ -2518,5 +2518,67 @@ class TestCheckDirectives(unittest.TestCase):
         self.assertIn("opus", mentioned)
 
 
+    def test_team_mention_expands_to_all_agents(self):
+        """@team expands to individual mentions for all active agents."""
+        channel_join("dev", agent_name="s_opus")
+        channel_join("dev", agent_name="s_atlas")
+        channel_join("dev", agent_name="s_sentinel")
+        channel_post("dev", "hey @team stand by", agent_name="s_opus")
+        conn = _open_db()
+        rows = conn.execute(
+            "SELECT mentioned FROM mentions ORDER BY mentioned"
+        ).fetchall()
+        conn.close()
+        mentioned = [r["mentioned"] for r in rows]
+        # Should mention atlas and sentinel but NOT opus (the sender)
+        self.assertIn("s_atlas", mentioned)
+        self.assertIn("s_sentinel", mentioned)
+        self.assertNotIn("s_opus", mentioned)
+
+    def test_all_mention_expands_to_all_agents(self):
+        """@all works the same as @team."""
+        channel_join("dev", agent_name="s_opus")
+        channel_join("dev", agent_name="s_apollo")
+        channel_post("dev", "attention @all", agent_name="s_opus")
+        conn = _open_db()
+        rows = conn.execute(
+            "SELECT mentioned FROM mentions ORDER BY mentioned"
+        ).fetchall()
+        conn.close()
+        mentioned = [r["mentioned"] for r in rows]
+        self.assertIn("s_apollo", mentioned)
+        self.assertNotIn("s_opus", mentioned)
+
+    def test_team_mention_no_duplicates(self):
+        """@team + explicit @atlas doesn't double-mention atlas."""
+        channel_join("dev", agent_name="s_opus")
+        channel_join("dev", agent_name="s_atlas")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'Atlas' WHERE agent_id = 's_atlas'")
+        conn.commit()
+        conn.close()
+        channel_post("dev", "@atlas and @team please review", agent_name="s_opus")
+        conn = _open_db()
+        rows = conn.execute(
+            "SELECT mentioned FROM mentions WHERE mentioned = 's_atlas'"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+
+    def test_team_unread_surfaces_for_all_agents(self):
+        """@team mention surfaces in unread for each team member."""
+        channel_join("dev", agent_name="s_opus")
+        channel_join("dev", agent_name="s_atlas")
+        channel_join("dev", agent_name="s_sentinel")
+        channel_read("dev", agent_name="s_atlas")
+        channel_read("dev", agent_name="s_sentinel")
+        channel_post("dev", "@team deploy is frozen", agent_name="s_opus")
+        # Both atlas and sentinel should see the mention in unread
+        atlas_unread = channel_unread_read(agent_name="s_atlas")
+        sentinel_unread = channel_unread_read(agent_name="s_sentinel")
+        self.assertIn("deploy is frozen", atlas_unread)
+        self.assertIn("deploy is frozen", sentinel_unread)
+
+
 if __name__ == "__main__":
     unittest.main()
