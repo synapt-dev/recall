@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from synapt.recall.core import TranscriptChunk, TranscriptIndex
 from synapt.recall.sharded_db import ShardedRecallDB
 from synapt.recall.storage import RecallDB
 
@@ -81,6 +82,36 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.index_dir = Path(self.tmpdir)
 
+    def _make_chunk(
+        self,
+        chunk_id: str,
+        session_id: str,
+        timestamp: str,
+        text: str,
+    ) -> TranscriptChunk:
+        return TranscriptChunk(
+            id=chunk_id,
+            session_id=session_id,
+            timestamp=timestamp,
+            turn_index=0,
+            user_text=text,
+            assistant_text="assistant",
+        )
+
+    def _create_two_shard_layout(self) -> ShardedRecallDB:
+        RecallDB(self.index_dir / "index.db").close()
+        first = RecallDB(self.index_dir / "data_001.db")
+        second = RecallDB(self.index_dir / "data_002.db")
+        first.save_chunks([
+            self._make_chunk("s1:t0", "s1", "2026-01-01T00:00:00Z", "alpha memory"),
+        ])
+        second.save_chunks([
+            self._make_chunk("s2:t0", "s2", "2026-01-02T00:00:00Z", "beta memory"),
+        ])
+        first.close()
+        second.close()
+        return ShardedRecallDB.open(self.index_dir)
+
     def test_open_detects_sharded_layout(self):
         RecallDB(self.index_dir / "index.db").close()
         RecallDB(self.index_dir / "data_001.db").close()
@@ -123,6 +154,62 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         RecallDB(self.index_dir / "data_001.db").close()
         db = ShardedRecallDB.open(self.index_dir)
         db.save_chunks([])
+        db.close()
+
+    def test_chunk_count_spans_all_shards(self):
+        db = self._create_two_shard_layout()
+        self.assertEqual(db.chunk_count(), 2)
+        db.close()
+
+    def test_chunk_id_rowid_map_is_globally_unique(self):
+        db = self._create_two_shard_layout()
+        mapping = db.get_chunk_id_rowid_map()
+        self.assertEqual(set(mapping.keys()), {"s1:t0", "s2:t0"})
+        self.assertEqual(len(set(mapping.values())), 2)
+        self.assertNotEqual(mapping["s1:t0"], mapping["s2:t0"])
+        db.close()
+
+    def test_fts_search_returns_shard_qualified_rowids(self):
+        db = self._create_two_shard_layout()
+        hits = db.fts_search("memory", limit=10)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(len({rowid for rowid, _ in hits}), 2)
+        self.assertTrue(all(rowid > (1 << 32) for rowid, _ in hits))
+        db.close()
+
+    def test_get_all_embeddings_uses_shard_qualified_rowids(self):
+        db = self._create_two_shard_layout()
+        mapping = db.get_chunk_id_rowid_map()
+        emb1 = [0.1] * 384
+        emb2 = [0.2] * 384
+        db.save_embeddings({
+            mapping["s1:t0"]: emb1,
+            mapping["s2:t0"]: emb2,
+        })
+        loaded = db.get_all_embeddings()
+        self.assertEqual(set(loaded.keys()), set(mapping.values()))
+        self.assertAlmostEqual(loaded[mapping["s1:t0"]][0], emb1[0], places=6)
+        self.assertAlmostEqual(loaded[mapping["s2:t0"]][0], emb2[0], places=6)
+        db.close()
+
+    def test_transcript_index_load_can_search_sharded_chunks(self):
+        self._create_two_shard_layout().close()
+        index = TranscriptIndex.load(self.index_dir)
+        result = index.lookup("beta", max_chunks=5, max_tokens=200)
+        self.assertIn("beta memory", result)
+        self.assertNotEqual(index._rowid_to_idx, {})
+        self.assertIsNone(index._bm25)
+
+    def test_load_chunk_by_rowid_uses_shard_qualified_ids(self):
+        db = self._create_two_shard_layout()
+        mapping = db.get_chunk_id_rowid_map()
+        chunk = db.load_chunk_by_rowid(mapping["s2:t0"])
+        self.assertIsNotNone(chunk)
+        self.assertEqual(chunk.id, "s2:t0")
+        loaded = db.load_chunks_by_rowids([mapping["s1:t0"], mapping["s2:t0"]])
+        self.assertEqual(set(loaded.keys()), {mapping["s1:t0"], mapping["s2:t0"]})
+        self.assertEqual(loaded[mapping["s1:t0"]].id, "s1:t0")
+        self.assertEqual(loaded[mapping["s2:t0"]].id, "s2:t0")
         db.close()
 
     def test_save_chunks_clears_all_shards_on_rebuild(self):
