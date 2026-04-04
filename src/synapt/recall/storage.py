@@ -211,7 +211,7 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
     user_text, assistant_text, tools_used, files_touched, tool_content, date_text,
     content=chunks,
     content_rowid=rowid,
-    tokenize="porter unicode61 tokenchars '._'"
+    tokenize="porter unicode61 tokenchars '._+'"
 );
 """
 
@@ -243,7 +243,7 @@ CREATE VIRTUAL TABLE knowledge_fts USING fts5(
     content, category, tags,
     content=knowledge,
     content_rowid=rowid,
-    tokenize="porter unicode61 tokenchars '._'"
+    tokenize="porter unicode61 tokenchars '._+'"
 );
 """
 
@@ -278,7 +278,7 @@ CREATE VIRTUAL TABLE clusters_fts USING fts5(
     topic, search_text,
     content='clusters',
     content_rowid='id',
-    tokenize="porter unicode61 tokenchars '._'"
+    tokenize="porter unicode61 tokenchars '._+'"
 );
 """
 
@@ -306,8 +306,8 @@ _FTS5_KEYWORDS = frozenset({"and", "or", "not", "near"})
 
 
 def _escape_fts_token(tok: str) -> str:
-    """Quote a single FTS5 token if it contains dots or is a keyword."""
-    if "." in tok or tok in _FTS5_KEYWORDS:
+    """Quote a single FTS5 token if it contains special chars or is a keyword."""
+    if any(ch in tok for ch in "._+") or tok in _FTS5_KEYWORDS:
         return f'"{tok}"'
     return tok
 
@@ -337,7 +337,7 @@ def _escape_fts_tokens(query: str) -> list[str]:
     Single-character tokens and stop words are dropped to reduce noise.
     """
     tokens = [
-        t for t in re.sub(r"[^a-zA-Z0-9_.]", " ", query.lower()).split()
+        t for t in re.sub(r"[^a-zA-Z0-9_.+]", " ", query.lower()).split()
         if len(t) > 1 and t not in _FTS_STOP_WORDS
     ]
     return [_escape_fts_token(tok) for tok in tokens]
@@ -456,6 +456,16 @@ class RecallDB:
         if krow is None:
             self._conn.executescript(_KNOWLEDGE_FTS_TABLE_SQL)
             self._conn.executescript(_KNOWLEDGE_FTS_TRIGGERS_SQL)
+        elif self._needs_knowledge_fts_migration():
+            self._conn.execute("DROP TABLE IF EXISTS knowledge_fts")
+            for name in ("knowledge_ai", "knowledge_ad", "knowledge_au"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self._conn.executescript(_KNOWLEDGE_FTS_TABLE_SQL)
+            self._conn.executescript(_KNOWLEDGE_FTS_TRIGGERS_SQL)
+            self._conn.execute(
+                "INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')"
+            )
+            self._conn.commit()
         else:
             # Verify triggers exist
             existing_kt = {r[0] for r in self._conn.execute(
@@ -735,6 +745,17 @@ class RecallDB:
             return False
         current = " ".join((row[0] or "").lower().split())
         expected = " ".join(_FTS_TABLE_SQL.strip().lower().split())
+        return current != expected
+
+    def _needs_knowledge_fts_migration(self) -> bool:
+        """Check if the knowledge FTS definition differs from the current schema."""
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
+        ).fetchone()
+        if row is None:
+            return False
+        current = " ".join((row[0] or "").lower().split())
+        expected = " ".join(_KNOWLEDGE_FTS_TABLE_SQL.strip().lower().split())
         return current != expected
 
     def close(self) -> None:

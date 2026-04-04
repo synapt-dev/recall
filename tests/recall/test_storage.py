@@ -289,6 +289,23 @@ class TestFTSSearch:
         results = db.fts_search("api_index.py")
         assert len(results) > 0
 
+    def test_search_terms_with_plus(self, db):
+        """FTS5 can search literal C++-style terms without collapsing to empty."""
+        chunks = [
+            TranscriptChunk(
+                id="cpp11111:t0",
+                session_id="session-cpp",
+                timestamp="2026-03-02T10:00:00Z",
+                turn_index=0,
+                user_text="Sentinel joked about being the C++O and writing C#.",
+                assistant_text="C++O means Chief Everything Officer.",
+                tools_used=[],
+                files_touched=[],
+            ),
+        ]
+        db.save_chunks(chunks)
+        assert len(db.fts_search("C++O")) > 0
+
     def test_limit_respected(self, db, sample_chunks):
         db.save_chunks(sample_chunks)
         results = db.fts_search("the", limit=1)
@@ -449,6 +466,10 @@ class TestFTSEscaping:
         assert "hello" in result
         assert "world" in result
 
+    def test_plus_tokens_preserved_and_quoted(self):
+        result = _escape_fts_query("C++O")
+        assert '"c++o"' in result
+
     def test_fts_keywords_quoted(self):
         """FTS5 reserved keywords (AND, OR, NOT, NEAR) are double-quoted."""
         result = _escape_fts_query("NOT working OR broken")
@@ -488,6 +509,10 @@ class TestFTSEscaping:
         assert '"api_index.py"' in tokens
         # "in" is a stop word and should be filtered
         assert "in" not in tokens
+
+    def test_escape_fts_tokens_preserves_plus(self):
+        tokens = _escape_fts_tokens("C++O")
+        assert '"c++o"' in tokens
 
     def test_stop_words_filtered(self):
         """Stop words are removed from FTS queries to improve AND precision."""
