@@ -109,11 +109,12 @@ def _build_date_text(timestamp: str) -> str:
 
 
 # Near-duplicate Jaccard threshold for result deduplication.
-# 0.75 keeps only near-identical chunks from consuming retrieval slots.
+# 0.70 catches near-identical chunks whose formatted blocks diverge
+# slightly due to metadata (context lines, turn headers).
 # Lower values (0.6) aggressively remove "similar" chunks that contain
 # different critical details — this caused a -4pp regression on both
 # LOCOMO and CodeMemo benchmarks (see #459).
-_DEDUP_JACCARD_THRESHOLD = 0.75
+_DEDUP_JACCARD_THRESHOLD = 0.70
 
 
 def _env_flag(name: str) -> bool:

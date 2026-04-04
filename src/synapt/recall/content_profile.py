@@ -161,7 +161,7 @@ class AdaptiveParams:
     subchunk_min_text: int = 1200              # Min chars to trigger sub-chunk splitting (0 = disabled)
 
     # Retrieval
-    dedup_jaccard: float = 0.6
+    dedup_jaccard: float = 0.70
     max_knowledge_default: int | None = None   # None = no cap
     knowledge_boost_adjust: float = 0.0        # Added to intent-based boost
 
@@ -203,7 +203,7 @@ def adaptive_params(profile: ContentProfile) -> AdaptiveParams:
             generic_filter_enabled=True,
             garbled_filter_enabled=True,
             subchunk_min_text=2000,          # Higher threshold — only split very long turns
-            dedup_jaccard=0.75,
+            dedup_jaccard=0.70,             # Lowered from 0.75 — formatted blocks with context lines dilute Jaccard
             max_knowledge_default=5,
             knowledge_boost_adjust=0.0,
         )
