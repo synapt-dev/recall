@@ -374,3 +374,50 @@ class TestQueryCache:
         # Fourth query should evict the oldest
         index.lookup("rollback procedure", max_chunks=5)
         assert len(index._query_cache) == 3
+
+
+class TestRecallQuickIntentRouting:
+    """Test that recall_quick passes intent-derived params to lookup (#412)."""
+
+    def test_factual_query_boosts_knowledge(self):
+        """Factual intent should pass knowledge_boost=3.0."""
+        from unittest.mock import MagicMock, patch
+        from synapt.recall.server import recall_quick
+
+        mock_index = MagicMock()
+        mock_index.lookup.return_value = "some result"
+
+        with patch("synapt.recall.server._get_index", return_value=mock_index):
+            recall_quick("what is the database port")
+
+        call_kwargs = mock_index.lookup.call_args.kwargs
+        assert call_kwargs.get("knowledge_boost") == 3.0
+
+    def test_status_query_caps_knowledge(self):
+        """Status intent should cap max_knowledge=2."""
+        from unittest.mock import MagicMock, patch
+        from synapt.recall.server import recall_quick
+
+        mock_index = MagicMock()
+        mock_index.lookup.return_value = "some result"
+
+        with patch("synapt.recall.server._get_index", return_value=mock_index):
+            recall_quick("what's pending")
+
+        call_kwargs = mock_index.lookup.call_args.kwargs
+        assert call_kwargs.get("max_knowledge") == 2
+        assert call_kwargs.get("depth") == "summary"
+
+    def test_debug_query_uses_recency(self):
+        """Debug intent should set half_life=30."""
+        from unittest.mock import MagicMock, patch
+        from synapt.recall.server import recall_quick
+
+        mock_index = MagicMock()
+        mock_index.lookup.return_value = "some result"
+
+        with patch("synapt.recall.server._get_index", return_value=mock_index):
+            recall_quick("why did the build fail")
+
+        call_kwargs = mock_index.lookup.call_args.kwargs
+        assert call_kwargs.get("half_life") == 30.0

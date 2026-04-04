@@ -44,7 +44,7 @@ from synapt.recall.core import (
 )
 from synapt.recall._llm_util import truncate_at_word as _tw
 from synapt.recall.embeddings import get_embedding_provider
-from synapt.recall.hybrid import classify_query_intent
+from synapt.recall.hybrid import classify_query_intent, intent_search_params
 
 
 def _cap_tokens(requested: int) -> int:
@@ -379,6 +379,7 @@ def recall_quick(query: str) -> str:
     quick_budget = _cap_tokens(500)
     intent = classify_query_intent(query)
     depth = "summary" if intent == "status" else "concise"
+    params = intent_search_params(intent)
     # Skip embedding loading for quick checks. Pending-work queries use
     # summary mode (knowledge + journal), everything else uses concise
     # mode (knowledge + cluster summaries).
@@ -392,9 +393,11 @@ def recall_quick(query: str) -> str:
             query,
             max_chunks=5,
             max_tokens=quick_budget,
-            half_life=None,
+            half_life=params.get("half_life"),
             depth=depth,
             threshold_ratio=0.2,
+            knowledge_boost=params.get("knowledge_boost"),
+            max_knowledge=params.get("max_knowledge"),
         )
         if result:
             return result
