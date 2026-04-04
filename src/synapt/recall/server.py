@@ -1484,7 +1484,7 @@ def recall_save(
                 existing["valid_until"] = now
                 existing["updated_at"] = now
                 db.upsert_knowledge_node(existing)
-                db.close()
+                # db.close() handled by finally below
                 _invalidate_cache()
                 return f"Knowledge node retracted: {node_id}. Hidden from search, preserved for audit."
 
