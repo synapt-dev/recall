@@ -1357,7 +1357,8 @@ def recall_journal(
     context for next time. Use "read" to see the latest entry.
 
     Args:
-        action: "read" (latest entry), "write" (create entry), or "list" (recent entries).
+        action: "read" (latest entry), "write" (create entry), "list" (recent entries),
+            or "pending" (unresolved carry-forward next steps only).
         focus: What this session was about (write only).
         done: Semicolon-separated list of accomplishments (write only).
         decisions: Semicolon-separated list of key decisions (write only).
@@ -1371,6 +1372,7 @@ def recall_journal(
             format_for_session_start,
             latest_transcript_path,
             merge_carried_forward_next_steps,
+            pending_next_steps,
             read_entries,
             read_latest,
             read_previous_meaningful,
@@ -1381,6 +1383,15 @@ def recall_journal(
             if not entry:
                 return "No journal entries yet."
             return format_for_session_start(entry)
+
+        if action == "pending":
+            items = pending_next_steps()
+            if not items:
+                return "No pending next steps."
+            lines = ["Pending next steps:"]
+            for item in items:
+                lines.append(f"  - {item}")
+            return "\n".join(lines)
 
         if action == "list":
             entries = read_entries(n=5)
@@ -1421,7 +1432,7 @@ def recall_journal(
             append_entry(entry)
             return f"Journal entry written.\n\n{format_entry_full(entry)}"
 
-        return f"Unknown action: {action}. Use 'read', 'write', or 'list'."
+        return f"Unknown action: {action}. Use 'read', 'write', 'list', or 'pending'."
     except Exception as exc:
         return f"Journal failed: {exc}"
 
