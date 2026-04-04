@@ -742,6 +742,20 @@ class TestUnreadMessages(unittest.TestCase):
         self.assertIn("@Apollo please take #371", result)
         self.assertNotIn("...", result)
 
+    def test_unread_read_excludes_pins_by_default(self):
+        """Unread polls should not include pinned messages (#476)."""
+        channel_join("dev", agent_name="agent-a")
+        channel_post("dev", "important pin", agent_name="agent-b")
+        msgs = _read_messages(_channel_path("dev"))
+        pin_id = msgs[-1].id
+        channel_pin("dev", pin_id, agent_name="agent-b")
+        channel_post("dev", "regular msg", agent_name="agent-c")
+
+        result = channel_unread_read(agent_name="agent-a")
+
+        self.assertIn("regular msg", result)
+        self.assertNotIn("Pinned in #dev", result)
+
 
     def test_join_surfaces_recent_mentions_with_content(self):
         """Join response includes recent @mention content so agents get directives (#453)."""
