@@ -1794,5 +1794,84 @@ def test_get_dedup_thresholds_unknown_type():
     assert c == 0.80
 
 
+def _setup_resolve_test(tmp_path, monkeypatch, transcript_path):
+    """Helper: set up DB + knowledge node for resolve_source_offsets tests."""
+    from synapt.recall.storage import RecallDB
+    from synapt.recall.knowledge import KnowledgeNode, append_node
+
+    recall_dir = tmp_path / ".synapt" / "recall"
+    recall_dir.mkdir(parents=True)
+    index_dir = recall_dir / "index"
+    index_dir.mkdir()
+
+    monkeypatch.setattr(
+        "synapt.recall.consolidate.project_index_dir",
+        lambda _: index_dir,
+    )
+    kn_path = recall_dir / "knowledge.jsonl"
+    monkeypatch.setattr(
+        "synapt.recall.consolidate._knowledge_path",
+        lambda _: kn_path,
+    )
+
+    node = KnowledgeNode.create(
+        content="She mentioned her adoption plans",
+        category="personal",
+        source_sessions=["sess-A"],
+        source_turns=["sess-A:0"],
+    )
+    append_node(node, kn_path)
+
+    db = RecallDB(index_dir / "recall.db")
+    db._conn.execute(
+        "INSERT INTO chunks (id, session_id, timestamp, turn_index, user_text, assistant_text, transcript_path) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("chunk-001", "sess-A", "2026-03-01T00:00:00", 0,
+         "We talked about the weather. She mentioned her adoption plans were moving forward. Then we discussed dinner.",
+         "",
+         transcript_path),
+    )
+    db._conn.commit()
+    db.close()
+    return kn_path
+
+
+def test_resolve_source_offsets_includes_file_path(tmp_path, monkeypatch):
+    """resolve_source_offsets stores transcript_path as 'f' key in offset dicts."""
+    from synapt.recall.consolidate import resolve_source_offsets
+
+    kn_path = _setup_resolve_test(tmp_path, monkeypatch, "/transcripts/sess-A.jsonl")
+
+    count = resolve_source_offsets(tmp_path)
+    assert count == 1
+
+    nodes = list(read_nodes(kn_path))
+    resolved = nodes[0]
+    assert resolved.source_offsets, "source_offsets should be populated"
+    offset = resolved.source_offsets[0]
+    assert offset["s"] == "sess-A"
+    assert offset["t"] == 0
+    assert "b" in offset and "e" in offset
+    assert offset["f"] == "/transcripts/sess-A.jsonl"
+    # Verify the span actually contains the right text
+    chunk_text = "We talked about the weather. She mentioned her adoption plans were moving forward. Then we discussed dinner."
+    snippet = chunk_text[offset["b"]:offset["e"]]
+    assert "adoption" in snippet
+
+
+def test_resolve_source_offsets_omits_f_when_empty(tmp_path, monkeypatch):
+    """When transcript_path is empty, the 'f' key is omitted from offsets."""
+    from synapt.recall.consolidate import resolve_source_offsets
+
+    kn_path = _setup_resolve_test(tmp_path, monkeypatch, "")
+
+    count = resolve_source_offsets(tmp_path)
+    assert count == 1
+
+    nodes = list(read_nodes(kn_path))
+    offset = nodes[0].source_offsets[0]
+    assert "f" not in offset, "Empty transcript_path should not be stored"
+
+
 if __name__ == "__main__":
     unittest.main()
