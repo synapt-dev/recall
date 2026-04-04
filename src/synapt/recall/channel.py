@@ -775,15 +775,35 @@ def channel_read_wakes(
 
 def channel_ack_wakes(
     up_to_seq: int,
+    targets: str | list[str] | None = None,
     project_dir: Path | None = None,
 ) -> int:
-    """Delete wake requests up to and including a sequence number."""
+    """Delete wake requests up to and including a sequence number.
+
+    When *targets* is provided, only rows for those wake targets are
+    deleted. This prevents one consumer from deleting another target's
+    unread wakes when they share the same transport DB.
+    """
     conn = _open_db(project_dir)
     try:
-        cursor = conn.execute(
-            "DELETE FROM wake_requests WHERE seq <= ?",
-            (up_to_seq,),
-        )
+        if targets is None:
+            cursor = conn.execute(
+                "DELETE FROM wake_requests WHERE seq <= ?",
+                (up_to_seq,),
+            )
+        else:
+            if isinstance(targets, str):
+                target_list = [targets]
+            else:
+                target_list = [t for t in targets if t]
+            if not target_list:
+                return 0
+            placeholders = ",".join("?" for _ in target_list)
+            cursor = conn.execute(
+                f"DELETE FROM wake_requests "
+                f"WHERE seq <= ? AND target IN ({placeholders})",
+                (up_to_seq, *target_list),
+            )
         conn.commit()
         return cursor.rowcount
     finally:

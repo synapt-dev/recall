@@ -441,6 +441,34 @@ class TestWakeTransport(unittest.TestCase):
             all_wakes[1]["payload"]["message_id"],
         )
 
+    def test_channel_ack_wakes_can_scope_to_targets(self):
+        channel_join("dev", agent_name="s_apollo", display_name="Apollo")
+        existing = channel_read_wakes(["channel:dev", "agent:s_apollo"])
+        if existing:
+            channel_ack_wakes(
+                max(w["seq"] for w in existing),
+                targets=["channel:dev", "agent:s_apollo"],
+            )
+        channel_post("dev", "hello", agent_name="s_writer")
+        channel_directive("dev", "review", to="s_apollo", agent_name="s_admin")
+
+        channel_wakes = channel_read_wakes("channel:dev")
+        agent_wakes = channel_read_wakes("agent:s_apollo")
+        self.assertEqual(len(channel_wakes), 2)
+        self.assertEqual(len(agent_wakes), 1)
+
+        deleted = channel_ack_wakes(
+            max(w["seq"] for w in channel_wakes),
+            targets="channel:dev",
+        )
+        remaining_channel = channel_read_wakes("channel:dev")
+        remaining_agent = channel_read_wakes("agent:s_apollo")
+
+        self.assertEqual(deleted, 2)
+        self.assertEqual(remaining_channel, [])
+        self.assertEqual(len(remaining_agent), 1)
+        self.assertEqual(remaining_agent[0]["target"], "agent:s_apollo")
+
 
 class TestStaleDetectionTiers(unittest.TestCase):
     """Test online/idle/away/offline status tiers."""
