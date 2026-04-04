@@ -1571,12 +1571,15 @@ class TranscriptIndex:
         search_mode: str,
         date_filter_active: bool = False,
         sessions_searched: int = 0,
+        reference_candidates: list[tuple[int, float]] | None = None,
     ) -> list[tuple[int, float]]:
         """Apply threshold filtering and record diagnostics if no candidates exist.
 
         Expects *candidates* sorted by score descending (highest first), with
         only positive scores (pre-filtered by caller).  Sets
         ``self._last_diagnostics`` when candidates is empty (``no_matches``).
+        ``reference_candidates`` lets callers threshold on the pre-boost score
+        domain while still ranking on the current candidate scores.
         """
         if not candidates:
             self._last_diagnostics = SearchDiagnostics(
@@ -1591,8 +1594,13 @@ class TranscriptIndex:
             return []
 
         if threshold_ratio > 0:
-            cutoff = candidates[0][1] * threshold_ratio
-            filtered = [(i, s) for i, s in candidates if s >= cutoff]
+            reference = reference_candidates or candidates
+            cutoff = max(s for _, s in reference) * threshold_ratio
+            ref_scores = {idx: score for idx, score in reference}
+            filtered = [
+                (i, s) for i, s in candidates
+                if ref_scores.get(i, s) >= cutoff
+            ]
         else:
             filtered = candidates
 
@@ -1981,6 +1989,8 @@ class TranscriptIndex:
                 continue
             candidates.append((idx, score))
 
+        reference_candidates = sorted(candidates, key=lambda x: x[1], reverse=True)
+
         # Recency decay — applied BEFORE RRF intentionally.
         # RRF is rank-based (not score-based), so decaying scores here biases
         # the *ranks* that RRF sees. Both BM25 and embedding lists are decayed
@@ -2001,12 +2011,14 @@ class TranscriptIndex:
 
                 # BM25/FTS ranked list (idx, score)
                 bm25_ranked = sorted(candidates, key=lambda x: x[1], reverse=True)
+                bm25_ranked_ref = reference_candidates
 
                 # Embedding ranked list (rowid, sim) → convert to (idx, sim)
                 emb_raw = embedding_search(
                     q_emb, self._all_embeddings, limit=max_chunks * 10,
                 )
                 emb_ranked = []
+                emb_ranked_ref = []
                 for rowid, sim in emb_raw:
                     idx = self._rowid_to_idx.get(rowid)
                     if idx is None:
@@ -2015,11 +2027,16 @@ class TranscriptIndex:
                         continue
                     if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
                         continue
+                    emb_ranked_ref.append((idx, sim))
                     emb_ranked.append((idx, sim))
                 emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
 
                 # Weighted RRF merge — emb_weight from intent classification
                 _bm25_floor = int(os.environ.get("SYNAPT_BM25_FLOOR", "0"))
+                reference_candidates = weighted_rrf_merge(
+                    bm25_ranked_ref, emb_ranked_ref, emb_weight=emb_weight,
+                    bm25_floor=_bm25_floor,
+                )
                 merged = weighted_rrf_merge(
                     bm25_ranked, emb_ranked, emb_weight=emb_weight,
                     bm25_floor=_bm25_floor,
@@ -2036,6 +2053,7 @@ class TranscriptIndex:
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "fts_global",
             date_filter_active=date_filter is not None,
+            reference_candidates=reference_candidates,
         )
 
         # Cross-encoder reranking (Phase 2): rerank after threshold so
@@ -2211,6 +2229,11 @@ class TranscriptIndex:
                 if i not in date_filter:
                     scores[i] = 0.0
 
+        reference_ranked = sorted(
+            [(i, s) for i, s in enumerate(scores) if s > 0],
+            key=lambda x: x[1], reverse=True,
+        )
+
         if half_life > 0:
             scores = self._apply_recency_decay(scores, half_life=half_life, now=now)
 
@@ -2227,6 +2250,7 @@ class TranscriptIndex:
                     [(i, s) for i, s in enumerate(scores) if s > 0],
                     key=lambda x: x[1], reverse=True,
                 )
+                bm25_ranked_ref = reference_ranked
 
                 # Embedding ranked list (using in-memory embeddings)
                 emb_dict = {i: emb for i, emb in enumerate(self._embeddings)}
@@ -2235,12 +2259,20 @@ class TranscriptIndex:
                     (i, s) for i, s in emb_raw
                     if date_filter is None or i in date_filter
                 ]
+                emb_ranked_ref = list(emb_ranked)
                 if depth == "summary":
                     emb_ranked = [
                         (i, s) for i, s in emb_ranked
                         if self._get_chunk(i).turn_index < 0
                     ]
+                    emb_ranked_ref = [
+                        (i, s) for i, s in emb_ranked_ref
+                        if self._get_chunk(i).turn_index < 0
+                    ]
 
+                reference_ranked = weighted_rrf_merge(
+                    bm25_ranked_ref, emb_ranked_ref, emb_weight=emb_weight,
+                )
                 merged = weighted_rrf_merge(
                     bm25_ranked, emb_ranked, emb_weight=emb_weight,
                 )
@@ -2256,6 +2288,7 @@ class TranscriptIndex:
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "bm25_global",
             date_filter_active=date_filter is not None,
+            reference_candidates=reference_ranked,
         )
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
@@ -2364,6 +2397,8 @@ class TranscriptIndex:
             if high_quality >= 3 and len(hits) >= max_chunks:
                 break
 
+        reference_hits = sorted(hits, key=lambda x: x[1], reverse=True)
+
         # Recency decay — applied BEFORE RRF intentionally (see _global_lookup_fts
         # for rationale). Both BM25 and embedding lists are decayed symmetrically
         # so RRF ranks reflect recency bias consistently.
@@ -2384,6 +2419,7 @@ class TranscriptIndex:
                     q_emb, self._all_embeddings, limit=max_chunks * 5,
                 )
                 emb_ranked = []
+                emb_ranked_ref = []
                 for rowid, sim in emb_raw:
                     idx = self._rowid_to_idx.get(rowid)
                     if idx is None:
@@ -2392,10 +2428,14 @@ class TranscriptIndex:
                         continue
                     if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
                         continue
+                    emb_ranked_ref.append((idx, sim))
                     emb_ranked.append((idx, sim))
                 emb_ranked = self._decay_candidates(emb_ranked, half_life, now=now)
 
                 bm25_ranked = sorted(hits, key=lambda x: x[1], reverse=True)
+                reference_hits = weighted_rrf_merge(
+                    reference_hits, emb_ranked_ref, emb_weight=emb_weight,
+                )
                 merged = weighted_rrf_merge(
                     bm25_ranked, emb_ranked, emb_weight=emb_weight,
                 )
@@ -2413,6 +2453,7 @@ class TranscriptIndex:
             hits, threshold_ratio, "fts_progressive",
             date_filter_active=date_filter is not None,
             sessions_searched=sessions_searched,
+            reference_candidates=reference_hits,
         )
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
@@ -2449,6 +2490,8 @@ class TranscriptIndex:
                 if chunk.turn_index >= 0:
                     bm25_scores[i] = 0.0
 
+        reference_scores = list(bm25_scores)
+
         if half_life > 0:
             bm25_scores = self._apply_recency_decay(
                 bm25_scores, half_life=half_life, now=now,
@@ -2479,6 +2522,8 @@ class TranscriptIndex:
             if high_quality >= 3 and len(hits) >= max_chunks:
                 break
 
+        reference_hits = [(i, reference_scores[i]) for i, _ in hits]
+        reference_hits.sort(key=lambda x: x[1], reverse=True)
         hits.sort(key=lambda x: x[1], reverse=True)
 
         # Bound candidates before expensive operations
@@ -2488,6 +2533,7 @@ class TranscriptIndex:
             hits, threshold_ratio, "bm25_progressive",
             date_filter_active=date_filter is not None,
             sessions_searched=sessions_searched,
+            reference_candidates=reference_hits,
         )
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)

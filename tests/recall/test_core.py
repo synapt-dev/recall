@@ -905,6 +905,65 @@ def test_threshold_zero_disables():
     assert result != ""
 
 
+def test_threshold_can_use_preboost_reference_scores():
+    """Thresholding can preserve hits based on their pre-boost scores."""
+    index = TranscriptIndex(make_test_chunks())
+
+    filtered = index._apply_threshold_with_diagnostics(
+        candidates=[(0, 10.0), (1, 0.5)],
+        reference_candidates=[(0, 10.0), (1, 3.0)],
+        threshold_ratio=0.2,
+        search_mode="bm25_global",
+    )
+
+    assert filtered == [(0, 10.0), (1, 0.5)]
+
+
+def test_status_threshold_uses_preboost_scores_for_filtering():
+    """Status recency bias should not suppress otherwise-relevant transcript hits."""
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 4, 4, tzinfo=timezone.utc)
+    chunks = [
+        TranscriptChunk(
+            id="journal:t0", session_id="sess-journal",
+            timestamp=now.isoformat(), turn_index=-1,
+            user_text="Session focus: deploy work",
+            assistant_text="Next steps: Deploy the api service and confirm rollout",
+        ),
+        TranscriptChunk(
+            id="transcript:t0", session_id="sess-transcript",
+            timestamp="2026-01-04T00:00:00+00:00", turn_index=0,
+            user_text="How do we deploy the api service safely?",
+            assistant_text="Apollo wrote the deploy checklist and rollback plan for the api service.",
+        ),
+    ]
+    index = TranscriptIndex(chunks, use_embeddings=False)
+    index._db = None
+    index._rowid_to_idx = {}
+    index._bm25.score = lambda _tokens: [10.0, 6.0]
+    index._apply_recency_decay = lambda scores, half_life=0.0, now=None: [10.0, 0.5]
+    index._rerank_candidates = lambda _query, ranked: ranked
+    index._expand_cross_session = lambda ranked, _max_chunks: ranked
+    captured = {}
+
+    def _capture_format(ranked, *_args, **_kwargs):
+        captured["ranked"] = ranked
+        return "captured"
+
+    index._format_results = _capture_format
+
+    result = index.lookup(
+        "what's pending deploy api service",
+        max_chunks=5,
+        threshold_ratio=0.5,
+        now=now,
+    )
+
+    assert result == "captured"
+    assert [idx for idx, _ in captured["ranked"]] == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # Tests: chunk context window (Improvement 2)
 # ---------------------------------------------------------------------------
