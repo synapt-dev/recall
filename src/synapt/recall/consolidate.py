@@ -1803,7 +1803,7 @@ def _load_chunks_for_resolve(
     # Filter chunks to only relevant sessions
     placeholders = ",".join("?" for _ in needed_sessions)
     rows = db._conn.execute(
-        f"SELECT session_id, turn_index, user_text, assistant_text "
+        f"SELECT session_id, turn_index, user_text, assistant_text, transcript_path "
         f"FROM chunks WHERE session_id IN ({placeholders})",
         list(needed_sessions),
     ).fetchall()
@@ -1818,8 +1818,9 @@ def _load_chunks_for_resolve(
         tidx = r["turn_index"]
         text = (r["user_text"] or "") + " " + (r["assistant_text"] or "")
         toks = _extract_keywords(text)
+        tpath = r["transcript_path"] or ""
         if include_text:
-            session_chunks.setdefault(sid, []).append((tidx, text, toks))
+            session_chunks.setdefault(sid, []).append((tidx, text, toks, tpath))
         else:
             session_chunks.setdefault(sid, []).append((tidx, toks))
 
@@ -1966,11 +1967,14 @@ def resolve_source_offsets(
     kn_path, session_chunks, nodes, db = loaded
     pending_updates: dict[str, dict] = {}
 
-    # Build a turn lookup: (session_id, turn_index) → full text
+    # Build turn lookups: (session_id, turn_index) → full text and file path
     _turn_text: dict[tuple[str, int], str] = {}
+    _turn_file: dict[tuple[str, int], str] = {}
     for sid, chunks_list in session_chunks.items():
-        for tidx, text, _toks in chunks_list:
+        for tidx, text, _toks, tpath in chunks_list:
             _turn_text[(sid, tidx)] = text
+            if tpath:
+                _turn_file[(sid, tidx)] = tpath
 
     try:
         for node in nodes:
@@ -1997,10 +2001,14 @@ def resolve_source_offsets(
                         continue
                     span = _find_best_span(node.content, text)
                     if span:
-                        offsets.append({
+                        entry: dict = {
                             "s": sid, "t": tidx,
                             "b": span[0], "e": span[1],
-                        })
+                        }
+                        fpath = _turn_file.get((sid, tidx), "")
+                        if fpath:
+                            entry["f"] = fpath
+                        offsets.append(entry)
                 if offsets:
                     pending_updates[node.id] = {"source_offsets": offsets}
                     continue
@@ -2013,12 +2021,12 @@ def resolve_source_offsets(
             if len(node_toks) < 2:
                 continue
 
-            candidates: list[tuple[str, int, str, int]] = []
+            candidates: list[tuple[str, int, str, int, str]] = []
             for sid in node.source_sessions:
-                for tidx, text, chunk_toks in session_chunks.get(sid, []):
+                for tidx, text, chunk_toks, tpath in session_chunks.get(sid, []):
                     overlap = len(node_toks & chunk_toks)
                     if overlap >= min_overlap:
-                        candidates.append((sid, tidx, text, overlap))
+                        candidates.append((sid, tidx, text, overlap, tpath))
 
             if not candidates:
                 continue
@@ -2026,13 +2034,16 @@ def resolve_source_offsets(
             candidates.sort(key=lambda x: x[3], reverse=True)
 
             offsets = []
-            for sid, tidx, text, _ in candidates[:max_offsets_per_node]:
+            for sid, tidx, text, _, tpath in candidates[:max_offsets_per_node]:
                 span = _find_best_span(node.content, text)
                 if span:
-                    offsets.append({
+                    entry = {
                         "s": sid, "t": tidx,
                         "b": span[0], "e": span[1],
-                    })
+                    }
+                    if tpath:
+                        entry["f"] = tpath
+                    offsets.append(entry)
 
             if offsets:
                 pending_updates[node.id] = {"source_offsets": offsets}

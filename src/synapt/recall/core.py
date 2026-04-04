@@ -3059,8 +3059,14 @@ class TranscriptIndex:
                     if not snippet:
                         continue
                     # Compact snippet block with source attribution
+                    fpath = offset.get("f", "")
+                    if fpath:
+                        fname = Path(fpath).name
+                        source_label = f"{fname} turn {tidx}"
+                    else:
+                        source_label = f"{_short_sid(sid)} turn {tidx}"
                     block = (
-                        f"--- [source: {_short_sid(sid)} turn {tidx}] ---\n"
+                        f"--- [source: {source_label}] ---\n"
                         f"{snippet}"
                     )
                     source_score = base_score * 0.6
