@@ -1056,7 +1056,7 @@ def channel_read(
             truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
         if _one_line:
             body = body.replace("\n", " ").strip()
-        if msg.type in ("join", "leave"):
+        if msg.type in ("join", "leave", "claim", "unclaim"):
             if _one_line:
                 continue
             lines.append(f"  {ts}{inline_mid}  -- {body}{truncation_tag}")
@@ -1559,12 +1559,17 @@ def channel_claim(
     channel: str = "dev",
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    _silent: bool = False,
 ) -> str:
     """Claim a message so other agents know you're handling it.
 
     Uses INSERT OR IGNORE for atomic first-writer-wins semantics.
     Returns success if you claimed it, or the existing claimant if
     someone else already did.
+
+    If ``_silent`` is False (the default), a claim notification is
+    automatically posted to the channel so other agents see it in
+    the message stream without polling the claims table.
     """
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
@@ -1586,6 +1591,14 @@ def channel_claim(
         ).fetchone()
         if row and row["claimed_by"] == aid:
             display = _resolve_display_name_for(aid, project_dir)
+            # Auto-post claim notification to channel
+            if not _silent:
+                claim_msg = ChannelMessage(
+                    timestamp=now, from_agent=aid, from_display=display,
+                    channel=channel, type="claim",
+                    body=f"{display} claimed {message_id}",
+                )
+                _append_message(claim_msg, project_dir)
             return f"Claimed {message_id} — you ({display}) own this task."
         else:
             claimer = row["claimed_by"] if row else "unknown"
@@ -1626,7 +1639,7 @@ def channel_unclaim(
     try:
         _reap_stale_agents(conn, project_dir)
         row = conn.execute(
-            "SELECT claimed_by FROM claims WHERE message_id = ?",
+            "SELECT claimed_by, channel FROM claims WHERE message_id = ?",
             (message_id,),
         ).fetchone()
         if not row:
@@ -1634,8 +1647,16 @@ def channel_unclaim(
         if row["claimed_by"] != aid:
             display = _resolve_display_name_for(row["claimed_by"], project_dir)
             return f"Cannot unclaim — owned by {display} ({row['claimed_by']})."
+        ch = row["channel"]
         conn.execute("DELETE FROM claims WHERE message_id = ?", (message_id,))
         conn.commit()
+        display = _resolve_display_name_for(aid, project_dir)
+        unclaim_msg = ChannelMessage(
+            timestamp=_now_iso(), from_agent=aid, from_display=display,
+            channel=ch, type="unclaim",
+            body=f"{display} released claim on {message_id}",
+        )
+        _append_message(unclaim_msg, project_dir)
         return f"Released claim on {message_id}."
     finally:
         conn.close()
@@ -1683,8 +1704,8 @@ def channel_claim_intent(
     )
     _append_message(msg, project_dir)
 
-    # Auto-claim the intent message
-    channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir)
+    # Auto-claim the intent message (silent — the intent post is the notification)
+    channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
 
     display = _resolve_display_name_for(aid, project_dir)
     return (True, f"[INTENT] {display}: {intent}")
