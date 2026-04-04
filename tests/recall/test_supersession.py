@@ -406,7 +406,8 @@ class TestFormatKnowledgeBlock:
     def test_active_node_normal_format(self):
         node = _make_knowledge_node(confidence=0.8, category="architecture")
         block = TranscriptIndex._format_knowledge_block(node)
-        assert "[knowledge] architecture (high" in block
+        assert "[knowledge" in block
+        assert "architecture (high" in block
         assert "historical" not in block
 
     def test_contradicted_node_historical_label(self):
@@ -1507,7 +1508,7 @@ class TestRecallSave:
             second = recall_save(content="Use staging before production")
 
         assert "Knowledge node saved:" in first
-        assert "Knowledge node saved:" in second
+        assert "Knowledge node updated:" in second  # second save is an update
 
         db = RecallDB(project_index_dir(tmp_path) / "recall.db")
         try:
@@ -1542,7 +1543,7 @@ class TestRecallSave:
             )
 
         assert "Knowledge node saved:" in first
-        assert "Knowledge node saved:" in second
+        assert "Knowledge node updated:" in second
 
         db = RecallDB(project_index_dir(tmp_path) / "recall.db")
         try:
@@ -1552,6 +1553,79 @@ class TestRecallSave:
             assert nodes[0]["content"] == "Updated memory"
         finally:
             db.close()
+
+
+    def test_recall_save_update_bumps_version(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_save
+        from synapt.recall.storage import RecallDB
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            first = recall_save(
+                content="LOCOMO score is 76%",
+                category="benchmark",
+                node_id="bench1",
+            )
+            second = recall_save(
+                content="LOCOMO score is 72.4% (audited)",
+                category="benchmark",
+                node_id="bench1",
+            )
+
+        assert "saved" in first
+        assert "updated" in second
+        assert "v2" in second
+
+        db = RecallDB(project_index_dir(tmp_path) / "recall.db")
+        try:
+            node = db.get_knowledge_node("bench1")
+            assert node["content"] == "LOCOMO score is 72.4% (audited)"
+            assert node["version"] == 2
+            assert node["lineage_id"] == "bench1"
+        finally:
+            db.close()
+
+    def test_recall_save_retract(self, tmp_path):
+        from synapt.recall.core import project_index_dir
+        from synapt.recall.server import recall_save
+        from synapt.recall.storage import RecallDB
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            recall_save(content="Wrong fact", category="workflow", node_id="wrong1")
+            result = recall_save(node_id="wrong1", retract=True)
+
+        assert "retracted" in result.lower()
+
+        db = RecallDB(project_index_dir(tmp_path) / "recall.db")
+        try:
+            node = db.get_knowledge_node("wrong1")
+            assert node["status"] == "retracted"
+            assert node["valid_until"] is not None
+            # Retracted nodes excluded from active search
+            active = db.load_knowledge_nodes(status="active")
+            assert all(n["id"] != "wrong1" for n in active)
+        finally:
+            db.close()
+
+    def test_recall_save_retract_requires_node_id(self):
+        from synapt.recall.server import recall_save
+
+        result = recall_save(retract=True)
+        assert "node_id is required" in result.lower()
+
+    def test_recall_save_retract_nonexistent_node(self, tmp_path):
+        from synapt.recall.server import recall_save
+
+        with patch("synapt.recall.server.Path.cwd", return_value=tmp_path), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            result = recall_save(node_id="nonexistent", retract=True)
+
+        assert "not found" in result.lower()
 
 
 class TestRecallSyncMemory:

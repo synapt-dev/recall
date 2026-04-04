@@ -2878,13 +2878,18 @@ class TranscriptIndex:
             except (ValueError, TypeError):
                 freshness = updated
 
-        # Historical/superseded/contradicted labels
+        node_id = node.get("id", "")
+        id_tag = f" #{node_id}" if node_id else ""
+
+        # Historical/superseded/contradicted/retracted labels
         if status == "contradicted":
-            header = f"--- [knowledge, CONTRADICTED] {category} ---"
+            header = f"--- [knowledge{id_tag}, CONTRADICTED] {category} ---"
         elif status == "superseded":
-            header = f"--- [knowledge, SUPERSEDED] {category} ---"
+            header = f"--- [knowledge{id_tag}, SUPERSEDED] {category} ---"
+        elif status == "retracted":
+            header = f"--- [knowledge{id_tag}, RETRACTED] {category} ---"
         else:
-            header = f"--- [knowledge] {category} ({conf_label}, {freshness or updated}) ---"
+            header = f"--- [knowledge{id_tag}] {category} ({conf_label}, {freshness or updated}) ---"
 
         # Temporal metadata with source attribution
         if sources:
