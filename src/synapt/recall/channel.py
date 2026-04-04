@@ -372,6 +372,22 @@ CREATE TABLE IF NOT EXISTS wake_requests (
 
 CREATE INDEX IF NOT EXISTS idx_wake_requests_target_seq
     ON wake_requests(target, seq);
+
+CREATE TABLE IF NOT EXISTS status_board (
+    channel TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (channel, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS status_board_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 """
 
 _WAKE_PRIORITIES = {
@@ -1251,6 +1267,13 @@ def channel_read(
         ).fetchall():
             claim_map[r["message_id"]] = r["claimed_by"]
 
+        # Load status board entries
+        board_rows = conn.execute(
+            "SELECT agent_id, body, updated_at FROM status_board "
+            "WHERE channel = ? ORDER BY updated_at DESC",
+            (channel,),
+        ).fetchall()
+
         # Update read cursor
         conn.execute(
             "INSERT INTO cursors (agent_id, channel, last_read_at) "
@@ -1293,6 +1316,15 @@ def channel_read(
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
             mid = f" [{pin['message_id']}]" if pin["message_id"] and _show_ids else ""
             lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
+        lines.append("")
+
+    # Status board after pins
+    if not _one_line and board_rows:
+        lines.append(f"## Status Board — #{channel}")
+        for r in board_rows:
+            bd = display_map.get(r["agent_id"], r["agent_id"])
+            bts = r["updated_at"][:16].replace("T", " ")
+            lines.append(f"  {bd} ({bts}): {r['body']}")
         lines.append("")
 
     lines.append(f"## #{channel} ({len(messages)} messages)")
@@ -1787,6 +1819,76 @@ def channel_broadcast(
     for ch in channels:
         channel_post(ch, message, agent_name=agent_name, project_dir=project_dir)
     return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+
+
+def channel_board(
+    channel: str = "dev",
+    message: str | None = None,
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Read or update the mutable status board for a channel.
+
+    Each agent has one row on the board. Setting a message replaces
+    the previous value (previous state archived to history).
+    Reading returns all agents' current board entries.
+    Pass an empty string to clear your entry.
+    """
+    aid = agent_name or _agent_id(project_dir)
+    now = _now_iso()
+    conn = _open_db(project_dir)
+    try:
+        if message is not None:
+            # Archive previous state
+            conn.execute(
+                "INSERT INTO status_board_history (channel, agent_id, body, updated_at) "
+                "SELECT channel, agent_id, body, updated_at "
+                "FROM status_board WHERE channel = ? AND agent_id = ?",
+                (channel, aid),
+            )
+            if message:
+                conn.execute(
+                    "INSERT OR REPLACE INTO status_board (channel, agent_id, body, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (channel, aid, message, now),
+                )
+            else:
+                # Empty string = clear entry
+                conn.execute(
+                    "DELETE FROM status_board WHERE channel = ? AND agent_id = ?",
+                    (channel, aid),
+                )
+            conn.commit()
+
+            # Resolve display name inline
+            row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = ?", (aid,)
+            ).fetchone()
+            display = (row["display_name"] if row and row["display_name"] else aid)
+            return f"Board updated for {display} in #{channel}."
+
+        # Read mode
+        rows = conn.execute(
+            "SELECT agent_id, body, updated_at FROM status_board "
+            "WHERE channel = ? ORDER BY updated_at DESC",
+            (channel,),
+        ).fetchall()
+        if not rows:
+            return f"No status board entries in #{channel}."
+
+        # Build display name map
+        display_map: dict[str, str] = {}
+        for r in conn.execute("SELECT agent_id, display_name FROM presence").fetchall():
+            display_map[r["agent_id"]] = r["display_name"] or r["agent_id"]
+
+        lines = [f"## Status Board — #{channel}"]
+        for r in rows:
+            display = display_map.get(r["agent_id"], r["agent_id"])
+            ts = r["updated_at"][:16].replace("T", " ")
+            lines.append(f"  {display} ({ts}): {r['body']}")
+        return "\n".join(lines)
+    finally:
+        conn.close()
 
 
 def channel_rename(
