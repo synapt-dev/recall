@@ -43,6 +43,7 @@ from synapt.recall.channel import (
     channel_rename,
     channel_claim,
     channel_unclaim,
+    channel_ack_wakes,
     channel_read_wakes,
     channel_wake_targets,
     channel_claim_intent,
@@ -386,6 +387,15 @@ class TestWakeTransport(unittest.TestCase):
         self.assertEqual(agent_wakes[0]["reason"], "directive")
         self.assertEqual(agent_wakes[0]["payload"]["to"], "s_target")
 
+    def test_broadcast_directive_emits_only_channel_wake(self):
+        channel_directive("dev", "everyone stop", to="*", agent_name="s_admin")
+
+        channel_wakes = channel_read_wakes("channel:dev")
+        agent_wakes = channel_read_wakes("agent:s_admin")
+        self.assertEqual(len(channel_wakes), 1)
+        self.assertEqual(channel_wakes[0]["reason"], "directive")
+        self.assertEqual(agent_wakes, [])
+
     def test_mentions_emit_agent_wakes(self):
         channel_join("dev", agent_name="s_apollo", display_name="Apollo")
         channel_post("dev", "hey @Apollo please review", agent_name="s_writer")
@@ -413,6 +423,21 @@ class TestWakeTransport(unittest.TestCase):
         self.assertEqual(len(later_wakes), 1)
         self.assertEqual(
             later_wakes[0]["payload"]["message_id"],
+            all_wakes[1]["payload"]["message_id"],
+        )
+
+    def test_channel_ack_wakes_deletes_consumed_rows(self):
+        channel_post("dev", "first", agent_name="s_writer")
+        channel_post("dev", "second", agent_name="s_writer")
+
+        all_wakes = channel_read_wakes("channel:dev")
+        deleted = channel_ack_wakes(all_wakes[0]["seq"])
+        remaining = channel_read_wakes("channel:dev")
+
+        self.assertEqual(deleted, 1)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(
+            remaining[0]["payload"]["message_id"],
             all_wakes[1]["payload"]["message_id"],
         )
 
