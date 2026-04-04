@@ -3555,13 +3555,17 @@ class TranscriptIndex:
         #   -1 or unset → no snippeting (default — full chunk)
         #    0           → tight snippets (40-char margin, original #340)
         #    N           → N chars of context margin on each side
-        snippet_ctx = os.environ.get("SYNAPT_SNIPPET_CONTEXT", "-1")
+        snippet_ctx = os.environ.get("SYNAPT_SNIPPET_CONTEXT")
+        if snippet_ctx is None and os.environ.get("SYNAPT_ENABLE_SNIPPETS"):
+            snippet_ctx = "0"  # backward compat for legacy env var
+        if snippet_ctx is None:
+            snippet_ctx = "-1"
         try:
             snippet_margin = int(snippet_ctx)
         except ValueError:
             snippet_margin = -1
         if query and snippet_margin >= 0:
-            margin = max(40, snippet_margin) if snippet_margin > 0 else 40
+            margin = snippet_margin if snippet_margin > 0 else 40
             asst = chunk.assistant_text or ""
             user = chunk.user_text or ""
             # Try assistant text first — that's the evidence source

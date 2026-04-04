@@ -2427,3 +2427,109 @@ def test_snippet_wider_margin(monkeypatch):
     assert "ArgoCD" in block
     # With 200-char margin, should include surrounding context
     assert "..." in block  # Still a snippet, not full text
+
+
+def test_snippet_tight_context_zero(monkeypatch):
+    """SYNAPT_SNIPPET_CONTEXT=0 enables tight snippets (40-char margin)."""
+    monkeypatch.setenv("SYNAPT_SNIPPET_CONTEXT", "0")
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Tell me about Docker",
+            assistant_text=(
+                "Docker is a containerization platform. "
+                "It lets you package applications into containers. "
+                "Containers are lightweight and portable. "
+                "You can deploy them anywhere. "
+                "Docker uses images as templates. "
+                "Images are built from Dockerfiles. "
+                "The Docker Hub hosts public images. "
+                "Kubernetes can orchestrate Docker containers at scale."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    block = index._format_chunk_block(0, query="Kubernetes orchestrate containers")
+    # Tight snippet — should be shorter than full block
+    full_block = index._format_chunk_block(0)
+    assert len(block) < len(full_block)
+    assert "Kubernetes" in block
+
+
+def test_snippet_invalid_env_value_disables(monkeypatch):
+    """Invalid SYNAPT_SNIPPET_CONTEXT value falls back to no snippeting."""
+    monkeypatch.setenv("SYNAPT_SNIPPET_CONTEXT", "not_a_number")
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Hello",
+            assistant_text=(
+                "Docker is a containerization platform. "
+                "Kubernetes can orchestrate Docker containers at scale. "
+                "Both are essential for modern deployments. "
+                "CI/CD pipelines automate the build and deploy process."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    block = index._format_chunk_block(0, query="Kubernetes orchestrate")
+    # Invalid value → no snippeting → full block with User: and Assistant:
+    assert "User: Hello" in block
+    assert "Docker is a containerization" in block
+
+
+def test_snippet_legacy_enable_snippets_compat(monkeypatch):
+    """SYNAPT_ENABLE_SNIPPETS=1 still works for backward compat."""
+    monkeypatch.setenv("SYNAPT_ENABLE_SNIPPETS", "1")
+    monkeypatch.delenv("SYNAPT_SNIPPET_CONTEXT", raising=False)
+    chunks = [
+        TranscriptChunk(
+            id="s001:t0",
+            session_id="session-001",
+            timestamp="2026-03-24T12:00:00Z",
+            turn_index=0,
+            user_text="Tell me about Docker",
+            assistant_text=(
+                "Docker is a containerization platform. "
+                "It lets you package applications into containers. "
+                "Containers are lightweight and portable. "
+                "You can deploy them anywhere. "
+                "Docker uses images as templates. "
+                "Images are built from Dockerfiles. "
+                "The Docker Hub hosts public images. "
+                "Kubernetes can orchestrate Docker containers at scale."
+            ),
+            tools_used=[],
+            files_touched=[],
+            tool_content="",
+            date_text="",
+            transcript_path="",
+            byte_offset=0,
+            byte_length=0,
+        ),
+    ]
+    index = TranscriptIndex(chunks)
+    block = index._format_chunk_block(0, query="Kubernetes orchestrate containers")
+    full_block = index._format_chunk_block(0)
+    # Legacy env var should enable snippets (tight mode)
+    assert len(block) < len(full_block)
