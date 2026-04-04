@@ -748,8 +748,10 @@ def channel_join(
     display = display_name or _resolve_display_name(project_dir)
     now = _now_iso()
 
-    # Determine cursor initial value: the timestamp of the last message
-    # currently in the channel (so only future messages are unread).
+    # Cursor init for first-time joins: set to last message so only future
+    # messages are unread.  For returning agents (cursor already exists),
+    # INSERT OR IGNORE preserves their old cursor — they'll catch up on
+    # everything since their last read.  Fixes #453.
     path = _channel_path(channel, project_dir)
     cursor_init = now
     last_ts = _read_last_timestamp(path)
@@ -805,7 +807,33 @@ def channel_join(
     )
     _append_message(msg, project_dir)
 
-    return f"Joined #{channel} as {display} ({aid})"
+    result = f"Joined #{channel} as {display} ({aid})"
+
+    # Surface recent @mentions so agents don't miss assignments (#453).
+    # Check mentions from the last 10 minutes that this agent hasn't seen.
+    try:
+        lookback = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        conn = _open_db(project_dir)
+        try:
+            # Find mentions of this agent (by agent_id or display name)
+            rows = conn.execute(
+                "SELECT m.message_id, m.channel, m.timestamp "
+                "FROM mentions m "
+                "WHERE m.mentioned IN (?, ?) AND m.timestamp > ? "
+                "ORDER BY m.timestamp DESC LIMIT 5",
+                (aid, display, lookback),
+            ).fetchall()
+            if rows:
+                result += f"\n\n[channel] {len(rows)} recent @mention(s) found. "
+                result += "Use recall_channel(action='unread') to catch up."
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    return result
 
 
 def channel_leave(
