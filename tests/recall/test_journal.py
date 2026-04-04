@@ -475,5 +475,88 @@ class TestNextStepCarryForward(unittest.TestCase):
         self.assertEqual(merged, ["write tests", "close loop", "follow up with team"])
 
 
+class TestPendingNextSteps(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.jpath = Path(self.tmp) / "journal.jsonl"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_empty_journal(self):
+        from synapt.recall.journal import pending_next_steps
+        self.assertEqual(pending_next_steps(self.jpath), [])
+
+    def test_single_entry_all_pending(self):
+        from synapt.recall.journal import pending_next_steps, append_entry, JournalEntry
+        e = JournalEntry(
+            timestamp="2026-04-01T10:00",
+            next_steps=["task A", "task B", "task C"],
+        )
+        append_entry(e, self.jpath)
+        self.assertEqual(pending_next_steps(self.jpath), ["task A", "task B", "task C"])
+
+    def test_done_items_filtered_out(self):
+        from synapt.recall.journal import pending_next_steps, append_entry, JournalEntry
+        e1 = JournalEntry(
+            timestamp="2026-04-01T10:00",
+            next_steps=["task A", "task B", "task C"],
+        )
+        append_entry(e1, self.jpath)
+        e2 = JournalEntry(
+            timestamp="2026-04-02T10:00",
+            done=["task B"],
+        )
+        append_entry(e2, self.jpath)
+        self.assertEqual(pending_next_steps(self.jpath), ["task A", "task C"])
+
+    def test_normalization_matching(self):
+        from synapt.recall.journal import pending_next_steps, append_entry, JournalEntry
+        e1 = JournalEntry(
+            timestamp="2026-04-01T10:00",
+            next_steps=["Fix the  Bug", "deploy to prod"],
+        )
+        append_entry(e1, self.jpath)
+        e2 = JournalEntry(
+            timestamp="2026-04-02T10:00",
+            done=["fix the bug"],  # different case + whitespace
+        )
+        append_entry(e2, self.jpath)
+        self.assertEqual(pending_next_steps(self.jpath), ["deploy to prod"])
+
+    def test_scans_all_entries_not_just_latest(self):
+        """Older next_steps not carried forward should still appear."""
+        from synapt.recall.journal import pending_next_steps, append_entry, JournalEntry
+        e1 = JournalEntry(
+            timestamp="2026-04-01T10:00",
+            next_steps=["old task"],
+        )
+        append_entry(e1, self.jpath)
+        # Entry 2 has its own next_steps but didn't carry forward "old task"
+        e2 = JournalEntry(
+            timestamp="2026-04-02T10:00",
+            next_steps=["new task"],
+        )
+        append_entry(e2, self.jpath)
+        pending = pending_next_steps(self.jpath)
+        self.assertIn("new task", pending)
+        self.assertIn("old task", pending)
+
+    def test_all_done_returns_empty(self):
+        from synapt.recall.journal import pending_next_steps, append_entry, JournalEntry
+        e1 = JournalEntry(
+            timestamp="2026-04-01T10:00",
+            next_steps=["task A"],
+        )
+        append_entry(e1, self.jpath)
+        e2 = JournalEntry(
+            timestamp="2026-04-02T10:00",
+            done=["task A"],
+        )
+        append_entry(e2, self.jpath)
+        self.assertEqual(pending_next_steps(self.jpath), [])
+
+
 if __name__ == "__main__":
     unittest.main()

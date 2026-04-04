@@ -373,8 +373,9 @@ def merge_carried_forward_next_steps(
 def pending_next_steps(path: Path | None = None) -> list[str]:
     """Return unresolved next_steps from recent journal entries.
 
-    Scans recent entries and returns next_steps that have not appeared
-    in any subsequent entry's ``done`` list.
+    Scans all next_steps across recent entries and returns those that
+    have not appeared in any entry's ``done`` list.  Deduplicates by
+    normalized key, preserving the most recent wording.
     """
     entries = read_entries(path, n=20)
     if not entries:
@@ -387,17 +388,20 @@ def pending_next_steps(path: Path | None = None) -> list[str]:
             if item and item.strip():
                 all_done.add(_step_key(item))
 
-    # Find the most recent entry with next_steps
+    # Collect all next_steps across entries (newest first), dedup by key
+    seen: set[str] = set()
+    pending: list[str] = []
     for entry in entries:
-        if not entry.next_steps:
-            continue
-        pending = [
-            step for step in entry.next_steps
-            if step and step.strip() and _step_key(step) not in all_done
-        ]
-        return pending
+        for step in entry.next_steps:
+            if not step or not step.strip():
+                continue
+            key = _step_key(step)
+            if key in all_done or key in seen:
+                continue
+            pending.append(step)
+            seen.add(key)
 
-    return []
+    return pending
 
 
 def extract_session_id(path: Path | str) -> str:
