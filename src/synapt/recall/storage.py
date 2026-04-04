@@ -1213,6 +1213,26 @@ class RecallDB:
         ).fetchone()
         return row is not None
 
+    def content_hash(self) -> str:
+        """Compute a content hash directly from the DB.
+
+        Streams rows in timestamp-descending order to match the ordering
+        used by TranscriptIndex (sorted newest-first).  This ensures the
+        hash is identical to the old _materialize_all_chunks() path.
+        """
+        import hashlib
+        h = hashlib.sha256()
+        cursor = self._conn.execute(
+            "SELECT id, user_text, assistant_text, tool_content "
+            "FROM chunks ORDER BY timestamp DESC, rowid DESC"
+        )
+        for row in cursor:
+            h.update(
+                f"{row[0]}|{row[1] or ''}|{row[2] or ''}|{row[3] or ''}\n"
+                .encode()
+            )
+        return h.hexdigest()[:16]
+
     def get_all_embeddings(self) -> dict[int, list[float]]:
         """Load ALL chunk embeddings into memory for embedding-only search.
 
