@@ -426,6 +426,15 @@ class RecallDB:
         if row is None:
             self._conn.executescript(_FTS_TABLE_SQL)
             self._conn.executescript(_FTS_TRIGGERS_SQL)
+            chunk_count = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            if chunk_count > 0:
+                # A DB may already contain chunk rows (e.g. split-created shards)
+                # before chunks_fts exists. Rebuild immediately so first search
+                # sees the existing content instead of an empty FTS index.
+                self._conn.execute(
+                    "INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')"
+                )
+                self._conn.commit()
         elif self._needs_fts_migration():
             # Tokenizer changed (e.g., porter added) — recreate FTS table
             # and rebuild from the content table so search keeps working.
