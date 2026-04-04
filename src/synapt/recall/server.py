@@ -1954,7 +1954,11 @@ def recall_channel(
             return channel_heartbeat()
 
         if action == "unread":
-            return channel_unread_read(limit=limit, show_pins=show_pins, detail=detail)
+            # Unread is a polling action — pins are static and waste context
+            # on every tick.  Only include them if explicitly requested via
+            # detail='high'/'max' (#476).
+            unread_pins = show_pins if detail in ("high", "max") else False
+            return channel_unread_read(limit=limit, show_pins=unread_pins, detail=detail)
 
         if action == "pin":
             if not message:
