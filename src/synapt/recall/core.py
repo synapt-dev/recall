@@ -4265,45 +4265,53 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
     In a gripspace, also discovers transcripts from:
     - direct child repos (directories with ``.git``)
     - linked worktrees under ``.worktrees/*`` (also directories with ``.git``)
+    - declared griptrees from ``.gitgrip/griptrees.json`` even when they live
+      outside the gripspace root directory
     """
     actual_dir = (project_dir or Path.cwd()).resolve()
     dirs: list[Path] = []
     seen_slugs: set[str] = set()
 
+    def _maybe_add_transcript_dir(path: Path) -> None:
+        slug = project_slug(path)
+        if slug in seen_slugs:
+            return
+        seen_slugs.add(slug)
+        transcript_dir = Path.home() / ".claude" / "projects" / slug
+        if transcript_dir.is_dir() and any(transcript_dir.glob("*.jsonl")):
+            dirs.append(transcript_dir)
+
     # Always include the actual CWD's transcript dir
-    slug = project_slug(actual_dir)
-    seen_slugs.add(slug)
-    d = Path.home() / ".claude" / "projects" / slug
-    if d.is_dir() and any(d.glob("*.jsonl")):
-        dirs.append(d)
+    _maybe_add_transcript_dir(actual_dir)
 
     # If in a linked worktree, also include the main worktree's transcript dir
     main_root = _git_main_worktree_root(actual_dir)
     if main_root is not None:
-        main_slug = project_slug(main_root)
-        if main_slug not in seen_slugs:
-            seen_slugs.add(main_slug)
-            main_d = Path.home() / ".claude" / "projects" / main_slug
-            if main_d.is_dir() and any(main_d.glob("*.jsonl")):
-                dirs.append(main_d)
+        _maybe_add_transcript_dir(main_root)
 
     # If in a gripspace, discover transcripts from all constituent repos
-    # plus linked worktrees under .worktrees/*. Active agent sessions often
-    # run from those clean worktrees rather than from the main child repos.
+    # plus linked worktrees under .worktrees/* and declared griptrees from
+    # .gitgrip/griptrees.json. Active agent sessions often run from sibling
+    # griptrees like synapt-global rather than from direct child repos.
     grip_root = _find_gripspace_root(actual_dir)
     if grip_root is not None:
+        griptrees_json = grip_root / ".gitgrip" / "griptrees.json"
+        if griptrees_json.is_file():
+            try:
+                data = json.loads(griptrees_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            for meta in data.get("griptrees", {}).values():
+                path_str = meta.get("path")
+                if isinstance(path_str, str) and path_str:
+                    _maybe_add_transcript_dir(Path(path_str))
         try:
             children = sorted(grip_root.iterdir())
         except OSError:
             children = []
         for child in children:
             if child.is_dir() and (child / ".git").exists():
-                child_slug = project_slug(child)
-                if child_slug not in seen_slugs:
-                    seen_slugs.add(child_slug)
-                    child_d = Path.home() / ".claude" / "projects" / child_slug
-                    if child_d.is_dir() and any(child_d.glob("*.jsonl")):
-                        dirs.append(child_d)
+                _maybe_add_transcript_dir(child)
             elif child.is_dir() and child.name == ".worktrees":
                 try:
                     worktrees = sorted(child.iterdir())
@@ -4311,12 +4319,7 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
                     worktrees = []
                 for wt in worktrees:
                     if wt.is_dir() and (wt / ".git").exists():
-                        wt_slug = project_slug(wt)
-                        if wt_slug not in seen_slugs:
-                            seen_slugs.add(wt_slug)
-                            wt_d = Path.home() / ".claude" / "projects" / wt_slug
-                            if wt_d.is_dir() and any(wt_d.glob("*.jsonl")):
-                                dirs.append(wt_d)
+                        _maybe_add_transcript_dir(wt)
 
     return dirs
 

@@ -359,6 +359,27 @@ class TestProjectTranscriptDirsGripspace:
 
         assert td_linked in dirs
 
+    def test_discovers_declared_sibling_griptree_transcripts(self, tmp_path):
+        """Gripspace-root discovery should include griptrees declared in griptrees.json."""
+        grip = _make_gripspace(tmp_path)
+
+        sibling = tmp_path / "sibling-tree"
+        sibling.mkdir()
+        (grip / ".gitgrip" / "griptrees.json").write_text(
+            '{"griptrees": {"sibling-tree": {"path": "' + str(sibling) + '"}}}'
+        )
+
+        fake_home = tmp_path / "home"
+        slug_sibling = str(sibling).replace("\\", "/").replace("/", "-")
+        td_sibling = fake_home / ".claude" / "projects" / slug_sibling
+        td_sibling.mkdir(parents=True)
+        (td_sibling / "session-sibling.jsonl").write_text("{}")
+
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            dirs = project_transcript_dirs(grip)
+
+        assert td_sibling in dirs
+
     def test_standalone_repo_returns_empty_when_no_transcripts(self, tmp_path):
         """Standalone git repo outside any gripspace."""
         repo = tmp_path / "standalone"
