@@ -38,6 +38,7 @@ _ONLINE_MINUTES = 5       # < 5 min  => online
 _IDLE_MINUTES = 30        # 5-30 min => idle
 _AWAY_MINUTES = 120       # 30-120 min => away
                           # > 120 min => offline (auto-leave)
+_JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on join
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -813,22 +814,22 @@ def channel_join(
     # assignments (#453).  Including the actual message text means the
     # agent gets the directive regardless of cursor state.
     try:
-        lookback = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime(
-            "%Y-%m-%dT%H:%M:%S.%fZ"
-        )
+        lookback = (datetime.now(timezone.utc) - timedelta(
+            minutes=_JOIN_MENTION_LOOKBACK_MINUTES,
+        )).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         conn = _open_db(project_dir)
         try:
             rows = conn.execute(
                 "SELECT m.message_id, m.channel, m.timestamp "
                 "FROM mentions m "
-                "WHERE m.mentioned IN (?, ?) AND m.timestamp > ? "
+                "WHERE m.mentioned IN (?, ?) AND m.channel = ? "
+                "AND m.timestamp > ? "
                 "ORDER BY m.timestamp DESC LIMIT 5",
-                (aid, display, lookback),
+                (aid, display, channel, lookback),
             ).fetchall()
         finally:
             conn.close()
         if rows:
-            # Read message content from the JSONL log
             mention_lines = []
             msg_ids = {r["message_id"] for r in rows}
             for m in _read_messages(path):
@@ -839,8 +840,11 @@ def channel_join(
             if mention_lines:
                 result += f"\n\n[channel] {len(mention_lines)} @mention(s):\n"
                 result += "\n".join(mention_lines)
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger("synapt.recall.channel").debug(
+            "Failed to check recent mentions on join: %s", exc,
+        )
 
     return result
 
