@@ -292,6 +292,13 @@ def split_monolithic_db(
             finally:
                 shard.close()
 
+            # Finalize the shard through RecallDB so it has the same schema
+            # guarantees as any normally-opened DB: FTS tables, triggers, and
+            # rebuild for preexisting chunk rows.
+            from synapt.recall.storage import RecallDB
+            shard_db = RecallDB(shard_path)
+            shard_db.close()
+
             # Record shard metadata
             min_ts = batch[0]["timestamp"] if batch else ""
             max_ts = batch[-1]["timestamp"] if batch else ""

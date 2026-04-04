@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from synapt.recall.sharded_db import ShardedRecallDB
 from synapt.recall.sharding import (
     shard_name_for_index,
     list_shards,
@@ -119,12 +120,15 @@ class TestSplitMonolithicDb(unittest.TestCase):
             "'2025-01-01', '2025-01-01', '', '', '', NULL, NULL, 1, '')"
         )
         for i in range(num_chunks):
+            user_text = f"user chunk {i}"
+            assistant_text = f"assistant unique_term_{i}"
             db._conn.execute(
                 "INSERT INTO chunks (id, session_id, timestamp, turn_index, user_text, "
                 "assistant_text, tools_used, files_touched, tool_content, transcript_path, "
                 "byte_offset, byte_length) "
                 f"VALUES ('c{i}', 's1', '2025-01-{(i % 28) + 1:02d}T10:00:00Z', {i}, "
-                "'user', 'assistant', '[]', '[]', '', '', 0, 0)"
+                f"?, ?, '[]', '[]', '', '', 0, 0)",
+                (user_text, assistant_text),
             )
         db._conn.commit()
         db.close()
@@ -176,6 +180,19 @@ class TestSplitMonolithicDb(unittest.TestCase):
         self.assertEqual(rows[0]["chunk_count"], 10)
         self.assertEqual(rows[2]["shard_name"], "data_003.db")
         self.assertEqual(rows[2]["is_active"], 1)  # Last shard is active
+
+    def test_split_produces_queryable_shards(self):
+        tmpdir = tempfile.mkdtemp()
+        self._create_monolithic(tmpdir, num_chunks=25)
+        d = Path(tmpdir)
+        split_monolithic_db(d, threshold=10)
+
+        db = ShardedRecallDB.open(d)
+        try:
+            results = db.fts_search("unique_term_17")
+            self.assertEqual(len(results), 1)
+        finally:
+            db.close()
 
     def test_dry_run_doesnt_write(self):
         tmpdir = tempfile.mkdtemp()
