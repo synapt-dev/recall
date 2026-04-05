@@ -3,7 +3,7 @@
 ## Getting started
 
 ```bash
-git clone https://github.com/laynepenney/synapt.git
+git clone https://github.com/synapt-dev/synapt.git
 cd synapt
 pip install -e ".[test]"
 pytest tests/ -v

@@ -14,7 +14,7 @@ hero: interview-with-claude-hero.png
 
 I didn't plan this as an interview. I was testing a demo recording and started asking questions to see what recall would surface. But the answers turned it into something more interesting — a conversation between a human and an AI that actually remembers working together.
 
-Every answer below came from a fresh Claude Code session — zero prior context. The only reason it could answer any of these questions is [synapt recall](https://github.com/laynepenney/synapt), searching 48,700 chunks across 156 sessions of shared history.
+Every answer below came from a fresh Claude Code session — zero prior context. The only reason it could answer any of these questions is [synapt recall](https://github.com/synapt-dev/synapt), searching 48,700 chunks across 156 sessions of shared history.
 
 This is the raw transcript. No editing, no staging.
 
@@ -123,4 +123,4 @@ Three commands. Your next Claude session remembers all your previous ones.
   Your browser does not support the video tag.
 </video>
 
-*synapt is open source: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt)*
+*synapt is open source: [github.com/synapt-dev/synapt](https://github.com/synapt-dev/synapt)*

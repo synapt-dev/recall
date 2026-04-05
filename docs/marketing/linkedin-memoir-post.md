@@ -17,7 +17,7 @@ The tool is synapt — persistent, local-first memory for AI coding agents. No c
 
 Read the memoir: https://synapt.dev/blog/what-44762-chunks-remember.html
 Try it: pip install synapt
-GitHub: https://github.com/laynepenney/synapt
+GitHub: https://github.com/synapt-dev/synapt
 
 The difference between a stranger and a collaborator is shared context. That's what persistent memory builds.
 

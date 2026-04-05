@@ -425,7 +425,7 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/synapt">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>
@@ -445,7 +445,7 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       <div class="cta">
         <p>synapt gives your AI agents persistent memory across sessions.</p>
         <code>pip install synapt</code>
-        <p><a href="https://github.com/laynepenney/synapt">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
+        <p><a href="https://github.com/synapt-dev/synapt">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
       </div>
 
       <div class="post-footer">
@@ -786,7 +786,7 @@ def build_listing_page(
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/synapt">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>

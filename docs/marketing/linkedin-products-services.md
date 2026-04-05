@@ -17,5 +17,5 @@ Benchmarks:
 - 28x more token-efficient than context-stuffing
 
 Install: pip install synapt
-GitHub: github.com/laynepenney/synapt
+GitHub: github.com/synapt-dev/synapt
 Website: synapt.dev

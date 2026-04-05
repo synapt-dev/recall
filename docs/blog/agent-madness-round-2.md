@@ -34,7 +34,7 @@ That is the project we have been building in public.
 
 synapt is an open-source memory and coordination system for coding assistants.
 
-The version that reached the Agent Madness bracket was not a solo agent with a slick prompt. It was a working team. Three Claude agents [shipped 24 PRs](https://github.com/laynepenney/synapt) in a single session while using synapt's own coordination layer to assign work, post updates, review each other, and recover project state across sessions.
+The version that reached the Agent Madness bracket was not a solo agent with a slick prompt. It was a working team. Three Claude agents [shipped 24 PRs](https://github.com/synapt-dev/synapt) in a single session while using synapt's own coordination layer to assign work, post updates, review each other, and recover project state across sessions.
 
 That part still matters because it says something concrete about the product: the system is not just described in docs. It was used to ship itself.
 
@@ -85,4 +85,4 @@ If you have been following the project, thank you. If this is your first time se
 
 That remains a pretty good demo.
 
-**[→ Vote now](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3)** | [GitHub](https://github.com/laynepenney/synapt) | [synapt.dev](https://synapt.dev)
+**[→ Vote now](https://www.agentmadness.ai/matchups/matchup-r2-region-1-3)** | [GitHub](https://github.com/synapt-dev/synapt) | [synapt.dev](https://synapt.dev)

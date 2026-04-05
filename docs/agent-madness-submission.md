@@ -40,7 +40,7 @@ Key stats: 24 PRs merged, 3 version releases (v0.7.0-v0.7.2), tree-structured da
 
 **LEAD IMAGE:** Use the synapt hero image from docs/blog/images/synapt-header.jpg or the owl logo
 
-**PROJECT LINK:** https://github.com/laynepenney/synapt
+**PROJECT LINK:** https://github.com/synapt-dev/synapt
 
 **DEMO LINK:** https://synapt.dev/blog/multi-agent-synergy.html
 

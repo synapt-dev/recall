@@ -56,4 +56,4 @@ Voting closes **Thursday, March 26**. synapt is currently ahead, but every vote 
 
 ---
 
-*synapt is open source at [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt). Try it: `pip install synapt` and run `recall setup` in any project.*
+*synapt is open source at [github.com/synapt-dev/synapt](https://github.com/synapt-dev/synapt). Try it: `pip install synapt` and run `recall setup` in any project.*

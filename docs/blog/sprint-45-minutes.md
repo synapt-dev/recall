@@ -206,4 +206,4 @@ One morning. One audit. One plan. Seven fixes. All from asking "I can't remember
 
 ---
 
-*Synapt is open source. Install: `pip install synapt`. Connect: `claude mcp add synapt -- synapt server`. Star: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt).*
+*Synapt is open source. Install: `pip install synapt`. Connect: `claude mcp add synapt -- synapt server`. Star: [github.com/synapt-dev/synapt](https://github.com/synapt-dev/synapt).*
