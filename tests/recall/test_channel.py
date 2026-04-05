@@ -797,6 +797,28 @@ class TestUnreadMessages(unittest.TestCase):
         self.assertIn("@mention", result)
         self.assertIn("please take #441", result)
 
+    def test_rejoin_inherits_prior_cursor_for_same_display_name(self):
+        """Restarted sessions should not lose unread messages posted during downtime (#489)."""
+        channel_join("dev", agent_name="old-session", display_name="Atlas")
+        channel_post("dev", "already read", agent_name="opus")
+        channel_read("dev", agent_name="old-session")
+
+        conn = _open_db()
+        try:
+            conn.execute("DELETE FROM memberships WHERE agent_id = ?", ("old-session",))
+            conn.execute("DELETE FROM presence WHERE agent_id = ?", ("old-session",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        channel_post("dev", "message during downtime", agent_name="opus")
+
+        channel_join("dev", agent_name="new-session", display_name="Atlas")
+        unread = channel_unread_read(agent_name="new-session")
+
+        self.assertIn("message during downtime", unread)
+        self.assertNotIn("already read", unread)
+
 
 class TestPins(unittest.TestCase):
     """Test pin creation and display in read output."""
