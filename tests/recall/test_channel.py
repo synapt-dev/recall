@@ -819,6 +819,35 @@ class TestUnreadMessages(unittest.TestCase):
         self.assertIn("message during downtime", unread)
         self.assertNotIn("already read", unread)
 
+    def test_rejoin_inherits_cursor_via_griptree(self):
+        """Griptree-based cursor inheritance works even with different display names (#491)."""
+        # Resolve the griptree that channel_join will use in this test env
+        griptree = _resolve_griptree()
+
+        # Old session: join and read, establishing a cursor
+        channel_join("dev", agent_name="old-session", display_name="OldName")
+        channel_post("dev", "already read", agent_name="opus")
+        channel_read("dev", agent_name="old-session")
+
+        # Simulate session end — remove membership but keep presence + cursor
+        conn = _open_db()
+        try:
+            conn.execute("DELETE FROM memberships WHERE agent_id = 'old-session'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        channel_post("dev", "downtime message", agent_name="opus")
+
+        # New session with DIFFERENT agent_id but SAME griptree.
+        # channel_join will resolve griptree from filesystem → same value.
+        # Display name is different to prove griptree (not display_name) drives inheritance.
+        channel_join("dev", agent_name="new-session", display_name="NewName")
+        unread = channel_unread_read(agent_name="new-session")
+
+        self.assertIn("downtime message", unread)
+        self.assertNotIn("already read", unread)
+
 
 class TestPins(unittest.TestCase):
     """Test pin creation and display in read output."""
