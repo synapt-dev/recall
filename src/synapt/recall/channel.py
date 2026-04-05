@@ -246,42 +246,74 @@ def _seed_cursor_for_join(
     if existing:
         return existing["last_read_at"]
 
-    rows = conn.execute(
-        """
-        SELECT c.last_read_at
-        FROM cursors c
-        JOIN presence p ON p.agent_id = c.agent_id
-        WHERE c.channel = ?
-          AND c.agent_id != ?
-          AND (
-            (p.display_name != '' AND p.display_name = ?)
-            OR p.griptree = ?
-          )
-        ORDER BY c.last_read_at DESC
-        LIMIT 1
-        """,
-        (channel, agent_id, display_name, griptree),
-    ).fetchall()
-    if rows:
-        return rows[0]["last_read_at"]
+    # Primary: match on griptree (stable, unique, not user-configurable).
+    # Fallback: match on display_name (for backward compat with pre-griptree
+    # sessions that only have display_name in presence).
+    if griptree:
+        row = conn.execute(
+            """
+            SELECT c.last_read_at
+            FROM cursors c
+            JOIN presence p ON p.agent_id = c.agent_id
+            WHERE c.channel = ?
+              AND c.agent_id != ?
+              AND p.griptree = ?
+            ORDER BY c.last_read_at DESC
+            LIMIT 1
+            """,
+            (channel, agent_id, griptree),
+        ).fetchone()
+        if row:
+            return row["last_read_at"]
+
+    if display_name:
+        row = conn.execute(
+            """
+            SELECT c.last_read_at
+            FROM cursors c
+            JOIN presence p ON p.agent_id = c.agent_id
+            WHERE c.channel = ?
+              AND c.agent_id != ?
+              AND p.display_name != '' AND p.display_name = ?
+            ORDER BY c.last_read_at DESC
+            LIMIT 1
+            """,
+            (channel, agent_id, display_name),
+        ).fetchone()
+        if row:
+            return row["last_read_at"]
 
     # Presence rows may already be gone after session end / stale reap, but the
     # channel log still carries the old session id on prior join/leave/messages.
     # Recover the latest matching session from the log and inherit its cursor.
-    if display_name:
-        path = _channel_path(channel, project_dir)
-        if path.exists():
-            for msg in reversed(_read_messages(path)):
-                if msg.from_agent == agent_id:
+    # Prefer griptree match, fall back to display_name.
+    path = _channel_path(channel, project_dir)
+    if path.exists():
+        for msg in reversed(_read_messages(path)):
+            if msg.from_agent == agent_id:
+                continue
+            # Check if this old agent shared our griptree or display_name
+            prior = conn.execute(
+                "SELECT griptree, display_name FROM presence WHERE agent_id = ?",
+                (msg.from_agent,),
+            ).fetchone()
+            if prior:
+                if griptree and prior["griptree"] == griptree:
+                    pass  # match
+                elif display_name and (prior["display_name"] or "") == display_name:
+                    pass  # match
+                else:
                     continue
-                if (msg.from_display or "") != display_name:
-                    continue
-                row = conn.execute(
-                    "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = ?",
-                    (msg.from_agent, channel),
-                ).fetchone()
-                if row:
-                    return row["last_read_at"]
+            elif display_name and (msg.from_display or "") == display_name:
+                pass  # presence gone, fall back to JSONL display name
+            else:
+                continue
+            row = conn.execute(
+                "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = ?",
+                (msg.from_agent, channel),
+            ).fetchone()
+            if row:
+                return row["last_read_at"]
 
     last_ts = _read_last_timestamp(_channel_path(channel, project_dir))
     if last_ts:
