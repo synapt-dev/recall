@@ -223,6 +223,72 @@ def _resolve_target_id(target: str, conn: sqlite3.Connection) -> str:
     return row["agent_id"] if row else target
 
 
+def _seed_cursor_for_join(
+    conn: sqlite3.Connection,
+    *,
+    agent_id: str,
+    channel: str,
+    display_name: str,
+    griptree: str,
+    project_dir: Path | None = None,
+) -> str:
+    """Choose the initial unread cursor for a joining session.
+
+    Brand-new identities should start at the current channel tail so old
+    backlog does not flood their first unread poll. But restarted sessions
+    with a new session hash should inherit the most recent cursor from an
+    earlier matching identity so downtime messages remain unread.
+    """
+    existing = conn.execute(
+        "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = ?",
+        (agent_id, channel),
+    ).fetchone()
+    if existing:
+        return existing["last_read_at"]
+
+    rows = conn.execute(
+        """
+        SELECT c.last_read_at
+        FROM cursors c
+        JOIN presence p ON p.agent_id = c.agent_id
+        WHERE c.channel = ?
+          AND c.agent_id != ?
+          AND (
+            (p.display_name != '' AND p.display_name = ?)
+            OR p.griptree = ?
+          )
+        ORDER BY c.last_read_at DESC
+        LIMIT 1
+        """,
+        (channel, agent_id, display_name, griptree),
+    ).fetchall()
+    if rows:
+        return rows[0]["last_read_at"]
+
+    # Presence rows may already be gone after session end / stale reap, but the
+    # channel log still carries the old session id on prior join/leave/messages.
+    # Recover the latest matching session from the log and inherit its cursor.
+    if display_name:
+        path = _channel_path(channel, project_dir)
+        if path.exists():
+            for msg in reversed(_read_messages(path)):
+                if msg.from_agent == agent_id:
+                    continue
+                if (msg.from_display or "") != display_name:
+                    continue
+                row = conn.execute(
+                    "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = ?",
+                    (msg.from_agent, channel),
+                ).fetchone()
+                if row:
+                    return row["last_read_at"]
+
+    last_ts = _read_last_timestamp(_channel_path(channel, project_dir))
+    if last_ts:
+        return last_ts
+    return _now_iso()
+
+
 # ---------------------------------------------------------------------------
 # Message ID generation
 # ---------------------------------------------------------------------------
@@ -999,18 +1065,17 @@ def channel_join(
     display = display_name or _resolve_display_name(project_dir)
     now = _now_iso()
 
-    # Cursor init for first-time joins: set to last message so only future
-    # messages are unread.  For returning agents (cursor already exists),
-    # INSERT OR IGNORE preserves their old cursor — they'll catch up on
-    # everything since their last read.  Fixes #453.
-    path = _channel_path(channel, project_dir)
-    cursor_init = now
-    last_ts = _read_last_timestamp(path)
-    if last_ts:
-        cursor_init = last_ts
-
     conn = _open_db(project_dir)
     try:
+        cursor_init = _seed_cursor_for_join(
+            conn,
+            agent_id=aid,
+            channel=channel,
+            display_name=display,
+            griptree=griptree,
+            project_dir=project_dir,
+        )
+
         if display_name is not None:
             conflict = _find_display_name_conflict(conn, display, aid)
             if conflict:
@@ -1036,7 +1101,9 @@ def channel_join(
             (aid, channel, now),
         )
 
-        # Initialize cursor to last message in channel
+        # Preserve prior read position for restarted sessions that inherit a
+        # readable identity; otherwise start at the current tail for truly
+        # first-time joins.
         conn.execute(
             "INSERT OR IGNORE INTO cursors (agent_id, channel, last_read_at) "
             "VALUES (?, ?, ?)",
@@ -1082,7 +1149,7 @@ def channel_join(
         if rows:
             mention_lines = []
             msg_ids = {r["message_id"] for r in rows}
-            for m in _read_messages(path):
+            for m in _read_messages(_channel_path(channel, project_dir)):
                 if m.id in msg_ids:
                     ts = m.timestamp[:16]
                     sender = m.from_display or m.from_agent
