@@ -104,16 +104,17 @@ _AGENT_ID_CACHE: dict[str, str] = {}
 
 
 def _agent_id(project_dir: Path | None = None) -> str:
-    """Return a stable session-scoped agent ID (s_xxxxxxxx).
+    """Return the agent ID for channel operations.
 
-    Stable across MCP server restarts within the same Claude Code session,
-    but unique per concurrent session in the same worktree.
-
-    The seed is (griptree, data_dir, PPID) where PPID is the parent
-    process ID (Claude Code's PID). This stays stable when the MCP server
-    restarts (same parent), but differs between concurrent Claude Code
-    sessions (different parents).
+    Priority: SYNAPT_AGENT_ID env var (set by gr spawn) → generated
+    session hash (s_xxxxxxxx). The env var gives agents stable identity
+    across restarts; the hash is the fallback for manual sessions.
     """
+    # Env var takes priority — stable identity set by gr spawn
+    env_id = os.environ.get("SYNAPT_AGENT_ID")
+    if env_id:
+        return env_id
+
     key = str(project_data_dir(project_dir))
     if key not in _AGENT_ID_CACHE:
         gt = _resolve_griptree(project_dir)
