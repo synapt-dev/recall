@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from synapt.recall.core import project_data_dir, _worktree_name
+from synapt.recall.core import project_data_dir, _worktree_name, _find_gripspace_root
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,99 @@ _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on joi
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
+
+
+def _read_manifest_url(project_dir: Path | None = None) -> str | None:
+    """Read the manifest URL from gripspace.yml, or None if not in a gripspace."""
+    root = _find_gripspace_root(project_dir or Path.cwd())
+    if root is None:
+        return None
+    manifest_path = root / ".gitgrip" / "spaces" / "main" / "gripspace.yml"
+    if not manifest_path.exists():
+        return None
+    try:
+        # Lightweight YAML parse — just find the manifest url line
+        with open(manifest_path, encoding="utf-8") as f:
+            in_manifest = False
+            for line in f:
+                stripped = line.strip()
+                if stripped == "manifest:":
+                    in_manifest = True
+                    continue
+                if in_manifest and stripped.startswith("url:"):
+                    return stripped.split(":", 1)[1].strip()
+                if in_manifest and not line.startswith(" ") and not line.startswith("\t"):
+                    break  # Left the manifest section
+    except OSError:
+        pass
+    return None
+
+
+def _extract_org_from_url(url: str) -> str | None:
+    """Extract the GitHub org from a git URL.
+
+    git@github.com:synapt-dev/gripspace.git → 'synapt-dev'
+    https://github.com/synapt-dev/gripspace.git → 'synapt-dev'
+    """
+    if ":" in url and "@" in url:
+        # SSH format: git@github.com:org/repo.git
+        path_part = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        # HTTPS format
+        path_part = url.split("github.com/", 1)[1]
+    else:
+        return None
+    parts = path_part.strip("/").split("/")
+    return parts[0] if parts else None
+
+
+def _extract_repo_from_url(url: str) -> str | None:
+    """Extract the repo slug from a git URL (without .git suffix).
+
+    git@github.com:synapt-dev/gripspace.git → 'gripspace'
+    """
+    if ":" in url and "@" in url:
+        path_part = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        path_part = url.split("github.com/", 1)[1]
+    else:
+        return None
+    parts = path_part.strip("/").split("/")
+    if len(parts) >= 2:
+        repo = parts[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        return repo
+    return None
+
+
+def _resolve_org_id(project_dir: Path | None = None) -> str | None:
+    """Derive org_id from the gripspace manifest URL's GitHub org."""
+    url = _read_manifest_url(project_dir)
+    if url:
+        return _extract_org_from_url(url)
+    return None
+
+
+def _resolve_project_id(project_dir: Path | None = None) -> str | None:
+    """Derive project_id from the gripspace manifest URL's repo name."""
+    url = _read_manifest_url(project_dir)
+    if url:
+        return _extract_repo_from_url(url)
+    return None
+
+
+def _global_channels_dir(project_dir: Path | None = None) -> Path | None:
+    """Return the global channel store path if inside a gripspace.
+
+    Routes to ~/.synapt/channels/<org_id>/<project_id>/.
+    Returns None if org/project can't be resolved.
+    """
+    org = _resolve_org_id(project_dir)
+    project = _resolve_project_id(project_dir)
+    if org and project:
+        return Path.home() / ".synapt" / "channels" / org / project
+    return None
 
 
 def _shared_channels_dir() -> Path | None:
@@ -66,10 +159,22 @@ def _local_channels_dir(project_dir: Path | None = None) -> Path:
 def _channels_dir(project_dir: Path | None = None) -> Path:
     """Return the channels directory for JSONL logs and attachments.
 
-    Uses SYNAPT_SHARED_CHANNELS_DIR if set, otherwise falls back to the
-    local per-gripspace directory.
+    Three-tier resolution:
+    1. SYNAPT_SHARED_CHANNELS_DIR env var (explicit override, backward compat)
+    2. Global store ~/.synapt/channels/<org>/<project>/ (if in a gripspace)
+    3. Local per-gripspace directory (fallback for non-gripspace repos)
     """
-    return _shared_channels_dir() or _local_channels_dir(project_dir)
+    # Tier 1: explicit env var override
+    shared = _shared_channels_dir()
+    if shared:
+        return shared
+    # Tier 2: global store from manifest URL
+    global_dir = _global_channels_dir(project_dir)
+    if global_dir:
+        global_dir.mkdir(parents=True, exist_ok=True)
+        return global_dir
+    # Tier 3: local fallback
+    return _local_channels_dir(project_dir)
 
 
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
