@@ -104,16 +104,22 @@ _AGENT_ID_CACHE: dict[str, str] = {}
 
 
 def _agent_id(project_dir: Path | None = None) -> str:
-    """Return a stable session-scoped agent ID (s_xxxxxxxx).
+    """Return the agent's stable identity.
 
-    Stable across MCP server restarts within the same Claude Code session,
-    but unique per concurrent session in the same worktree.
+    Resolution order:
+    1. SYNAPT_AGENT_ID env var (set by gr spawn) — stable, org-registered
+    2. Session-scoped hash (s_xxxxxxxx) — fallback for manual/unregistered sessions
 
-    The seed is (griptree, data_dir, PPID) where PPID is the parent
-    process ID (Claude Code's PID). This stays stable when the MCP server
-    restarts (same parent), but differs between concurrent Claude Code
-    sessions (different parents).
+    When SYNAPT_AGENT_ID is set, the agent uses its registered org identity
+    for all channel operations (cursors, claims, DMs). This is the Phase 0
+    integration point for the org agent registry.
     """
+    # Phase 0: registered agent identity takes priority
+    registered_id = os.environ.get("SYNAPT_AGENT_ID")
+    if registered_id:
+        return registered_id
+
+    # Fallback: session-scoped hash (backward compat for manual sessions)
     key = str(project_data_dir(project_dir))
     if key not in _AGENT_ID_CACHE:
         gt = _resolve_griptree(project_dir)
