@@ -34,7 +34,7 @@ authors = [
 
 [project.urls]
 Homepage = "https://synapt.dev"
-Repository = "https://github.com/laynepenney/synapt"
+Repository = "https://github.com/laynepenney/recall"
 
 [project.optional-dependencies]
 hf = ["huggingface_hub>=0.20"]
