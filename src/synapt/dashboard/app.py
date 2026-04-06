@@ -77,7 +77,7 @@ def _render_agent_tile(agent: dict) -> str:
     channels = ", ".join(f"#{c}" for c in agent["channels"]) or "no channels"
     seen = agent["last_seen"][11:16] if len(agent["last_seen"]) > 16 else ""
     return (
-        f'<div class="tile" style="border-left:4px solid {color}">'
+        f'<div class="tile clickable" data-agent="{escape(name)}" style="border-left:4px solid {color}">'
         f'<div class="tile-name">{escape(name)}</div>'
         f'<div class="tile-role">{escape(role)}</div>'
         f'<div class="tile-meta">'

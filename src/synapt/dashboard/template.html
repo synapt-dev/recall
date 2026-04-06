@@ -159,6 +159,32 @@
     font-weight: 600;
   }
   #input-bar button:hover { opacity: 0.9; }
+  /* Agent input panel */
+  #agent-input-panel {
+    display: none;
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  #agent-input-panel.active { display: flex; gap: 8px; align-items: flex-end; }
+  #agent-input-panel .agent-target {
+    font-size: 12px; font-weight: 600; color: var(--accent);
+    white-space: nowrap; align-self: center;
+  }
+  #agent-input-panel input[type="text"] {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); padding: 8px 12px;
+    border-radius: 6px; font-family: inherit; font-size: 13px; outline: none;
+  }
+  #agent-input-panel input[type="text"]:focus { border-color: var(--accent); }
+  #agent-input-panel button {
+    background: var(--accent); color: white; border: none;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer;
+    font-family: inherit; font-size: 13px; font-weight: 600;
+  }
+  .tile.clickable { cursor: pointer; transition: border-color 0.15s; border: 1px solid transparent; }
+  .tile.clickable:hover { border-color: var(--accent); }
+  .tile.clickable.selected { border-color: var(--accent); background: rgba(139,92,246,0.08); }
 </style>
 </head>
 <body>
@@ -173,6 +199,12 @@
 <div id="sse-container" hx-ext="sse" sse-connect="/api/stream?channel=dev">
   <div id="agents" sse-swap="agents" hx-swap="innerHTML">
     <div class="tile empty">Loading agents...</div>
+  </div>
+
+  <div id="agent-input-panel">
+    <span class="agent-target" id="agent-target-label">→ agent</span>
+    <input type="text" id="agent-input-text" placeholder="Send input to agent..." autocomplete="off">
+    <button id="agent-input-send">Send to Agent</button>
   </div>
 
   <div id="feed" sse-swap="messages" hx-swap="beforeend">
@@ -291,6 +323,49 @@ const observer = new MutationObserver(() => {
   feed.scrollTop = feed.scrollHeight;
 });
 observer.observe(feed, { childList: true, subtree: true });
+
+// Agent input panel — click tile to select agent, send input via API
+let selectedAgent = null;
+const agentPanel = document.getElementById('agent-input-panel');
+const agentLabel = document.getElementById('agent-target-label');
+const agentInput = document.getElementById('agent-input-text');
+const agentSendBtn = document.getElementById('agent-input-send');
+
+document.getElementById('agents').addEventListener('click', function(e) {
+  const tile = e.target.closest('.tile');
+  if (!tile || tile.classList.contains('empty')) return;
+  const name = tile.dataset.agent;
+  if (!name) return;
+
+  // Toggle selection
+  document.querySelectorAll('.tile.selected').forEach(t => t.classList.remove('selected'));
+  if (selectedAgent === name) {
+    selectedAgent = null;
+    agentPanel.classList.remove('active');
+    return;
+  }
+  selectedAgent = name;
+  tile.classList.add('selected');
+  agentLabel.textContent = '→ ' + name;
+  agentPanel.classList.add('active');
+  agentInput.focus();
+});
+
+function sendAgentInput() {
+  if (!selectedAgent || !agentInput.value.trim()) return;
+  fetch('/api/agent/' + selectedAgent + '/input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ text: agentInput.value }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) agentInput.value = '';
+  });
+}
+
+agentSendBtn.addEventListener('click', sendAgentInput);
+agentInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); sendAgentInput(); }
+});
 </script>
 
 </body>
