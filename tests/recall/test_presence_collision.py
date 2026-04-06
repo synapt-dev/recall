@@ -25,11 +25,31 @@ from synapt.recall.channel import (
 
 
 def _patch_data_dir(tmpdir):
+    """Return a combined patcher for project_data_dir + disable global store."""
     data_dir = Path(tmpdir) / "project" / ".synapt" / "recall"
-    return patch(
+    patcher_data = patch(
         "synapt.recall.channel.project_data_dir",
         return_value=data_dir,
     )
+    patcher_manifest = patch(
+        "synapt.recall.channel._read_manifest_url",
+        return_value=None,
+    )
+
+    class _CombinedPatcher:
+        def start(self):
+            patcher_data.start()
+            patcher_manifest.start()
+        def stop(self):
+            patcher_manifest.stop()
+            patcher_data.stop()
+        def __enter__(self):
+            self.start()
+            return self
+        def __exit__(self, *args):
+            self.stop()
+
+    return _CombinedPatcher()
 
 
 class TestPresenceCollision(unittest.TestCase):
