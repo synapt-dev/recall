@@ -404,6 +404,34 @@ class TestAdversarialSpawn(unittest.TestCase):
         shutil.rmtree(tmpdir)
 
 
+class TestDashboardTemplateUI(unittest.TestCase):
+    """Verify the dashboard template has required UI elements."""
+
+    def test_template_has_agent_input_panel(self):
+        """Dashboard template contains agent input form (recall#544)."""
+        template_path = Path(__file__).parent.parent.parent / "src" / "synapt" / "dashboard" / "template.html"
+        content = template_path.read_text()
+        self.assertIn("agent-input-panel", content)
+        self.assertIn("agent-input-text", content)
+        self.assertIn("agent-input-send", content)
+        self.assertIn("/api/agent/", content)
+
+    def test_agent_tiles_are_clickable(self):
+        """Agent tile renderer adds clickable class and data-agent attribute."""
+        from synapt.dashboard.app import _render_agent_tile
+        tile_html = _render_agent_tile({
+            "status": "online",
+            "display_name": "Opus",
+            "griptree": "synapt-codex/recall",
+            "agent_id": "s_123",
+            "role": "CTO",
+            "channels": ["dev"],
+            "last_seen": "2026-04-06T17:00:00Z",
+        })
+        self.assertIn("clickable", tile_html)
+        self.assertIn('data-agent="Opus"', tile_html)
+
+
 @pytest.mark.integration
 class TestEndToEnd(unittest.TestCase):
     """End-to-end tests requiring real tmux.
