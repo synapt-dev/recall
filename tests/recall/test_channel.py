@@ -58,12 +58,37 @@ from synapt.recall.channel import (
 
 
 def _patch_data_dir(tmpdir):
-    """Return a patcher for project_data_dir targeting a temp directory."""
+    """Return a combined patcher for project_data_dir + disable global store.
+
+    Patches both project_data_dir (for local path resolution) and
+    _read_manifest_url (returns None to disable global channel store),
+    so tests use the local temp directory instead of the real gripspace.
+    """
     data_dir = Path(tmpdir) / "project" / ".synapt" / "recall"
-    return patch(
+    patcher_data = patch(
         "synapt.recall.channel.project_data_dir",
         return_value=data_dir,
     )
+    patcher_manifest = patch(
+        "synapt.recall.channel._read_manifest_url",
+        return_value=None,
+    )
+
+    class _CombinedPatcher:
+        """Manages two patchers as one."""
+        def start(self):
+            patcher_data.start()
+            patcher_manifest.start()
+        def stop(self):
+            patcher_manifest.stop()
+            patcher_data.stop()
+        def __enter__(self):
+            self.start()
+            return self
+        def __exit__(self, *args):
+            self.stop()
+
+    return _CombinedPatcher()
 
 
 class TestResolveGriptree(unittest.TestCase):
@@ -2727,9 +2752,15 @@ class TestSharedChannelsDir(unittest.TestCase):
             "synapt.recall.channel.project_data_dir",
             return_value=self._local_dir,
         )
+        self._patcher_manifest = patch(
+            "synapt.recall.channel._read_manifest_url",
+            return_value=None,
+        )
         self._patcher.start()
+        self._patcher_manifest.start()
 
     def tearDown(self):
+        self._patcher_manifest.stop()
         self._patcher.stop()
         shutil.rmtree(self._tmpdir)
 
