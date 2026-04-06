@@ -32,13 +32,30 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             role TEXT,
             org_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            last_seen_at TEXT
+            last_seen_at TEXT,
+            session_id TEXT,
+            pid INTEGER,
+            status TEXT,
+            tmux_target TEXT,
+            log_path TEXT
         )"""
     )
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_org_display
            ON org_agents(org_id, display_name)"""
     )
+    # Add process columns to existing tables (no-op if already present)
+    for col, typ in [
+        ("session_id", "TEXT"),
+        ("pid", "INTEGER"),
+        ("status", "TEXT"),
+        ("tmux_target", "TEXT"),
+        ("log_path", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE org_agents ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.commit()
 
 
@@ -186,3 +203,90 @@ def resolve_agent_id(org_id: str, db_path: Path | None = None) -> str | None:
     if env_id:
         return env_id
     return None
+
+
+# ---------------------------------------------------------------------------
+# Process tracking (recall#538)
+# ---------------------------------------------------------------------------
+
+def update_agent_status(
+    db_path: Path,
+    agent_id: str,
+    status: str,
+    session_id: str | None = None,
+    pid: int | None = None,
+    tmux_target: str | None = None,
+    log_path: str | None = None,
+) -> None:
+    """Update process tracking columns for an agent."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    _ensure_schema(conn)
+    try:
+        conn.execute(
+            "UPDATE org_agents SET status = ?, session_id = ?, pid = ?, "
+            "tmux_target = ?, log_path = ?, last_seen_at = datetime('now') "
+            "WHERE agent_id = ?",
+            (status, session_id, pid, tmux_target, log_path, agent_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_agent_status(db_path: Path, agent_id: str) -> dict[str, Any] | None:
+    """Return process tracking info for an agent."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    _ensure_schema(conn)
+    try:
+        row = conn.execute(
+            "SELECT agent_id, display_name, status, session_id, pid, "
+            "tmux_target, log_path FROM org_agents WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+    finally:
+        conn.close()
+
+
+def detect_crashed_agents(db_path: Path) -> list[dict[str, Any]]:
+    """Find agents with status='running' but dead PIDs."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    _ensure_schema(conn)
+    try:
+        rows = conn.execute(
+            "SELECT agent_id, pid, session_id FROM org_agents "
+            "WHERE status = 'running' AND pid IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    crashed = []
+    for row in rows:
+        pid = row["pid"]
+        try:
+            os.kill(pid, 0)  # Check if process exists
+        except (ProcessLookupError, PermissionError):
+            crashed.append(dict(row))
+    return crashed
+
+
+def clear_agent_session(db_path: Path, agent_id: str) -> None:
+    """Reset process columns while preserving agent identity."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    _ensure_schema(conn)
+    try:
+        conn.execute(
+            "UPDATE org_agents SET status = 'stopped', session_id = NULL, "
+            "pid = NULL, tmux_target = NULL, log_path = NULL "
+            "WHERE agent_id = ?",
+            (agent_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
