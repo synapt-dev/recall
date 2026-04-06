@@ -458,6 +458,80 @@ def create_app() -> FastAPI:
 
         return EventSourceResponse(generate())
 
+    # -----------------------------------------------------------------
+    # Mission Control: per-agent tmux integration (Sprint 9)
+    # -----------------------------------------------------------------
+
+    @app.post("/api/agent/{name}/input")
+    async def api_agent_input(name: str, text: str = Form("")):
+        """Send input to an agent's tmux pane via send-keys."""
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Input text required")
+        # Resolve tmux target from team.db or convention
+        target = f"{name}"  # Will be refined with session:window format
+        try:
+            result = subprocess.run(
+                ["tmux", "send-keys", "-t", target, text, "Enter"],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"tmux send-keys failed: {result.stderr.decode().strip()}",
+                )
+        except FileNotFoundError:
+            raise HTTPException(status_code=503, detail="tmux not available")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="tmux send-keys timed out")
+        return {"ok": True, "agent": name}
+
+    @app.get("/api/agent/{name}/output")
+    async def api_agent_output(request: Request, name: str, lines: int = 50):
+        """Stream agent output from pipe-pane log file via SSE."""
+        # Resolve log path from team.db or convention
+        log_dir = project_data_dir() / ".." / "logs" / name
+        log_path = log_dir / "output.log"
+
+        async def tail_log():
+            last_pos = 0
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    if log_path.exists():
+                        with open(log_path, "r") as f:
+                            f.seek(last_pos)
+                            new_content = f.read()
+                            if new_content:
+                                last_pos = f.tell()
+                                yield {
+                                    "event": "output",
+                                    "data": escape(new_content),
+                                }
+                    await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                return
+
+        return EventSourceResponse(tail_log())
+
+    @app.get("/api/agent/{name}/snapshot")
+    async def api_agent_snapshot(name: str, lines: int = 50):
+        """One-shot capture of agent's tmux pane content."""
+        target = f"{name}"
+        try:
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{lines}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return {"agent": name, "content": "", "error": "pane not found"}
+            return {"agent": name, "content": result.stdout}
+        except FileNotFoundError:
+            return {"agent": name, "content": "", "error": "tmux not available"}
+
     return app
 
 
