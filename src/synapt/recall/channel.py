@@ -2543,3 +2543,160 @@ def check_directives(
             display = _resolve_display_name_for(msg.from_agent, project_dir)
             lines.append(f"  #{ch} {display} is working on: {msg.body}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# URL parsing helpers for org/project resolution
+# ---------------------------------------------------------------------------
+
+def _extract_org_from_url(url: str) -> str:
+    """Extract GitHub org from a manifest URL.
+
+    Handles both SSH and HTTPS formats:
+    - git@github.com:synapt-dev/gripspace.git → synapt-dev
+    - https://github.com/synapt-dev/gripspace.git → synapt-dev
+    """
+    import re
+    # SSH: git@github.com:org/repo.git
+    m = re.search(r"[:/]([^/]+)/[^/]+?(?:\.git)?$", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _extract_repo_from_url(url: str) -> str:
+    """Extract repo name from a manifest URL.
+
+    Handles both SSH and HTTPS formats:
+    - git@github.com:synapt-dev/gripspace.git → gripspace
+    - https://github.com/synapt-dev/gripspace.git → gripspace
+    """
+    import re
+    m = re.search(r"/([^/]+?)(?:\.git)?$", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Channel migration: local → global store (Phase 1)
+# ---------------------------------------------------------------------------
+
+def migrate_channels_to_global(
+    local_dir: Path,
+    global_dir: Path,
+    org_id: str,
+    project_id: str,
+) -> None:
+    """Migrate channel data from local .synapt/recall/channels/ to global store.
+
+    Copies JSONL messages to ~/.synapt/channels/<org>/<project>/.
+    Migrates cursors from local channels.db to global _state.db.
+    Idempotent: skips messages that already exist in global store.
+    """
+    if not local_dir.exists():
+        return
+
+    target_dir = global_dir / org_id / project_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Migrate JSONL channel files
+    for jsonl_file in sorted(local_dir.glob("*.jsonl")):
+        channel_name = jsonl_file.stem
+        target_file = target_dir / jsonl_file.name
+
+        # Read local messages
+        local_messages = []
+        with open(jsonl_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        local_messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+        if not local_messages:
+            continue
+
+        # Read existing global messages (for partial migration / idempotency)
+        existing_timestamps: set[str] = set()
+        if target_file.exists():
+            with open(target_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            msg = json.loads(line)
+                            # Use timestamp + from_agent + body as dedup key
+                            key = f"{msg.get('timestamp', '')}\t{msg.get('from_agent', '')}\t{msg.get('body', '')}"
+                            existing_timestamps.add(key)
+                        except json.JSONDecodeError:
+                            continue
+
+        # Append only new messages
+        new_messages = []
+        for msg in local_messages:
+            key = f"{msg.get('timestamp', '')}\t{msg.get('from_agent', '')}\t{msg.get('body', '')}"
+            if key not in existing_timestamps:
+                new_messages.append(msg)
+
+        if new_messages:
+            with open(target_file, "a", encoding="utf-8") as f:
+                for msg in new_messages:
+                    f.write(json.dumps(msg) + "\n")
+
+    # Migrate cursors from local channels.db to global _state.db
+    local_db = local_dir / "channels.db"
+    if local_db.exists():
+        _migrate_cursors(local_db, global_dir, org_id, project_id)
+
+
+def _migrate_cursors(
+    local_db: Path,
+    global_dir: Path,
+    org_id: str,
+    project_id: str,
+) -> None:
+    """Migrate cursor data from local channels.db to global _state.db."""
+    state_db = global_dir / "_state.db"
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read local cursors
+    local_conn = sqlite3.connect(str(local_db))
+    local_conn.row_factory = sqlite3.Row
+    try:
+        rows = local_conn.execute(
+            "SELECT agent_id, channel, last_read_at FROM cursors"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        local_conn.close()
+
+    if not rows:
+        return
+
+    # Write to global _state.db
+    conn = sqlite3.connect(str(state_db))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cursors ("
+        "agent_id TEXT NOT NULL, "
+        "org_id TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, "
+        "channel TEXT NOT NULL, "
+        "cursor_value TEXT NOT NULL, "
+        "last_read_at TEXT NOT NULL, "
+        "PRIMARY KEY (agent_id, org_id, project_id, channel))"
+    )
+    for row in rows:
+        conn.execute(
+            "INSERT OR REPLACE INTO cursors "
+            "(agent_id, org_id, project_id, channel, cursor_value, last_read_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (row["agent_id"], org_id, project_id, row["channel"],
+             row["last_read_at"], row["last_read_at"]),
+        )
+    conn.commit()
+    conn.close()
