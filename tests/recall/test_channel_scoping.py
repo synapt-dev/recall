@@ -168,13 +168,19 @@ class TestOrgAgentRegistry(unittest.TestCase):
             register_agent("synapt-dev", "Atlas", db_path=self._db_path)
 
     def test_same_display_name_different_orgs(self):
-        """'Atlas' in synapt-dev AND 'Atlas' in mem0-org → both succeed."""
+        """'Atlas' in synapt-dev AND 'Atlas' in mem0-org → both succeed.
+
+        Agent IDs are per-org (each org has its own team.db), so both
+        may be 'atlas-001'. The guarantee is both registrations succeed
+        without IntegrityError — uniqueness is per-org, not global.
+        """
         db_mem0 = Path(self._tmpdir) / "orgs" / "mem0-org" / "team.db"
         _create_team_db(db_mem0, "mem0-org")
 
         a1 = register_agent("synapt-dev", "Atlas", db_path=self._db_path)
         a2 = register_agent("mem0-org", "Atlas", db_path=db_mem0)
-        self.assertNotEqual(a1, a2)
+        self.assertIsNotNone(a1)
+        self.assertIsNotNone(a2)
 
     def test_agent_id_permanent_after_rename(self):
         """Register agent, change display_name, verify agent_id unchanged."""
