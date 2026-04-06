@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from synapt.recall.core import project_data_dir, _worktree_name
+from synapt.recall.core import project_data_dir, _worktree_name, _find_gripspace_root
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,99 @@ _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on joi
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
+
+
+def _read_manifest_url(project_dir: Path | None = None) -> str | None:
+    """Read the manifest URL from gripspace.yml, or None if not in a gripspace."""
+    root = _find_gripspace_root(project_dir or Path.cwd())
+    if root is None:
+        return None
+    manifest_path = root / ".gitgrip" / "spaces" / "main" / "gripspace.yml"
+    if not manifest_path.exists():
+        return None
+    try:
+        # Lightweight YAML parse — just find the manifest url line
+        with open(manifest_path, encoding="utf-8") as f:
+            in_manifest = False
+            for line in f:
+                stripped = line.strip()
+                if stripped == "manifest:":
+                    in_manifest = True
+                    continue
+                if in_manifest and stripped.startswith("url:"):
+                    return stripped.split(":", 1)[1].strip()
+                if in_manifest and not line.startswith(" ") and not line.startswith("\t"):
+                    break  # Left the manifest section
+    except OSError:
+        pass
+    return None
+
+
+def _extract_org_from_url(url: str) -> str | None:
+    """Extract the GitHub org from a git URL.
+
+    git@github.com:synapt-dev/gripspace.git → 'synapt-dev'
+    https://github.com/synapt-dev/gripspace.git → 'synapt-dev'
+    """
+    if ":" in url and "@" in url:
+        # SSH format: git@github.com:org/repo.git
+        path_part = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        # HTTPS format
+        path_part = url.split("github.com/", 1)[1]
+    else:
+        return None
+    parts = path_part.strip("/").split("/")
+    return parts[0] if parts else None
+
+
+def _extract_repo_from_url(url: str) -> str | None:
+    """Extract the repo slug from a git URL (without .git suffix).
+
+    git@github.com:synapt-dev/gripspace.git → 'gripspace'
+    """
+    if ":" in url and "@" in url:
+        path_part = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        path_part = url.split("github.com/", 1)[1]
+    else:
+        return None
+    parts = path_part.strip("/").split("/")
+    if len(parts) >= 2:
+        repo = parts[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        return repo
+    return None
+
+
+def _resolve_org_id(project_dir: Path | None = None) -> str | None:
+    """Derive org_id from the gripspace manifest URL's GitHub org."""
+    url = _read_manifest_url(project_dir)
+    if url:
+        return _extract_org_from_url(url)
+    return None
+
+
+def _resolve_project_id(project_dir: Path | None = None) -> str | None:
+    """Derive project_id from the gripspace manifest URL's repo name."""
+    url = _read_manifest_url(project_dir)
+    if url:
+        return _extract_repo_from_url(url)
+    return None
+
+
+def _global_channels_dir(project_dir: Path | None = None) -> Path | None:
+    """Return the global channel store path if inside a gripspace.
+
+    Routes to ~/.synapt/channels/<org_id>/<project_id>/.
+    Returns None if org/project can't be resolved.
+    """
+    org = _resolve_org_id(project_dir)
+    project = _resolve_project_id(project_dir)
+    if org and project:
+        return Path.home() / ".synapt" / "channels" / org / project
+    return None
 
 
 def _shared_channels_dir() -> Path | None:
@@ -66,10 +159,22 @@ def _local_channels_dir(project_dir: Path | None = None) -> Path:
 def _channels_dir(project_dir: Path | None = None) -> Path:
     """Return the channels directory for JSONL logs and attachments.
 
-    Uses SYNAPT_SHARED_CHANNELS_DIR if set, otherwise falls back to the
-    local per-gripspace directory.
+    Three-tier resolution:
+    1. SYNAPT_SHARED_CHANNELS_DIR env var (explicit override, backward compat)
+    2. Global store ~/.synapt/channels/<org>/<project>/ (if in a gripspace)
+    3. Local per-gripspace directory (fallback for non-gripspace repos)
     """
-    return _shared_channels_dir() or _local_channels_dir(project_dir)
+    # Tier 1: explicit env var override
+    shared = _shared_channels_dir()
+    if shared:
+        return shared
+    # Tier 2: global store from manifest URL
+    global_dir = _global_channels_dir(project_dir)
+    if global_dir:
+        global_dir.mkdir(parents=True, exist_ok=True)
+        return global_dir
+    # Tier 3: local fallback
+    return _local_channels_dir(project_dir)
 
 
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
@@ -104,16 +209,22 @@ _AGENT_ID_CACHE: dict[str, str] = {}
 
 
 def _agent_id(project_dir: Path | None = None) -> str:
-    """Return a stable session-scoped agent ID (s_xxxxxxxx).
+    """Return the agent's stable identity.
 
-    Stable across MCP server restarts within the same Claude Code session,
-    but unique per concurrent session in the same worktree.
+    Resolution order:
+    1. SYNAPT_AGENT_ID env var (set by gr spawn) — stable, org-registered
+    2. Session-scoped hash (s_xxxxxxxx) — fallback for manual/unregistered sessions
 
-    The seed is (griptree, data_dir, PPID) where PPID is the parent
-    process ID (Claude Code's PID). This stays stable when the MCP server
-    restarts (same parent), but differs between concurrent Claude Code
-    sessions (different parents).
+    When SYNAPT_AGENT_ID is set, the agent uses its registered org identity
+    for all channel operations (cursors, claims, DMs). This is the Phase 0
+    integration point for the org agent registry.
     """
+    # Phase 0: registered agent identity takes priority
+    registered_id = os.environ.get("SYNAPT_AGENT_ID")
+    if registered_id:
+        return registered_id
+
+    # Fallback: session-scoped hash (backward compat for manual sessions)
     key = str(project_data_dir(project_dir))
     if key not in _AGENT_ID_CACHE:
         gt = _resolve_griptree(project_dir)
@@ -2543,3 +2654,268 @@ def check_directives(
             display = _resolve_display_name_for(msg.from_agent, project_dir)
             lines.append(f"  #{ch} {display} is working on: {msg.body}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# URL parsing helpers for org/project resolution
+# ---------------------------------------------------------------------------
+
+def _extract_org_from_url(url: str) -> str:
+    """Extract GitHub org from a manifest URL.
+
+    Handles both SSH and HTTPS formats:
+    - git@github.com:synapt-dev/gripspace.git → synapt-dev
+    - https://github.com/synapt-dev/gripspace.git → synapt-dev
+    """
+    import re
+    # SSH: git@github.com:org/repo.git
+    m = re.search(r"[:/]([^/]+)/[^/]+?(?:\.git)?$", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _extract_repo_from_url(url: str) -> str:
+    """Extract repo name from a manifest URL.
+
+    Handles both SSH and HTTPS formats:
+    - git@github.com:synapt-dev/gripspace.git → gripspace
+    - https://github.com/synapt-dev/gripspace.git → gripspace
+    """
+    import re
+    m = re.search(r"/([^/]+?)(?:\.git)?$", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Channel migration: local → global store (Phase 1)
+# ---------------------------------------------------------------------------
+
+def migrate_channels_to_global(
+    local_dir: Path,
+    global_dir: Path,
+    org_id: str,
+    project_id: str,
+) -> None:
+    """Migrate channel data from local .synapt/recall/channels/ to global store.
+
+    Copies JSONL messages to ~/.synapt/channels/<org>/<project>/.
+    Migrates cursors from local channels.db to global _state.db.
+    Idempotent: skips messages that already exist in global store.
+    """
+    if not local_dir.exists():
+        return
+
+    target_dir = global_dir / org_id / project_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Migrate JSONL channel files
+    for jsonl_file in sorted(local_dir.glob("*.jsonl")):
+        channel_name = jsonl_file.stem
+        target_file = target_dir / jsonl_file.name
+
+        # Read local messages
+        local_messages = []
+        with open(jsonl_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        local_messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+        if not local_messages:
+            continue
+
+        # Read existing global messages (for partial migration / idempotency)
+        existing_timestamps: set[str] = set()
+        if target_file.exists():
+            with open(target_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            msg = json.loads(line)
+                            # Use timestamp + from_agent + body as dedup key
+                            key = f"{msg.get('timestamp', '')}\t{msg.get('from_agent', '')}\t{msg.get('body', '')}"
+                            existing_timestamps.add(key)
+                        except json.JSONDecodeError:
+                            continue
+
+        # Append only new messages
+        new_messages = []
+        for msg in local_messages:
+            key = f"{msg.get('timestamp', '')}\t{msg.get('from_agent', '')}\t{msg.get('body', '')}"
+            if key not in existing_timestamps:
+                new_messages.append(msg)
+
+        if new_messages:
+            with open(target_file, "a", encoding="utf-8") as f:
+                for msg in new_messages:
+                    f.write(json.dumps(msg) + "\n")
+
+    # Migrate cursors from local channels.db to global _state.db
+    local_db = local_dir / "channels.db"
+    if local_db.exists():
+        _migrate_cursors(local_db, global_dir, org_id, project_id)
+
+
+def _migrate_cursors(
+    local_db: Path,
+    global_dir: Path,
+    org_id: str,
+    project_id: str,
+) -> None:
+    """Migrate cursor data from local channels.db to global _state.db."""
+    state_db = global_dir / "_state.db"
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read local cursors
+    local_conn = sqlite3.connect(str(local_db))
+    local_conn.row_factory = sqlite3.Row
+    try:
+        rows = local_conn.execute(
+            "SELECT agent_id, channel, last_read_at FROM cursors"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        local_conn.close()
+
+    if not rows:
+        return
+
+    # Write to global _state.db
+    conn = sqlite3.connect(str(state_db))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cursors ("
+        "agent_id TEXT NOT NULL, "
+        "org_id TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, "
+        "channel TEXT NOT NULL, "
+        "cursor_value TEXT NOT NULL, "
+        "last_read_at TEXT NOT NULL, "
+        "PRIMARY KEY (agent_id, org_id, project_id, channel))"
+    )
+    for row in rows:
+        conn.execute(
+            "INSERT OR REPLACE INTO cursors "
+            "(agent_id, org_id, project_id, channel, cursor_value, last_read_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (row["agent_id"], org_id, project_id, row["channel"],
+             row["last_read_at"], row["last_read_at"]),
+        )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Global claims in _state.db (Story #12)
+# ---------------------------------------------------------------------------
+
+def _open_state_db(state_db: Path) -> sqlite3.Connection:
+    """Open or create the global _state.db with WAL mode."""
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(state_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS claims ("
+        "org_id TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, "
+        "channel TEXT NOT NULL, "
+        "message_id TEXT NOT NULL, "
+        "claimed_by TEXT NOT NULL, "
+        "display_name TEXT NOT NULL, "
+        "claimed_at TEXT NOT NULL, "
+        "PRIMARY KEY (org_id, project_id, channel, message_id))"
+    )
+    # Ensure cursors table exists too
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cursors ("
+        "agent_id TEXT NOT NULL, "
+        "org_id TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, "
+        "channel TEXT NOT NULL, "
+        "cursor_value TEXT NOT NULL, "
+        "last_read_at TEXT NOT NULL, "
+        "PRIMARY KEY (agent_id, org_id, project_id, channel))"
+    )
+    return conn
+
+
+def global_claim(
+    state_db: Path,
+    org_id: str,
+    project_id: str,
+    channel: str,
+    message_id: str,
+    claimed_by: str,
+    display_name: str,
+) -> bool:
+    """Claim a message in global _state.db. First writer wins.
+
+    Returns True if the claim succeeded, False if already claimed.
+    """
+    conn = _open_state_db(state_db)
+    try:
+        now = _now_iso()
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO claims "
+            "(org_id, project_id, channel, message_id, claimed_by, display_name, claimed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (org_id, project_id, channel, message_id, claimed_by, display_name, now),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def global_unclaim(
+    state_db: Path,
+    org_id: str,
+    project_id: str,
+    channel: str,
+    message_id: str,
+    claimed_by: str,
+) -> bool:
+    """Unclaim a message. Only the original claimer can unclaim.
+
+    Returns True if unclaimed, False if not the claimer or not claimed.
+    """
+    conn = _open_state_db(state_db)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM claims WHERE org_id = ? AND project_id = ? "
+            "AND channel = ? AND message_id = ? AND claimed_by = ?",
+            (org_id, project_id, channel, message_id, claimed_by),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def is_globally_claimed(
+    state_db: Path,
+    org_id: str,
+    project_id: str,
+    channel: str,
+    message_id: str,
+) -> str | None:
+    """Check if a message is claimed. Returns claimer agent_id or None."""
+    conn = _open_state_db(state_db)
+    try:
+        row = conn.execute(
+            "SELECT claimed_by FROM claims WHERE org_id = ? AND project_id = ? "
+            "AND channel = ? AND message_id = ?",
+            (org_id, project_id, channel, message_id),
+        ).fetchone()
+        return row["claimed_by"] if row else None
+    finally:
+        conn.close()
