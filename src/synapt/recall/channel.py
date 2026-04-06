@@ -8,6 +8,11 @@ Any process that can append/read files can participate -- no daemon required.
 External agents that cannot use SQLite can still write JSONL lines directly;
 the SQLite layer is used by agents that import this module.
 
+Cross-gripspace sharing:
+  Set SYNAPT_SHARED_CHANNELS_DIR to a directory accessible by all gripspaces.
+  Channel JSONL logs and attachments use the shared dir; presence/cursor state
+  (channels.db) stays local per gripspace to avoid cross-contamination.
+
 Agent identity: every agent has three layers, but only `id` is passed around.
   - id:           session hash (s_xxxxxxxx), primary key everywhere
   - griptree:     auto-detected (gripspace/repo), stored on join
@@ -45,9 +50,26 @@ _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on joi
 # ---------------------------------------------------------------------------
 
 
-def _channels_dir(project_dir: Path | None = None) -> Path:
-    """Return the shared channels directory: <data>/.synapt/recall/channels/."""
+def _shared_channels_dir() -> Path | None:
+    """Return the shared channels directory from env var, or None."""
+    shared = os.environ.get("SYNAPT_SHARED_CHANNELS_DIR")
+    if shared:
+        return Path(shared)
+    return None
+
+
+def _local_channels_dir(project_dir: Path | None = None) -> Path:
+    """Return the local (per-gripspace) channels directory."""
     return project_data_dir(project_dir) / "channels"
+
+
+def _channels_dir(project_dir: Path | None = None) -> Path:
+    """Return the channels directory for JSONL logs and attachments.
+
+    Uses SYNAPT_SHARED_CHANNELS_DIR if set, otherwise falls back to the
+    local per-gripspace directory.
+    """
+    return _shared_channels_dir() or _local_channels_dir(project_dir)
 
 
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
@@ -56,13 +78,17 @@ def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
 
 
 def _db_path(project_dir: Path | None = None) -> Path:
-    """Return the SQLite database path for channel state."""
-    return _channels_dir(project_dir) / "channels.db"
+    """Return the SQLite database path for channel state.
+
+    Always uses the local directory — presence, cursors, pins, and mutes
+    are per-gripspace even when channels are shared.
+    """
+    return _local_channels_dir(project_dir) / "channels.db"
 
 
 def _presence_path(project_dir: Path | None = None) -> Path:
     """Return the legacy presence JSON file path (for migration)."""
-    return _channels_dir(project_dir) / "_presence.json"
+    return _local_channels_dir(project_dir) / "_presence.json"
 
 
 def _attachments_dir(project_dir: Path | None = None) -> Path:
