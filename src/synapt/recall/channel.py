@@ -2700,3 +2700,111 @@ def _migrate_cursors(
         )
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Global claims in _state.db (Story #12)
+# ---------------------------------------------------------------------------
+
+def _open_state_db(state_db: Path) -> sqlite3.Connection:
+    """Open or create the global _state.db with WAL mode."""
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(state_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS claims ("
+        "org_id TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, "
+        "channel TEXT NOT NULL, "
+        "message_id TEXT NOT NULL, "
+        "claimed_by TEXT NOT NULL, "
+        "display_name TEXT NOT NULL, "
+        "claimed_at TEXT NOT NULL, "
+        "PRIMARY KEY (org_id, project_id, channel, message_id))"
+    )
+    # Ensure cursors table exists too
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cursors ("
+        "agent_id TEXT NOT NULL, "
+        "org_id TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, "
+        "channel TEXT NOT NULL, "
+        "cursor_value TEXT NOT NULL, "
+        "last_read_at TEXT NOT NULL, "
+        "PRIMARY KEY (agent_id, org_id, project_id, channel))"
+    )
+    return conn
+
+
+def global_claim(
+    state_db: Path,
+    org_id: str,
+    project_id: str,
+    channel: str,
+    message_id: str,
+    claimed_by: str,
+    display_name: str,
+) -> bool:
+    """Claim a message in global _state.db. First writer wins.
+
+    Returns True if the claim succeeded, False if already claimed.
+    """
+    conn = _open_state_db(state_db)
+    try:
+        now = _now_iso()
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO claims "
+            "(org_id, project_id, channel, message_id, claimed_by, display_name, claimed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (org_id, project_id, channel, message_id, claimed_by, display_name, now),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def global_unclaim(
+    state_db: Path,
+    org_id: str,
+    project_id: str,
+    channel: str,
+    message_id: str,
+    claimed_by: str,
+) -> bool:
+    """Unclaim a message. Only the original claimer can unclaim.
+
+    Returns True if unclaimed, False if not the claimer or not claimed.
+    """
+    conn = _open_state_db(state_db)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM claims WHERE org_id = ? AND project_id = ? "
+            "AND channel = ? AND message_id = ? AND claimed_by = ?",
+            (org_id, project_id, channel, message_id, claimed_by),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def is_globally_claimed(
+    state_db: Path,
+    org_id: str,
+    project_id: str,
+    channel: str,
+    message_id: str,
+) -> str | None:
+    """Check if a message is claimed. Returns claimer agent_id or None."""
+    conn = _open_state_db(state_db)
+    try:
+        row = conn.execute(
+            "SELECT claimed_by FROM claims WHERE org_id = ? AND project_id = ? "
+            "AND channel = ? AND message_id = ?",
+            (org_id, project_id, channel, message_id),
+        ).fetchone()
+        return row["claimed_by"] if row else None
+    finally:
+        conn.close()
