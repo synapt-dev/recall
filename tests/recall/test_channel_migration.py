@@ -302,16 +302,12 @@ class TestChannelMigration(unittest.TestCase):
         """Migration handles 5K+ messages without data loss."""
         messages = [
             _make_message(
-                f"2026-01-01T{h:02d}:{m:02d}:00Z",
+                f"2026-{(i // 1440) + 1:02d}-{((i % 1440) // 60) + 1:02d}T{(i % 60):02d}:{(i // 60 % 60):02d}:{i % 60:02d}Z",
                 f"agent-{i % 5}",
                 f"Message {i}",
             )
-            for i, (h, m) in enumerate(
-                [(h, m) for h in range(24) for m in range(60)][:5000]
-            )
+            for i in range(5000)
         ]
-        # Only take first 5000
-        messages = messages[:5000]
         _setup_local_channels(self.local_dir, messages)
 
         migrate = self._import_migrate()
