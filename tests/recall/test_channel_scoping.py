@@ -487,11 +487,12 @@ class TestMigration(unittest.TestCase):
 
 
 class TestDmPrivacy(unittest.TestCase):
-    """Tests for DM privacy across orgs.
+    """Tests for DM privacy across orgs (directory-level validation).
 
     Bug found in multi-org adversarial scenario: org-agnostic DMs would
     leak messages between identically-named agents in different orgs.
-    Fix: DMs namespaced by org.
+    Fix: DMs namespaced by org. These tests validate the directory design;
+    full DM API tests will be added in Phase 3.
     """
 
     def setUp(self):
