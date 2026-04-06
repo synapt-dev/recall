@@ -1,6 +1,8 @@
 """Tests for synapt.recall.channel -- cross-worktree agent communication."""
 
 import json
+import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -13,6 +15,8 @@ from synapt.recall.channel import (
     ChannelMessage,
     _channel_path,
     _channels_dir,
+    _local_channels_dir,
+    _shared_channels_dir,
     _db_path,
     _open_db,
     _read_messages,
@@ -2708,6 +2712,90 @@ class TestStatusBoard(unittest.TestCase):
         conn.close()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["body"], "v1")
+
+
+class TestSharedChannelsDir(unittest.TestCase):
+    """Test cross-gripspace shared channel directory support."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._shared_dir = Path(self._tmpdir) / "shared_channels"
+        self._shared_dir.mkdir()
+        self._local_dir = Path(self._tmpdir) / "local" / ".synapt" / "recall"
+        self._local_dir.mkdir(parents=True)
+        self._patcher = patch(
+            "synapt.recall.channel.project_data_dir",
+            return_value=self._local_dir,
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self._tmpdir)
+
+    def test_channels_dir_defaults_to_local(self):
+        """Without env var, _channels_dir returns local path."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SYNAPT_SHARED_CHANNELS_DIR", None)
+            result = _channels_dir()
+        self.assertEqual(result, self._local_dir / "channels")
+
+    def test_channels_dir_uses_shared_when_set(self):
+        """With SYNAPT_SHARED_CHANNELS_DIR, _channels_dir returns shared path."""
+        with patch.dict(os.environ, {"SYNAPT_SHARED_CHANNELS_DIR": str(self._shared_dir)}):
+            result = _channels_dir()
+        self.assertEqual(result, self._shared_dir)
+
+    def test_db_path_always_local(self):
+        """channels.db stays local even when shared dir is set."""
+        with patch.dict(os.environ, {"SYNAPT_SHARED_CHANNELS_DIR": str(self._shared_dir)}):
+            result = _db_path()
+        self.assertEqual(result, self._local_dir / "channels" / "channels.db")
+
+    def test_channel_path_uses_shared(self):
+        """JSONL log paths use the shared directory."""
+        with patch.dict(os.environ, {"SYNAPT_SHARED_CHANNELS_DIR": str(self._shared_dir)}):
+            result = _channel_path("dev")
+        self.assertEqual(result, self._shared_dir / "dev.jsonl")
+
+    def test_post_and_read_across_gripspaces(self):
+        """Two gripspaces sharing a dir can see each other's messages."""
+        local_a = Path(self._tmpdir) / "grip_a" / ".synapt" / "recall"
+        local_b = Path(self._tmpdir) / "grip_b" / ".synapt" / "recall"
+        local_a.mkdir(parents=True)
+        local_b.mkdir(parents=True)
+
+        with patch.dict(os.environ, {"SYNAPT_SHARED_CHANNELS_DIR": str(self._shared_dir)}):
+            # Gripspace A posts
+            with patch("synapt.recall.channel.project_data_dir", return_value=local_a):
+                channel_join("dev", agent_name="s_agent_a", display_name="AgentA")
+                channel_post("dev", "hello from A", agent_name="s_agent_a")
+
+            # Gripspace B reads
+            with patch("synapt.recall.channel.project_data_dir", return_value=local_b):
+                channel_join("dev", agent_name="s_agent_b", display_name="AgentB")
+                result = channel_read("dev", agent_name="s_agent_b", limit=10)
+
+        self.assertIn("hello from A", result)
+
+    def test_presence_stays_local(self):
+        """Each gripspace has its own presence state."""
+        local_a = Path(self._tmpdir) / "grip_a" / ".synapt" / "recall"
+        local_b = Path(self._tmpdir) / "grip_b" / ".synapt" / "recall"
+        local_a.mkdir(parents=True)
+        local_b.mkdir(parents=True)
+
+        with patch.dict(os.environ, {"SYNAPT_SHARED_CHANNELS_DIR": str(self._shared_dir)}):
+            with patch("synapt.recall.channel.project_data_dir", return_value=local_a):
+                channel_join("dev", agent_name="s_agent_a", display_name="AgentA")
+
+            # Gripspace B's DB should not see agent A's join
+            db_b = local_b / "channels" / "channels.db"
+            self.assertFalse(db_b.exists())
+
+            # But gripspace A's DB has the join
+            db_a = local_a / "channels" / "channels.db"
+            self.assertTrue(db_a.exists())
 
 
 if __name__ == "__main__":
