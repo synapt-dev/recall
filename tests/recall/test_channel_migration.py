@@ -325,6 +325,59 @@ class TestChannelMigration(unittest.TestCase):
         result = _read_messages(self._target_dir() / "dev.jsonl")
         self.assertEqual(len(result), 5000)
 
+    def test_migration_derives_org_project_from_manifest(self):
+        """Org and project should be parsed from gripspace manifest URL."""
+        from synapt.recall.channel import _extract_org_from_url, _extract_repo_from_url
+
+        # SSH format
+        self.assertEqual(
+            _extract_org_from_url("git@github.com:synapt-dev/gripspace.git"),
+            "synapt-dev",
+        )
+        self.assertEqual(
+            _extract_repo_from_url("git@github.com:synapt-dev/gripspace.git"),
+            "gripspace",
+        )
+        # HTTPS format
+        self.assertEqual(
+            _extract_org_from_url("https://github.com/synapt-dev/gripspace.git"),
+            "synapt-dev",
+        )
+        self.assertEqual(
+            _extract_repo_from_url("https://github.com/synapt-dev/gripspace.git"),
+            "gripspace",
+        )
+
+    def test_migration_skips_already_migrated(self):
+        """Partial migration: only append messages newer than what's already in global store."""
+        # Pre-existing messages in global store
+        existing = [
+            _make_message("2026-04-01T10:00:00Z", "a", "already migrated"),
+        ]
+        _write_messages(self._target_dir() / "dev.jsonl", existing)
+
+        # Local store has the old message + a new one
+        local_msgs = [
+            _make_message("2026-04-01T10:00:00Z", "a", "already migrated"),
+            _make_message("2026-04-02T10:00:00Z", "b", "new message"),
+        ]
+        _setup_local_channels(self.local_dir, local_msgs)
+
+        migrate = self._import_migrate()
+        migrate(
+            local_dir=self.local_dir,
+            global_dir=self.global_dir,
+            org_id=self.org_id,
+            project_id=self.project_id,
+        )
+
+        result = _read_messages(self._target_dir() / "dev.jsonl")
+        # Should have 2 messages total, not 3 (no duplicate of "already migrated")
+        self.assertEqual(len(result), 2)
+        bodies = [m["body"] for m in result]
+        self.assertIn("already migrated", bodies)
+        self.assertIn("new message", bodies)
+
 
 if __name__ == "__main__":
     unittest.main()
