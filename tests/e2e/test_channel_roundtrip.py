@@ -42,9 +42,17 @@ class GripspaceFixture:
         self.data_dir.mkdir(parents=True)
 
     def patch_data_dir(self):
+        """Patch both data_dir and manifest URL to isolate from global store."""
         return patch(
             "synapt.recall.channel.project_data_dir",
             return_value=self.data_dir,
+        )
+
+    def patch_manifest(self):
+        """Prevent global channel store routing — keep tests local."""
+        return patch(
+            "synapt.recall.channel._read_manifest_url",
+            return_value=None,
         )
 
     def set_agent(self, agent_id: str):
@@ -63,10 +71,13 @@ class TestChannelRoundtrip(unittest.TestCase):
     def setUp(self):
         self.fixture = GripspaceFixture()
         self._patcher = self.fixture.patch_data_dir()
+        self._manifest_patcher = self.fixture.patch_manifest()
         self._patcher.start()
+        self._manifest_patcher.start()
 
     def tearDown(self):
         self.fixture.clear_agent()
+        self._manifest_patcher.stop()
         self._patcher.stop()
 
     def test_two_agents_post_and_read(self):
