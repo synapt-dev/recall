@@ -1254,14 +1254,28 @@ def channel_join(
                     f"({conflict['agent_id']}). Choose a different name."
                 )
 
-        # Upsert presence with identity
-        conn.execute(
-            "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
-            "VALUES (?, ?, ?, ?, 'online', ?, ?) "
-            "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
-            "griptree=?, display_name=?, role=?",
-            (aid, griptree, display, role, now, now, now, griptree, display, role),
-        )
+        # Upsert presence with identity.
+        # Role escalation: never downgrade human → agent. A human session
+        # that shares an agent_id with an agent (same griptree) keeps the
+        # human role and display name. Fixes recall#546.
+        existing = conn.execute(
+            "SELECT role, display_name FROM presence WHERE agent_id = ?",
+            (aid,),
+        ).fetchone()
+        if existing and existing["role"] == "human" and role != "human":
+            # Agent joining with a human's agent_id — preserve human identity
+            conn.execute(
+                "UPDATE presence SET status='online', last_seen=? WHERE agent_id=?",
+                (now, aid),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                "VALUES (?, ?, ?, ?, 'online', ?, ?) "
+                "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
+                "griptree=?, display_name=?, role=?",
+                (aid, griptree, display, role, now, now, now, griptree, display, role),
+            )
 
         # Add membership
         conn.execute(
