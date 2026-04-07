@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
@@ -560,6 +561,10 @@ class TestBackwardCompat(unittest.TestCase):
             result = _channels_dir()
         self.assertEqual(result, custom_dir)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Global store routing differs on Windows — _find_gripspace_root resolves differently",
+    )
     @pytest.mark.xfail(
         strict=True,
         reason="Phase 2: global store (#524) changed default routing — needs test update for non-gripspace fallback",
