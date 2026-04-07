@@ -254,5 +254,102 @@ class TestMigrateInPlace(unittest.TestCase):
         self.assertIn("conversa-dev", result.stdout)
 
 
+    def test_conversa_layout(self):
+        """Simulate actual Conversa migration: main + 3 agent worktrees.
+
+        Conversa structure:
+          ~/conversa/         (Anchor, main worktree)
+          ~/conversa-ui/      (UI agent)
+          ~/conversa-codex/   (Codex agent)
+          ~/conversa-dev/     (Dev agent)
+
+        After migration:
+          ~/conversa/                    (gripspace root)
+          ~/conversa/conversa-app/       (repo, moved down)
+          ~/conversa-ui/conversa-app/    (NOT migrated — griptree repo checkout)
+        """
+        # Setup exact Conversa layout
+        main = self._base / "conversa"
+        main.mkdir()
+        _run(["git", "init", "-b", "main"], cwd=main)
+        _run(["git", "config", "user.email", "t@t.com"], cwd=main)
+        _run(["git", "config", "user.name", "T"], cwd=main)
+        _run(["git", "remote", "add", "origin", "git@github.com:GetConversa/conversa-app.git"], cwd=main)
+        (main / "src").mkdir()
+        (main / "src" / "app.py").write_text("# Conversa app\n")
+        (main / "package.json").write_text('{"name": "conversa"}\n')
+        _run(["git", "add", "."], cwd=main)
+        _run(["git", "commit", "-m", "Conversa initial"], cwd=main)
+
+        # Create .synapt/recall data (pre-existing)
+        recall_dir = main / ".synapt" / "recall"
+        recall_dir.mkdir(parents=True)
+        (recall_dir / "channels").mkdir()
+        (recall_dir / "channels" / "dev.jsonl").write_text('{"body":"pre-migration msg"}\n')
+
+        # Create agent worktrees
+        agents = {}
+        for name in ["conversa-ui", "conversa-codex", "conversa-dev"]:
+            wt = self._base / name
+            _run(["git", "worktree", "add", str(wt), "-b", f"agent-{name}"], cwd=main)
+            agents[name] = wt
+
+        # Migrate main worktree
+        child = _migrate_in_place(main)
+
+        # Verify: child repo is conversa-app (from remote URL)
+        self.assertEqual(child.name, "conversa-app")
+        self.assertTrue((child / "src" / "app.py").exists())
+
+        # Verify: all agent worktrees work
+        for name, wt in agents.items():
+            result = _run(["git", "status"], cwd=wt)
+            self.assertIn("On branch", result.stdout)
+
+        # Verify: .synapt stayed at gripspace root
+        self.assertTrue((main / ".synapt" / "recall" / "channels" / "dev.jsonl").exists())
+        self.assertEqual(
+            (main / ".synapt" / "recall" / "channels" / "dev.jsonl").read_text(),
+            '{"body":"pre-migration msg"}\n',
+        )
+
+    def test_recall_history_accessible(self):
+        """After migration, recall data at gripspace root is intact.
+
+        .synapt/recall/ stays at the gripspace root. Channel history,
+        knowledge nodes, journal entries should all be readable from
+        the root level after migration.
+        """
+        repo = _create_test_repo(self._base, "project")
+
+        # Create recall data
+        recall = repo / ".synapt" / "recall"
+        recall.mkdir(parents=True)
+        (recall / "channels").mkdir()
+        (recall / "channels" / "dev.jsonl").write_text(
+            '{"id":"m_001","body":"sprint 1 kickoff","channel":"dev"}\n'
+            '{"id":"m_002","body":"sprint 1 complete","channel":"dev"}\n'
+        )
+        (recall / "journal.jsonl").write_text(
+            '{"session":"s1","summary":"Fixed auth bug"}\n'
+        )
+
+        # Migrate
+        child = _migrate_in_place(repo)
+
+        # Recall data still at root
+        channels_file = repo / ".synapt" / "recall" / "channels" / "dev.jsonl"
+        self.assertTrue(channels_file.exists())
+        lines = channels_file.read_text().strip().split("\n")
+        self.assertEqual(len(lines), 2)
+
+        journal = repo / ".synapt" / "recall" / "journal.jsonl"
+        self.assertTrue(journal.exists())
+        self.assertIn("Fixed auth bug", journal.read_text())
+
+        # Recall data NOT duplicated in child
+        self.assertFalse((child / ".synapt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
