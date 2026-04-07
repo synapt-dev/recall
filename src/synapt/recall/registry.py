@@ -272,6 +272,13 @@ def detect_crashed_agents(db_path: Path) -> list[dict[str, Any]]:
             os.kill(pid, 0)  # Check if process exists
         except (ProcessLookupError, PermissionError):
             crashed.append(dict(row))
+        except OSError as e:
+            # Windows: WinError 87 (invalid parameter) means process gone
+            import errno
+            if getattr(e, "winerror", None) == 87 or e.errno == errno.EINVAL:
+                crashed.append(dict(row))
+            else:
+                raise
     return crashed
 
 
