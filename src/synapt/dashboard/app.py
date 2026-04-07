@@ -33,6 +33,7 @@ from synapt.recall.channel import (
     channel_messages_json,
     channel_post,
 )
+from synapt.recall.registry import list_agents as _registry_list_agents
 
 _MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
 
@@ -67,6 +68,65 @@ def _agent_color(name: str) -> str:
         idx = len(_agent_color_cache) % len(_AGENT_COLORS)
         _agent_color_cache[name] = _AGENT_COLORS[idx]
     return _agent_color_cache[name]
+
+
+def _combined_agents_json() -> list[dict]:
+    """Return agents from both team.db (process tracking) and channel presence.
+
+    Fixes recall#552: spawned agents weren't visible because presence is
+    per-gripspace (local channels.db) but the dashboard may be in a
+    different gripspace. team.db is global and updated by gr spawn.
+
+    Merge strategy: team.db agents are the authority for process status.
+    Channel presence supplements with channel memberships and heartbeat.
+    """
+    # Start with channel presence (existing behavior)
+    agents_by_name: dict[str, dict] = {}
+    try:
+        for agent in channel_agents_json():
+            name = agent.get("display_name") or agent.get("agent_id", "")
+            agents_by_name[name] = agent
+    except Exception:
+        pass
+
+    # Overlay with team.db agents (global process tracking)
+    try:
+        for org_dir in (Path.home() / ".synapt" / "orgs").iterdir():
+            if not org_dir.is_dir():
+                continue
+            db_path = org_dir / "team.db"
+            if not db_path.exists():
+                continue
+            org_id = org_dir.name
+            try:
+                registered = _registry_list_agents(org_id, db_path=db_path)
+            except Exception:
+                continue
+            for agent in registered:
+                name = agent.get("display_name", "")
+                status = agent.get("status") or "offline"
+                if status in ("offline", "stopped") and name not in agents_by_name:
+                    continue  # Don't show offline agents that aren't in presence
+                if name not in agents_by_name:
+                    # Agent visible in team.db but not in local presence
+                    agents_by_name[name] = {
+                        "agent_id": agent.get("agent_id", ""),
+                        "display_name": name,
+                        "griptree": "",
+                        "role": agent.get("role", "agent"),
+                        "status": status,
+                        "last_seen": agent.get("last_seen_at", ""),
+                        "channels": [],
+                    }
+                else:
+                    # Merge: use team.db status if agent is running/online
+                    existing = agents_by_name[name]
+                    if status in ("running", "online"):
+                        existing["status"] = status
+    except FileNotFoundError:
+        pass  # No orgs directory
+
+    return sorted(agents_by_name.values(), key=lambda a: a.get("display_name", ""))
 
 
 def _render_agent_tile(agent: dict) -> str:
@@ -358,7 +418,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/agents")
     async def api_agents():
-        return channel_agents_json()
+        return _combined_agents_json()
 
     @app.get("/api/channels")
     async def api_channels():
@@ -429,7 +489,7 @@ def create_app() -> FastAPI:
 
                     # Agent status
                     try:
-                        agents = channel_agents_json()
+                        agents = _combined_agents_json()
                     except Exception:
                         agents = []
                     agents_hash = json.dumps(agents, sort_keys=True)
