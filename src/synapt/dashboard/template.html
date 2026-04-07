@@ -185,6 +185,35 @@
   .tile.clickable { cursor: pointer; transition: border-color 0.15s; border: 1px solid transparent; }
   .tile.clickable:hover { border-color: var(--accent); }
   .tile.clickable.selected { border-color: var(--accent); background: rgba(139,92,246,0.08); }
+  /* Agent output panel */
+  #agent-output-panel {
+    display: none;
+    background: #141420;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 8px 20px;
+    max-height: 300px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  #agent-output-panel.active { display: block; }
+  #agent-output-panel .output-header {
+    padding: 6px 12px;
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky;
+    top: 0;
+  }
+  #agent-output-content {
+    padding: 8px 12px;
+    white-space: pre-wrap;
+    font-family: inherit;
+    color: var(--text);
+  }
 </style>
 </head>
 <body>
@@ -205,6 +234,11 @@
     <span class="agent-target" id="agent-target-label">→ agent</span>
     <input type="text" id="agent-input-text" placeholder="Send input to agent..." autocomplete="off">
     <button id="agent-input-send">Send to Agent</button>
+  </div>
+
+  <div id="agent-output-panel">
+    <div class="output-header" id="agent-output-header">Terminal: agent</div>
+    <div id="agent-output-content">No output yet.</div>
   </div>
 
   <div id="feed" sse-swap="messages" hx-swap="beforeend">
@@ -365,6 +399,54 @@ function sendAgentInput() {
 agentSendBtn.addEventListener('click', sendAgentInput);
 agentInput.addEventListener('keydown', function(e) {
   if (e.key === 'Enter') { e.preventDefault(); sendAgentInput(); }
+});
+
+// Agent output panel — shows terminal content when agent is selected
+const outputPanel = document.getElementById('agent-output-panel');
+const outputHeader = document.getElementById('agent-output-header');
+const outputContent = document.getElementById('agent-output-content');
+let outputInterval = null;
+
+function showAgentOutput(name) {
+  outputHeader.textContent = 'Terminal: ' + name;
+  outputPanel.classList.add('active');
+  outputContent.textContent = 'Loading...';
+
+  // Poll snapshot every 2 seconds for live updates
+  if (outputInterval) clearInterval(outputInterval);
+  function fetchSnapshot() {
+    fetch('/api/agent/' + name + '/snapshot?lines=40')
+      .then(r => r.json())
+      .then(data => {
+        if (data.content) {
+          outputContent.textContent = data.content;
+          outputPanel.scrollTop = outputPanel.scrollHeight;
+        } else if (data.error) {
+          outputContent.textContent = '(' + data.error + ')';
+        }
+      })
+      .catch(() => { outputContent.textContent = '(not connected)'; });
+  }
+  fetchSnapshot();
+  outputInterval = setInterval(fetchSnapshot, 2000);
+}
+
+function hideAgentOutput() {
+  outputPanel.classList.remove('active');
+  if (outputInterval) { clearInterval(outputInterval); outputInterval = null; }
+}
+
+// Hook into tile selection — show output when agent selected, hide when deselected
+const origClick = document.getElementById('agents').onclick;
+document.getElementById('agents').addEventListener('click', function(e) {
+  // Wait for the selection handler to run
+  setTimeout(function() {
+    if (selectedAgent) {
+      showAgentOutput(selectedAgent);
+    } else {
+      hideAgentOutput();
+    }
+  }, 0);
 });
 </script>
 
