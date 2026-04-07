@@ -1259,7 +1259,7 @@ def channel_join(
         # that shares an agent_id with an agent (same griptree) keeps the
         # human role and display name. Fixes recall#546.
         existing = conn.execute(
-            "SELECT role, display_name FROM presence WHERE agent_id = ?",
+            "SELECT role, display_name, status FROM presence WHERE agent_id = ?",
             (aid,),
         ).fetchone()
         if existing and existing["role"] == "human" and role != "human":
@@ -1293,9 +1293,23 @@ def channel_join(
             (aid, channel, cursor_init),
         )
 
+        # Track whether this is a genuinely new join (for log event below).
+        # An agent is "already joined" if they have presence (online) AND membership.
+        has_membership = conn.execute(
+            "SELECT 1 FROM memberships WHERE agent_id = ? AND channel = ?",
+            (aid, channel),
+        ).fetchone()
+        is_new_join = not (existing and existing["status"] == "online" and has_membership)
+
         conn.commit()
     finally:
         conn.close()
+
+    # Only append join event if this is a new join, not a reconnect.
+    # Prevents duplicate "X joined #dev" spam on MCP restart. Fixes #546.
+    if not is_new_join:
+        display = display_name or _resolve_display_name(project_dir)
+        return f"Reconnected to #{channel} as {display} ({aid})"
 
     # Append join event to channel log
     msg = ChannelMessage(
