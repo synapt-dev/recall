@@ -548,8 +548,14 @@ class TestBackwardCompat(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._local_dir = Path(self._tmpdir) / "project" / ".synapt" / "recall"
         self._local_dir.mkdir(parents=True)
+        self._patcher_manifest = patch(
+            "synapt.recall.channel._read_manifest_url",
+            return_value=None,
+        )
+        self._patcher_manifest.start()
 
     def tearDown(self):
+        self._patcher_manifest.stop()
         shutil.rmtree(self._tmpdir)
 
     def test_shared_channels_dir_env_overrides_global(self):
@@ -564,10 +570,6 @@ class TestBackwardCompat(unittest.TestCase):
     @pytest.mark.skipif(
         sys.platform == "win32",
         reason="Global store routing differs on Windows — _find_gripspace_root resolves differently",
-    )
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Phase 2: global store (#524) changed default routing — needs test update for non-gripspace fallback",
     )
     def test_no_gripspace_falls_back_to_local(self):
         """Agent outside gripspace → uses local .synapt/recall/channels/."""
