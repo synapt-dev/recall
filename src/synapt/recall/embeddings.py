@@ -59,7 +59,21 @@ class LocalEmbeddings(EmbeddingProvider):
     def _ensure_model(self) -> None:
         """Load the model on first use, not at init time."""
         if self._model is None:
+            import os
+            from pathlib import Path
             from sentence_transformers import SentenceTransformer
+
+            # Skip the HuggingFace revision-check network call if the model is
+            # already in the local cache.  The cache dir name is deterministic:
+            # models--{org}--{model} with '/' replaced by '--'.
+            hf_cache = Path(
+                os.environ.get("HF_HOME",
+                               os.path.join(os.path.expanduser("~"), ".cache", "huggingface"))
+            ) / "hub"
+            model_cache_name = "models--" + self._model_name.replace("/", "--")
+            if (hf_cache / model_cache_name).exists():
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
             self._model = SentenceTransformer(self._model_name, device=self._device)
             self._dim_cached = self._model.get_sentence_embedding_dimension()
 
