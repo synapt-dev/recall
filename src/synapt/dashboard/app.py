@@ -32,6 +32,8 @@ from synapt.recall.channel import (
     channel_list_channels,
     channel_messages_json,
     channel_post,
+    _resolve_org_id,
+    _resolve_project_id,
 )
 from synapt.recall.registry import list_agents as _registry_list_agents
 
@@ -134,11 +136,16 @@ def _render_agent_tile(agent: dict) -> str:
     color = _STATUS_COLORS.get(status, "#6b7280")
     name = agent["display_name"] or agent["griptree"] or agent["agent_id"]
     role = agent["role"] if agent["role"] != "agent" else ""
+    griptree = agent.get("griptree", "")
     channels = ", ".join(f"#{c}" for c in agent["channels"]) or "no channels"
     seen = agent["last_seen"][11:16] if len(agent["last_seen"]) > 16 else ""
+    project_badge = (
+        f'<div class="tile-project">{escape(griptree)}</div>' if griptree else ""
+    )
     return (
         f'<div class="tile clickable" data-agent="{escape(name)}" style="border-left:4px solid {color}">'
         f'<div class="tile-name">{escape(name)}</div>'
+        f'{project_badge}'
         f'<div class="tile-role">{escape(role)}</div>'
         f'<div class="tile-meta">'
         f'<span style="color:{color}">{status}</span>'
@@ -419,6 +426,12 @@ def create_app() -> FastAPI:
     @app.get("/api/agents")
     async def api_agents():
         return _combined_agents_json()
+
+    @app.get("/api/org")
+    async def api_org():
+        org = _resolve_org_id(None) or "unknown"
+        project = _resolve_project_id(None) or "unknown"
+        return {"org": org, "project": project}
 
     @app.get("/api/channels")
     async def api_channels():
