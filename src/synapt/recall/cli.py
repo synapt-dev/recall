@@ -1704,6 +1704,17 @@ def cmd_hook(args: argparse.Namespace) -> None:
         project = Path.cwd().resolve()
         transcript_all = project_transcript_dirs(project)
 
+        # 0. Onboarding preamble — tell the agent how to catch up
+        print("SessionStart:compact hook success: "
+              "You have synapt recall — persistent memory across sessions. "
+              "Get up to speed before acting:\n"
+              "  1. Read the context below (journal, knowledge, reminders, #dev unread)\n"
+              "  2. recall_quick '<topic>' — fast check before making decisions\n"
+              "  3. recall_search '<query>' — find past decisions, conventions, rationale\n"
+              "  4. recall_channel read #dev — current team status, assignments, blockers\n"
+              "  5. recall_journal — what happened in recent sessions\n"
+              "Do not start work until you understand the current state.")
+
         # 0a. Stale MCP server warning — surface prominently so agent acts (#428)
         try:
             from synapt.recall.server import _check_version_stale
