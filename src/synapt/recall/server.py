@@ -464,7 +464,7 @@ def recall_sessions(
         after: Only sessions with activity after this date (ISO 8601).
         before: Only sessions with activity before this date (ISO 8601).
     """
-    index = _get_index()
+    index = _get_index(use_embeddings=False)
     if index is None:
         index_dir = project_index_dir()
         return f"No index found at {index_dir}. Run `synapt recall setup` first."
