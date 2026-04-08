@@ -2463,13 +2463,16 @@ def channel_messages_json(
     limit: int = 50,
     since: str | None = None,
     project_dir: Path | None = None,
+    channels_dir: Path | None = None,
 ) -> list[dict]:
     """Return recent channel messages as a list of dicts.
 
     Each dict matches the ChannelMessage.to_dict() format with keys:
     timestamp, channel, type, body, from, from_display, id, to, attachments.
+
+    ``channels_dir`` overrides path resolution for cross-project reads.
     """
-    path = _channel_path(channel, project_dir)
+    path = (channels_dir / f"{channel}.jsonl") if channels_dir else _channel_path(channel, project_dir)
     if not path.exists():
         return []
     messages = _read_messages(path, since=since)
