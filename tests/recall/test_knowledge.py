@@ -475,8 +475,7 @@ class TestDedupKnowledgeNodes(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_dedup_identical_content(self):
-        """Two nodes with identical content should merge."""
-        from synapt.recall.knowledge import dedup_knowledge_nodes
+        """Identical content produces the same ID; _dedup_nodes keeps latest."""
         n1 = KnowledgeNode.create(
             content="Always use A100 for training 8B models",
             category="infrastructure",
@@ -489,14 +488,14 @@ class TestDedupKnowledgeNodes(unittest.TestCase):
             source_sessions=["sess-B"],
         )
         n2.updated_at = "2026-03-01T00:00:00"
+        # Same content → same ID (content-hash)
+        self.assertEqual(n1.id, n2.id)
         append_node(n1, self.kn_path)
         append_node(n2, self.kn_path)
-        result = dedup_knowledge_nodes(threshold=0.7)
-        self.assertEqual(result, 1)
-        # Survivor should be n2 (newer updated_at)
+        # _dedup_nodes keeps latest by updated_at, so only n2 survives
         active = read_nodes(self.kn_path, status="active")
         self.assertEqual(len(active), 1)
-        self.assertEqual(active[0].id, n2.id)
+        self.assertEqual(active[0].source_sessions, ["sess-B"])
 
     def test_dedup_markdown_formatting_diff(self):
         """Nodes differing only by markdown formatting should merge."""
@@ -591,15 +590,17 @@ class TestDedupKnowledgeNodes(unittest.TestCase):
         """Merge decisions should be logged to dedup_decisions.jsonl."""
         from synapt.recall.knowledge import dedup_knowledge_nodes
         n1 = KnowledgeNode.create(
-            content="Always use A100 for training 8B models",
+            content="Always use A100 GPU for training 8B parameter models on the cluster",
             category="infrastructure",
         )
         n1.updated_at = "2026-01-01T00:00:00"
         n2 = KnowledgeNode.create(
-            content="Always use A100 for training 8B models",
+            content="Always use A100 GPU for training 8B parameter models on cluster nodes",
             category="infrastructure",
         )
         n2.updated_at = "2026-03-01T00:00:00"
+        # Different content → different IDs, but high Jaccard overlap
+        self.assertNotEqual(n1.id, n2.id)
         append_node(n1, self.kn_path)
         append_node(n2, self.kn_path)
         dedup_knowledge_nodes(threshold=0.7)
