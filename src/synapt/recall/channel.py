@@ -208,12 +208,16 @@ def _attachments_dir(project_dir: Path | None = None) -> Path:
 _AGENT_ID_CACHE: dict[str, str] = {}
 
 
-def _agent_id(project_dir: Path | None = None) -> str:
+def _agent_id(project_dir: Path | None = None, name: str | None = None) -> str:
     """Return the agent's stable identity.
 
     Resolution order:
     1. SYNAPT_AGENT_ID env var (set by gr spawn) — stable, org-registered
-    2. Session-scoped hash (s_xxxxxxxx) — fallback for manual/unregistered sessions
+    2. Named agent hash (a_xxxxxxxx) — when ``name`` is provided, creates a
+       distinct identity per agent name within the same griptree. Fixes
+       recall#590: agents sharing a griptree with a human session no longer
+       collide on agent_id.
+    3. Session-scoped hash (s_xxxxxxxx) — fallback for manual/unregistered sessions
 
     When SYNAPT_AGENT_ID is set, the agent uses its registered org identity
     for all channel operations (cursors, claims, DMs). This is the Phase 0
@@ -223,6 +227,13 @@ def _agent_id(project_dir: Path | None = None) -> str:
     registered_id = os.environ.get("SYNAPT_AGENT_ID")
     if registered_id:
         return registered_id
+
+    # Named agent: derive a distinct ID from name + griptree so multiple
+    # callers in the same griptree get separate presence rows.
+    if name:
+        gt = _resolve_griptree(project_dir)
+        seed = f"named:{gt}:{name}"
+        return "a_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
 
     # Fallback: session-scoped hash (backward compat for manual sessions)
     key = str(project_data_dir(project_dir))
@@ -1243,8 +1254,10 @@ def channel_join(
         role: "human" (set by session-start hook), "agent" (default), or "system".
         display_name: If provided, sets display name before joining so the
             join event shows the readable name instead of the agent hash.
+            Also derives a distinct agent_id so agents sharing a griptree
+            with a human session get their own presence row (recall#590).
     """
-    aid = agent_name or _agent_id(project_dir)
+    aid = agent_name or _agent_id(project_dir, name=display_name)
     griptree = _resolve_griptree(project_dir)
     display = display_name or _resolve_display_name(project_dir)
     now = _now_iso()
@@ -1383,9 +1396,10 @@ def channel_leave(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     reason: str = "",
+    display_name: str | None = None,
 ) -> str:
     """Leave a channel."""
-    aid = agent_name or _agent_id(project_dir)
+    aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
 
     conn = _open_db(project_dir)
@@ -1445,10 +1459,10 @@ def channel_post(
     DB operations (presence, pins) always use the local gripspace.
 
     ``display_name`` overrides the presence DB lookup so callers (e.g. MCP
-    tool handler) can pass the agent's declared name directly.  Fixes
-    identity confusion when multiple agents share the same griptree.
+    tool handler) can pass the agent's declared name directly.  Also
+    derives a distinct agent_id per name (recall#590).
     """
-    aid = agent_name or _agent_id(project_dir)
+    aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
     display = display_name or _resolve_display_name_for(aid, project_dir)
 
@@ -1982,7 +1996,7 @@ def channel_directive(
     display_name: str | None = None,
 ) -> str:
     """Post a directive message targeted at a specific agent."""
-    aid = agent_name or _agent_id(project_dir)
+    aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
     display = display_name or _resolve_display_name(project_dir)
 

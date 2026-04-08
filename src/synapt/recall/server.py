@@ -1935,7 +1935,7 @@ def recall_channel(
             return channel_join(channel=channel, display_name=name)
 
         if action == "leave":
-            return channel_leave(channel=channel)
+            return channel_leave(channel=channel, display_name=name)
 
         if action == "post":
             if not message:
