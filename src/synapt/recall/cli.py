@@ -819,6 +819,139 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"  FTS backend:   {'sqlite' if index._rowid_to_idx else 'bm25'}", file=sys.stderr)
 
 
+_DEFAULT_BENCHMARK_QUERIES = [
+    "what was discussed last session",
+    "how does authentication work",
+    "debug error in production",
+    "configuration settings",
+    "performance optimization",
+    "test coverage for module",
+    "API endpoint changes",
+    "migration plan",
+]
+
+
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    """Run search pipeline benchmarks and report timing statistics."""
+    import time
+
+    index_dir = Path(args.index) if args.index else _resolve_index_dir(args)
+    if not (index_dir / "recall.db").exists() and not (index_dir / "chunks.jsonl").exists():
+        print(f"Error: no index found at {index_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    iterations = args.iterations
+    queries = args.queries.split(";") if args.queries else _DEFAULT_BENCHMARK_QUERIES
+    json_output = args.json_output
+
+    # Phase 1: Cold start (index load)
+    t0 = time.perf_counter()
+    index = TranscriptIndex.load(index_dir, use_embeddings=True)
+    t_cold = (time.perf_counter() - t0) * 1000  # ms
+
+    chunk_count = len(index.chunks)
+    session_count = len(index.sessions)
+    emb_status = index._embedding_status
+    emb_matrix = getattr(index, "_emb_matrix", None)
+    numpy_storage = emb_matrix is not None
+
+    # Memory footprint estimate (rough: list container + ~1KB per chunk for strings)
+    import sys as _sys
+    mem_bytes = _sys.getsizeof(index.chunks)
+    mem_bytes += chunk_count * 1024  # ~1KB average per chunk (strings, metadata)
+    if emb_matrix is not None:
+        mem_bytes += emb_matrix.nbytes
+    all_emb = getattr(index, "_all_embeddings", {})
+    if all_emb:
+        mem_bytes += _sys.getsizeof(all_emb)
+    mem_mb = mem_bytes / (1024 * 1024)
+
+    # Phase 2: Query latencies
+    query_results = []
+    for q in queries:
+        latencies = []
+        for _ in range(iterations):
+            # Clear query cache between iterations
+            index._query_cache.clear()
+            t_start = time.perf_counter()
+            result = index.lookup(q, max_chunks=5, max_tokens=500)
+            t_end = time.perf_counter()
+            latencies.append((t_end - t_start) * 1000)  # ms
+
+        latencies.sort()
+        n = len(latencies)
+        p50 = latencies[n // 2]
+        p95 = latencies[int(n * 0.95)] if n >= 20 else latencies[-1]
+        p99 = latencies[int(n * 0.99)] if n >= 100 else latencies[-1]
+        mean = sum(latencies) / n
+        has_results = bool(result)
+
+        query_results.append({
+            "query": q,
+            "mean_ms": round(mean, 2),
+            "p50_ms": round(p50, 2),
+            "p95_ms": round(p95, 2),
+            "p99_ms": round(p99, 2),
+            "min_ms": round(latencies[0], 2),
+            "max_ms": round(latencies[-1], 2),
+            "has_results": has_results,
+        })
+
+    # Phase 3: Second load (warm filesystem cache)
+    index2 = None
+    t_w0 = time.perf_counter()
+    index2 = TranscriptIndex.load(index_dir, use_embeddings=True)
+    t_warm = (time.perf_counter() - t_w0) * 1000
+    del index2
+
+    # Output
+    if json_output:
+        output = {
+            "cold_start_ms": round(t_cold, 2),
+            "warm_start_ms": round(t_warm, 2),
+            "queries": query_results,
+            "index_info": {
+                "chunk_count": chunk_count,
+                "session_count": session_count,
+                "embedding_status": emb_status,
+                "numpy_storage": numpy_storage,
+                "memory_mb": round(mem_mb, 2),
+                "index_dir": str(index_dir),
+            },
+            "config": {
+                "iterations": iterations,
+                "query_count": len(queries),
+            },
+        }
+        print(json.dumps(output, indent=2))
+    else:
+        print("Recall Search Benchmark")
+        print("=" * 50)
+        print(f"  Index:         {index_dir}")
+        print(f"  Chunks:        {chunk_count}")
+        print(f"  Sessions:      {session_count}")
+        print(f"  Embeddings:    {emb_status} ({'numpy' if numpy_storage else 'dict'})")
+        print(f"  Memory:        {mem_mb:.1f} MB")
+        print()
+        print(f"  Cold start:    {t_cold:.0f} ms")
+        print(f"  Warm start:    {t_warm:.0f} ms")
+        print()
+        print(f"  Query Latencies ({iterations} iterations)")
+        print(f"  {'Query':<35} {'p50':>7} {'p95':>7} {'mean':>7}")
+        print(f"  {'-'*35} {'-'*7} {'-'*7} {'-'*7}")
+        for qr in query_results:
+            label = qr["query"][:33] + ".." if len(qr["query"]) > 35 else qr["query"]
+            hit = "" if qr["has_results"] else " (no hits)"
+            print(f"  {label:<35} {qr['p50_ms']:>6.1f}ms {qr['p95_ms']:>6.1f}ms {qr['mean_ms']:>6.1f}ms{hit}")
+        print()
+
+        # Summary
+        all_means = [qr["mean_ms"] for qr in query_results]
+        overall_p50 = sorted(all_means)[len(all_means) // 2]
+        print(f"  Overall p50:   {overall_p50:.1f} ms")
+        print(f"  Total queries: {len(queries) * iterations}")
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show index statistics."""
     index_dir = _resolve_index_dir(args)
@@ -2412,6 +2545,13 @@ def main():
     search_parser.add_argument("--before", default=None, help="Only results before this date (ISO 8601, e.g. 2026-03-01)")
     search_parser.add_argument("--profile", action="store_true", help="Show per-phase timing breakdown")
 
+    # Benchmark
+    benchmark_parser = subparsers.add_parser("benchmark", help="Run search pipeline benchmarks")
+    benchmark_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
+    benchmark_parser.add_argument("--json", dest="json_output", action="store_true", help="Output results as JSON")
+    benchmark_parser.add_argument("--queries", default=None, help="Semicolon-separated queries (default: built-in set)")
+    benchmark_parser.add_argument("--iterations", type=int, default=5, help="Iterations per query (default: 5)")
+
     # Stats
     stats_parser = subparsers.add_parser("stats", help="Show index statistics")
     stats_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
@@ -2573,6 +2713,8 @@ def main():
         cmd_split(args)
     elif args.command == "search":
         cmd_search(args)
+    elif args.command == "benchmark":
+        cmd_benchmark(args)
     elif args.command == "stats":
         cmd_stats(args)
     elif args.command == "sessions":
