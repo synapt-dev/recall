@@ -313,7 +313,7 @@
       <span id="channel-title">dev</span>
     </div>
 
-    <div id="sse-container" hx-ext="sse" sse-connect="/api/stream?channel=dev">
+    <div id="sse-container">
       <div id="agent-input-panel">
         <span class="agent-target" id="agent-target-label">&rarr; agent</span>
         <input type="text" id="agent-input-text" placeholder="Send input to agent..." autocomplete="off">
@@ -325,7 +325,7 @@
         <div id="agent-output-content">No output yet.</div>
       </div>
 
-      <div id="feed" sse-swap="messages" hx-swap="beforeend">
+      <div id="feed">
         <div class="msg sys"><span class="sys-text">Loading messages&hellip;</span></div>
       </div>
     </div>
@@ -400,16 +400,6 @@ function switchChannel(ch, org, project) {
   // Update channel title
   document.getElementById('channel-title').textContent = ch;
 
-  // Build query string with org/project if set
-  const q = new URLSearchParams({ channel: ch });
-  if (activeOrg) q.set('org', activeOrg);
-  if (activeProject) q.set('project', activeProject);
-
-  // Reconnect SSE
-  const sse = document.getElementById('sse-container');
-  sse.setAttribute('sse-connect', '/api/stream?' + q.toString());
-  htmx.process(sse);
-
   // Update post form target + hidden org/project fields
   const form = document.getElementById('post-form');
   form.setAttribute('hx-post', '/api/post/' + ch);
@@ -423,12 +413,9 @@ function switchChannel(ch, org, project) {
   // Join the channel
   ensureDashboardJoin(ch);
 
-  // Reload messages
-  const msgQ = new URLSearchParams({ limit: '50' });
-  if (activeOrg) msgQ.set('org', activeOrg);
-  if (activeProject) msgQ.set('project', activeProject);
+  // Clear feed and do a full reload for the new channel
   document.getElementById('feed').innerHTML = '';
-  htmx.ajax('GET', '/api/messages/' + ch + '?' + msgQ.toString(), '#feed');
+  loadMessages(true);
 }
 
 // ── Nav tree (org → project → channels) ──────────────────
@@ -470,7 +457,7 @@ function refreshChannelList() {
 refreshChannelList();
 setInterval(refreshChannelList, 30000);
 
-// ── Join & initial load ───────────────────────────────────
+// ── Join ──────────────────────────────────────────────────
 function ensureDashboardJoin(channel) {
   return fetch('/api/join/' + channel, {
     method: 'POST',
@@ -478,8 +465,39 @@ function ensureDashboardJoin(channel) {
     body: new URLSearchParams({ name: dashName }),
   });
 }
+
+// ── Message polling (replaces SSE — clean channel switching) ──
+// On switch, clears feed and does a full load (limit=50, no since).
+// Every 2s it reads the last timestamp from the DOM and fetches only newer messages.
+function _lastFeedTs() {
+  const spans = document.getElementById('feed').querySelectorAll('.ts[data-utc]');
+  return spans.length ? (spans[spans.length - 1].getAttribute('data-utc') || '') : '';
+}
+
+async function loadMessages(full) {
+  const q = new URLSearchParams();
+  if (full) {
+    q.set('limit', '50');
+  } else {
+    const ts = _lastFeedTs();
+    if (!ts) return; // nothing loaded yet, wait for full load
+    q.set('since', ts);
+  }
+  if (activeOrg) q.set('org', activeOrg);
+  if (activeProject) q.set('project', activeProject);
+  try {
+    const res = await fetch('/api/messages/' + activeChannel + '?' + q.toString());
+    if (!res.ok) return;
+    const html = await res.text();
+    if (!html.trim()) return;
+    const feed = document.getElementById('feed');
+    if (full) { feed.innerHTML = html; } else { feed.insertAdjacentHTML('beforeend', html); }
+  } catch(e) {}
+}
+
 ensureDashboardJoin('dev');
-htmx.ajax('GET', '/api/messages/dev?limit=50', '#feed');
+loadMessages(true);
+setInterval(() => loadMessages(false), 2000);
 
 // ── Agents polling (right sidebar — polled, not SSE) ─────
 // #agents is outside #sse-container so sse-swap won't fire here.
