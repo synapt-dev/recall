@@ -1874,6 +1874,7 @@ def recall_channel(
     attachments: str | None = None,
     show_pins: bool = True,
     detail: str = "medium",
+    msg_type: str | None = None,
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -1893,6 +1894,8 @@ def recall_channel(
         pin: If True with "post" action, also pin the message.
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
         attachments: Semicolon-separated file paths to attach (copied into channel store on post).
+        msg_type: Message type for "post" (status, claim, pr, code, message) or filter for "read".
+            Default "message". On read, only messages matching the type are returned.
         show_pins: If False with "read" action, omit pinned messages from output (default True).
             Deprecated — use detail instead.
         detail: Output verbosity level. Controls pins, metadata, and truncation.
@@ -1941,10 +1944,10 @@ def recall_channel(
             if not message:
                 return "Error: message is required for 'post' action."
             attachment_list = [p.strip() for p in attachments.split(";")] if attachments else None
-            return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list, display_name=name)
+            return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list, display_name=name, msg_type=msg_type or "message")
 
         if action == "read":
-            return channel_read(channel=channel, limit=limit, show_pins=show_pins, detail=detail)
+            return channel_read(channel=channel, limit=limit, show_pins=show_pins, detail=detail, msg_type=msg_type)
 
         if action == "read_message":
             if not message:

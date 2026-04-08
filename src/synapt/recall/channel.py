@@ -1451,6 +1451,7 @@ def channel_post(
     attachment_paths: list[str] | None = None,
     channels_dir: Path | None = None,
     display_name: str | None = None,
+    msg_type: str = "message",
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message.
 
@@ -1468,7 +1469,7 @@ def channel_post(
 
     msg = ChannelMessage(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
-        type="message", body=message,
+        type=msg_type or "message", body=message,
     )
     if attachment_paths:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
@@ -1507,6 +1508,7 @@ def channel_read(
     project_dir: Path | None = None,
     show_pins: bool = True,
     detail: str = "medium",
+    msg_type: str | None = None,
 ) -> str:
     """Read recent messages from a channel.
 
@@ -1598,6 +1600,10 @@ def channel_read(
         if since:
             return f"No messages in #{channel} since {since}."
         return f"Channel #{channel} has no messages yet."
+
+    # Filter by message type
+    if msg_type:
+        messages = [m for m in messages if m.type == msg_type]
 
     # Filter muted agents
     if muted:
@@ -2491,6 +2497,7 @@ def channel_messages_json(
     since: str | None = None,
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
+    msg_type: str | None = None,
 ) -> list[dict]:
     """Return recent channel messages as a list of dicts.
 
@@ -2498,11 +2505,14 @@ def channel_messages_json(
     timestamp, channel, type, body, from, from_display, id, to, attachments.
 
     ``channels_dir`` overrides path resolution for cross-project reads.
+    ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
     path = (channels_dir / f"{channel}.jsonl") if channels_dir else _channel_path(channel, project_dir)
     if not path.exists():
         return []
     messages = _read_messages(path, since=since)
+    if msg_type:
+        messages = [m for m in messages if m.type == msg_type]
     messages = messages[-limit:]
     conn = _open_db(project_dir)
     try:
