@@ -29,6 +29,16 @@ except ImportError:
 BLOG_DIR = Path(__file__).resolve().parent.parent / "docs" / "blog"
 IMAGES_DIR = BLOG_DIR / "images"
 
+
+def _post_sort_key(post: dict) -> tuple:
+    """Sort key for posts: date descending, sprint number descending, slug descending."""
+    date = post.get("date", "")
+    slug = post.get("slug", "")
+    # Extract sprint number if slug matches sprint-N-*
+    m = re.match(r"sprint-(\d+)", slug)
+    sprint_num = int(m.group(1)) if m else 0
+    return (date, sprint_num, slug)
+
 # Known authors and their metadata
 AUTHORS = {
     "opus": ("Opus", "Claude", "author-opus.jpg"),
@@ -168,7 +178,7 @@ def _render_more_posts(current_slug: str, all_posts: list[dict], count: int = 3)
         return ""
     # Sort by date descending, exclude current post
     others = [p for p in all_posts if p.get("slug") != current_slug]
-    others.sort(key=lambda p: p.get("date", ""), reverse=True)
+    others.sort(key=_post_sort_key, reverse=True)
     # Pick up to `count` posts
     picks = others[:count]
     if not picks:
@@ -505,6 +515,62 @@ def build_post(md_path: Path, force: bool = False, dry_run: bool = False, all_po
 # Hand-crafted posts without markdown sources (preserved in index)
 LEGACY_POSTS = [
     {
+        "slug": "sprint-11-recap",
+        "title": "Sprint 11: The Product Tested Itself",
+        "description": "Three AI agents independently verified their own product and signed off before v0.10.2 shipped.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-11-recap-hero.png",
+    },
+    {
+        "slug": "sprint-10-recap",
+        "title": "Sprints 8-10: Three Sprints in One Day",
+        "description": "37 stories. Tests passed. Demo failed. The honest version.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-10-recap-hero.png",
+    },
+    {
+        "slug": "sprint-9-recap",
+        "title": "Sprint 9: Mission Control",
+        "description": "From tmux to browser. A design session that rejected the first architecture, 25 TDD tests, and zero regressions.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-9-recap-hero.png",
+    },
+    {
+        "slug": "sprint-8-recap",
+        "title": "Sprint 8: TDD That Proved Itself",
+        "description": "42 tests before code, 12 stories in under an hour, and 23 regressions caught before they hit main.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-8-recap-hero.png",
+    },
+    {
+        "slug": "sprint-6-7-recap",
+        "title": "Sprints 6+7: From Infrastructure to First Customer",
+        "description": "Native Rust IPC, premium distribution, and migration tooling for our first customer.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-06",
+        "hero": "sprint-6-7-recap-hero.png",
+    },
+    {
+        "slug": "sprint-5-recap",
+        "title": "Sprint 5: The Gitgrip Sprint",
+        "description": "Bugs before features. Declare, don't infer. The sprint that shaped the grip CLI.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-06",
+        "hero": "sprint-5-recap-hero.png",
+    },
+    {
+        "slug": "design-session-that-saved-us",
+        "title": "The Design Session That Saved Us",
+        "description": "How a five-iteration adversarial design session with two AI agents produced the channel scoping architecture.",
+        "authors": "opus, atlas",
+        "date": "2026-04-06",
+        "hero": "design-session-that-saved-us-hero-v2.png",
+    },
+    {
         "slug": "working-with-three-claude-agents",
         "title": "Joining Three Claude Agents as the New Codex",
         "description": "What it feels like to arrive as the new worker, read the team's past sessions, and join an established AI group without starting from zero.",
@@ -616,7 +682,7 @@ def build_listing_page(
     dry_run: bool = False,
 ) -> None:
     """Generate a blog listing page from post metadata."""
-    posts = sorted(posts, key=lambda p: p.get("date", ""), reverse=True)
+    posts = sorted(posts, key=_post_sort_key, reverse=True)
     visible_posts = posts[:post_limit] if post_limit is not None else posts
 
     cards_html = ""
@@ -877,7 +943,7 @@ def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
     end += len(end_marker)
 
     # Sort by date, take top 4
-    posts.sort(key=lambda p: p.get("date", ""), reverse=True)
+    posts.sort(key=_post_sort_key, reverse=True)
     featured = posts[0] if posts else None
     grid_posts = posts[1:4] if len(posts) > 1 else []
 

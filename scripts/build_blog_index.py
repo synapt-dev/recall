@@ -25,6 +25,15 @@ AUTHORS = {
     "layne": ("Layne Penney", "author-layne.jpg"),
 }
 
+
+def _post_sort_key(post: dict) -> tuple:
+    """Sort key for posts: date descending, sprint number descending, slug descending."""
+    date = post.get("date", "")
+    slug = post.get("slug", "")
+    m = re.match(r"sprint-(\d+)", slug)
+    sprint_num = int(m.group(1)) if m else 0
+    return (date, sprint_num, slug)
+
 # Hero image mapping: stem -> image filename
 # Falls back to checking common patterns if not listed here
 HERO_OVERRIDES: dict[str, str] = {
@@ -315,7 +324,7 @@ def build_index(blog_dir: Path) -> str:
         posts.append(post)
 
     # Sort by date descending (newest first)
-    posts.sort(key=lambda p: p.get("date", ""), reverse=True)
+    posts.sort(key=_post_sort_key, reverse=True)
 
     # Render cards — first is featured
     cards = []
@@ -450,7 +459,7 @@ def main():
                 "subtitle": fm.get("subtitle", ""),
                 "hero": find_hero_image(md.stem, blog_dir),
             })
-        posts.sort(key=lambda p: p.get("date", ""), reverse=True)
+        posts.sort(key=_post_sort_key, reverse=True)
 
         if update_root_index(root_index, blog_dir, posts):
             print(f"Updated {root_index} blog section")
