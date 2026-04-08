@@ -202,6 +202,67 @@ def _embedding_search_numpy(
     return [(rowids[indices[i]], float(masked_sims[i])) for i in top_k_idx]
 
 
+def embedding_search_numpy(
+    query_embedding: list[float],
+    matrix: "np.ndarray",
+    rowids: list[int],
+    limit: int = 50,
+    threshold: float = EMBEDDING_SIM_THRESHOLD,
+) -> list[tuple[int, float]]:
+    """Embedding search against a pre-built numpy matrix.
+
+    Same semantics as :func:`embedding_search` but skips the per-query
+    dict-to-numpy conversion.  For large indexes (48K+ chunks), this
+    avoids rebuilding the (N, 384) matrix on every query.
+
+    Args:
+        query_embedding: The query vector.
+        matrix: Pre-built ``(N, D)`` float32 embedding matrix.
+        rowids: Rowid list aligned with matrix rows.
+        limit: Maximum results to return.
+        threshold: Minimum cosine similarity to include.
+    """
+    import numpy as np
+
+    if matrix.shape[0] == 0 or not query_embedding or limit <= 0:
+        return []
+
+    query = np.array(query_embedding, dtype=np.float32)
+
+    if query.shape[0] != matrix.shape[1]:
+        min_dim = min(query.shape[0], matrix.shape[1])
+        logger.warning(
+            "Embedding dimension mismatch: query=%d, stored=%d; truncating to %d",
+            query.shape[0], matrix.shape[1], min_dim,
+        )
+        query = query[:min_dim]
+        matrix = matrix[:, :min_dim]
+
+    query_norm = np.linalg.norm(query)
+    if query_norm == 0:
+        return []
+    row_norms = np.linalg.norm(matrix, axis=1)
+
+    valid = row_norms > 0
+    sims = np.zeros(len(rowids), dtype=np.float32)
+    sims[valid] = matrix[valid] @ query / (row_norms[valid] * query_norm)
+
+    mask = sims >= threshold
+    if not mask.any():
+        return []
+
+    indices = np.where(mask)[0]
+    masked_sims = sims[indices]
+
+    if len(indices) > limit:
+        top_k_idx = np.argpartition(masked_sims, -limit)[-limit:]
+        top_k_idx = top_k_idx[np.argsort(masked_sims[top_k_idx])[::-1]]
+    else:
+        top_k_idx = np.argsort(masked_sims)[::-1]
+
+    return [(rowids[indices[i]], float(masked_sims[i])) for i in top_k_idx]
+
+
 # ---------------------------------------------------------------------------
 # Query intent classification
 # ---------------------------------------------------------------------------

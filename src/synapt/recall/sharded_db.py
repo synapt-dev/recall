@@ -406,6 +406,23 @@ class ShardedRecallDB:
             return result
         return self._index.get_all_embeddings()
 
+    def get_all_embeddings_numpy(self) -> "tuple[np.ndarray, list[int]]":
+        """Load chunk embeddings into a numpy matrix with global rowids."""
+        import numpy as np
+        if self._data_dbs:
+            matrices, all_rowids = [], []
+            for shard_idx, db in self._iter_data_shards():
+                mat, rids = db.get_all_embeddings_numpy()
+                if mat.shape[0] > 0:
+                    matrices.append(mat)
+                    all_rowids.extend(
+                        self._encode_chunk_rowid(shard_idx, r) for r in rids
+                    )
+            if not matrices:
+                return np.empty((0, 384), dtype=np.float32), []
+            return np.vstack(matrices), all_rowids
+        return self._index.get_all_embeddings_numpy()
+
     # -- Access tracking (always index DB) ---------------------------------
 
     def record_access(self, *args, **kwargs) -> None:
