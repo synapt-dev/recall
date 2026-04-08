@@ -1674,7 +1674,10 @@ class TranscriptIndex:
         self._last_search_summary = None
         self._last_conflicts: list[tuple[dict, dict]] = []
 
-        if not self.chunks:
+        # Allow knowledge-only search even when no transcript chunks exist
+        # (cold-start: recall_save was called but no conversations ingested)
+        has_knowledge = self._db and self._db.knowledge_count() > 0
+        if not self.chunks and not has_knowledge:
             self._last_diagnostics = SearchDiagnostics(reason="empty_index")
             return ""
 
@@ -1812,7 +1815,7 @@ class TranscriptIndex:
         context: int = 0,
     ) -> str:
         """Score all chunks globally, return top-K."""
-        if self._db and self._rowid_to_idx:
+        if self._db and (self._rowid_to_idx or self._db.knowledge_count() > 0):
             return self._global_lookup_fts(
                 query, max_chunks, max_tokens, date_filter,
                 after, before,
