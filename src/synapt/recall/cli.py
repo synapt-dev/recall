@@ -768,7 +768,10 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def cmd_search(args: argparse.Namespace) -> None:
     """Search the transcript index."""
+    import time
     from synapt.recall.config import load_config
+
+    profile = getattr(args, "profile", False)
 
     index_dir = _resolve_index_dir(args)
     if not (index_dir / "recall.db").exists() and not (index_dir / "chunks.jsonl").exists():
@@ -781,7 +784,10 @@ def cmd_search(args: argparse.Namespace) -> None:
     if max_tokens is None:
         max_tokens = min(500, load_config().get_max_tokens())
 
+    t0 = time.perf_counter()
     index = TranscriptIndex.load(index_dir, use_embeddings=True)
+    t_load = time.perf_counter()
+
     result = index.lookup(
         args.query,
         max_chunks=args.max_chunks,
@@ -790,11 +796,27 @@ def cmd_search(args: argparse.Namespace) -> None:
         after=args.after,
         before=args.before,
     )
+    t_search = time.perf_counter()
 
     if result:
         print(result)
     else:
         print("No results found.")
+
+    if profile:
+        t_total = t_search - t0
+        emb_status = index._embedding_status
+        emb_loaded = getattr(index, "_embeddings_loaded", "n/a")
+        chunk_count = len(index.chunks)
+        emb_matrix = getattr(index, "_emb_matrix", None)
+        numpy_info = f"{emb_matrix.shape[0]}x{emb_matrix.shape[1]} float32" if emb_matrix is not None else "dict"
+        print(f"\n--- Profile ---", file=sys.stderr)
+        print(f"  Index load:    {t_load - t0:.3f}s", file=sys.stderr)
+        print(f"  Search:        {t_search - t_load:.3f}s", file=sys.stderr)
+        print(f"  Total:         {t_total:.3f}s", file=sys.stderr)
+        print(f"  Chunks:        {chunk_count}", file=sys.stderr)
+        print(f"  Embeddings:    {emb_status} (loaded: {emb_loaded}, storage: {numpy_info})", file=sys.stderr)
+        print(f"  FTS backend:   {'sqlite' if index._rowid_to_idx else 'bm25'}", file=sys.stderr)
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -2388,6 +2410,7 @@ def main():
     search_parser.add_argument("--max-sessions", type=int, default=None, help="Progressive: only search N recent sessions")
     search_parser.add_argument("--after", default=None, help="Only results after this date (ISO 8601, e.g. 2026-02-28)")
     search_parser.add_argument("--before", default=None, help="Only results before this date (ISO 8601, e.g. 2026-03-01)")
+    search_parser.add_argument("--profile", action="store_true", help="Show per-phase timing breakdown")
 
     # Stats
     stats_parser = subparsers.add_parser("stats", help="Show index statistics")
