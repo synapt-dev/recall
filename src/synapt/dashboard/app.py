@@ -251,14 +251,16 @@ def _render_message(msg: dict) -> str:
         return (
             f'<div class="msg directive">'
             f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
-            f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: {body_html}'
+            f'<b style="color:{color}">{escape(name)}</b> &rarr; @{escape(to)}: '
+            f'<span class="msg-body">{body_html}</span>'
             f'{attachments_html}'
             f'</div>'
         )
     return (
         f'<div class="msg">'
         f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
-        f'<b style="color:{color}">{escape(name)}</b>: {body_html}'
+        f'<b style="color:{color}">{escape(name)}</b>: '
+        f'<span class="msg-body">{body_html}</span>'
         f'{attachments_html}'
         f'</div>'
     )
