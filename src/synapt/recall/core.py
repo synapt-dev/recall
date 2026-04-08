@@ -3910,7 +3910,8 @@ class TranscriptIndex:
         before: str | None = None,
     ) -> list[dict]:
         """Return recent sessions with summary info, newest-first."""
-        results = []
+        # Pass 1: collect candidate sessions within filter bounds
+        candidates: list[tuple[str, list, str, str]] = []
         for session_id in self._session_order:
             chunks = self.sessions[session_id]
 
@@ -3926,7 +3927,37 @@ class TranscriptIndex:
             if before and earliest_ts >= before:
                 continue
 
-            # First user message as summary (skip journal chunks)
+            candidates.append((session_id, chunks, earliest_ts, latest_ts))
+            if len(candidates) >= max_sessions:
+                break
+
+        # Pass 2: batch-load all chunks for candidate sessions.
+        # Avoids N individual DB round-trips (one per chunk) by doing a single
+        # batched fetch across all shards.
+        if self._lazy_chunks and self._db is not None and self._idx_to_rowid:
+            needed_rowids: list[int] = []
+            for _, chunks, _, _ in candidates:
+                for c in chunks:
+                    idx = self._id_to_idx.get(c.id)
+                    if idx is not None and idx in self._idx_to_rowid:
+                        existing = self.chunks[idx]
+                        if not (existing.user_text or existing.assistant_text
+                                or existing.tool_content or existing.transcript_path):
+                            needed_rowids.append(self._idx_to_rowid[idx])
+            if needed_rowids:
+                loaded_map = self._db.load_chunks_by_rowids(needed_rowids)
+                for _rowid, chunk in loaded_map.items():
+                    idx = self._id_to_idx.get(chunk.id)
+                    if idx is not None:
+                        # Update self.chunks only — _get_chunk() reads from here,
+                        # so this is sufficient. Updating self.sessions lists would
+                        # require a linear search per chunk (O(N*M)), which is the
+                        # bottleneck we are explicitly avoiding.
+                        self.chunks[idx] = chunk
+
+        # Pass 3: compute summaries (chunks are now hydrated in the cache)
+        results = []
+        for session_id, chunks, earliest_ts, _latest_ts in candidates:
             transcript_chunks = [c for c in chunks if c.turn_index >= 0]
             sorted_chunks = sorted(
                 transcript_chunks or chunks,
@@ -3953,9 +3984,6 @@ class TranscriptIndex:
                 "first_message": first_msg,
                 "files_count": len(all_files),
             })
-
-            if len(results) >= max_sessions:
-                break
 
         return results
 
