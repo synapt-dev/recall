@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from synapt.recall.core import project_slug, project_index_dir, project_archive_dir, project_worktree_dir, project_transcript_dir
 from synapt.recall.cli import (
     discover_transcript_dirs,
@@ -886,3 +888,68 @@ def test_channel_cli_post_without_name():
     assert args.action == "post"
     assert args.message == "hello"
     assert args.name is None
+
+
+# ---------------------------------------------------------------------------
+# migrate-channels CLI tests
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_channels_cli_dispatches_correctly():
+    """CLI dispatches 'migrate' subcommand to cmd_migrate_channels."""
+    with patch.object(sys, "argv", ["synapt", "migrate"]), \
+         patch("synapt.recall.cli.cmd_migrate_channels") as mock:
+        main()
+    mock.assert_called_once()
+
+
+def test_migrate_channels_cli_flags():
+    """CLI passes --org, --project, --project-dir to cmd_migrate_channels."""
+    with patch.object(
+        sys, "argv",
+        ["synapt", "migrate", "--org", "myorg", "--project", "myproject", "--project-dir", "/tmp/foo"],
+    ), patch("synapt.recall.cli.cmd_migrate_channels") as mock:
+        main()
+    args = mock.call_args[0][0]
+    assert args.org == "myorg"
+    assert args.project == "myproject"
+    assert args.project_dir == "/tmp/foo"
+
+
+def test_cmd_migrate_channels_calls_migrate_function(tmp_path):
+    """cmd_migrate_channels calls migrate_channels_to_global with resolved paths."""
+    import argparse
+    from synapt.recall.cli import cmd_migrate_channels
+
+    # Write a channel file to the local channels dir
+    local_channels = tmp_path / ".synapt" / "recall" / "channels"
+    local_channels.mkdir(parents=True)
+    (local_channels / "dev.jsonl").write_text(
+        '{"timestamp": "2026-01-01T00:00:00", "from_agent": "apollo", "body": "hi"}\n'
+    )
+
+    args = argparse.Namespace(
+        project_dir=str(tmp_path),
+        org="test-org",
+        project="test-project",
+    )
+
+    global_dir = tmp_path / "global"
+    with patch("synapt.recall.cli._get_global_channels_dir", return_value=global_dir):
+        cmd_migrate_channels(args)
+
+    migrated = global_dir / "test-org" / "test-project" / "dev.jsonl"
+    assert migrated.exists(), "Channel file should be in global store after migration"
+    msgs = [json.loads(line) for line in migrated.read_text().splitlines()]
+    assert msgs[0]["from_agent"] == "apollo"
+
+
+def test_cmd_migrate_channels_missing_org_exits(tmp_path):
+    """cmd_migrate_channels exits with error if org cannot be resolved."""
+    import argparse
+    from synapt.recall.cli import cmd_migrate_channels
+
+    args = argparse.Namespace(project_dir=str(tmp_path), org=None, project=None)
+    with patch("synapt.recall.cli._resolve_org_id_for_cli", return_value=None), \
+         pytest.raises(SystemExit):
+        cmd_migrate_channels(args)

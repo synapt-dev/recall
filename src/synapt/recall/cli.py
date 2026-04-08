@@ -2271,6 +2271,70 @@ def _download_hf_transcripts(repo_id: str) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
+# migrate-channels helpers (exposed for testing)
+# ---------------------------------------------------------------------------
+
+def _resolve_org_id_for_cli(project_dir: "Path | None") -> "str | None":
+    """Thin wrapper so tests can patch org resolution independently."""
+    from synapt.recall.channel import _resolve_org_id
+    return _resolve_org_id(project_dir)
+
+
+def _resolve_project_id_for_cli(project_dir: "Path | None") -> "str | None":
+    """Thin wrapper so tests can patch project resolution independently."""
+    from synapt.recall.channel import _resolve_project_id
+    return _resolve_project_id(project_dir)
+
+
+def _get_global_channels_dir(project_dir: "Path | None" = None) -> "Path":
+    """Return the global channels root (~/.synapt/channels/).
+
+    Exposed as a standalone function so tests can patch it without touching
+    Path.home() or channel internals.
+    """
+    from pathlib import Path as _Path
+    return _Path.home() / ".synapt" / "channels"
+
+
+def cmd_migrate_channels(args: "argparse.Namespace") -> None:
+    """Migrate local .synapt/recall/channels/ to global ~/.synapt/channels/ store."""
+    from pathlib import Path as _Path
+    from synapt.recall.channel import migrate_channels_to_global, _local_channels_dir
+
+    project_dir = _Path(args.project_dir) if args.project_dir else None
+
+    org_id = args.org or _resolve_org_id_for_cli(project_dir)
+    project_id = args.project or _resolve_project_id_for_cli(project_dir)
+
+    if not org_id:
+        import sys as _sys
+        print(
+            "Error: --org is required (or run from a gripspace with a manifest URL)",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+    if not project_id:
+        import sys as _sys
+        print(
+            "Error: --project is required (or run from a gripspace with a manifest URL)",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+
+    local_dir = _local_channels_dir(project_dir)
+    global_dir = _get_global_channels_dir(project_dir)
+
+    if not local_dir.exists():
+        print(f"No local channels found at {local_dir}")
+        return
+
+    n_before = len(list(local_dir.glob("*.jsonl")))
+    migrate_channels_to_global(local_dir, global_dir, org_id, project_id)
+    target = global_dir / org_id / project_id
+    print(f"Migrated {n_before} channel(s) → {target}")
+
+
+# ---------------------------------------------------------------------------
 # Argparse
 # ---------------------------------------------------------------------------
 
@@ -2459,6 +2523,23 @@ def main():
     channel_parser.add_argument("--name", default=None,
                                 help="Display name for join action")
 
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Migrate local .synapt/recall/channels/ to global ~/.synapt/channels/ store",
+    )
+    migrate_parser.add_argument(
+        "--project-dir", default=None,
+        help="Path to the gripspace root (default: current directory)",
+    )
+    migrate_parser.add_argument(
+        "--org", default=None,
+        help="Org ID (auto-detected from gripspace manifest if not set)",
+    )
+    migrate_parser.add_argument(
+        "--project", default=None,
+        help="Project ID (auto-detected from gripspace manifest if not set)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "setup":
@@ -2501,6 +2582,8 @@ def main():
         cmd_channel(args)
     elif args.command == "rescrub":
         cmd_rescrub(args)
+    elif args.command == "migrate":
+        cmd_migrate_channels(args)
 
 
 if __name__ == "__main__":
