@@ -652,5 +652,142 @@ class TestDedupKnowledgeNodes(unittest.TestCase):
         self.assertIn("sess-C", sessions)
 
 
+class TestColdStartKnowledgeSearch(unittest.TestCase):
+    """Cold-start scenario: knowledge saved via recall_save but no transcript
+    chunks exist yet. Verifies that lookup() and _concise_lookup() still
+    surface knowledge nodes. Regression test for recall#592."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = Path(self.tmpdir) / "recall.db"
+
+    def _make_index_with_knowledge(self, nodes: list[dict]) -> "TranscriptIndex":
+        """Create a TranscriptIndex with DB-backed knowledge but zero chunks."""
+        from synapt.recall.core import TranscriptIndex
+        from synapt.recall.storage import RecallDB
+
+        db = RecallDB(self.db_path)
+        db.save_knowledge_nodes(nodes)
+        # No chunks saved -- simulates cold start
+        index = TranscriptIndex([], db=db)
+        return index
+
+    def test_concise_lookup_surfaces_knowledge(self):
+        """depth='concise' should return knowledge nodes even without chunks."""
+        from synapt.recall.core import TranscriptIndex
+
+        nodes = [
+            {
+                "id": "cold_test_01",
+                "content": "The deploy pipeline uses Terraform with S3 backend",
+                "category": "infrastructure",
+                "status": "active",
+                "confidence": 0.8,
+                "source_sessions": ["sess-cold-1"],
+            },
+        ]
+        index = self._make_index_with_knowledge(nodes)
+        result = index.lookup(
+            "deploy pipeline Terraform",
+            max_chunks=5,
+            max_tokens=500,
+            depth="concise",
+        )
+        self.assertIn("Terraform", result)
+        index._db.close()
+
+    def test_full_lookup_surfaces_knowledge(self):
+        """depth='full' should return knowledge nodes even without chunks."""
+        from synapt.recall.core import TranscriptIndex
+
+        nodes = [
+            {
+                "id": "cold_test_02",
+                "content": "User prefers dark mode in all editors",
+                "category": "preference",
+                "status": "active",
+                "confidence": 0.9,
+                "source_sessions": ["sess-cold-2"],
+            },
+        ]
+        index = self._make_index_with_knowledge(nodes)
+        result = index.lookup(
+            "dark mode editor preference",
+            max_chunks=5,
+            max_tokens=500,
+            depth="full",
+        )
+        self.assertIn("dark mode", result)
+        index._db.close()
+
+    def test_empty_db_still_returns_empty(self):
+        """No chunks AND no knowledge should still return empty string."""
+        from synapt.recall.core import TranscriptIndex
+        from synapt.recall.storage import RecallDB
+
+        db = RecallDB(self.db_path)
+        index = TranscriptIndex([], db=db)
+        result = index.lookup("anything", max_chunks=5)
+        self.assertEqual(result, "")
+        db.close()
+
+    def test_stale_knowledge_not_surfaced(self):
+        """Stale knowledge nodes should not appear in cold-start search."""
+        from synapt.recall.core import TranscriptIndex
+
+        nodes = [
+            {
+                "id": "cold_stale_01",
+                "content": "Old API key for staging environment",
+                "category": "infrastructure",
+                "status": "stale",
+                "confidence": 0.5,
+                "source_sessions": ["sess-stale"],
+            },
+        ]
+        index = self._make_index_with_knowledge(nodes)
+        result = index.lookup(
+            "API key staging",
+            max_chunks=5,
+            max_tokens=500,
+            depth="concise",
+        )
+        # Stale nodes should not appear (knowledge_count only counts active)
+        self.assertEqual(result, "")
+        index._db.close()
+
+    def test_multiple_knowledge_nodes_ranked(self):
+        """Multiple knowledge nodes compete by score in cold-start."""
+        from synapt.recall.core import TranscriptIndex
+
+        nodes = [
+            {
+                "id": "cold_multi_01",
+                "content": "Database uses PostgreSQL 16 with pgvector extension",
+                "category": "infrastructure",
+                "status": "active",
+                "confidence": 0.9,
+                "source_sessions": ["sess-m1"],
+            },
+            {
+                "id": "cold_multi_02",
+                "content": "Redis cache layer sits in front of PostgreSQL",
+                "category": "infrastructure",
+                "status": "active",
+                "confidence": 0.7,
+                "source_sessions": ["sess-m2"],
+            },
+        ]
+        index = self._make_index_with_knowledge(nodes)
+        result = index.lookup(
+            "PostgreSQL database",
+            max_chunks=5,
+            max_tokens=500,
+            depth="concise",
+        )
+        self.assertIn("PostgreSQL", result)
+        index._db.close()
+
+
 if __name__ == "__main__":
     unittest.main()
