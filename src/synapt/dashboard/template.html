@@ -73,6 +73,15 @@
   }
 
   /* ── Channel list ─────────────────────────────────────── */
+  .ch-project-header {
+    padding: 8px 10px 2px;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.7;
+  }
+  .ch-project-header.active-project { color: var(--accent); opacity: 0.85; }
   .ch-item {
     display: flex;
     align-items: center;
@@ -291,12 +300,10 @@
 
 <div class="layout">
 
-  <!-- Left sidebar: channels -->
+  <!-- Left sidebar: org → project → channels -->
   <div class="sidebar sidebar-left">
     <div class="sidebar-header">Channels</div>
-    <div id="channel-list">
-      <div class="ch-item active" data-ch="dev">dev</div>
-    </div>
+    <div id="channel-list"></div>
   </div>
 
   <!-- Main panel: messages + input -->
@@ -342,7 +349,7 @@
     </div>
   </div>
 
-  <!-- Right sidebar: agents -->
+  <!-- Right sidebar: org member roster -->
   <div class="sidebar sidebar-right">
     <div class="sidebar-header">Members</div>
     <div id="agents">
@@ -361,7 +368,12 @@ if (!dashName) {
 }
 document.getElementById('post-name').value = dashName;
 
-// ── Org/project label ────────────────────────────────────
+// ── Active channel + org/project context ─────────────────
+let activeChannel = 'dev';
+let activeOrg = '';
+let activeProject = '';
+
+// ── Org/project label + initial context ──────────────────
 fetch('/api/org').then(r => r.json()).then(data => {
   activeOrg = data.org || '';
   activeProject = data.project || '';
@@ -373,11 +385,7 @@ fetch('/api/org').then(r => r.json()).then(data => {
   document.getElementById('org-label').textContent = '';
 });
 
-// ── Active channel + org/project context ─────────────────
-let activeChannel = 'dev';
-let activeOrg = '';
-let activeProject = '';
-
+// ── Channel switching ─────────────────────────────────────
 function switchChannel(ch, org, project) {
   activeChannel = ch;
   activeOrg = org || '';
@@ -385,7 +393,8 @@ function switchChannel(ch, org, project) {
 
   // Update sidebar highlight
   document.querySelectorAll('.ch-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.ch === ch && el.dataset.org === activeOrg && el.dataset.proj === activeProject);
+    el.classList.toggle('active',
+      el.dataset.ch === ch && el.dataset.org === activeOrg && el.dataset.proj === activeProject);
   });
 
   // Update channel title
@@ -422,22 +431,23 @@ function switchChannel(ch, org, project) {
   htmx.ajax('GET', '/api/messages/' + ch + '?' + msgQ.toString(), '#feed');
 }
 
-// ── Channel list population (org/project hierarchy) ───────
+// ── Nav tree (org → project → channels) ──────────────────
 function renderChannelList(nav) {
   const list = document.getElementById('channel-list');
-  // nav = { org, project, projects: [{org, project, channels, active}] }
   const projects = (nav && nav.projects) ? nav.projects : [];
 
-  // Set initial activeOrg/activeProject from current project
-  if (!activeOrg && nav && nav.org) { activeOrg = nav.org; activeProject = nav.project || ''; }
+  // Seed activeOrg/activeProject from nav on first load
+  if (!activeOrg && nav && nav.org) {
+    activeOrg = nav.org;
+    activeProject = nav.project || '';
+  }
 
   let html = '';
   projects.forEach(p => {
-    const isCurrentProject = p.active;
-    // Show project header only if multiple projects exist
     if (projects.length > 1) {
       const label = (p.org !== nav.org) ? p.org + '/' + p.project : p.project;
-      html += '<div style="padding:8px 10px 2px; font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em; opacity:0.7;">' + label + '</div>';
+      const activeClass = p.active ? ' active-project' : '';
+      html += '<div class="ch-project-header' + activeClass + '">' + label + '</div>';
     }
     p.channels.forEach(c => {
       const isActive = (c === activeChannel && p.org === activeOrg && p.project === activeProject);
@@ -471,22 +481,25 @@ function ensureDashboardJoin(channel) {
 ensureDashboardJoin('dev');
 htmx.ajax('GET', '/api/messages/dev?limit=50', '#feed');
 
-// ── Agents polling (SSE scope prevents sse-swap here) ────
+// ── Agents polling (right sidebar — polled, not SSE) ─────
+// #agents is outside #sse-container so sse-swap won't fire here.
+const _statusColors = { online: '#4ade80', running: '#4ade80', idle: '#facc15', away: '#fb923c', offline: '#6b7280' };
+
 function renderAgents(agents) {
   const container = document.getElementById('agents');
   if (!agents || !agents.length) {
     container.innerHTML = '<div class="tile empty">No agents online</div>';
     return;
   }
-  const statusColors = { online: '#4ade80', idle: '#facc15', away: '#fb923c', offline: '#6b7280', running: '#4ade80' };
   container.innerHTML = agents.map(a => {
     const name = a.display_name || a.griptree || a.agent_id || '?';
-    const color = statusColors[a.status] || '#6b7280';
+    const color = _statusColors[a.status] || '#6b7280';
     const role = (a.role && a.role !== 'agent') ? '<div class="tile-role">' + a.role + '</div>' : '';
     const project = a.griptree ? '<div class="tile-project">' + a.griptree + '</div>' : '';
     const channels = (a.channels && a.channels.length) ? a.channels.map(c => '#' + c).join(', ') : 'no channels';
     const seen = (a.last_seen && a.last_seen.length > 16) ? a.last_seen.substring(11, 16) : '';
-    return '<div class="tile clickable" data-agent="' + name + '" style="border-left:4px solid ' + color + '">' +
+    const isSel = (selectedAgent === name) ? ' selected' : '';
+    return '<div class="tile clickable' + isSel + '" data-agent="' + name + '" style="border-left:4px solid ' + color + '">' +
            '<div class="tile-name">' + name + '</div>' + project + role +
            '<div class="tile-meta"><span style="color:' + color + '">' + a.status + '</span>' +
            ' &middot; ' + channels + (seen ? ' &middot; ' + seen : '') + '</div></div>';
