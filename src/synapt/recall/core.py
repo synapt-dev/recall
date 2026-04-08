@@ -1073,9 +1073,15 @@ class TranscriptIndex:
         # Optional embedding index
         self._embeddings: list[list[float]] | None = None
         self._embed_provider = None
-        # Pre-loaded embeddings for hybrid search (rowid -> vector)
+        # Pre-loaded embeddings for hybrid search — numpy-backed for memory
+        # efficiency.  Loaded lazily on first search to avoid blocking init.
         self._all_embeddings: dict[int, list[float]] = {}
         self._knowledge_embeddings: dict[int, list[float]] = {}
+        self._emb_matrix: "np.ndarray | None" = None
+        self._emb_rowids: list[int] = []
+        self._kn_emb_matrix: "np.ndarray | None" = None
+        self._kn_emb_rowids: list[int] = []
+        self._embeddings_loaded: bool = False
         # Track embedding status for user-facing messages
         self._embedding_status: str = "disabled"  # disabled | active | unavailable
         self._embedding_reason: str = ""
@@ -1089,12 +1095,8 @@ class TranscriptIndex:
                     # Only build embeddings if storage is available
                     if self._db is None or self._idx_to_rowid:
                         self._load_or_build_embeddings(cache_dir)
-                    # Load all embeddings into memory for hybrid search
-                    if self._db is not None:
-                        self._all_embeddings = self._db.get_all_embeddings()
-                        self._knowledge_embeddings = (
-                            self._db.get_knowledge_embeddings()
-                        )
+                    # Embedding data is loaded lazily via
+                    # _ensure_embeddings_loaded() on first search call.
                 else:
                     self._embedding_status = "unavailable"
                     self._embedding_reason = (
@@ -1144,6 +1146,42 @@ class TranscriptIndex:
             self._get_chunk(i)
         return self.chunks
 
+    def _ensure_embeddings_loaded(self) -> None:
+        """Load embedding data on first access (lazy initialization).
+
+        Populates ``_emb_matrix`` / ``_emb_rowids`` from the DB using
+        numpy-backed bulk loading, avoiding millions of Python float
+        objects.  Also populates the legacy ``_all_embeddings`` dict
+        for any code paths that still reference it, and loads knowledge
+        embeddings.
+
+        Skips loading if embeddings were already injected (e.g. by tests).
+        """
+        if self._embeddings_loaded:
+            return
+        self._embeddings_loaded = True
+        # Respect manually injected embeddings (used in integration tests)
+        if self._all_embeddings:
+            return
+        if self._db is None:
+            return
+        try:
+            import numpy as np
+            matrix, rowids = self._db.get_all_embeddings_numpy()
+            self._emb_matrix = matrix
+            self._emb_rowids = rowids
+            # Build legacy dict from numpy for backward-compat paths
+            self._all_embeddings = {
+                rowids[i]: matrix[i].tolist()
+                for i in range(len(rowids))
+            } if len(rowids) > 0 else {}
+        except Exception:
+            # Fallback to the dict loader if numpy is unavailable
+            self._all_embeddings = self._db.get_all_embeddings()
+            self._emb_matrix = None
+            self._emb_rowids = []
+        self._knowledge_embeddings = self._db.get_knowledge_embeddings()
+
     def _rerank_candidates(
         self,
         query: str,
@@ -1186,11 +1224,12 @@ class TranscriptIndex:
         """
         if _env_flag("SYNAPT_DISABLE_CROSS_LINKS"):
             return 0
+        self._ensure_embeddings_loaded()
         if not self._db or not self._all_embeddings:
             return 0
         import numpy as np
 
-        rowids = list(self._all_embeddings.keys())
+        rowids = self._emb_rowids if self._emb_matrix is not None else list(self._all_embeddings.keys())
         if len(rowids) < 2:
             return 0
 
@@ -1199,10 +1238,13 @@ class TranscriptIndex:
         id_map = self._db.chunk_id_map()
         sessions = [session_map.get(r, "") for r in rowids]
 
-        # Build embedding matrix (N, D)
-        matrix = np.array(
-            [self._all_embeddings[r] for r in rowids], dtype=np.float32,
-        )
+        # Use pre-built numpy matrix if available, else build from dict
+        if self._emb_matrix is not None:
+            matrix = self._emb_matrix.copy()
+        else:
+            matrix = np.array(
+                [self._all_embeddings[r] for r in rowids], dtype=np.float32,
+            )
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         normed = matrix / norms
@@ -2013,10 +2055,12 @@ class TranscriptIndex:
         # Hybrid search: RRF fusion between BM25/FTS and embedding similarity.
         # Unlike the old additive boost (score + sim * 3.0), RRF can surface
         # results that BM25 missed entirely — critical for paraphrased queries.
+        self._ensure_embeddings_loaded()
         if self._embed_provider and self._all_embeddings:
             try:
                 from synapt.recall.hybrid import (
-                    embedding_search, weighted_rrf_merge,
+                    embedding_search, embedding_search_numpy,
+                    weighted_rrf_merge,
                 )
                 q_emb = self._embed_provider.embed_single(query)
 
@@ -2025,9 +2069,15 @@ class TranscriptIndex:
                 bm25_ranked_ref = reference_candidates
 
                 # Embedding ranked list (rowid, sim) → convert to (idx, sim)
-                emb_raw = embedding_search(
-                    q_emb, self._all_embeddings, limit=max_chunks * 10,
-                )
+                if self._emb_matrix is not None:
+                    emb_raw = embedding_search_numpy(
+                        q_emb, self._emb_matrix, self._emb_rowids,
+                        limit=max_chunks * 10,
+                    )
+                else:
+                    emb_raw = embedding_search(
+                        q_emb, self._all_embeddings, limit=max_chunks * 10,
+                    )
                 emb_ranked = []
                 emb_ranked_ref = []
                 for rowid, sim in emb_raw:
@@ -2425,15 +2475,23 @@ class TranscriptIndex:
         # search globally — semantic recall should be broader than keyword
         # recall, surfacing paraphrased matches from any session even when
         # max_sessions limits the BM25 search window.
+        self._ensure_embeddings_loaded()
         if self._embed_provider and self._all_embeddings:
             try:
                 from synapt.recall.hybrid import (
-                    embedding_search, weighted_rrf_merge,
+                    embedding_search, embedding_search_numpy,
+                    weighted_rrf_merge,
                 )
                 q_emb = self._embed_provider.embed_single(query)
-                emb_raw = embedding_search(
-                    q_emb, self._all_embeddings, limit=max_chunks * 5,
-                )
+                if self._emb_matrix is not None:
+                    emb_raw = embedding_search_numpy(
+                        q_emb, self._emb_matrix, self._emb_rowids,
+                        limit=max_chunks * 5,
+                    )
+                else:
+                    emb_raw = embedding_search(
+                        q_emb, self._all_embeddings, limit=max_chunks * 5,
+                    )
                 emb_ranked = []
                 emb_ranked_ref = []
                 for rowid, sim in emb_raw:
@@ -2607,6 +2665,7 @@ class TranscriptIndex:
                             seen_kn.add(rowid)
 
             # Hybrid: also search knowledge embeddings
+            self._ensure_embeddings_loaded()
             emb_hits: list[tuple[int, float]] = []
             if self._embed_provider and self._knowledge_embeddings:
                 try:
