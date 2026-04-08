@@ -1417,17 +1417,40 @@ class TranscriptIndex:
             self._embeddings = None
 
     def _load_or_build_embeddings_db(self):
-        """Build or load embeddings using the SQLite backend."""
+        """Build or load embeddings using the SQLite backend.
+
+        When embeddings are stale (content hash mismatch), the rebuild is
+        deferred to a background thread so search returns immediately with
+        BM25-only results. The next search after the build finishes will
+        pick up the fresh embeddings via _ensure_embeddings_loaded().
+        """
         content_hash = self._content_hash()
         stored_hash = self._db.get_metadata("embedding_hash")
 
         if stored_hash == content_hash and self._db.has_embeddings():
-            return  # Embeddings are current — fetch on demand during lookup
+            return  # Embeddings are current; fetch on demand during lookup
 
-        # Build embeddings and store as per-row BLOBs
-        texts = [c.text[:500] for c in self._materialize_all_chunks()]
+        # Stale embeddings: rebuild in background to avoid blocking search.
+        # Search will use BM25-only until the build completes.
+        logger.info(
+            "Embedding hash mismatch (stored=%s, current=%s). "
+            "Rebuilding in background...",
+            (stored_hash or "none")[:8], content_hash[:8],
+        )
+        import threading
+        self._embedding_build_thread = threading.Thread(
+            target=self._build_embeddings_background,
+            args=(content_hash,),
+            daemon=True,
+            name="synapt-embedding-build",
+        )
+        self._embedding_build_thread.start()
+
+    def _build_embeddings_background(self, content_hash: str) -> None:
+        """Build chunk + knowledge embeddings in a background thread."""
         try:
-            all_embs = []
+            texts = [c.text[:500] for c in self._materialize_all_chunks()]
+            all_embs: list[list[float]] = []
             for i in range(0, len(texts), 64):
                 batch = texts[i:i + 64]
                 all_embs.extend(self._embed_provider.embed(batch))
@@ -1440,11 +1463,14 @@ class TranscriptIndex:
             if emb_mapping:
                 self._db.save_embeddings(emb_mapping)
             self._db.set_metadata("embedding_hash", content_hash)
+            logger.info(
+                "Background embedding build complete: %d chunks",
+                len(emb_mapping),
+            )
 
-            # Also build embeddings for knowledge nodes
             self._build_knowledge_embeddings()
         except Exception as e:
-            logger.warning("Embedding build failed: %s", e)
+            logger.warning("Background embedding build failed: %s", e)
 
     def _build_knowledge_embeddings(self) -> None:
         """Build embeddings for knowledge nodes that don't have them yet."""

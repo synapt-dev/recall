@@ -245,9 +245,11 @@ class ShardedRecallDB:
         """Save chunks to the appropriate database.
 
         In monolithic mode, delegates directly to the single DB.
-        In sharded mode, clears ALL shards first (to prevent duplication on
-        full rebuilds), then saves to the active (last) shard. If the active
-        shard exceeds SHARD_CHUNK_THRESHOLD, a new shard is created.
+        In sharded mode, closes all existing shards, deletes the old
+        shard files, and re-distributes chunks across fresh shards
+        using SHARD_CHUNK_THRESHOLD. This prevents the unbounded shard
+        accumulation bug where every rebuild created a new full-copy
+        shard (#sharding-bug-sprint-13).
         """
         if not self._data_dbs:
             self._index.save_chunks(chunks)
@@ -257,66 +259,67 @@ class ShardedRecallDB:
             SHARD_CHUNK_THRESHOLD,
             SHARD_METADATA_SQL,
             _update_shard_metadata,
+            list_shards,
             shard_name_for_index,
-            next_shard_index,
         )
 
-        # Clear ALL non-active shards before writing. RecallDB.save_chunks()
-        # only wipes the single DB it's called on, so without this step a
-        # full rebuild leaves stale duplicates in every earlier shard.
-        for db in self._data_dbs[:-1]:
+        index_dir = self._index._path.parent
+
+        # Step 1: Close all existing data shard connections
+        for db in self._data_dbs:
             try:
-                db._conn.execute("DROP TRIGGER IF EXISTS chunks_ad")
-                db._conn.execute("DELETE FROM chunks")
-                db._conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('delete-all')")
-                db._conn.execute(
-                    "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN "
-                    "  INSERT INTO chunks_fts(chunks_fts, rowid, user_text, assistant_text, "
-                    "    tools_used, files_touched, tool_content, date_text) "
-                    "  VALUES ('delete', old.rowid, old.user_text, old.assistant_text, "
-                    "    old.tools_used, old.files_touched, old.tool_content, old.date_text); "
-                    "END;"
-                )
-                db._conn.commit()
+                db.close()
             except Exception:
-                logger.warning("Failed to clear shard %s", db._path, exc_info=True)
+                pass
+        self._data_dbs = []
 
-        # Save to the last (active) shard (this also clears it internally)
-        active_db = self._data_dbs[-1]
-        active_db.save_chunks(chunks)
-
-        # Check if active shard exceeded threshold — rotate to a new shard
-        try:
-            count = active_db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            if count > SHARD_CHUNK_THRESHOLD:
-                index_dir = self._index._path.parent
-                idx = next_shard_index(index_dir)
-                new_path = index_dir / shard_name_for_index(idx)
-                new_db = RecallDB(new_path)
-                self._data_dbs.append(new_db)
-
-                # Update shard metadata: old shard is now inactive, new is active
-                idx_conn = sqlite3.connect(str(self._index._path))
+        # Step 2: Delete all old shard files (including WAL/SHM journals)
+        for old_shard in list_shards(index_dir):
+            for suffix in ("", "-wal", "-shm"):
+                p = old_shard.parent / (old_shard.name + suffix)
                 try:
-                    idx_conn.execute(SHARD_METADATA_SQL)
-                    # Get timestamps from the now-full shard
-                    ts_row = active_db._conn.execute(
-                        "SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts FROM chunks"
-                    ).fetchone()
-                    _update_shard_metadata(
-                        idx_conn, active_db._path, count,
-                        ts_row[0] or "", ts_row[1] or "",
-                        is_active=False,
-                    )
-                    _update_shard_metadata(
-                        idx_conn, new_path, 0, "", "",
-                        is_active=True,
-                    )
-                    idx_conn.commit()
-                finally:
-                    idx_conn.close()
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Failed to delete %s", p)
+
+        # Step 3: Clear stale shard_metadata in index.db
+        try:
+            self._index._conn.execute("DELETE FROM shard_metadata")
+            self._index._conn.commit()
         except Exception:
-            logger.warning("Shard rotation check failed", exc_info=True)
+            logger.warning("Failed to clear shard_metadata", exc_info=True)
+
+        # Step 4: Sort chunks by timestamp for time-range sharding
+        sorted_chunks = sorted(chunks, key=lambda c: c.timestamp or "")
+
+        # Step 5: Distribute chunks across fresh shards
+        shard_idx = 1
+        for offset in range(0, len(sorted_chunks), SHARD_CHUNK_THRESHOLD):
+            batch = sorted_chunks[offset:offset + SHARD_CHUNK_THRESHOLD]
+            shard_path = index_dir / shard_name_for_index(shard_idx)
+            shard_db = RecallDB(shard_path)
+            shard_db.save_chunks(batch)
+            self._data_dbs.append(shard_db)
+
+            # Record shard metadata
+            min_ts = batch[0].timestamp if batch else ""
+            max_ts = batch[-1].timestamp if batch else ""
+            is_last = offset + SHARD_CHUNK_THRESHOLD >= len(sorted_chunks)
+            try:
+                self._index._conn.execute(SHARD_METADATA_SQL)
+                _update_shard_metadata(
+                    self._index._conn, shard_path, len(batch),
+                    min_ts or "", max_ts or "",
+                    is_active=is_last,
+                )
+                self._index._conn.commit()
+            except Exception:
+                logger.warning("Failed to update shard metadata for %s",
+                               shard_path.name, exc_info=True)
+            shard_idx += 1
+
+        logger.info("save_chunks: distributed %d chunks across %d shard(s)",
+                     len(chunks), len(self._data_dbs))
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.
