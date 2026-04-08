@@ -219,6 +219,7 @@ class SearchDiagnostics:
     search_mode: str = ""            # fts_global, bm25_global, fts_progressive, bm25_progressive
     sessions_searched: int = 0       # Progressive mode only
     date_filter_active: bool = False
+    embeddings_available: bool = True  # False when search ran without embeddings
     reason: str = ""                 # empty_index, empty_query, no_matches
 
     def format_message(self) -> str:
@@ -232,6 +233,9 @@ class SearchDiagnostics:
         if self.reason == "no_matches":
             lines = ["No results found — no chunks matched your query terms."]
             lines.append(f"  Index: {self.total_chunks} chunks across {self.total_sessions} sessions")
+            if not self.embeddings_available:
+                lines.append("  Warning: semantic search unavailable — using keyword matching only.")
+                lines.append("  Broad or abstract queries may not match. Try exact terms from conversations.")
             if self.date_filter_active:
                 lines.append("  Note: date filter was active — try widening the date range")
             lines.append("  Try: broader terms, different keywords, or check `recall_stats`")
@@ -1574,6 +1578,7 @@ class TranscriptIndex:
         date_filter_active: bool = False,
         sessions_searched: int = 0,
         reference_candidates: list[tuple[int, float]] | None = None,
+        embeddings_available: bool = True,
     ) -> list[tuple[int, float]]:
         """Apply threshold filtering and record diagnostics if no candidates exist.
 
@@ -1591,6 +1596,7 @@ class TranscriptIndex:
                 search_mode=search_mode,
                 date_filter_active=date_filter_active,
                 sessions_searched=sessions_searched,
+                embeddings_available=embeddings_available,
                 reason="no_matches",
             )
             return []
@@ -2051,14 +2057,17 @@ class TranscriptIndex:
                 logger.warning("Hybrid search failed, using BM25 only: %s", e)
                 candidates.sort(key=lambda x: x[1], reverse=True)
         else:
+            logger.debug("Semantic search unavailable — using keyword matching only")
             candidates.sort(key=lambda x: x[1], reverse=True)
 
         top = [(i, s) for i, s in candidates[:max_chunks * 2] if s > 0]
 
+        has_emb = bool(self._embed_provider and self._all_embeddings)
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "fts_global",
             date_filter_active=date_filter is not None,
             reference_candidates=reference_candidates,
+            embeddings_available=has_emb,
         )
 
         # Cross-encoder reranking (Phase 2): rerank after threshold so
@@ -2290,10 +2299,12 @@ class TranscriptIndex:
             ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
             top = [(i, s) for i, s in ranked[:max_chunks * 2] if s > 0]
 
+        has_emb = bool(self._embeddings and self._embed_provider)
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "bm25_global",
             date_filter_active=date_filter is not None,
             reference_candidates=reference_ranked,
+            embeddings_available=has_emb,
         )
 
         # Cross-encoder reranking (Phase 2): after threshold (see fts_global)
