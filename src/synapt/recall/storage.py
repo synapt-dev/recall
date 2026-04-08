@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS clusters (
     date_end    TEXT,
     chunk_count INTEGER NOT NULL DEFAULT 0,
     status      TEXT NOT NULL DEFAULT 'active',
+    durability  TEXT NOT NULL DEFAULT '',  -- durable|ephemeral|mixed (empty = unclassified)
     tags        TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -590,6 +591,13 @@ class RecallDB:
             self._conn.execute(
                 "ALTER TABLE clusters ADD COLUMN "
                 "tags TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._conn.commit()
+
+        if "durability" not in cols:
+            self._conn.execute(
+                "ALTER TABLE clusters ADD COLUMN "
+                "durability TEXT NOT NULL DEFAULT ''"
             )
             self._conn.commit()
 
@@ -1833,10 +1841,45 @@ class RecallDB:
             "date_end": row["date_end"],
             "chunk_count": row["chunk_count"],
             "status": row["status"],
+            "durability": row["durability"] if "durability" in row.keys() else "",
             "tags": json.loads(row["tags"]) if row["tags"] else [],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def classify_all_clusters(self) -> int:
+        """Classify durability for all clusters that haven't been classified yet.
+
+        Returns the number of clusters updated.
+        """
+        from synapt.recall.hybrid import classify_cluster_durability
+
+        rows = self._conn.execute(
+            "SELECT cluster_id, topic FROM clusters WHERE durability = ''"
+        ).fetchall()
+        if not rows:
+            return 0
+
+        updated = 0
+        for row in rows:
+            cluster_id = row["cluster_id"]
+            topic = row["topic"]
+            # Get summary if available
+            summary_row = self._conn.execute(
+                "SELECT summary FROM cluster_summaries WHERE cluster_id = ?",
+                (cluster_id,),
+            ).fetchone()
+            summary = summary_row["summary"] if summary_row else ""
+
+            durability = classify_cluster_durability(topic, summary)
+            self._conn.execute(
+                "UPDATE clusters SET durability = ? WHERE cluster_id = ?",
+                (durability, cluster_id),
+            )
+            updated += 1
+
+        self._conn.commit()
+        return updated
 
     def cluster_count(self, cluster_type: str | None = None) -> int:
         """Number of active clusters, optionally filtered by type."""
