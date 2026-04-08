@@ -72,6 +72,15 @@ def _agent_color(name: str) -> str:
     return _agent_color_cache[name]
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process with the given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
 def _combined_agents_json() -> list[dict]:
     """Return agents from both team.db (process tracking) and channel presence.
 
@@ -107,6 +116,12 @@ def _combined_agents_json() -> list[dict]:
             for agent in registered:
                 name = agent.get("display_name", "")
                 status = agent.get("status") or "offline"
+                # Verify PID is alive — team.db status can be stale if the
+                # process exited without updating the DB (crash, kill, etc.)
+                pid = agent.get("pid")
+                if status in ("running", "online") and pid:
+                    if not _is_pid_alive(pid):
+                        status = "offline"
                 if status in ("offline", "stopped") and name not in agents_by_name:
                     continue  # Don't show offline agents that aren't in presence
                 if name not in agents_by_name:
