@@ -973,15 +973,24 @@ def _emit_message_wakes(msg: ChannelMessage, project_dir: Path | None = None) ->
         conn.close()
 
 
-def _append_message(msg: ChannelMessage, project_dir: Path | None = None) -> None:
+def _append_message(
+    msg: ChannelMessage,
+    project_dir: Path | None = None,
+    channels_dir: Path | None = None,
+) -> None:
     """Append a message to a channel's JSONL log with file locking.
 
     Auto-generates a message ID if not already set.
     Also parses and stores any @mentions found in the message body.
+    When ``channels_dir`` is provided it overrides the normal path resolution
+    so the message lands in the correct cross-project channel directory.
     """
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
-    path = _channel_path(msg.channel, project_dir)
+    if channels_dir is not None:
+        path = channels_dir / f"{msg.channel}.jsonl"
+    else:
+        path = _channel_path(msg.channel, project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
@@ -1420,8 +1429,14 @@ def channel_post(
     project_dir: Path | None = None,
     pin: bool = False,
     attachment_paths: list[str] | None = None,
+    channels_dir: Path | None = None,
 ) -> str:
-    """Post a message to a channel. If pin=True, also pin the message."""
+    """Post a message to a channel. If pin=True, also pin the message.
+
+    ``channels_dir`` overrides the JSONL write location so messages can be
+    posted to cross-project channels (e.g. from the dashboard switching views).
+    DB operations (presence, pins) always use the local gripspace.
+    """
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
     display = _resolve_display_name_for(aid, project_dir)
@@ -1433,7 +1448,7 @@ def channel_post(
     if attachment_paths:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
         msg.attachments = _copy_attachments(msg.id, attachment_paths, project_dir)
-    _append_message(msg, project_dir)
+    _append_message(msg, project_dir, channels_dir=channels_dir)
 
     conn = _open_db(project_dir)
     try:

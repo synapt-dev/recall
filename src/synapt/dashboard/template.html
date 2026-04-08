@@ -331,6 +331,8 @@
             hx-on::after-request="this.querySelector('textarea').value = ''; this.querySelector('#attachment-input').value=''; this.querySelector('#attachment-name').textContent='';"
             style="display:flex; gap:8px; flex:1; align-items:flex-end">
         <input type="hidden" name="name" id="post-name" value="dashboard">
+        <input type="hidden" name="org" id="post-org" value="">
+        <input type="hidden" name="project" id="post-project" value="">
         <label class="upload-label" for="attachment-input">&#128247;</label>
         <input id="attachment-input" type="file" name="attachment" accept="image/*" style="display:none">
         <span id="attachment-name"></span>
@@ -343,7 +345,7 @@
   <!-- Right sidebar: agents -->
   <div class="sidebar sidebar-right">
     <div class="sidebar-header">Members</div>
-    <div id="agents" sse-swap="agents" hx-swap="innerHTML">
+    <div id="agents">
       <div class="tile empty">Loading&hellip;</div>
     </div>
   </div>
@@ -361,35 +363,49 @@ document.getElementById('post-name').value = dashName;
 
 // ── Org/project label ────────────────────────────────────
 fetch('/api/org').then(r => r.json()).then(data => {
+  activeOrg = data.org || '';
+  activeProject = data.project || '';
+  document.getElementById('post-org').value = activeOrg;
+  document.getElementById('post-project').value = activeProject;
   const lbl = document.getElementById('org-label');
   lbl.innerHTML = '<span>' + data.org + '</span> / ' + data.project;
 }).catch(() => {
   document.getElementById('org-label').textContent = '';
 });
 
-// ── Channel switching ─────────────────────────────────────
+// ── Active channel + org/project context ─────────────────
 let activeChannel = 'dev';
+let activeOrg = '';
+let activeProject = '';
 
-function switchChannel(ch) {
-  if (ch === activeChannel) return;
+function switchChannel(ch, org, project) {
   activeChannel = ch;
+  activeOrg = org || '';
+  activeProject = project || '';
 
   // Update sidebar highlight
   document.querySelectorAll('.ch-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.ch === ch);
+    el.classList.toggle('active', el.dataset.ch === ch && el.dataset.org === activeOrg && el.dataset.proj === activeProject);
   });
 
   // Update channel title
   document.getElementById('channel-title').textContent = ch;
 
+  // Build query string with org/project if set
+  const q = new URLSearchParams({ channel: ch });
+  if (activeOrg) q.set('org', activeOrg);
+  if (activeProject) q.set('project', activeProject);
+
   // Reconnect SSE
   const sse = document.getElementById('sse-container');
-  sse.setAttribute('sse-connect', '/api/stream?channel=' + ch);
+  sse.setAttribute('sse-connect', '/api/stream?' + q.toString());
   htmx.process(sse);
 
-  // Update post form target
+  // Update post form target + hidden org/project fields
   const form = document.getElementById('post-form');
   form.setAttribute('hx-post', '/api/post/' + ch);
+  document.getElementById('post-org').value = activeOrg;
+  document.getElementById('post-project').value = activeProject;
   htmx.process(form);
 
   // Update placeholder
@@ -399,30 +415,50 @@ function switchChannel(ch) {
   ensureDashboardJoin(ch);
 
   // Reload messages
+  const msgQ = new URLSearchParams({ limit: '50' });
+  if (activeOrg) msgQ.set('org', activeOrg);
+  if (activeProject) msgQ.set('project', activeProject);
   document.getElementById('feed').innerHTML = '';
-  htmx.ajax('GET', '/api/messages/' + ch + '?limit=50', '#feed');
+  htmx.ajax('GET', '/api/messages/' + ch + '?' + msgQ.toString(), '#feed');
 }
 
-// ── Channel list population ───────────────────────────────
-function renderChannelList(channels) {
+// ── Channel list population (org/project hierarchy) ───────
+function renderChannelList(nav) {
   const list = document.getElementById('channel-list');
-  list.innerHTML = channels.map(c => {
-    const isActive = c === activeChannel;
-    return '<div class="ch-item' + (isActive ? ' active' : '') + '" data-ch="' + c + '">' + c + '</div>';
-  }).join('');
-  list.addEventListener('click', function(e) {
-    const item = e.target.closest('.ch-item');
-    if (item) switchChannel(item.dataset.ch);
+  // nav = { org, project, projects: [{org, project, channels, active}] }
+  const projects = (nav && nav.projects) ? nav.projects : [];
+
+  // Set initial activeOrg/activeProject from current project
+  if (!activeOrg && nav && nav.org) { activeOrg = nav.org; activeProject = nav.project || ''; }
+
+  let html = '';
+  projects.forEach(p => {
+    const isCurrentProject = p.active;
+    // Show project header only if multiple projects exist
+    if (projects.length > 1) {
+      const label = (p.org !== nav.org) ? p.org + '/' + p.project : p.project;
+      html += '<div style="padding:8px 10px 2px; font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em; opacity:0.7;">' + label + '</div>';
+    }
+    p.channels.forEach(c => {
+      const isActive = (c === activeChannel && p.org === activeOrg && p.project === activeProject);
+      html += '<div class="ch-item' + (isActive ? ' active' : '') +
+              '" data-ch="' + c + '" data-org="' + p.org + '" data-proj="' + p.project + '">' + c + '</div>';
+    });
   });
+  if (!html) html = '<div style="padding:8px 10px; font-size:12px; color:var(--text-dim);">No channels</div>';
+  list.innerHTML = html;
 }
 
-fetch('/api/channels').then(r => r.json()).then(channels => {
-  renderChannelList(channels);
-  // Refresh channel list every 30s to pick up new channels
-  setInterval(() => {
-    fetch('/api/channels').then(r => r.json()).then(renderChannelList);
-  }, 30000);
+document.getElementById('channel-list').addEventListener('click', function(e) {
+  const item = e.target.closest('.ch-item');
+  if (item) switchChannel(item.dataset.ch, item.dataset.org, item.dataset.proj);
 });
+
+function refreshChannelList() {
+  fetch('/api/nav').then(r => r.json()).then(renderChannelList).catch(() => {});
+}
+refreshChannelList();
+setInterval(refreshChannelList, 30000);
 
 // ── Join & initial load ───────────────────────────────────
 function ensureDashboardJoin(channel) {
@@ -434,6 +470,34 @@ function ensureDashboardJoin(channel) {
 }
 ensureDashboardJoin('dev');
 htmx.ajax('GET', '/api/messages/dev?limit=50', '#feed');
+
+// ── Agents polling (SSE scope prevents sse-swap here) ────
+function renderAgents(agents) {
+  const container = document.getElementById('agents');
+  if (!agents || !agents.length) {
+    container.innerHTML = '<div class="tile empty">No agents online</div>';
+    return;
+  }
+  const statusColors = { online: '#4ade80', idle: '#facc15', away: '#fb923c', offline: '#6b7280', running: '#4ade80' };
+  container.innerHTML = agents.map(a => {
+    const name = a.display_name || a.griptree || a.agent_id || '?';
+    const color = statusColors[a.status] || '#6b7280';
+    const role = (a.role && a.role !== 'agent') ? '<div class="tile-role">' + a.role + '</div>' : '';
+    const project = a.griptree ? '<div class="tile-project">' + a.griptree + '</div>' : '';
+    const channels = (a.channels && a.channels.length) ? a.channels.map(c => '#' + c).join(', ') : 'no channels';
+    const seen = (a.last_seen && a.last_seen.length > 16) ? a.last_seen.substring(11, 16) : '';
+    return '<div class="tile clickable" data-agent="' + name + '" style="border-left:4px solid ' + color + '">' +
+           '<div class="tile-name">' + name + '</div>' + project + role +
+           '<div class="tile-meta"><span style="color:' + color + '">' + a.status + '</span>' +
+           ' &middot; ' + channels + (seen ? ' &middot; ' + seen : '') + '</div></div>';
+  }).join('');
+}
+
+function refreshAgents() {
+  fetch('/api/agents').then(r => r.json()).then(renderAgents).catch(() => {});
+}
+refreshAgents();
+setInterval(refreshAgents, 5000);
 
 // ── Enter sends, Shift+Enter newline ─────────────────────
 const textarea = document.getElementById('message-input');
