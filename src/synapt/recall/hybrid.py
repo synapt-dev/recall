@@ -656,6 +656,80 @@ def augment_query_for_intent(query: str, intent: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cluster durability classification
+# ---------------------------------------------------------------------------
+
+_DURABLE_SIGNALS = re.compile(
+    r"\b("
+    r"decid(?:ed|ing|es?)|decision|chose|chosen|select(?:ed|ing)|adopted"
+    r"|agreed|agreement|policy|policies"
+    r"|convention|standard|established|rule"
+    r"|architect(?:ure|ed|ing)|design(?:ed|ing)?"
+    r"|milestone|shipped|released|launched|deployed"
+    r"|version\s+\d|v\d+\.\d+"
+    r"|requirement|constraint|scope"
+    r"|configur(?:ed|ing|ation|es?)"
+    r"|pattern|principle|philosophy"
+    r"|strategic|roadmap|initiative|priority"
+    r"|benchmark|evaluation|score|result"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_EPHEMERAL_SIGNALS = re.compile(
+    r"\b("
+    r"debug(?:ging|ged|s)?|troubleshoot(?:ing|ed)?"
+    r"|investigat(?:ing|ed|es?)|fix(?:ing|ed)?\s+(?:the|a|an)"
+    r"|check(?:ing|ed)?\s+(?:the|a|if|whether)"
+    r"|read(?:ing)?\s+(?:the|a|file|code|source)"
+    r"|look(?:ing|ed)?\s+at"
+    r"|navigat(?:ing|ed)"
+    r"|refactor(?:ing|ed)"
+    r"|trie[ds]?\s+(?:to|a|the|running|adding|using)"
+    r"|let\s+me|I'll\s+(?:check|look|read|try)"
+    r"|traceback|stack\s*trace|exception\s+in"
+    r"|moving\s+(?:to|on|the)|switching\s+to"
+    r"|updating?\s+(?:the|a|imports?|tests?)"
+    r"|running\s+(?:tests?|the|a)"
+    r"|cleaning\s+up"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def classify_cluster_durability(topic: str, summary: str) -> str:
+    """Classify a cluster as durable, ephemeral, or mixed.
+
+    Durable clusters contain decisions, architecture, milestones, or policies
+    that have lasting value. Ephemeral clusters contain debugging steps,
+    file navigation, and coding narration that lose relevance quickly.
+
+    Returns:
+        "durable", "ephemeral", or "mixed"
+    """
+    text = f"{topic} {summary}"
+    if not text.strip():
+        return "ephemeral"
+
+    durable_count = len(_DURABLE_SIGNALS.findall(text))
+    ephemeral_count = len(_EPHEMERAL_SIGNALS.findall(text))
+
+    if durable_count > 0 and ephemeral_count > 0:
+        # Both signals present: if durable signals dominate, it's durable
+        # (a debugging session that led to a decision is durable)
+        if durable_count > ephemeral_count:
+            return "durable"
+        return "mixed"
+    elif durable_count > 0:
+        return "durable"
+    elif ephemeral_count > 0:
+        return "ephemeral"
+    else:
+        # No clear signals: default to ephemeral (conservative)
+        return "ephemeral"
+
+
+# ---------------------------------------------------------------------------
 # Temporal date extraction
 # ---------------------------------------------------------------------------
 

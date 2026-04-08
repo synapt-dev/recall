@@ -2212,11 +2212,22 @@ class TranscriptIndex:
             })
             wm.record("knowledge", item_id, node.get("content", ""))
 
-        # Cluster summaries — pass query for snippet extraction
+        # Re-rank cluster hits by durability: durable clusters are more
+        # valuable in concise mode (high-level context). Ephemeral clusters
+        # (debugging narration, navigation) get score discounts.
+        _durability_mult = {"durable": 1.0, "mixed": 0.8, "ephemeral": 0.5}
+        ranked_hits = []
         for cluster_id, score in cluster_hits:
             info = self._db.get_cluster(cluster_id)
             if info is None:
                 continue
+            dur = info.get("durability", "")
+            mult = _durability_mult.get(dur, 0.7)  # unclassified = 0.7
+            ranked_hits.append((cluster_id, score * mult, info))
+        ranked_hits.sort(key=lambda x: x[1], reverse=True)
+
+        # Cluster summaries — pass query for snippet extraction
+        for cluster_id, score, info in ranked_hits:
             block = self._format_cluster_block(cluster_id, info, query=query)
             block_tokens = len(block) // 4
             if token_count + block_tokens > max_tokens and len(lines) > 1:
