@@ -43,7 +43,11 @@ def parse_frontmatter(path: Path) -> dict | None:
         if ":" not in line:
             continue
         key, _, val = line.partition(":")
-        fm[key.strip()] = val.strip().strip('"').strip("'")
+        val = val.strip().strip('"').strip("'")
+        # Handle YAML-style lists like [opus, atlas] -> "opus, atlas"
+        if val.startswith("[") and val.endswith("]"):
+            val = val[1:-1]
+        fm[key.strip()] = val
     return fm
 
 
@@ -94,8 +98,8 @@ def render_card(post: dict, featured: bool = False) -> str:
     """Render a single blog post card."""
     stem = post["stem"]
     title = post["title"]
-    desc = post.get("description", "")
-    author_html = render_author_meta(post.get("author", ""))
+    desc = post.get("description", "") or post.get("subtitle", "")
+    author_html = render_author_meta(post.get("authors", "") or post.get("author", ""))
     date_html = format_date(post.get("date", ""))
     hero = post.get("hero")
 
@@ -301,9 +305,11 @@ def build_index(blog_dir: Path) -> str:
         post = {
             "stem": md.stem,
             "title": fm.get("title", md.stem),
+            "authors": fm.get("authors", ""),
             "author": fm.get("author", ""),
             "date": fm.get("date", ""),
             "description": fm.get("description", ""),
+            "subtitle": fm.get("subtitle", ""),
             "hero": find_hero_image(md.stem, blog_dir),
         }
         posts.append(post)
@@ -437,9 +443,11 @@ def main():
             posts.append({
                 "stem": md.stem,
                 "title": fm.get("title", md.stem),
+                "authors": fm.get("authors", ""),
                 "author": fm.get("author", ""),
                 "date": fm.get("date", ""),
                 "description": fm.get("description", ""),
+                "subtitle": fm.get("subtitle", ""),
                 "hero": find_hero_image(md.stem, blog_dir),
             })
         posts.sort(key=lambda p: p.get("date", ""), reverse=True)
