@@ -13,11 +13,28 @@ Verified design claims:
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+
+def _rmtree(path: str) -> None:
+    """Remove a directory tree, handling read-only files on Windows.
+
+    Git pack files and objects are often read-only. On Windows,
+    shutil.rmtree raises PermissionError without an error handler.
+    """
+    def _handle_readonly(func, fpath, exc_info):
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            func(fpath)
+        except Exception:
+            pass  # Best-effort cleanup in tearDown
+
+    shutil.rmtree(path, onerror=_handle_readonly)
 
 
 def _run(cmd: list[str], cwd: str | Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -103,7 +120,7 @@ class TestMigrateInPlace(unittest.TestCase):
         self._base = Path(self._tmpdir)
 
     def tearDown(self):
-        shutil.rmtree(self._tmpdir)
+        _rmtree(self._tmpdir)
 
     def test_worktree_paths_survive_migration(self):
         """Critical: linked worktrees can git status after .git/ moves."""
