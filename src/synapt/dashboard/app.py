@@ -32,6 +32,8 @@ from synapt.recall.channel import (
     channel_list_channels,
     channel_messages_json,
     channel_post,
+    _resolve_org_id,
+    _resolve_project_id,
 )
 from synapt.recall.registry import list_agents as _registry_list_agents
 
@@ -134,11 +136,16 @@ def _render_agent_tile(agent: dict) -> str:
     color = _STATUS_COLORS.get(status, "#6b7280")
     name = agent["display_name"] or agent["griptree"] or agent["agent_id"]
     role = agent["role"] if agent["role"] != "agent" else ""
+    griptree = agent.get("griptree", "")
     channels = ", ".join(f"#{c}" for c in agent["channels"]) or "no channels"
     seen = agent["last_seen"][11:16] if len(agent["last_seen"]) > 16 else ""
+    project_badge = (
+        f'<div class="tile-project">{escape(griptree)}</div>' if griptree else ""
+    )
     return (
         f'<div class="tile clickable" data-agent="{escape(name)}" style="border-left:4px solid {color}">'
         f'<div class="tile-name">{escape(name)}</div>'
+        f'{project_badge}'
         f'<div class="tile-role">{escape(role)}</div>'
         f'<div class="tile-meta">'
         f'<span style="color:{color}">{status}</span>'
@@ -409,6 +416,68 @@ def _start_dashboard_background(
     return proc.pid
 
 
+def _all_channels_nav() -> dict:
+    """Return hierarchical org → project → channel navigation data.
+
+    Scans ``~/.synapt/channels/<org>/<project>/`` globally so the dashboard
+    can show all visible channels, not just the current project's.
+    Falls back to local channel list for non-gripspace repos.
+    """
+    global_dir = Path.home() / ".synapt" / "channels"
+    current_org = _resolve_org_id(None) or ""
+    current_project = _resolve_project_id(None) or ""
+
+    projects = []
+
+    if global_dir.exists():
+        for org_dir in sorted(global_dir.iterdir()):
+            if not org_dir.is_dir() or org_dir.name.startswith("_"):
+                continue
+            for proj_dir in sorted(org_dir.iterdir()):
+                if not proj_dir.is_dir():
+                    continue
+                channels = sorted(p.stem for p in proj_dir.glob("*.jsonl"))
+                if not channels:
+                    continue
+                is_active = (
+                    org_dir.name == current_org and proj_dir.name == current_project
+                )
+                projects.append(
+                    {
+                        "org": org_dir.name,
+                        "project": proj_dir.name,
+                        "channels": channels,
+                        "active": is_active,
+                    }
+                )
+
+    # Fallback: no global store found — use local channels
+    if not projects:
+        local_channels = channel_list_channels()
+        if local_channels:
+            projects.append(
+                {
+                    "org": current_org or "local",
+                    "project": current_project or "local",
+                    "channels": local_channels,
+                    "active": True,
+                }
+            )
+
+    return {
+        "org": current_org,
+        "project": current_project,
+        "projects": projects,
+    }
+
+
+def _channels_dir_for(org: str | None, project: str | None) -> "Path | None":
+    """Return the channels directory for a specific org/project, or None for current."""
+    if not org or not project:
+        return None
+    return Path.home() / ".synapt" / "channels" / org / project
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="synapt dashboard", docs_url=None, redoc_url=None)
 
@@ -420,13 +489,32 @@ def create_app() -> FastAPI:
     async def api_agents():
         return _combined_agents_json()
 
+    @app.get("/api/org")
+    async def api_org():
+        org = _resolve_org_id(None) or "unknown"
+        project = _resolve_project_id(None) or "unknown"
+        return {"org": org, "project": project}
+
     @app.get("/api/channels")
     async def api_channels():
         return channel_list_channels()
 
+    @app.get("/api/nav")
+    async def api_nav():
+        return _all_channels_nav()
+
     @app.get("/api/messages/{channel}", response_class=HTMLResponse)
-    async def api_messages(channel: str, limit: int = 50, since: str | None = None):
-        msgs = channel_messages_json(channel=channel, limit=limit, since=since)
+    async def api_messages(
+        channel: str,
+        limit: int = 50,
+        since: str | None = None,
+        org: str | None = None,
+        project: str | None = None,
+    ):
+        ch_dir = _channels_dir_for(org, project)
+        msgs = channel_messages_json(
+            channel=channel, limit=limit, since=since, channels_dir=ch_dir
+        )
         return _render_messages_html(msgs)
 
     @app.get("/api/attachments/{attachment_path:path}")
@@ -448,9 +536,12 @@ def create_app() -> FastAPI:
         channel: str,
         message: str = Form(""),
         name: str = Form("dashboard"),
+        org: str = Form(""),
+        project: str = Form(""),
         attachment: UploadFile | None = File(None),
     ):
         agent_name = "dashboard"
+        ch_dir = _channels_dir_for(org or None, project or None)
         _ensure_dashboard_join(_dashboard_joined, channel=channel, name=name)
 
         attachment_paths: list[str] | None = None
@@ -470,6 +561,7 @@ def create_app() -> FastAPI:
                 message=message,
                 agent_name=agent_name,
                 attachment_paths=attachment_paths,
+                channels_dir=ch_dir,
             )
         finally:
             if tmp_path is not None:
@@ -477,9 +569,15 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/stream")
-    async def stream(request: Request, channel: str = "dev"):
+    async def stream(
+        request: Request,
+        channel: str = "dev",
+        org: str | None = None,
+        project: str | None = None,
+    ):
+        ch_dir = _channels_dir_for(org, project)
+
         async def generate():
-            last_agents_hash = ""
             last_msg_ts = ""
 
             try:
@@ -487,23 +585,13 @@ def create_app() -> FastAPI:
                     if await request.is_disconnected():
                         return
 
-                    # Agent status
-                    try:
-                        agents = _combined_agents_json()
-                    except Exception:
-                        agents = []
-                    agents_hash = json.dumps(agents, sort_keys=True)
-                    if agents_hash != last_agents_hash:
-                        last_agents_hash = agents_hash
-                        html = _render_agents_html(agents)
-                        yield {"event": "agents", "data": html}
-
                     # New messages
                     try:
                         msgs = channel_messages_json(
                             channel=channel,
                             limit=20,
                             since=last_msg_ts or None,
+                            channels_dir=ch_dir,
                         )
                     except Exception:
                         msgs = []
