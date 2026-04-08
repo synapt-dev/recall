@@ -29,6 +29,16 @@ except ImportError:
 BLOG_DIR = Path(__file__).resolve().parent.parent / "docs" / "blog"
 IMAGES_DIR = BLOG_DIR / "images"
 
+
+def _post_sort_key(post: dict) -> tuple:
+    """Sort key for posts: date descending, sprint number descending, slug descending."""
+    date = post.get("date", "")
+    slug = post.get("slug", "")
+    # Extract sprint number if slug matches sprint-N-*
+    m = re.match(r"sprint-(\d+)", slug)
+    sprint_num = int(m.group(1)) if m else 0
+    return (date, sprint_num, slug)
+
 # Known authors and their metadata
 AUTHORS = {
     "opus": ("Opus", "Claude", "author-opus.jpg"),
@@ -102,6 +112,13 @@ def _render_author_meta(post: dict, *, link_authors: bool = False) -> str:
     return " ".join(parts)
 
 
+def _normalize_hero(hero: str) -> str:
+    """Strip leading 'images/' prefix if present (frontmatter sometimes includes it)."""
+    if hero.startswith("images/"):
+        return hero[len("images/"):]
+    return hero
+
+
 def _find_hero(slug: str) -> str:
     """Find the hero image file for a slug, checking .png then .jpg."""
     for ext in (".png", ".jpg"):
@@ -161,7 +178,7 @@ def _render_more_posts(current_slug: str, all_posts: list[dict], count: int = 3)
         return ""
     # Sort by date descending, exclude current post
     others = [p for p in all_posts if p.get("slug") != current_slug]
-    others.sort(key=lambda p: p.get("date", ""), reverse=True)
+    others.sort(key=_post_sort_key, reverse=True)
     # Pick up to `count` posts
     picks = others[:count]
     if not picks:
@@ -174,7 +191,7 @@ def _render_more_posts(current_slug: str, all_posts: list[dict], count: int = 3)
         if len(p.get("description", "")) > 100:
             desc += "..."
         s = p.get("slug", "")
-        hero = p.get("hero", "") or _find_hero(s)
+        hero = _normalize_hero(p.get("hero", "")) or _find_hero(s)
         hero_img = f'<img src="images/{hero}" alt="" class="more-post-hero">' if hero else ""
         cards.append(
             f'        <a href="{s}.html" class="more-post">'
@@ -193,10 +210,10 @@ def _render_more_posts(current_slug: str, all_posts: list[dict], count: int = 3)
 def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict] | None = None) -> str:
     """Render a full blog post HTML page."""
     title = meta.get("title", "Untitled")
-    description = meta.get("description", "")
-    date = meta.get("date", "")
     subtitle = meta.get("subtitle", "")
-    hero = meta.get("hero", "")
+    description = meta.get("description", "") or subtitle
+    date = meta.get("date", "")
+    hero = _normalize_hero(meta.get("hero", ""))
     date_display = date if date else "2026"
 
     hero_tag = ""
@@ -425,7 +442,7 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/recall">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>
@@ -445,7 +462,7 @@ def render_post_html(meta: dict, body_html: str, slug: str, all_posts: list[dict
       <div class="cta">
         <p>synapt gives your AI agents persistent memory across sessions.</p>
         <code>pip install synapt</code>
-        <p><a href="https://github.com/laynepenney/synapt">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
+        <p><a href="https://github.com/synapt-dev/recall">GitHub</a> &middot; <a href="../">synapt.dev</a></p>
       </div>
 
       <div class="post-footer">
@@ -497,6 +514,62 @@ def build_post(md_path: Path, force: bool = False, dry_run: bool = False, all_po
 
 # Hand-crafted posts without markdown sources (preserved in index)
 LEGACY_POSTS = [
+    {
+        "slug": "sprint-11-recap",
+        "title": "Sprint 11: The Product Tested Itself",
+        "description": "Three AI agents independently verified their own product and signed off before v0.10.2 shipped.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-11-recap-hero.png",
+    },
+    {
+        "slug": "sprint-10-recap",
+        "title": "Sprints 8-10: Three Sprints in One Day",
+        "description": "37 stories. Tests passed. Demo failed. The honest version.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-10-recap-hero.png",
+    },
+    {
+        "slug": "sprint-9-recap",
+        "title": "Sprint 9: Mission Control",
+        "description": "From tmux to browser. A design session that rejected the first architecture, 25 TDD tests, and zero regressions.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-9-recap-hero.png",
+    },
+    {
+        "slug": "sprint-8-recap",
+        "title": "Sprint 8: TDD That Proved Itself",
+        "description": "42 tests before code, 12 stories in under an hour, and 23 regressions caught before they hit main.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-07",
+        "hero": "sprint-8-recap-hero.png",
+    },
+    {
+        "slug": "sprint-6-7-recap",
+        "title": "Sprints 6+7: From Infrastructure to First Customer",
+        "description": "Native Rust IPC, premium distribution, and migration tooling for our first customer.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-06",
+        "hero": "sprint-6-7-recap-hero.png",
+    },
+    {
+        "slug": "sprint-5-recap",
+        "title": "Sprint 5: The Gitgrip Sprint",
+        "description": "Bugs before features. Declare, don't infer. The sprint that shaped the grip CLI.",
+        "authors": "opus, atlas, apollo, sentinel",
+        "date": "2026-04-06",
+        "hero": "sprint-5-recap-hero.png",
+    },
+    {
+        "slug": "design-session-that-saved-us",
+        "title": "The Design Session That Saved Us",
+        "description": "How a five-iteration adversarial design session with two AI agents produced the channel scoping architecture.",
+        "authors": "opus, atlas",
+        "date": "2026-04-06",
+        "hero": "design-session-that-saved-us-hero-v2.png",
+    },
     {
         "slug": "working-with-three-claude-agents",
         "title": "Joining Three Claude Agents as the New Codex",
@@ -561,9 +634,9 @@ def _render_post_card(post: dict, featured: bool = False) -> str:
     """Render a single post card for the index page."""
     slug = post["slug"]
     title = post["title"]
-    description = post.get("description", "")
+    description = post.get("description", "") or post.get("subtitle", "")
     date = post.get("date", "2026")
-    hero = post.get("hero", "")
+    hero = _normalize_hero(post.get("hero", ""))
 
     # Format date for display
     date_display = "March 2026"
@@ -609,7 +682,7 @@ def build_listing_page(
     dry_run: bool = False,
 ) -> None:
     """Generate a blog listing page from post metadata."""
-    posts = sorted(posts, key=lambda p: p.get("date", ""), reverse=True)
+    posts = sorted(posts, key=_post_sort_key, reverse=True)
     visible_posts = posts[:post_limit] if post_limit is not None else posts
 
     cards_html = ""
@@ -786,7 +859,7 @@ def build_listing_page(
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/recall">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>
@@ -870,18 +943,21 @@ def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
     end += len(end_marker)
 
     # Sort by date, take top 4
-    posts.sort(key=lambda p: p.get("date", ""), reverse=True)
+    posts.sort(key=_post_sort_key, reverse=True)
     featured = posts[0] if posts else None
     grid_posts = posts[1:4] if len(posts) > 1 else []
 
     # Build featured card
     featured_html = ""
     if featured:
-        f_author_key = featured.get("author", "opus").lower()
-        f_name, f_model, _ = AUTHORS.get(f_author_key, (f_author_key.title(), "", ""))
-        f_byline = f"{f_name} ({f_model})" if f_model else f_name
+        f_byline_parts = []
+        for ak in _author_keys(featured):
+            name, model, img = _author_meta(ak)
+            label = f"{name} ({model})" if model else name
+            f_byline_parts.append(f'<img src="blog/images/{img}" alt="" style="width:20px;height:20px;border-radius:50%;object-fit:cover;vertical-align:middle"> {label}')
+        f_byline = " ".join(f_byline_parts)
         f_slug = featured["slug"]
-        f_hero = featured.get("hero", "")
+        f_hero = _normalize_hero(featured.get("hero", ""))
         f_hero_tag = ""
         if f_hero:
             f_hero_tag = f'<img src="blog/images/{f_hero}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 1rem;">'
@@ -889,18 +965,19 @@ def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
             _fh = _find_hero(f_slug)
             if _fh:
                 f_hero_tag = f'<img src="blog/images/{_fh}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 1rem;">'
+        f_description = featured.get("description", "") or featured.get("subtitle", "")
         featured_html = f"""      <a href="blog/{f_slug}.html" style="display: block; padding: 2rem; background: var(--bg-card); border: 1px solid var(--purple); border-radius: 12px; text-decoration: none; transition: border-color 0.2s; margin-bottom: 1.5rem;">
         {f_hero_tag}
         <div style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--purple-light); margin-bottom: 0.75rem;">New &mdash; by {f_byline}</div>
         <h3 style="color: var(--text); font-size: 1.4rem; margin-bottom: 0.5rem;">{featured["title"]}</h3>
-        <p style="color: var(--text-dim); font-size: 1rem; line-height: 1.6; max-width: 600px;">{featured.get("description", "")}</p>
+        <p style="color: var(--text-dim); font-size: 1rem; line-height: 1.6; max-width: 600px;">{f_description}</p>
       </a>"""
 
     # Build grid cards
     grid_cards = ""
     for p in grid_posts:
         p_slug = p["slug"]
-        p_hero = p.get("hero", "")
+        p_hero = _normalize_hero(p.get("hero", ""))
         p_hero_tag = ""
         if p_hero:
             p_hero_tag = f'<img src="blog/images/{p_hero}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 0.75rem;">'
@@ -908,10 +985,11 @@ def build_root_blog_section(posts: list[dict], dry_run: bool = False) -> None:
             _fh = _find_hero(p_slug)
             if _fh:
                 p_hero_tag = f'<img src="blog/images/{_fh}" alt="" style="width: 100%; border-radius: 8px; margin-bottom: 0.75rem;">'
+        p_description = p.get("description", "") or p.get("subtitle", "")
         grid_cards += f"""        <a href="blog/{p_slug}.html" style="display: block; padding: 1.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; text-decoration: none; transition: border-color 0.2s;">
           {p_hero_tag}
           <h3 style="color: var(--teal); font-size: 1.1rem; margin-bottom: 0.5rem;">{p["title"]}</h3>
-          <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.5;">{p.get("description", "")}</p>
+          <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.5;">{p_description}</p>
         </a>
 """
 
