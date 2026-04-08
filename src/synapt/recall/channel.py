@@ -985,6 +985,12 @@ def _append_message(
     When ``channels_dir`` is provided it overrides the normal path resolution
     so the message lands in the correct cross-project channel directory.
     """
+    # Unescape literal \n and \t that LLM tool calls often produce.
+    # MCP arguments are JSON strings, but models sometimes double-escape
+    # newlines (sending "\\n" instead of "\n"), resulting in literal
+    # backslash-n in the body.  Fixes recall#493.
+    if msg.body:
+        msg.body = msg.body.replace("\\n", "\n").replace("\\t", "\t")
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
