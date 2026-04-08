@@ -517,6 +517,7 @@ class ChannelMessage:
     from_display: str = ""  # display name at post time (persisted in JSONL)
     id: str = ""       # auto-generated message ID (m_xxxxxxxx)
     to: str = ""       # directive target agent (optional)
+    worktree: str = ""  # sender's worktree/griptree name
     attachments: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -527,6 +528,8 @@ class ChannelMessage:
             d.pop("id", None)
         if not d.get("to"):
             d.pop("to", None)
+        if not d.get("worktree"):
+            d.pop("worktree", None)
         if not d.get("attachments"):
             d.pop("attachments", None)
         if not d.get("from_display"):
@@ -1340,6 +1343,7 @@ def channel_join(
         return f"Reconnected to #{channel} as {display} ({aid})"
 
     # Append join event to channel log
+    wt = _resolve_griptree(project_dir)
     msg = ChannelMessage(
         timestamp=now,
         from_agent=aid,
@@ -1347,6 +1351,7 @@ def channel_join(
         channel=channel,
         type="join",
         body=f"{display} joined #{channel}",
+        worktree=wt,
     )
     _append_message(msg, project_dir)
 
@@ -1433,10 +1438,11 @@ def channel_leave(
         conn.close()
 
     display = _resolve_display_name(project_dir)
+    wt = _resolve_griptree(project_dir)
     body = reason if reason else f"{display} left #{channel}"
     msg = ChannelMessage(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
-        type="leave", body=body,
+        type="leave", body=body, worktree=wt,
     )
     _append_message(msg, project_dir)
     return f"Left #{channel}"
@@ -1467,9 +1473,10 @@ def channel_post(
     now = _now_iso()
     display = display_name or _resolve_display_name_for(aid, project_dir)
 
+    wt = _resolve_griptree(project_dir)
     msg = ChannelMessage(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
-        type=msg_type or "message", body=message,
+        type=msg_type or "message", body=message, worktree=wt,
     )
     if attachment_paths:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
