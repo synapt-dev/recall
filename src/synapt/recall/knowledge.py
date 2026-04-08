@@ -32,8 +32,17 @@ def _knowledge_path(project_dir: Path | None = None) -> Path:
     return project_data_dir(project_dir) / "knowledge.jsonl"
 
 
-def _new_id() -> str:
-    """Generate a short unique ID for a knowledge node."""
+def _new_id(content: str = "") -> str:
+    """Generate a short ID for a knowledge node.
+
+    When *content* is provided, returns a stable content-hash so that
+    identical content always produces the same ID (preventing duplicates
+    at the DB level via INSERT OR REPLACE).  Falls back to a random UUID
+    when no content is given.
+    """
+    if content:
+        import hashlib
+        return hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
     return uuid.uuid4().hex[:12]
 
 
@@ -80,7 +89,7 @@ class KnowledgeNode:
         """Create a new knowledge node with auto-generated ID and timestamps."""
         now = datetime.now(timezone.utc).isoformat()
         return cls(
-            id=node_id or _new_id(),
+            id=node_id or _new_id(_tw(content, 300)),
             content=_tw(content, 300),
             category=category if category in VALID_CATEGORIES else "workflow",
             confidence=max(0.0, min(1.0, confidence)),
