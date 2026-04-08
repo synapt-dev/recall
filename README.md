@@ -30,6 +30,10 @@ It closes the gap between a one-shot assistant and a real working team:
 - coordinate multiple agents through shared channels, directives, and task claims
 - scale from solo recall on a laptop to multi-agent operational memory
 
+Agent skill files for repository-native use live in:
+- `.codex/skills/synapt/SKILL.md`
+- `.claude/skills/synapt/SKILL.md`
+
 ## Three-command quickstart
 
 For the default Claude Code path:
