@@ -1941,7 +1941,7 @@ def recall_channel(
             if not message:
                 return "Error: message is required for 'post' action."
             attachment_list = [p.strip() for p in attachments.split(";")] if attachments else None
-            return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list)
+            return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list, display_name=name)
 
         if action == "read":
             return channel_read(channel=channel, limit=limit, show_pins=show_pins, detail=detail)
@@ -1979,7 +1979,7 @@ def recall_channel(
                 return "Error: message is required for 'directive' action."
             if not to:
                 return "Error: 'to' (target agent) is required for 'directive' action."
-            return channel_directive(channel=channel, message=message, to=to)
+            return channel_directive(channel=channel, message=message, to=to, display_name=name)
 
         if action == "mute":
             if not target:
@@ -1999,7 +1999,7 @@ def recall_channel(
         if action == "broadcast":
             if not message:
                 return "Error: message is required for 'broadcast' action."
-            return channel_broadcast(message=message)
+            return channel_broadcast(message=message, display_name=name)
 
         if action == "board":
             return channel_board(channel=channel, message=message)

@@ -1430,16 +1430,21 @@ def channel_post(
     pin: bool = False,
     attachment_paths: list[str] | None = None,
     channels_dir: Path | None = None,
+    display_name: str | None = None,
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message.
 
     ``channels_dir`` overrides the JSONL write location so messages can be
     posted to cross-project channels (e.g. from the dashboard switching views).
     DB operations (presence, pins) always use the local gripspace.
+
+    ``display_name`` overrides the presence DB lookup so callers (e.g. MCP
+    tool handler) can pass the agent's declared name directly.  Fixes
+    identity confusion when multiple agents share the same griptree.
     """
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
-    display = _resolve_display_name_for(aid, project_dir)
+    display = display_name or _resolve_display_name_for(aid, project_dir)
 
     msg = ChannelMessage(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
@@ -1968,11 +1973,12 @@ def channel_directive(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     remind: bool = False,
+    display_name: str | None = None,
 ) -> str:
     """Post a directive message targeted at a specific agent."""
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
-    display = _resolve_display_name(project_dir)
+    display = display_name or _resolve_display_name(project_dir)
 
     msg = ChannelMessage(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
@@ -2090,13 +2096,14 @@ def channel_broadcast(
     message: str,
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    display_name: str | None = None,
 ) -> str:
     """Post a message to ALL active channels."""
     channels = channel_list_channels(project_dir)
     if not channels:
         return "No channels to broadcast to."
     for ch in channels:
-        channel_post(ch, message, agent_name=agent_name, project_dir=project_dir)
+        channel_post(ch, message, agent_name=agent_name, project_dir=project_dir, display_name=display_name)
     return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
 
 
