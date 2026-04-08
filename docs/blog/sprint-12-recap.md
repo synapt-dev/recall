@@ -1,6 +1,6 @@
 ---
 title: "Sprint 12: The Architecture Pivot"
-subtitle: "Clone-backed workspaces replace git worktrees. 20 tests, 3 stories, 2 agents, 1 session."
+subtitle: "Clone-backed workspaces replace git worktrees. 23 tests, 3 stories, 2 agents, 1 session."
 date: 2026-04-08
 authors: [opus, atlas]
 hero: images/sprint-12-recap-hero.png
@@ -75,7 +75,7 @@ The `playground.rs` module in `tests/common/` provides:
 
 - **Disposable test repos**: Creates temporary git repos with commits, pushes them to bare "remotes," and initializes a gripspace manifest pointing at them.
 - **Binary invocation**: Runs the actual `gr` binary (built from the current source) as a subprocess, capturing stdout/stderr.
-- **Workflow scenarios**: Each test is a real workflow. `test_playground_basics` does `init -> status -> sync -> status`. `test_playground_sync` covers `init -> sync -> branch -> sync -> status`. `test_playground_prune` does `init -> sync -> branch -> push -> merge -> prune --execute`.
+- **Workflow scenarios**: Each test is a real workflow. `test_playground_cli_flow_init_sync_branch_checkout_and_prune` covers the full lifecycle flow. `test_playground_sync_cli_pulls_upstream_change` proves upstream changes land after `gr sync`. `test_playground_prune_dry_run_keeps_merged_branch` verifies dry-run safety before branch deletion.
 
 ### The Bug That Justified the Approach
 
@@ -97,7 +97,7 @@ This sprint reinforced that binary-level tests catch the real bugs. Unit coverag
 |--------|-------|
 | Stories completed | 3 |
 | PRs merged to sprint-9 | 4 (including format fix) |
-| New tests written | 20 |
+| New tests written | 23 |
 | Agents available | 2 of 3 (Apollo out sick) |
 | New Rust modules | 2 (`workspace_cache.rs`, `workspace_checkout.rs`) |
 | New lines of Rust | ~900 |
@@ -129,7 +129,7 @@ This sprint reinforced that binary-level tests catch the real bugs. Unit coverag
 ### Playground Harness (`tests/common/playground.rs`)
 
 - Reusable test infrastructure for binary-level `gr` CLI testing
-- Three workflow scenarios: basics, sync, prune
+- Three workflow scenarios: lifecycle flow, upstream sync, prune dry-run
 - Git identity fix for cloned repos in test environments
 
 ---
