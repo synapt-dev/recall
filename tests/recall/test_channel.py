@@ -1940,6 +1940,15 @@ class TestRename(unittest.TestCase):
 
     def test_join_rejects_duplicate_display_name(self):
         channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+        # Give s_agent1 a distinct griptree so same-griptree supersede doesn't apply
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET griptree = 'other-space/other-repo' WHERE agent_id = 's_agent1'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         result = channel_join("dev", agent_name="s_agent2", display_name="Apollo")
 
@@ -1955,6 +1964,15 @@ class TestRename(unittest.TestCase):
 
     def test_join_rejects_casefold_duplicate_display_name(self):
         channel_join("dev", agent_name="s_agent1", display_name="Apollo")
+        # Give s_agent1 a distinct griptree so same-griptree supersede doesn't apply
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET griptree = 'other-space/other-repo' WHERE agent_id = 's_agent1'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         result = channel_join("dev", agent_name="s_agent2", display_name="apollo")
 
@@ -2016,6 +2034,68 @@ class TestRename(unittest.TestCase):
             self.assertEqual(_resolve_target_id("Sentinel", conn), "s_new")
         finally:
             conn.close()
+
+    def test_join_same_griptree_supersedes_online_session(self):
+        """New join from same griptree supersedes old 'online' session (recall#575).
+
+        Reproduces the MCP-restart scenario where s_new can't claim its own
+        display name because s_old is still within the 5-minute heartbeat window.
+        Same griptree = same physical worktree = old session is definitively gone.
+        """
+        # s_old joins as "Apollo" — both s_old and s_new share the same griptree
+        # because _resolve_griptree() derives from the patched tmpdir path.
+        channel_join("dev", agent_name="s_old", display_name="Apollo")
+
+        # Confirm s_old is online (fresh last_seen — NOT stale)
+        conn = _open_db()
+        try:
+            row = conn.execute(
+                "SELECT status, display_name FROM presence WHERE agent_id = 's_old'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["display_name"], "Apollo")
+        finally:
+            conn.close()
+
+        # s_new joins from SAME griptree (same tmpdir → same _resolve_griptree() value)
+        # with the same display name. Should supersede s_old even though s_old is "online".
+        result = channel_join("dev", agent_name="s_new", display_name="Apollo")
+
+        self.assertIn("Joined #dev as Apollo", result)
+
+        conn = _open_db()
+        try:
+            old_row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_old'"
+            ).fetchone()
+            new_row = conn.execute(
+                "SELECT display_name FROM presence WHERE agent_id = 's_new'"
+            ).fetchone()
+            # Old session name was cleared — new session claimed it
+            self.assertEqual(old_row["display_name"], "")
+            self.assertEqual(new_row["display_name"], "Apollo")
+        finally:
+            conn.close()
+
+    def test_join_different_griptree_still_blocks_online_name(self):
+        """Online agent from a DIFFERENT griptree still blocks the name claim."""
+        channel_join("dev", agent_name="s_other", display_name="Apollo")
+
+        # Manually assign a different griptree to s_other so it won't be superseded
+        conn = _open_db()
+        try:
+            conn.execute(
+                "UPDATE presence SET griptree = 'other-space/other-repo' WHERE agent_id = 's_other'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # s_new with a patched-different griptree should NOT be able to claim "Apollo"
+        with patch("synapt.recall.channel._resolve_griptree", return_value="my-space/my-repo"):
+            result = channel_join("dev", agent_name="s_new", display_name="Apollo")
+
+        self.assertIn("already in use", result)
 
 
 class TestFromDisplay(unittest.TestCase):

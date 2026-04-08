@@ -310,19 +310,25 @@ def _find_display_name_conflict(
     conn: sqlite3.Connection,
     display_name: str,
     agent_id: str,
+    griptree: str | None = None,
 ) -> sqlite3.Row | None:
     """Return another online/active agent already using this display name.
 
     Stale agents (anything no longer "online" in the <5 minute heartbeat
     window) do not block name claims. Their old claim is cleared eagerly
     so display-name targeting stays unambiguous after the new join/rename.
+
+    Same-griptree agents are always superseded regardless of heartbeat status.
+    A griptree (physical worktree) can only host one active session at a time,
+    so a new join from the same griptree means the old session is definitively
+    gone — even if it's still within the 5-minute heartbeat window (recall#575).
     """
     normalized = _normalize_display_name(display_name)
     if not normalized:
         return None
 
     rows = conn.execute(
-        "SELECT agent_id, display_name, status, last_seen FROM presence WHERE agent_id != ?",
+        "SELECT agent_id, griptree, display_name, status, last_seen FROM presence WHERE agent_id != ?",
         (agent_id,),
     ).fetchall()
     for row in rows:
@@ -335,6 +341,14 @@ def _find_display_name_conflict(
         # Release name claims from stale agents before allowing reuse.
         # Only "online" (<5 min) agents truly hold a live claim.
         if status != "online":
+            conn.execute(
+                "UPDATE presence SET display_name = '' WHERE agent_id = ?",
+                (row["agent_id"],),
+            )
+            continue
+        # Same-griptree supersede: a new session from the same physical worktree
+        # always replaces the old one, even within the heartbeat window (recall#575).
+        if griptree and (row["griptree"] or "") == griptree:
             conn.execute(
                 "UPDATE presence SET display_name = '' WHERE agent_id = ?",
                 (row["agent_id"],),
@@ -1246,7 +1260,7 @@ def channel_join(
         )
 
         if display_name is not None:
-            conflict = _find_display_name_conflict(conn, display, aid)
+            conflict = _find_display_name_conflict(conn, display, aid, griptree=griptree)
             if conflict:
                 existing = conflict["display_name"] or conflict["agent_id"]
                 return (
