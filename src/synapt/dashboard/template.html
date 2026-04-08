@@ -104,6 +104,58 @@
   .ch-item::before { content: '#'; opacity: 0.5; font-size: 11px; }
   .ch-item.active::before { opacity: 1; color: var(--accent); }
 
+  /* ── New channel button + form ──────────────────────── */
+  .new-ch-btn {
+    display: block;
+    width: calc(100% - 12px);
+    margin: 8px 6px 4px;
+    padding: 5px 10px;
+    background: transparent;
+    border: 1px dashed var(--border);
+    border-radius: 5px;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .new-ch-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .new-ch-form {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    margin: 4px 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .new-ch-form.active { display: flex; }
+  .new-ch-form select, .new-ch-form input {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    outline: none;
+  }
+  .new-ch-form select:focus, .new-ch-form input:focus { border-color: var(--accent); }
+  .new-ch-form button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .new-ch-form button:hover { opacity: 0.9; }
+
   /* ── Agent tiles (right sidebar) ─────────────────────── */
   #agents { display: flex; flex-direction: column; gap: 0; padding: 4px 6px; }
   .tile {
@@ -304,6 +356,12 @@
   <div class="sidebar sidebar-left">
     <div class="sidebar-header">Channels</div>
     <div id="channel-list"></div>
+    <button class="new-ch-btn" id="new-ch-toggle">+ New Channel</button>
+    <div class="new-ch-form" id="new-ch-form">
+      <select id="new-ch-target"><option value="">Loading…</option></select>
+      <input type="text" id="new-ch-name" placeholder="channel-name" autocomplete="off">
+      <button id="new-ch-create">Create</button>
+    </div>
   </div>
 
   <!-- Main panel: messages + input -->
@@ -456,6 +514,54 @@ function refreshChannelList() {
 }
 refreshChannelList();
 setInterval(refreshChannelList, 30000);
+
+// ── New channel form ─────────────────────────────────────
+function _populateNewChTargets(nav) {
+  const sel = document.getElementById('new-ch-target');
+  const projects = (nav && nav.projects) ? nav.projects : [];
+  if (!projects.length) { sel.innerHTML = '<option value="">No projects</option>'; return; }
+  sel.innerHTML = projects.map(p =>
+    '<option value="' + p.org + '/' + p.project + '"' +
+    (p.active ? ' selected' : '') + '>' + p.org + '/' + p.project + '</option>'
+  ).join('');
+}
+
+// Update renderChannelList to also populate the new-channel target select
+const _origRenderChannelList = renderChannelList;
+renderChannelList = function(nav) {
+  _origRenderChannelList(nav);
+  _populateNewChTargets(nav);
+};
+
+document.getElementById('new-ch-toggle').addEventListener('click', function() {
+  const form = document.getElementById('new-ch-form');
+  form.classList.toggle('active');
+  if (form.classList.contains('active')) {
+    document.getElementById('new-ch-name').focus();
+  }
+});
+
+function createNewChannel() {
+  const nameInput = document.getElementById('new-ch-name');
+  const raw = nameInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (!raw) return;
+  const sel = document.getElementById('new-ch-target');
+  const parts = (sel.value || '').split('/');
+  const org = parts[0] || activeOrg;
+  const project = parts[1] || activeProject;
+  // Channels auto-create on first post — just switch to the new name
+  switchChannel(raw, org, project);
+  nameInput.value = '';
+  document.getElementById('new-ch-form').classList.remove('active');
+  // Force a nav refresh so the new channel appears in sidebar after first message
+  setTimeout(refreshChannelList, 1000);
+}
+
+document.getElementById('new-ch-create').addEventListener('click', createNewChannel);
+document.getElementById('new-ch-name').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); createNewChannel(); }
+  if (e.key === 'Escape') { document.getElementById('new-ch-form').classList.remove('active'); }
+});
 
 // ── Join ──────────────────────────────────────────────────
 function ensureDashboardJoin(channel) {
