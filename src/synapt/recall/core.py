@@ -150,8 +150,11 @@ class TranscriptChunk:
     byte_offset: int = -1  # Byte position where this turn starts in raw JSONL
     byte_length: int = 0  # Total bytes of raw JSONL entries for this turn
     text: str = ""  # Combined searchable text (built at init)
+    agent_id: str | None = None  # Agent that created this chunk (from SYNAPT_AGENT_ID)
 
     def __post_init__(self):
+        if self.agent_id is None:
+            self.agent_id = os.environ.get("SYNAPT_AGENT_ID")
         if not self.date_text:
             self.date_text = _build_date_text(self.timestamp)
         if not self.text:
@@ -1706,6 +1709,7 @@ class TranscriptIndex:
         max_knowledge: int | None = None,
         min_confidence: float = 0.0,
         context: int = 0,
+        agent_id: str | None = None,
     ) -> str:
         """Search transcripts and return formatted context string.
 
@@ -1760,6 +1764,7 @@ class TranscriptIndex:
             query, max_chunks, max_sessions, after, before,
             half_life, threshold_ratio, depth, include_archived,
             include_historical, now, knowledge_boost, max_knowledge,
+            agent_id,
         )
         cached = self._query_cache.get(cache_key)
         if cached is not None:
@@ -1845,7 +1850,7 @@ class TranscriptIndex:
                 include_historical,
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
-                intent=intent,
+                intent=intent, agent_id=agent_id,
             )
         else:
             result = self._global_lookup(
@@ -1856,6 +1861,7 @@ class TranscriptIndex:
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
                 intent=intent, min_confidence=min_confidence, context=context,
+                agent_id=agent_id,
             )
 
         # Cache the result (LRU eviction when full)
@@ -1887,6 +1893,7 @@ class TranscriptIndex:
         intent: str = "",
         min_confidence: float = 0.0,
         context: int = 0,
+        agent_id: str | None = None,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and (self._rowid_to_idx or self._db.knowledge_count() > 0):
@@ -1898,11 +1905,12 @@ class TranscriptIndex:
                 emb_weight=emb_weight, knowledge_boost=knowledge_boost,
                 now=now, max_knowledge=max_knowledge, intent=intent,
                 min_confidence=min_confidence, context=context,
+                agent_id=agent_id,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
             half_life, threshold_ratio, depth,
-            emb_weight=emb_weight, now=now,
+            emb_weight=emb_weight, now=now, agent_id=agent_id,
         )
 
     def _global_lookup_fts(
@@ -1925,6 +1933,7 @@ class TranscriptIndex:
         intent: str = "",
         min_confidence: float = 0.0,
         context: int = 0,
+        agent_id: str | None = None,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
@@ -2055,16 +2064,22 @@ class TranscriptIndex:
                         fts_results.append((rowid, score * t3_discount_single))
                         seen_rowids.add(rowid)
 
-        # Convert rowids to chunk indices, applying date and depth filters
+        # Convert rowids to chunk indices, applying date, depth, and agent filters
         candidates: list[tuple[int, float]] = []
+        _agent_filter = agent_id not in (None, "*")
         for rowid, score in fts_results:
             idx = self._rowid_to_idx.get(rowid)
             if idx is None:
                 continue
             if date_filter is not None and idx not in date_filter:
                 continue
+            chunk = self._get_chunk(idx)
             # In summary mode, only include journal chunks (turn_index == -1)
-            if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
+            if depth == "summary" and chunk.turn_index >= 0:
+                continue
+            # Agent scoping: when agent_id is set, only return chunks owned
+            # by this agent or legacy chunks (agent_id=None)
+            if _agent_filter and chunk.agent_id is not None and chunk.agent_id != agent_id:
                 continue
             candidates.append((idx, score))
 
@@ -2112,7 +2127,10 @@ class TranscriptIndex:
                         continue
                     if date_filter is not None and idx not in date_filter:
                         continue
-                    if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
+                    emb_chunk = self._get_chunk(idx)
+                    if depth == "summary" and emb_chunk.turn_index >= 0:
+                        continue
+                    if _agent_filter and emb_chunk.agent_id is not None and emb_chunk.agent_id != agent_id:
                         continue
                     emb_ranked_ref.append((idx, sim))
                     emb_ranked.append((idx, sim))
@@ -2190,6 +2208,7 @@ class TranscriptIndex:
             query=query,
             max_knowledge=max_knowledge,
             intent=intent,
+            agent_id=agent_id,
         )
 
     def _concise_lookup(
@@ -2311,6 +2330,7 @@ class TranscriptIndex:
         depth: str = "full",
         emb_weight: float = 1.0,
         now: datetime | None = None,
+        agent_id: str | None = None,
     ) -> str:
         """Global lookup using in-memory BM25 (legacy fallback)."""
         # BM25 path has no cluster FTS — concise mode requires FTS5
@@ -2328,6 +2348,12 @@ class TranscriptIndex:
         if date_filter is not None:
             for i in range(len(scores)):
                 if i not in date_filter:
+                    scores[i] = 0.0
+
+        # Agent scoping: zero out chunks not owned by this agent
+        if agent_id not in (None, "*"):
+            for i, chunk in enumerate(self.chunks):
+                if chunk.agent_id is not None and chunk.agent_id != agent_id:
                     scores[i] = 0.0
 
         reference_ranked = sorted(
@@ -2399,7 +2425,7 @@ class TranscriptIndex:
         top = self._expand_cross_session(top, max_chunks)
 
         dedup_headroom = _dedup_limit(max_chunks)
-        return self._format_results(top[:dedup_headroom], max_tokens, query=query)
+        return self._format_results(top[:dedup_headroom], max_tokens, query=query, agent_id=agent_id)
 
     def _progressive_lookup(
         self,
@@ -2420,6 +2446,7 @@ class TranscriptIndex:
         now: datetime | None = None,
         max_knowledge: int | None = None,
         intent: str = "",
+        agent_id: str | None = None,
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
@@ -2442,12 +2469,14 @@ class TranscriptIndex:
                 now=now,
                 max_knowledge=max_knowledge,
                 intent=intent,
+                agent_id=agent_id,
             )
         return self._progressive_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, max_sessions,
             date_filter, half_life, threshold_ratio,
             depth=depth,
             now=now,
+            agent_id=agent_id,
         )
 
     def _progressive_lookup_fts(
@@ -2465,11 +2494,13 @@ class TranscriptIndex:
         now: datetime | None = None,
         max_knowledge: int | None = None,
         intent: str = "",
+        agent_id: str | None = None,
     ) -> str:
         """Progressive session search using FTS5 (SQLite backend)."""
         hits: list[tuple[int, float]] = []
         sessions_searched = 0
         BM25_THRESHOLD = 2.0
+        _agent_filter = agent_id not in (None, "*")
 
         for session_id in self._session_order:
             if sessions_searched >= max_sessions:
@@ -2485,8 +2516,11 @@ class TranscriptIndex:
                     continue
                 if date_filter is not None and idx not in date_filter:
                     continue
+                chunk = self._get_chunk(idx)
                 # In summary mode, skip raw transcript chunks (keep journal only)
-                if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
+                if depth == "summary" and chunk.turn_index >= 0:
+                    continue
+                if _agent_filter and chunk.agent_id is not None and chunk.agent_id != agent_id:
                     continue
                 session_hits.append((idx, score))
 
@@ -2537,7 +2571,10 @@ class TranscriptIndex:
                         continue
                     if date_filter is not None and idx not in date_filter:
                         continue
-                    if depth == "summary" and self._get_chunk(idx).turn_index >= 0:
+                    emb_chunk = self._get_chunk(idx)
+                    if depth == "summary" and emb_chunk.turn_index >= 0:
+                        continue
+                    if _agent_filter and emb_chunk.agent_id is not None and emb_chunk.agent_id != agent_id:
                         continue
                     emb_ranked_ref.append((idx, sim))
                     emb_ranked.append((idx, sim))
@@ -2577,6 +2614,7 @@ class TranscriptIndex:
             query=query,
             max_knowledge=max_knowledge,
             intent=intent,
+            agent_id=agent_id,
         )
 
     def _progressive_lookup_bm25(
@@ -2591,6 +2629,7 @@ class TranscriptIndex:
         threshold_ratio: float,
         depth: str = "full",
         now: datetime | None = None,
+        agent_id: str | None = None,
     ) -> str:
         """Progressive session search using in-memory BM25 (legacy fallback)."""
         bm25_scores = self._bm25.score(query_tokens)
@@ -2599,6 +2638,12 @@ class TranscriptIndex:
         if depth == "summary":
             for i, chunk in enumerate(self.chunks):
                 if chunk.turn_index >= 0:
+                    bm25_scores[i] = 0.0
+
+        # Agent scoping: zero out chunks not owned by this agent
+        if agent_id not in (None, "*"):
+            for i, chunk in enumerate(self.chunks):
+                if chunk.agent_id is not None and chunk.agent_id != agent_id:
                     bm25_scores[i] = 0.0
 
         reference_scores = list(bm25_scores)
@@ -2654,6 +2699,7 @@ class TranscriptIndex:
         return self._format_results(
             hits[:max_chunks], max_tokens,
             query=query,
+            agent_id=agent_id,
         )
 
     def _search_knowledge(
@@ -3065,6 +3111,7 @@ class TranscriptIndex:
         query: str = "",
         max_knowledge: int | None = None,
         intent: str = "",
+        agent_id: str | None = None,
     ) -> str:
         """Format ranked chunk indices into a context string.
 
@@ -3165,6 +3212,9 @@ class TranscriptIndex:
                     if i in ranked_indices:
                         continue
                     chunk = self._get_chunk(i)
+                    # Agent scoping: skip source chunks from other agents
+                    if agent_id not in (None, "*") and chunk.agent_id is not None and chunk.agent_id != agent_id:
+                        continue
                     full_text = (chunk.user_text or "") + " " + (chunk.assistant_text or "")
                     snippet = full_text[begin:end].strip()
                     if not snippet:
@@ -3199,6 +3249,9 @@ class TranscriptIndex:
                             continue
                         chunk = self._get_chunk(i)
                         if chunk.turn_index < 0:
+                            continue
+                        # Agent scoping: skip source chunks from other agents
+                        if agent_id not in (None, "*") and chunk.agent_id is not None and chunk.agent_id != agent_id:
                             continue
                         chunk_toks = set(_tokenize(chunk.text))
                         overlap = len(chunk_toks & match_toks)
