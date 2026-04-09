@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     transcript_path TEXT NOT NULL DEFAULT '',
     byte_offset INTEGER NOT NULL DEFAULT -1,
     byte_length INTEGER NOT NULL DEFAULT 0,
+    agent_id TEXT,
     embedding BLOB
 );
 
@@ -532,6 +533,7 @@ class RecallDB:
             "transcript_path": "TEXT NOT NULL DEFAULT ''",
             "byte_offset": "INTEGER NOT NULL DEFAULT -1",
             "byte_length": "INTEGER NOT NULL DEFAULT 0",
+            "agent_id": "TEXT",
         }
         for col_name, col_def in new_cols.items():
             if col_name not in cols:
@@ -841,8 +843,8 @@ class RecallDB:
                 "INSERT INTO chunks "
                 "(id, session_id, timestamp, turn_index, user_text, assistant_text, "
                 " tools_used, files_touched, tool_content, date_text, "
-                " transcript_path, byte_offset, byte_length, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " transcript_path, byte_offset, byte_length, agent_id, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     chunk.id,
                     chunk.session_id,
@@ -857,6 +859,7 @@ class RecallDB:
                     chunk.transcript_path,
                     chunk.byte_offset,
                     chunk.byte_length,
+                    chunk.agent_id,
                     emb_blob,
                 ),
             )
@@ -880,7 +883,8 @@ class RecallDB:
         rows = self._conn.execute(
             "SELECT id, session_id, timestamp, turn_index, "
             "user_text, assistant_text, tools_used, files_touched, "
-            "tool_content, date_text, transcript_path, byte_offset, byte_length "
+            "tool_content, date_text, transcript_path, byte_offset, byte_length, "
+            "agent_id "
             "FROM chunks ORDER BY rowid"
         ).fetchall()
 
@@ -900,6 +904,7 @@ class RecallDB:
                 transcript_path=r["transcript_path"] or "",
                 byte_offset=r["byte_offset"] if r["byte_offset"] is not None else -1,
                 byte_length=r["byte_length"] if r["byte_length"] is not None else 0,
+                agent_id=r["agent_id"],
             ))
         return chunks
 

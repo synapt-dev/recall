@@ -206,7 +206,7 @@ class TestScopedSearch(unittest.TestCase):
         results = index.lookup("API design", agent_id="opus")
 
         # Should find opus's chunks about API design
-        result_text = " ".join(r for r in results if isinstance(r, str))
+        result_text = results.lower() if isinstance(results, str) else " ".join(results)
         self.assertIn("registration", result_text.lower())
 
         # Should NOT include sentinel's or atlas's raw transcripts
@@ -219,7 +219,7 @@ class TestScopedSearch(unittest.TestCase):
         results = index.lookup("API")
 
         # Should find results from all agents
-        result_text = " ".join(r for r in results if isinstance(r, str))
+        result_text = results.lower() if isinstance(results, str) else " ".join(results)
         # At minimum, should have content from multiple agents
         self.assertTrue(len(results) > 0)
 
@@ -228,7 +228,7 @@ class TestScopedSearch(unittest.TestCase):
         index = self._make_index_with_attributed_chunks()
         results = index.lookup("API", agent_id="sentinel")
 
-        result_text = " ".join(r for r in results if isinstance(r, str))
+        result_text = results.lower() if isinstance(results, str) else " ".join(results)
         # Should find sentinel's security review
         self.assertIn("sanitization", result_text.lower())
         # Should NOT find opus's design or atlas's caching work
@@ -241,7 +241,7 @@ class TestScopedSearch(unittest.TestCase):
         results = index.lookup("project structure", agent_id="opus")
 
         # Legacy chunk (no agent_id) should be visible
-        result_text = " ".join(r for r in results if isinstance(r, str))
+        result_text = results.lower() if isinstance(results, str) else " ".join(results)
         self.assertIn("monorepo", result_text.lower())
 
     def test_knowledge_nodes_always_included(self):
@@ -250,7 +250,7 @@ class TestScopedSearch(unittest.TestCase):
         results = index.lookup("API conventions", agent_id="atlas")
 
         # atlas didn't create this knowledge node, but it's shared
-        result_text = " ".join(r for r in results if isinstance(r, str))
+        result_text = results.lower() if isinstance(results, str) else " ".join(results)
         self.assertIn("conventions", result_text.lower())
 
     def test_wildcard_agent_searches_all_transcripts(self):
