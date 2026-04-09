@@ -202,6 +202,67 @@ def _embedding_search_numpy(
     return [(rowids[indices[i]], float(masked_sims[i])) for i in top_k_idx]
 
 
+def embedding_search_numpy(
+    query_embedding: list[float],
+    matrix: "np.ndarray",
+    rowids: list[int],
+    limit: int = 50,
+    threshold: float = EMBEDDING_SIM_THRESHOLD,
+) -> list[tuple[int, float]]:
+    """Embedding search against a pre-built numpy matrix.
+
+    Same semantics as :func:`embedding_search` but skips the per-query
+    dict-to-numpy conversion.  For large indexes (48K+ chunks), this
+    avoids rebuilding the (N, 384) matrix on every query.
+
+    Args:
+        query_embedding: The query vector.
+        matrix: Pre-built ``(N, D)`` float32 embedding matrix.
+        rowids: Rowid list aligned with matrix rows.
+        limit: Maximum results to return.
+        threshold: Minimum cosine similarity to include.
+    """
+    import numpy as np
+
+    if matrix.shape[0] == 0 or not query_embedding or limit <= 0:
+        return []
+
+    query = np.array(query_embedding, dtype=np.float32)
+
+    if query.shape[0] != matrix.shape[1]:
+        min_dim = min(query.shape[0], matrix.shape[1])
+        logger.warning(
+            "Embedding dimension mismatch: query=%d, stored=%d; truncating to %d",
+            query.shape[0], matrix.shape[1], min_dim,
+        )
+        query = query[:min_dim]
+        matrix = matrix[:, :min_dim]
+
+    query_norm = np.linalg.norm(query)
+    if query_norm == 0:
+        return []
+    row_norms = np.linalg.norm(matrix, axis=1)
+
+    valid = row_norms > 0
+    sims = np.zeros(len(rowids), dtype=np.float32)
+    sims[valid] = matrix[valid] @ query / (row_norms[valid] * query_norm)
+
+    mask = sims >= threshold
+    if not mask.any():
+        return []
+
+    indices = np.where(mask)[0]
+    masked_sims = sims[indices]
+
+    if len(indices) > limit:
+        top_k_idx = np.argpartition(masked_sims, -limit)[-limit:]
+        top_k_idx = top_k_idx[np.argsort(masked_sims[top_k_idx])[::-1]]
+    else:
+        top_k_idx = np.argsort(masked_sims)[::-1]
+
+    return [(rowids[indices[i]], float(masked_sims[i])) for i in top_k_idx]
+
+
 # ---------------------------------------------------------------------------
 # Query intent classification
 # ---------------------------------------------------------------------------
@@ -376,6 +437,46 @@ _AGGREGATION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Code-level queries: about specific code, files, functions, implementations.
+# These need raw transcript chunks with file associations, not abstract knowledge.
+_CODE_PATTERNS = re.compile(
+    r"\b("
+    # File extensions in query
+    r"\w+\.(?:py|rs|ts|tsx|js|jsx|go|java|rb|c|cpp|h|sql|yaml|yml|toml|json|sh)\b"
+    # snake_case identifiers (3+ chars, at least one underscore)
+    r"|[a-z]\w*_\w+(?:_\w+)*"
+    # Code-specific terms
+    r"|implement(?:ed|s|ation|ing)"
+    r"|(?:the|this|that|a|what|which)\s+(?:module|class|function|method)"
+    r"|refactor(?:ed|ing|s)?"
+    r"|codebase|source\s+code"
+    r"|(?:how\s+is|how\s+does|how\s+do)\s+(?:the\s+)?\w+\s+implement"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# CamelCase identifiers need case-sensitive matching (IGNORECASE would
+# match every word). Checked separately and added to the code score.
+_CAMELCASE_PATTERN = re.compile(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+")
+
+# Project-level queries: about roadmap, sprints, milestones, priorities, initiatives.
+# These need knowledge nodes, journal entries, and high-level summaries.
+_PROJECT_PATTERNS = re.compile(
+    r"\b("
+    r"roadmaps?|backlogs?|milestones?|sprints?"
+    r"|priorit(?:y|ies|ize|ized)"
+    r"|initiatives?|goals?|objectives?"
+    r"|ship(?:ped|ping)?\s+(?:in|this|last|during)"
+    r"|release\s+(?:plan|schedule|notes)"
+    r"|what\s+did\s+we\s+(?:ship|release|deliver|accomplish|complete)"
+    r"|in\s+progress"
+    r"|blocke[dr]|blocking"
+    r"|scoped?|requirements?"
+    r"|stakeholders?|deadlines?"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def classify_query_intent(query: str) -> str:
     """Classify a search query into an intent category.
@@ -389,6 +490,8 @@ def classify_query_intent(query: str) -> str:
         "exploratory" — Understanding what was tried, general exploration
         "procedural"  — How to do something (steps, workflow)
         "aggregation" — Gathering scattered facts across multiple sessions
+        "code"        — About specific code, files, functions, implementations
+        "project"     — About roadmap, sprints, milestones, priorities
         "general"     — Default when no clear intent detected
 
     The classification is used to weight search strategies:
@@ -399,8 +502,30 @@ def classify_query_intent(query: str) -> str:
     - exploratory → clusters and timeline, broad search
     - procedural → knowledge nodes + cluster summaries
     - aggregation → broad entity search, moderate knowledge boost
+    - code → file-associated chunks, low knowledge boost
+    - project → knowledge nodes + journal, high semantic weight
     - general → balanced hybrid search
     """
+    # Code identifiers (snake_case, file extensions) are strong signals.
+    # CamelCase alone is ambiguous (could be product names like RevenueCat),
+    # so it only counts when another code keyword is present.
+    code_keywords = len(_CODE_PATTERNS.findall(query))
+    code_identifiers = len(_CAMELCASE_PATTERN.findall(query))
+    snake_matches = len(re.findall(r"\b[a-z]\w*_\w+(?:_\w+)*\b", query))
+    ext_matches = len(re.findall(
+        r"\b\w+\.(?:py|rs|ts|tsx|js|jsx|go|java|rb|c|cpp|h|sql|yaml|yml|toml|json|sh)\b",
+        query, re.IGNORECASE,
+    ))
+    # snake_case and file extensions are unambiguous code (2x weight)
+    code_score = code_keywords + (snake_matches + ext_matches) * 2
+    # CamelCase always counts (1 point) but only gets bonus weight when
+    # paired with other code signals. Prevents "Stripe vs RevenueCat"
+    # from being classified as code (CamelCase alone = 1 point, which
+    # ties with decision's "vs" but decision wins on priority).
+    code_score += code_identifiers
+    if code_keywords > 0 or snake_matches > 0 or ext_matches > 0:
+        code_score += code_identifiers  # bonus for paired CamelCase
+
     scores = {
         "temporal": len(_TEMPORAL_PATTERNS.findall(query)),
         "factual": len(_FACTUAL_PATTERNS.findall(query)),
@@ -410,13 +535,23 @@ def classify_query_intent(query: str) -> str:
         "exploratory": len(_EXPLORATORY_PATTERNS.findall(query)),
         "procedural": len(_PROCEDURAL_PATTERNS.findall(query)),
         "aggregation": len(_AGGREGATION_PATTERNS.findall(query)),
+        "code": code_score,
+        "project": len(_PROJECT_PATTERNS.findall(query)),
     }
 
-    # Aggregation wins over factual since factual patterns match many aggregation
-    # queries ("what does X have") but aggregation needs different treatment.
-    # Status/pending queries should beat decision/exploratory because they need
-    # explicit unresolved next steps rather than general history or rationale.
-    priority = ["status", "decision", "aggregation", "temporal", "exploratory", "procedural", "debug", "factual"]
+    # Priority order determines tie-breaking. More specific intents win:
+    # - status/decision first (most specific)
+    # - aggregation/temporal before exploratory (existing behavior)
+    # - exploratory before debug ("solve the problem" = exploratory, not debug)
+    # - debug before code (error messages shouldn't be classified as code)
+    # - code/project before procedural/factual
+    priority = [
+        "status", "decision",
+        "aggregation", "temporal",
+        "exploratory", "debug",
+        "code", "project",
+        "procedural", "factual",
+    ]
     best_score = max(scores.values())
     if best_score == 0:
         return "general"
@@ -486,6 +621,19 @@ def intent_search_params(intent: str) -> dict:
             "half_life": 0.0,          # All timeframes matter for aggregation
             "emb_weight": 2.0,         # Semantic matching finds scattered mentions
         }
+    elif intent == "code":
+        return {
+            "knowledge_boost": 0.5,    # Low — raw transcript chunks with file context matter
+            "half_life": 30.0,         # Moderate recency
+            "emb_weight": 0.8,         # Exact terms matter more for code
+            "max_knowledge": 2,        # Cap knowledge — leave room for code chunks
+        }
+    elif intent == "project":
+        return {
+            "knowledge_boost": 3.0,    # High — decisions, patterns, project facts
+            "half_life": 60.0,         # Project context is broadly relevant
+            "emb_weight": 1.5,         # Semantic matching for abstract queries
+        }
     else:  # general
         return {
             "knowledge_boost": 2.0,    # Default knowledge boost
@@ -505,6 +653,80 @@ def augment_query_for_intent(query: str, intent: str) -> str:
         return query
     extras = "next steps pending remaining left todo follow up"
     return f"{query} {extras}"
+
+
+# ---------------------------------------------------------------------------
+# Cluster durability classification
+# ---------------------------------------------------------------------------
+
+_DURABLE_SIGNALS = re.compile(
+    r"\b("
+    r"decid(?:ed|ing|es?)|decision|chose|chosen|select(?:ed|ing)|adopted"
+    r"|agreed|agreement|policy|policies"
+    r"|convention|standard|established|rule"
+    r"|architect(?:ure|ed|ing)|design(?:ed|ing)?"
+    r"|milestone|shipped|released|launched|deployed"
+    r"|version\s+\d|v\d+\.\d+"
+    r"|requirement|constraint|scope"
+    r"|configur(?:ed|ing|ation|es?)"
+    r"|pattern|principle|philosophy"
+    r"|strategic|roadmap|initiative|priority"
+    r"|benchmark|evaluation|score|result"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_EPHEMERAL_SIGNALS = re.compile(
+    r"\b("
+    r"debug(?:ging|ged|s)?|troubleshoot(?:ing|ed)?"
+    r"|investigat(?:ing|ed|es?)|fix(?:ing|ed)?\s+(?:the|a|an)"
+    r"|check(?:ing|ed)?\s+(?:the|a|if|whether)"
+    r"|read(?:ing)?\s+(?:the|a|file|code|source)"
+    r"|look(?:ing|ed)?\s+at"
+    r"|navigat(?:ing|ed)"
+    r"|refactor(?:ing|ed)"
+    r"|trie[ds]?\s+(?:to|a|the|running|adding|using)"
+    r"|let\s+me|I'll\s+(?:check|look|read|try)"
+    r"|traceback|stack\s*trace|exception\s+in"
+    r"|moving\s+(?:to|on|the)|switching\s+to"
+    r"|updating?\s+(?:the|a|imports?|tests?)"
+    r"|running\s+(?:tests?|the|a)"
+    r"|cleaning\s+up"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def classify_cluster_durability(topic: str, summary: str) -> str:
+    """Classify a cluster as durable, ephemeral, or mixed.
+
+    Durable clusters contain decisions, architecture, milestones, or policies
+    that have lasting value. Ephemeral clusters contain debugging steps,
+    file navigation, and coding narration that lose relevance quickly.
+
+    Returns:
+        "durable", "ephemeral", or "mixed"
+    """
+    text = f"{topic} {summary}"
+    if not text.strip():
+        return "ephemeral"
+
+    durable_count = len(_DURABLE_SIGNALS.findall(text))
+    ephemeral_count = len(_EPHEMERAL_SIGNALS.findall(text))
+
+    if durable_count > 0 and ephemeral_count > 0:
+        # Both signals present: if durable signals dominate, it's durable
+        # (a debugging session that led to a decision is durable)
+        if durable_count > ephemeral_count:
+            return "durable"
+        return "mixed"
+    elif durable_count > 0:
+        return "durable"
+    elif ephemeral_count > 0:
+        return "ephemeral"
+    else:
+        # No clear signals: default to ephemeral (conservative)
+        return "ephemeral"
 
 
 # ---------------------------------------------------------------------------

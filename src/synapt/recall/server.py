@@ -378,11 +378,17 @@ def recall_quick(query: str) -> str:
     """
     quick_budget = _cap_tokens(500)
     intent = classify_query_intent(query)
-    depth = "summary" if intent == "status" else "concise"
+    # Route depth by intent:
+    # - status: summary (knowledge + journal next-steps)
+    # - code: full (raw transcript chunks with file associations)
+    # - everything else: concise (knowledge + cluster summaries)
+    if intent == "status":
+        depth = "summary"
+    elif intent == "code":
+        depth = "full"
+    else:
+        depth = "concise"
     params = intent_search_params(intent)
-    # Skip embedding loading for quick checks. Pending-work queries use
-    # summary mode (knowledge + journal), everything else uses concise
-    # mode (knowledge + cluster summaries).
     index = _get_index(use_embeddings=False)
     if index is None:
         index_dir = project_index_dir()

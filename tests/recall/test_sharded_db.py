@@ -131,8 +131,8 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertEqual(db.shard_count, 3)
         db.close()
 
-    def test_save_chunks_to_active_shard(self):
-        """Sharded save_chunks writes to the active (last) shard."""
+    def test_save_chunks_creates_fresh_shards(self):
+        """Sharded save_chunks creates fresh shard(s) for the data."""
         from synapt.recall.core import TranscriptChunk
         RecallDB(self.index_dir / "index.db").close()
         RecallDB(self.index_dir / "data_001.db").close()
@@ -142,10 +142,9 @@ class TestShardedRecallDBSharded(unittest.TestCase):
             turn_index=0, user_text="hello", assistant_text="hi",
         )
         db.save_chunks([chunk])
-        # Chunk saved to active shard
-        active = db._data_dbs[-1]
-        count = active._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        self.assertEqual(count, 1)
+        # 1 chunk = 1 shard
+        self.assertEqual(db.shard_count, 1)
+        self.assertEqual(db.chunk_count(), 1)
         db.close()
 
     def test_save_chunks_empty_is_noop(self):
@@ -227,8 +226,8 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertIn("beta memory", joined)
         db.close()
 
-    def test_save_chunks_clears_all_shards_on_rebuild(self):
-        """Full save_chunks clears stale data from ALL shards, not just active."""
+    def test_save_chunks_reshards_properly(self):
+        """save_chunks deletes old shards and redistributes across fresh ones."""
         from synapt.recall.core import TranscriptChunk
         RecallDB(self.index_dir / "index.db").close()
         RecallDB(self.index_dir / "data_001.db").close()
@@ -242,10 +241,6 @@ class TestShardedRecallDBSharded(unittest.TestCase):
             turn_index=0, user_text="old", assistant_text="stale",
         )
         db._data_dbs[0].save_chunks([old_chunk])
-        count_before = db._data_dbs[0]._conn.execute(
-            "SELECT COUNT(*) FROM chunks"
-        ).fetchone()[0]
-        self.assertEqual(count_before, 1)
 
         # Now do a full rebuild save (like rescrub does)
         new_chunk = TranscriptChunk(
@@ -254,23 +249,87 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         )
         db.save_chunks([new_chunk])
 
-        # Shard 1 should be cleared (the bug: it kept the old chunk)
-        count_shard1 = db._data_dbs[0]._conn.execute(
-            "SELECT COUNT(*) FROM chunks"
-        ).fetchone()[0]
-        self.assertEqual(count_shard1, 0, "Old shard should be cleared on rebuild")
+        # Old shard files should be deleted; 1 chunk = 1 fresh shard
+        self.assertEqual(db.shard_count, 1)
+        self.assertFalse(
+            (self.index_dir / "data_002.db").exists(),
+            "Old shard file should be deleted",
+        )
 
         # Active shard should have the new chunk
-        count_active = db._data_dbs[-1]._conn.execute(
-            "SELECT COUNT(*) FROM chunks"
-        ).fetchone()[0]
-        self.assertEqual(count_active, 1)
+        self.assertEqual(db.chunk_count(), 1)
 
-        # FTS search should only find the new chunk, not the old one
+        # FTS search should only find the new chunk
         results = db.fts_search("stale")
         self.assertEqual(len(results), 0, "Stale data should not appear in FTS")
         results = db.fts_search("fresh")
         self.assertEqual(len(results), 1)
+        db.close()
+
+    def test_save_chunks_no_unbounded_shard_growth(self):
+        """Repeated rebuilds must not accumulate shard files (the sprint-13 bug)."""
+        from synapt.recall.core import TranscriptChunk
+        from synapt.recall.sharding import list_shards
+
+        RecallDB(self.index_dir / "index.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
+        db = ShardedRecallDB.open(self.index_dir)
+
+        chunks = [
+            TranscriptChunk(
+                id=f"c{i}:t0", session_id=f"s{i}",
+                timestamp=f"2025-01-{i+1:02d}T00:00:00Z",
+                turn_index=0, user_text=f"chunk {i}", assistant_text="a",
+            )
+            for i in range(5)
+        ]
+
+        # Simulate 3 consecutive rebuilds (the bug created a new shard each time)
+        for rebuild in range(3):
+            db.save_chunks(chunks)
+
+        shard_files = list_shards(self.index_dir)
+        self.assertEqual(
+            len(shard_files), 1,
+            f"Expected 1 shard after rebuilds, got {len(shard_files)}: "
+            f"{[p.name for p in shard_files]}",
+        )
+        self.assertEqual(db.chunk_count(), 5)
+        db.close()
+
+    def test_save_chunks_splits_at_threshold(self):
+        """Chunks exceeding threshold are split across multiple shards."""
+        from synapt.recall.core import TranscriptChunk
+        from synapt.recall.sharding import list_shards
+        import synapt.recall.sharding as _sharding_mod
+
+        RecallDB(self.index_dir / "index.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
+        db = ShardedRecallDB.open(self.index_dir)
+
+        chunks = [
+            TranscriptChunk(
+                id=f"c{i}:t0", session_id=f"s{i}",
+                timestamp=f"2025-01-{i+1:02d}T00:00:00Z",
+                turn_index=0, user_text=f"chunk {i}", assistant_text="a",
+            )
+            for i in range(25)
+        ]
+
+        # Temporarily lower the threshold for testing
+        original = _sharding_mod.SHARD_CHUNK_THRESHOLD
+        _sharding_mod.SHARD_CHUNK_THRESHOLD = 10
+        try:
+            db.save_chunks(chunks)
+        finally:
+            _sharding_mod.SHARD_CHUNK_THRESHOLD = original
+
+        # 25 chunks / 10 per shard = 3 shards
+        self.assertEqual(db.shard_count, 3)
+        self.assertEqual(db.chunk_count(), 25)
+
+        shard_files = list_shards(self.index_dir)
+        self.assertEqual(len(shard_files), 3)
         db.close()
 
 
