@@ -8,7 +8,7 @@ All tests are expected to FAIL until the implementation lands.
 """
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 # OSS base actions that must always be available
@@ -253,6 +253,49 @@ class TestPremiumStubs(unittest.TestCase):
 
         reg = get_default_registry()
         self.assertEqual(reg.status("totally_fake_action"), "unknown")
+
+
+class TestRecallChannelIntegration(unittest.TestCase):
+    """The live MCP tool should dispatch through the shared action registry."""
+
+    def tearDown(self):
+        from synapt.recall.actions import reset_action_registry
+
+        reset_action_registry()
+
+    def test_recall_channel_uses_registry_dispatch(self):
+        """recall_channel should route OSS actions through the shared registry."""
+        from synapt.recall.actions import get_action_registry
+        from synapt.recall.server import recall_channel
+
+        reg = get_action_registry()
+        handler = MagicMock(return_value="joined via registry")
+        reg.register("join", handler, tier="oss")
+
+        result = recall_channel(action="join", channel="dev", name="Atlas")
+        self.assertEqual(result, "joined via registry")
+        _, kwargs = handler.call_args
+        self.assertEqual(kwargs["channel"], "dev")
+        self.assertEqual(kwargs["name"], "Atlas")
+
+    def test_recall_channel_gates_premium_action_without_plugin(self):
+        """recall_channel should return the premium gate message for locked actions."""
+        from synapt.recall.server import recall_channel
+
+        result = recall_channel(action="directive", channel="dev", message="test", to="opus")
+        self.assertIn("premium", result.lower())
+        self.assertIn("directive", result.lower())
+
+    def test_recall_channel_uses_shared_registry_overrides(self):
+        """Premium-style overrides on the shared registry should affect the live dispatcher."""
+        from synapt.recall.actions import get_action_registry
+        from synapt.recall.server import recall_channel
+
+        reg = get_action_registry()
+        reg.register("who", lambda **_kwargs: "premium who", tier="premium")
+
+        result = recall_channel(action="who")
+        self.assertEqual(result, "premium who")
 
 
 if __name__ == "__main__":

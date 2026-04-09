@@ -1912,150 +1912,22 @@ def recall_channel(
         intent: Declare intent to create something (message = description of planned work).
     """
     try:
-        from synapt.recall.channel import (
-            channel_join,
-            channel_leave,
-            channel_post,
-            channel_read,
-            channel_read_message,
-            channel_rename,
-            channel_who,
-            channel_heartbeat,
-            channel_unread,
-            channel_unread_read,
-            channel_pin,
-            channel_unpin,
-            channel_directive,
-            channel_mute,
-            channel_unmute,
-            channel_kick,
-            channel_broadcast,
-            channel_board,
-            channel_list_channels,
-        )
+        from synapt.recall.actions import get_action_registry
 
-        if action == "join":
-            return channel_join(channel=channel, display_name=name)
-
-        if action == "leave":
-            return channel_leave(channel=channel)
-
-        if action == "post":
-            if not message:
-                return "Error: message is required for 'post' action."
-            attachment_list = [p.strip() for p in attachments.split(";")] if attachments else None
-            return channel_post(channel=channel, message=message, pin=pin, attachment_paths=attachment_list, display_name=name, msg_type=msg_type or "message")
-
-        if action == "read":
-            return channel_read(channel=channel, limit=limit, show_pins=show_pins, detail=detail, msg_type=msg_type)
-
-        if action == "read_message":
-            if not message:
-                return "Error: message_id is required for 'read_message' action."
-            return channel_read_message(channel=channel, message_id=message)
-
-        if action == "who":
-            return channel_who()
-
-        if action == "heartbeat":
-            return channel_heartbeat()
-
-        if action == "unread":
-            # Unread is a polling action — pins are static and waste context
-            # on every tick.  Only include them if explicitly requested via
-            # detail='high'/'max' (#476).
-            unread_pins = show_pins if detail in ("high", "max") else False
-            return channel_unread_read(limit=limit, show_pins=unread_pins, detail=detail)
-
-        if action == "pin":
-            if not message:
-                return "Error: message_id is required for 'pin' action."
-            return channel_pin(channel=channel, message_id=message)
-
-        if action == "unpin":
-            if not message:
-                return "Error: message_id is required for 'unpin' action."
-            return channel_unpin(channel=channel, message_id=message)
-
-        if action == "directive":
-            if not message:
-                return "Error: message is required for 'directive' action."
-            if not to:
-                return "Error: 'to' (target agent) is required for 'directive' action."
-            return channel_directive(channel=channel, message=message, to=to, display_name=name)
-
-        if action == "mute":
-            if not target:
-                return "Error: target agent is required for 'mute' action."
-            return channel_mute(target=target, channel=channel)
-
-        if action == "unmute":
-            if not target:
-                return "Error: target agent is required for 'unmute' action."
-            return channel_unmute(target=target, channel=channel)
-
-        if action == "kick":
-            if not target:
-                return "Error: target agent is required for 'kick' action."
-            return channel_kick(target=target, channel=channel)
-
-        if action == "broadcast":
-            if not message:
-                return "Error: message is required for 'broadcast' action."
-            return channel_broadcast(message=message, display_name=name)
-
-        if action == "board":
-            return channel_board(channel=channel, message=message)
-
-        if action == "list":
-            channels = channel_list_channels()
-            if not channels:
-                return "No channels yet."
-            return "Channels: " + ", ".join(f"#{c}" for c in channels)
-
-        if action == "search":
-            if not message:
-                return "Error: query is required for 'search' action."
-            from synapt.recall.channel import channel_search
-            results = channel_search(message)
-            if not results:
-                return "No matching channel messages."
-            lines = ["## Channel search results"]
-            for r in results:
-                ts = r["timestamp"][:16]
-                lines.append(f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {r['body']}")
-            return "\n".join(lines)
-
-        if action == "rename":
-            if not message:
-                return "Error: message is required for 'rename' action (the new display name)."
-            from synapt.recall.channel import channel_rename
-            return channel_rename(new_name=message)
-
-        if action == "claim":
-            if not message:
-                return "Error: message is required for 'claim' action (the message_id to claim)."
-            from synapt.recall.channel import channel_claim
-            return channel_claim(message_id=message, channel=channel)
-
-        if action == "unclaim":
-            if not message:
-                return "Error: message is required for 'unclaim' action (the message_id to release)."
-            from synapt.recall.channel import channel_unclaim
-            return channel_unclaim(message_id=message)
-
-        if action == "intent":
-            if not message:
-                return "Error: message is required for 'intent' action (describe what you're about to create)."
-            from synapt.recall.channel import channel_claim_intent
-            ok, result = channel_claim_intent(intent=message, channel=channel)
-            return result
-
-        return (
-            f"Unknown action: {action}. Use 'join', 'leave', 'post', 'read', "
-            f"'who', 'heartbeat', 'unread', 'pin', 'directive', 'mute', "
-            f"'unmute', 'kick', 'broadcast', 'board', 'list', 'search', 'rename', "
-            f"'claim', 'unclaim', or 'intent'."
+        registry = get_action_registry()
+        return registry.dispatch(
+            action,
+            channel=channel,
+            message=message,
+            to=to,
+            target=target,
+            limit=limit,
+            pin=pin,
+            name=name,
+            attachments=attachments,
+            show_pins=show_pins,
+            detail=detail,
+            msg_type=msg_type,
         )
     except Exception as exc:
         return f"Channel failed: {exc}"

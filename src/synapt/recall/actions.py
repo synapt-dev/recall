@@ -52,17 +52,17 @@ class ActionRegistry:
             handler=handler, tier=tier, description=description
         )
 
-    def dispatch(self, name: str, **kwargs: Any) -> str:
+    def dispatch(self, action_name: str, **kwargs: Any) -> str:
         """Dispatch an action by name. Returns a string result or error message."""
-        entry = self._entries.get(name)
+        entry = self._entries.get(action_name)
         if entry is not None:
             return entry.handler(**kwargs)
-        if name in self._known_premium:
+        if action_name in self._known_premium:
             return (
-                f"Action '{name}' requires premium plugin. "
+                f"Action '{action_name}' requires premium plugin. "
                 f"See synapt.dev/premium for details."
             )
-        return f"Unknown action: '{name}'."
+        return f"Unknown action: '{action_name}'."
 
     @property
     def actions(self) -> set[str]:
@@ -274,3 +274,24 @@ def get_default_registry() -> ActionRegistry:
         reg.register(name, handler, tier="oss", description=desc)
     reg._known_premium = set(PREMIUM_ACTION_NAMES)
     return reg
+
+
+_DEFAULT_REGISTRY: ActionRegistry | None = None
+
+
+def get_action_registry() -> ActionRegistry:
+    """Return the process-wide channel action registry.
+
+    OSS installs the base registry once. Premium can then register additive
+    actions or overrides at import/startup time against this shared instance.
+    """
+    global _DEFAULT_REGISTRY
+    if _DEFAULT_REGISTRY is None:
+        _DEFAULT_REGISTRY = get_default_registry()
+    return _DEFAULT_REGISTRY
+
+
+def reset_action_registry() -> None:
+    """Reset the shared registry for tests."""
+    global _DEFAULT_REGISTRY
+    _DEFAULT_REGISTRY = None
