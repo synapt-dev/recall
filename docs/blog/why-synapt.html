@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Why Synapt? — Local-First Memory That Beats Cloud Systems</title>
-  <meta name="description" content="Synapt scores 76.04% on LOCOMO — #2 on the benchmark, within 1.5pp of Engram (77.55%), beating Memobase (75.78%), Zep (65.99%), and all other cloud systems. Runs entirely locally on a 3B model.">
+  <title>Why Synapt? Local-First Memory That Beats Cloud Systems</title>
+  <meta name="description" content="Synapt scores 76.04% on LOCOMO, #2 on the benchmark, within 1.5pp of Engram (77.55%), beating Memobase (75.78%), Zep (65.99%), and all other cloud systems. Runs entirely locally on a 3B model.">
   <meta property="og:title" content="Why Synapt?">
   <meta property="og:description" content="Local-first agent memory that beats cloud-dependent systems on standardized benchmarks.">
   <meta property="og:image" content="https://synapt.dev/blog/images/why-synapt-hero.png">
@@ -191,7 +191,7 @@
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/recall">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>
@@ -199,16 +199,16 @@
 
   <article>
     <div class="container">
-      <img src="images/why-synapt-hero.png" alt="Why Synapt — local-first memory" class="hero">
+      <img src="images/why-synapt-hero.png" alt="Why Synapt: local-first memory" class="hero">
       <h1>Why Synapt?</h1>
       <p class="subtitle">Local-first memory that beats cloud-dependent systems.</p>
       <p class="meta"><span class="byline"><img src="images/author-layne.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Layne Penney</a></span> &middot; March 2026</p>
 
       <p>
-        AI coding assistants forget everything between sessions. You debug a tricky issue on Monday, and by Wednesday your assistant has no memory it ever happened. Every agent memory system tries to solve this. Most of them require cloud APIs, send your code context to external servers, and still don't beat a well-configured local search.
+        AI coding assistants forget everything between sessions. You debug a tricky issue on Monday, and by Wednesday your assistant has no memory it ever happened. I kept hitting this wall, so I started looking at the memory systems that existed. Most of them require cloud APIs, send your code context to external servers, and still don't beat a well-configured local search.
       </p>
       <p>
-        Synapt is different. It runs entirely on your machine, requires no API keys, and scores higher on standardized benchmarks than systems that depend on GPT-4.
+        I wanted to know if you could do better without leaving your own machine. Synapt is what came out of that question: no API keys, no cloud dependency, and somehow scoring higher on standardized benchmarks than systems running GPT-4.
       </p>
 
       <h2>The benchmark landscape is misleading</h2>
@@ -277,16 +277,16 @@
       </table>
 
       <p>
-        Synapt scores <strong>76.04% overall</strong> with an 8B enrichment model &mdash; #2 on LOCOMO, within 1.5pp of <a href="https://arxiv.org/abs/2511.12960">Engram</a> (77.55%) and ahead of every other system. Even the local 3B version (73.38%) surpasses the Full-Context upper bound (72.90%), beating every cloud system while running entirely on a laptop.
+        Synapt scores <strong>76.04% overall</strong> with an 8B enrichment model, placing #2 on LOCOMO within 1.5pp of <a href="https://arxiv.org/abs/2511.12960">Engram</a> (77.55%) and ahead of every other system. Even the local 3B version (73.38%) surpasses the Full-Context upper bound (72.90%), beating every cloud system while running entirely on a laptop.
       </p>
 
       <p>
-        <strong>What is Full-Context?</strong> The entire conversation history is passed directly to GPT-4 as context &mdash; no retrieval, no memory system, just brute force. It&rsquo;s the theoretical upper bound: the model has access to every fact. Synapt beats it because focused retrieval surfaces only the relevant chunks &mdash; the answer model doesn&rsquo;t have to find the needle in a haystack when the retrieval system has already pulled it out.
+        <strong>What is Full-Context?</strong> The entire conversation history is passed directly to GPT-4 as context with no retrieval, no memory system, just brute force. It's the theoretical upper bound: the model has access to every fact. Synapt beats it because focused retrieval surfaces only the relevant chunks; the answer model doesn't have to find the needle in a haystack when the retrieval system has already pulled it out.
       </p>
 
       <div class="callout">
         <p>
-          Other systems report higher headline numbers using different metrics. For example, Hindsight reports 89.61% using binary LLM-judge accuracy (not Jaccard), and MemU claims 92% without publishing evaluation code or specifying their metric. When comparing benchmarks, check the methodology &mdash; the metric matters more than the number.
+          Other systems report higher headline numbers using different metrics. For example, Hindsight reports 89.61% using binary LLM-judge accuracy (not Jaccard), and MemU claims 92% without publishing evaluation code or specifying their metric. When comparing benchmarks, check the methodology: the metric matters more than the number.
         </p>
       </div>
 
@@ -294,9 +294,9 @@
 
       <p><strong>Local-first, no API keys.</strong> Synapt runs on your laptop. Embeddings come from <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2">all-MiniLM-L6-v2</a> (90MB). Optional enrichment uses a 3B model via MLX on Apple Silicon or Ollama on Linux. Your code context never leaves your machine.</p>
 
-      <p><strong>Hybrid search that catches what embeddings miss.</strong> Most memory systems rely on pure embedding similarity. That works for semantic matches but fails when you search for a specific config value, error message, or file path. Synapt fuses FTS5 full-text search with 384-dim embeddings via <a href="https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf">Reciprocal Rank Fusion</a>. A result that keyword search misses can still surface if it's semantically similar &mdash; and vice versa.</p>
+      <p><strong>Hybrid search that catches what embeddings miss.</strong> Most memory systems rely on pure embedding similarity. That works for semantic matches but fails when you search for a specific config value, error message, or file path. Synapt fuses FTS5 full-text search with 384-dim embeddings via <a href="https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf">Reciprocal Rank Fusion</a>. A result that keyword search misses can still surface if it's semantically similar, and vice versa.</p>
 
-      <p><strong>Built for coding, not chat.</strong> LOCOMO tests personal conversation memory ("what's Maria's cat's name?"). Synapt is designed for coding sessions. It indexes tool results, file paths, error traces, and decision markers alongside conversation text. The query intent classifier routes debug queries differently from factual lookups, with tuned recency decay and embedding weights per intent.</p>
+      <p><strong>Built for coding, not chat.</strong> LOCOMO tests personal conversation memory ("what's Maria's cat's name?"). Synapt is designed for coding sessions: it indexes tool results, file paths, error traces, and decision markers alongside conversation text. The query intent classifier routes debug queries differently from factual lookups, with tuned recency decay and embedding weights per intent.</p>
 
       <p><strong>Dynamic knowledge discovery.</strong> Some systems predefine fixed memory categories (e.g., 10 buckets like "preferences", "relationships"). Synapt discovers knowledge clusters from your actual data through temporal and semantic similarity, then consolidates them into durable knowledge nodes with confidence scores and source attribution.</p>
 
@@ -307,17 +307,17 @@
       <p>Three retrieval paths run in parallel:</p>
 
       <ol>
-        <li><strong>BM25/FTS5</strong> &mdash; Full-text search with configurable recency decay</li>
-        <li><strong>Embeddings</strong> &mdash; Cosine similarity over 384-dim vectors</li>
-        <li><strong>Knowledge</strong> &mdash; Durable facts extracted from session journals, searched via FTS5 + embeddings with confidence-weighted boosting</li>
+        <li><strong>BM25/FTS5</strong>: full-text search with configurable recency decay</li>
+        <li><strong>Embeddings</strong>: cosine similarity over 384-dim vectors</li>
+        <li><strong>Knowledge</strong>: durable facts extracted from session journals, searched via FTS5 + embeddings with confidence-weighted boosting</li>
       </ol>
 
       <p>
-        Results are merged via RRF (rank-based fusion, no score normalization needed), then interleaved with knowledge nodes and deduplicated. Query intent classification adjusts parameters automatically &mdash; debug queries weight recent sessions heavily, factual queries prioritize knowledge nodes.
+        Results are merged via RRF (rank-based fusion, no score normalization needed), then interleaved with knowledge nodes and deduplicated. Query intent classification adjusts parameters automatically: debug queries weight recent sessions heavily; factual queries prioritize knowledge nodes.
       </p>
 
       <p>
-        <strong>Why this matters in practice:</strong> During a project, your assistant might discuss multiple options across sessions &mdash; approach A in session 3, approach B in session 5, then settle on B-with-modifications in session 7. Raw transcripts contain all three discussions equally. A naive search returns the most recent or most keyword-dense match, which may not be the decision. The knowledge layer extracts the final decision as a durable fact with source attribution, so when you search &ldquo;what did we decide?&rdquo;, the decision surfaces first &mdash; not the earlier deliberation that was superseded.
+        <strong>Why this matters in practice:</strong> During a project, your assistant might discuss multiple options across sessions: approach A in session 3, approach B in session 5, then settle on B-with-modifications in session 7. Raw transcripts contain all three discussions equally. A naive search returns the most recent or most keyword-dense match, which may not be the decision. The knowledge layer extracts the final decision as a durable fact with source attribution, so when you search "what did we decide?", the decision surfaces first. Not the earlier deliberation that was superseded.
       </p>
 
       <h2>The metric problem in memory benchmarks</h2>
@@ -327,11 +327,11 @@
       </p>
 
       <ul>
-        <li><strong>J-score vs accuracy</strong> &mdash; Jaccard token overlap is strict. LLM binary accuracy is lenient. A system scoring 70% Jaccard might score 85%+ accuracy. They are not comparable.</li>
-        <li><strong>Judge model</strong> &mdash; GPT-4 as judge is more generous than gpt-4o-mini. Same system, different judge, different score.</li>
-        <li><strong>Answer model</strong> &mdash; Hindsight's best score uses Gemini-3 Pro for answer generation. Their open-source 20B model drops ~6 points. The memory system gets credit for the answer model's strength.</li>
-        <li><strong>Dataset version</strong> &mdash; LOCOMO has different versions. Some systems evaluate on subsets.</li>
-        <li><strong>Reproducibility</strong> &mdash; If the evaluation code isn't published, treat the numbers with skepticism.</li>
+        <li><strong>J-score vs accuracy</strong>: Jaccard token overlap is strict; LLM binary accuracy is lenient. A system scoring 70% Jaccard might score 85%+ accuracy. They are not comparable.</li>
+        <li><strong>Judge model</strong>: GPT-4 as judge is more generous than gpt-4o-mini. Same system, different judge, different score.</li>
+        <li><strong>Answer model</strong>: Hindsight's best score uses Gemini-3 Pro for answer generation. Their open-source 20B model drops ~6 points. The memory system gets credit for the answer model's strength.</li>
+        <li><strong>Dataset version</strong>: LOCOMO has different versions. Some systems evaluate on subsets.</li>
+        <li><strong>Reproducibility</strong>: if the evaluation code isn't published, treat the numbers with skepticism.</li>
       </ul>
 
       <p>
@@ -340,7 +340,7 @@
 
       <h2>Coding memory: where the gap widens</h2>
       <p>
-        LOCOMO tests personal conversation memory — two friends discussing life events. But coding assistants need to remember tool output, error traces, debugging steps, and architectural decisions across sessions. We built <strong>CodeMemo</strong> to test this.
+        LOCOMO tests personal conversation memory, two friends discussing life events. But coding assistants need to remember tool output, error traces, debugging steps, and architectural decisions across sessions. We built <strong>CodeMemo</strong> to test this.
       </p>
       <p>
         158 questions across 3 coding projects, 6 categories (factual, debug, architecture, temporal, convention, cross-session). Same gpt-4o-mini judge. Synapt leads Mem0 by <strong>+14.51 percentage points</strong>:
@@ -359,7 +359,7 @@
         </tbody>
       </table>
       <p>
-        The biggest gap is <strong>convention</strong> (+37pp) — implicit patterns across sessions that Mem0's fact extraction abstracts away. Debug (+22pp) and factual (+24pp) follow — categories that require exact tool output and implementation details, not summaries.
+        The biggest gap is <strong>convention</strong> (+37pp): implicit patterns across sessions that Mem0's fact extraction abstracts away. Debug (+22pp) and factual (+24pp) follow, categories that require exact tool output and implementation details, not summaries.
       </p>
       <p>
         The dataset and evaluation code are open source: <a href="https://huggingface.co/datasets/laynepro/codememo-benchmark">HuggingFace</a> and <a href="https://github.com/laynepenney/codememo-benchmark">benchmark gripspace</a>.
@@ -371,7 +371,7 @@
         <p>Install synapt and build your first index in under a minute.</p>
         <code>pip install synapt && synapt recall build && synapt server</code>
         <p style="margin-top: 1rem;">
-          <a href="https://github.com/laynepenney/synapt">GitHub</a> &nbsp;&middot;&nbsp;
+          <a href="https://github.com/synapt-dev/recall">GitHub</a> &nbsp;&middot;&nbsp;
           <a href="https://x.com/synapt_dev">X</a> &nbsp;&middot;&nbsp;
           <a href="https://pypi.org/project/synapt/">PyPI</a> &nbsp;&middot;&nbsp;
           <a href="../">Docs</a>
@@ -382,7 +382,7 @@
         <h2>Continue reading</h2>
         <a href="what-is-memory.html">
           <strong>What Is Memory?</strong>
-          <span>The story behind synapt — from frustration to architecture.</span>
+          <span>The story behind synapt, from frustration to architecture.</span>
         </a>
         <a href="building-my-own-memory.html">
           <strong>Building My Own Memory</strong>

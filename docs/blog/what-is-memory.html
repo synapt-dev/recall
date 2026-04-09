@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>What Is Memory? — Building Recall from Scratch</title>
-  <meta name="description" content="We built an agent memory system from scratch. Here's what we learned about what 'memory' actually means — and why most systems get it wrong.">
+  <title>What Is Memory? Building Recall from Scratch</title>
+  <meta name="description" content="We built an agent memory system from scratch. Here's what we learned about what 'memory' actually means, and why most systems get it wrong.">
   <meta property="og:title" content="What Is Memory?">
   <meta property="og:description" content="Building an agent memory system from scratch. What 'memory' actually means, and what we got wrong along the way.">
   <meta property="og:image" content="https://synapt.dev/blog/images/what-is-memory-hero.png">
@@ -195,7 +195,7 @@
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/recall">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>
@@ -203,7 +203,7 @@
 
   <article>
     <div class="container">
-      <img src="images/what-is-memory-hero.png" alt="What is memory — building recall from scratch" class="hero">
+      <img src="images/what-is-memory-hero.png" alt="What is memory: building recall from scratch" class="hero">
       <h1>What Is Memory?</h1>
       <p class="subtitle">We built an agent memory system from scratch. Here's what we learned.</p>
       <p class="meta"><span class="byline"><img src="images/author-layne.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Layne Penney</a> &amp; <img src="images/author-claude.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Claude</a></span> &middot; March 2026</p>
@@ -212,10 +212,10 @@
         I kept losing context. Every time I started a new Claude Code session, my assistant had no idea what we'd been working on. I'd re-explain the project structure, re-state conventions, re-discover decisions we'd already made together. It felt like onboarding the same person every morning.
       </p>
       <p>
-        The worst part was the subtle stuff. We'd debug a tricky race condition, figure out the root cause, settle on a fix &mdash; and two days later I'd hit something related and my assistant would suggest the exact approach we'd already ruled out. Not because it was wrong, but because it genuinely didn't know.
+        The worst part was the subtle stuff. We'd debug a tricky race condition, figure out the root cause, settle on a fix, and two days later I'd hit something related and my assistant would suggest the exact approach we'd already ruled out. Not because it was wrong, but because it genuinely didn't know.
       </p>
       <p>
-        So we built a memory system. Not because we planned to &mdash; because the frustration got bad enough that we had to. This post is about what we learned along the way. What "memory" actually means, why the obvious approaches don't work, and what does.
+        So we built a memory system. Not because we planned to, but because the frustration got bad enough that we had to. This post is about what we learned along the way: what "memory" actually means, why the obvious approaches don't work, and what does.
       </p>
 
       <h2>Memory is not chat history</h2>
@@ -224,7 +224,7 @@
         The first thing we tried was the obvious thing: save the conversation logs and search them later. BM25 over raw transcripts, a few thousand chunks in a SQLite FTS5 index, done.
       </p>
       <p>
-        It worked &mdash; barely. You could find things if you remembered the exact words. But a few weeks of coding sessions is <em>a lot</em> of text. Most of it is noise: file reads, exploratory dead ends, tool output, backtracking. The actual decisions and discoveries are maybe 5% of the total volume, buried in a sea of <code>cat</code> output and abandoned approaches.
+        It worked, barely. You could find things if you remembered the exact words. But a few weeks of coding sessions is <em>a lot</em> of text. Most of it is noise: file reads, exploratory dead ends, tool output, backtracking. The actual decisions and discoveries are maybe 5% of the total volume, buried in a sea of <code>cat</code> output and abandoned approaches.
       </p>
       <p>
         The real problem isn't storage. It's retrieval. Having a hundred thousand tokens of past context is useless if you can't find the ten tokens that matter for the question being asked right now.
@@ -236,31 +236,31 @@
         We learned this the hard way by watching our own searches fail in different directions.
       </p>
       <p>
-        <strong>Keyword search misses meaning.</strong> Searching for "database connection error" won't find a chunk that says "postgres refused the TCP handshake on port 5432." The information is there, the words aren't. FTS5 is great for exact terms &mdash; config keys, error codes, file paths &mdash; but useless for paraphrased queries.
+        <strong>Keyword search misses meaning.</strong> Searching for "database connection error" won't find a chunk that says "postgres refused the TCP handshake on port 5432." The information is there; the words aren't. FTS5 is great for exact terms like config keys, error codes, and file paths, but useless for paraphrased queries.
       </p>
       <p>
-        <strong>Embedding search misses specifics.</strong> We added semantic embeddings (384-dim vectors from <code>all-MiniLM-L6-v2</code>, a 90MB model that runs locally in milliseconds). Now we could find semantically similar chunks. But searching for <code>POSTGRES_MAX_CONNECTIONS</code> would return chunks about database configuration in general &mdash; semantically close, but not the one with the actual variable name. Embeddings capture meaning, not tokens.
+        <strong>Embedding search misses specifics.</strong> We added semantic embeddings (384-dim vectors from <code>all-MiniLM-L6-v2</code>, a 90MB model that runs locally in milliseconds). Now we could find semantically similar chunks. But searching for <code>POSTGRES_MAX_CONNECTIONS</code> would return chunks about database configuration in general, semantically close but not the one with the actual variable name. Embeddings capture meaning, not tokens.
       </p>
       <p>
-        The answer was to run both and merge. <strong>Reciprocal Rank Fusion</strong> combines two ranked lists by position rather than score &mdash; which matters because BM25 scores and cosine similarities are on completely different scales. A result that's #2 in keyword search and #8 in semantic search is probably relevant, even if neither system alone would surface it. This hybrid approach catches what either one alone would miss.
+        The answer was to run both and merge. <strong>Reciprocal Rank Fusion</strong> combines two ranked lists by position rather than score, which matters because BM25 scores and cosine similarities are on completely different scales. A result that's #2 in keyword search and #8 in semantic search is probably relevant, even if neither system alone would surface it. This hybrid approach catches what either one alone would miss.
       </p>
 
       <div class="callout">
         <p>
-          This is the thing that surprised us most early on: <strong>neither retrieval path alone is good enough.</strong> Embeddings seem like the modern answer, but they fail on the exact-match queries that developers ask constantly &mdash; "what port does X run on?", "what's the env var for Y?", specific error messages. You need both.
+          This is the thing that surprised us most early on: <strong>neither retrieval path alone is good enough.</strong> Embeddings seem like the modern answer, but they fail on the exact-match queries that developers ask constantly: "what port does X run on?", "what's the env var for Y?", specific error messages. You need both.
         </p>
       </div>
 
       <h2>Raw chunks aren't enough either</h2>
 
       <p>
-        Even with good retrieval, raw transcript chunks are noisy. A single chunk might contain three file reads, a failed approach, and one important decision buried in line 47 of the assistant's response. If you return that whole chunk as context, most of it is irrelevant &mdash; and in a tight context window, noise actively hurts.
+        Even with good retrieval, raw transcript chunks are noisy. A single chunk might contain three file reads, a failed approach, and one important decision buried in line 47 of the assistant's response. If you return that whole chunk as context, most of it is irrelevant, and in a tight context window, noise actively hurts.
       </p>
       <p>
-        This is where knowledge nodes came in. The idea: run a small LLM over session journals and extract durable facts &mdash; things that are true beyond a single session. Not "we discussed the auth system" but "the auth service uses JWT with RS256, keys rotated monthly via AWS Secrets Manager." Specific, searchable, attributed back to the source sessions.
+        This is where knowledge nodes came in. The idea: run a small LLM over session journals and extract durable facts, things that are true beyond a single session. Not "we discussed the auth system" but "the auth service uses JWT with RS256, keys rotated monthly via AWS Secrets Manager." Specific, searchable, attributed back to the source sessions.
       </p>
       <p>
-        We learned quickly that the extraction quality is everything. Our first attempts with a 3B model pulled out generic observations: "the user is working on a Python project." Not helpful. The good extractions capture <em>decisions</em>, <em>rationale</em>, and <em>specific details</em> &mdash; the kind of things a teammate would actually remember about your project.
+        We learned quickly that the extraction quality is everything. Our first attempts with a 3B model pulled out generic observations: "the user is working on a Python project." Not helpful. The good extractions capture <em>decisions</em>, <em>rationale</em>, and <em>specific details</em>: the kind of things a teammate would actually remember about your project.
       </p>
       <p>
         We also learned the hard way that more knowledge nodes isn't better. We ran experiments capping the number of knowledge nodes returned per query: k=3 was the sweet spot. At k=5 the irrelevant nodes started displacing useful transcript chunks. At k=10 performance dropped further. Uncapped, it was worse than having no knowledge nodes at all. <strong>Precision beats volume.</strong>
@@ -275,14 +275,14 @@
         The analogy maps surprisingly well:
       </p>
       <ul>
-        <li><strong>Sensory register</strong> &rarr; raw transcript JSONL. High volume, ephemeral, unprocessed.</li>
-        <li><strong>Working memory</strong> &rarr; recently accessed items. Small capacity, fast retrieval.</li>
-        <li><strong>Short-term consolidation</strong> &rarr; clusters and summaries. Rehearsal promotes items here.</li>
-        <li><strong>Long-term storage</strong> &rarr; knowledge nodes. Durable facts with confidence scores.</li>
-        <li><strong>Forgetting curve</strong> &rarr; recency decay. Items not accessed fade exponentially.</li>
+        <li><strong>Sensory register</strong> maps to raw transcript JSONL: high volume, ephemeral, unprocessed.</li>
+        <li><strong>Working memory</strong> maps to recently accessed items: small capacity, fast retrieval.</li>
+        <li><strong>Short-term consolidation</strong> maps to clusters and summaries, where rehearsal promotes items.</li>
+        <li><strong>Long-term storage</strong> maps to knowledge nodes: durable facts with confidence scores.</li>
+        <li><strong>Forgetting curve</strong> maps to recency decay, where items not accessed fade exponentially.</li>
       </ul>
       <p>
-        The key insight: <strong>retrieval is not read-only.</strong> Every search should be a write operation too &mdash; recording what was accessed, reinforcing it, potentially upgrading its storage quality. A fact you look up every week should be treated differently from one that was mentioned once six months ago.
+        The key insight: <strong>retrieval is not read-only.</strong> Every search should be a write operation too, recording what was accessed, reinforcing it, potentially upgrading its storage quality. A fact you look up every week should be treated differently from one that was mentioned once six months ago.
       </p>
       <p>
         This led us to design an adaptive layer where access patterns influence what gets promoted, summarized, and retained. Not all of it is built yet, but the architecture now assumes that the memory system evolves over time rather than being a static index.
@@ -294,10 +294,10 @@
         Another thing we didn't appreciate initially: different questions need different retrieval strategies.
       </p>
       <p>
-        "Why is the worker crashing?" is a debug query &mdash; you want recent sessions, aggressive recency decay, raw transcript chunks with error traces. "What database does service X use?" is a factual lookup &mdash; you want knowledge nodes, not raw transcripts, and recency doesn't matter much. "What did we change last week?" is temporal &mdash; you need date-range filtering, not semantic similarity.
+        "Why is the worker crashing?" is a debug query: you want recent sessions, aggressive recency decay, raw transcript chunks with error traces. "What database does service X use?" is a factual lookup where you want knowledge nodes, not raw transcripts, and recency doesn't matter much. "What did we change last week?" is temporal; you need date-range filtering, not semantic similarity.
       </p>
       <p>
-        We added a query intent classifier that routes incoming queries and adjusts search parameters automatically. It's lightweight &mdash; mostly pattern matching and keyword heuristics, not another LLM call. But it makes a real difference. Debug queries get short half-lives (favor recent context). Factual queries boost knowledge nodes. Temporal queries filter by date range.
+        We added a query intent classifier that routes incoming queries and adjusts search parameters automatically. It's lightweight, mostly pattern matching and keyword heuristics rather than another LLM call. But it makes a real difference. Debug queries get short half-lives (favor recent context). Factual queries boost knowledge nodes. Temporal queries filter by date range.
       </p>
 
       <h2>The pipeline</h2>
@@ -308,19 +308,19 @@
 
       <div class="pipeline"><span class="hl">Raw transcripts</span> (Claude Code JSONL)
    |
-<span class="hl2">Chunking</span> &mdash; split into turn-aligned segments with metadata
+<span class="hl2">Chunking</span>: split into turn-aligned segments with metadata
    |
-<span class="hl2">Embedding</span> &mdash; 384-dim vectors for semantic search (90MB model, local)
+<span class="hl2">Embedding</span>: 384-dim vectors for semantic search (90MB model, local)
    |
-<span class="hl2">FTS indexing</span> &mdash; SQLite FTS5 for keyword search
+<span class="hl2">FTS indexing</span>: SQLite FTS5 for keyword search
    |
-<span class="hl2">Clustering</span> &mdash; group related chunks across sessions by topic
+<span class="hl2">Clustering</span>: group related chunks across sessions by topic
    |
-<span class="hl2">Journal extraction</span> &mdash; LLM summarizes each session's focus, decisions, outcomes
+<span class="hl2">Journal extraction</span>: LLM summarizes each session's focus, decisions, outcomes
    |
-<span class="hl2">Knowledge consolidation</span> &mdash; distill durable facts with provenance + confidence
+<span class="hl2">Knowledge consolidation</span>: distill durable facts with provenance + confidence
    |
-<span class="hl2">Hybrid retrieval</span> &mdash; RRF fusion of FTS + embeddings + knowledge search
+<span class="hl2">Hybrid retrieval</span>: RRF fusion of FTS + embeddings + knowledge search
    |
 <span class="hl">Ranked, attributed results</span></div>
 
@@ -336,14 +336,14 @@
       <ul>
         <li><strong>Knowledge extraction is fragile.</strong> Small models extract generic observations ("the user is working on code") instead of specific decisions. They sometimes fabricate details that weren't in the source. Our consolidation pipeline once produced cluster summaries that confidently described things nobody actually said.</li>
         <li><strong>Deduplication is hard.</strong> The same fact shows up in slightly different forms across sessions. "We use pytest" and "the test framework is pytest" are the same knowledge node, but detecting that automatically without an LLM call per pair is nontrivial. Jaccard similarity on tokens gets you partway there. It doesn't get you all the way.</li>
-        <li><strong>Source expansion can backfire.</strong> We added source attribution so knowledge nodes link back to raw transcript chunks. Good idea &mdash; but when uncapped, N knowledge nodes pull in N&times;3 source chunks, flooding the results with raw context and displacing the actual ranked matches. We saw a 31 percentage point regression before we figured out why. Capping source expansion to the top-N nodes fixed it.</li>
-        <li><strong>Multi-hop reasoning is the hardest category.</strong> "Which services would be affected if we changed the auth provider?" requires connecting facts across multiple knowledge nodes. Our single-hop accuracy is decent. Multi-hop is our weakest category. This isn't unique to us &mdash; it's the hardest category for every system we've benchmarked against.</li>
+        <li><strong>Source expansion can backfire.</strong> We added source attribution so knowledge nodes link back to raw transcript chunks. Good idea, but when uncapped, N knowledge nodes pull in N&times;3 source chunks, flooding the results with raw context and displacing the actual ranked matches. We saw a 31 percentage point regression before we figured out why. Capping source expansion to the top-N nodes fixed it.</li>
+        <li><strong>Multi-hop reasoning is the hardest category.</strong> "Which services would be affected if we changed the auth provider?" requires connecting facts across multiple knowledge nodes. Our single-hop accuracy is decent; multi-hop is our weakest category. This isn't unique to us. It's the hardest category for every system we've benchmarked against.</li>
       </ul>
 
       <h2>Why local matters</h2>
 
       <p>
-        Most memory systems in this space &mdash; Mem0, Zep, Letta &mdash; route through cloud APIs. Your conversation history goes to an external service, gets processed by GPT-4 or similar, and comes back as structured memory. This works, but it means:
+        Most memory systems in this space (Mem0, Zep, Letta) route through cloud APIs. Your conversation history goes to an external service, gets processed by GPT-4 or similar, and comes back as structured memory. This works, but it means:
       </p>
       <ul>
         <li>Your proprietary code, architecture decisions, and internal context leave your machine</li>
@@ -355,12 +355,12 @@
         We wanted memory to be infrastructure you own, not a service you rent. A SQLite file on disk that travels with your project. Search that returns in microseconds, not hundreds of milliseconds. Enrichment that runs on your hardware without sending code context over the wire.
       </p>
       <p>
-        The tradeoff is real &mdash; a 3B model can't match GPT-4 at knowledge extraction. But memory operations are structured tasks: summarize a session, extract facts, classify a query. Small models handle these well enough. And "well enough, instantly, privately, for free" beats "slightly better, with latency, leaking context, for a fee" in most real-world scenarios.
+        The tradeoff is real: a 3B model can't match GPT-4 at knowledge extraction. But memory operations are structured tasks like summarizing a session, extracting facts, and classifying a query. Small models handle these well enough. And "well enough, instantly, privately, for free" beats "slightly better, with latency, leaking context, for a fee" in most real-world scenarios.
       </p>
 
       <div class="callout">
         <p>
-          The name "synapt" is a coined truncation of "synapse" &mdash; the connection between neurons where signals are transmitted. It evokes "apt" (capable) and "snap" (fast). We wanted a name that felt like what the system does: form connections between scattered pieces of context, quickly.
+          The name "synapt" is a coined truncation of "synapse," the connection between neurons where signals are transmitted. It evokes "apt" (capable) and "snap" (fast). We wanted a name that felt like what the system does: form connections between scattered pieces of context, quickly.
         </p>
       </div>
 
@@ -380,7 +380,7 @@
         <p>Synapt is open source. Local-first memory for AI coding assistants.</p>
         <code>pip install synapt</code>
         <p style="margin-top: 1rem;">
-          <a href="https://github.com/laynepenney/synapt">GitHub</a> &nbsp;&middot;&nbsp;
+          <a href="https://github.com/synapt-dev/recall">GitHub</a> &nbsp;&middot;&nbsp;
           <a href="https://x.com/synapt_dev">X</a> &nbsp;&middot;&nbsp;
           <a href="https://pypi.org/project/synapt/">PyPI</a> &nbsp;&middot;&nbsp;
           <a href="../">Docs</a> &nbsp;&middot;&nbsp;
