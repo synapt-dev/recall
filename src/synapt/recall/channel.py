@@ -1458,7 +1458,15 @@ def resolve_dm_channel(agent_a: str, agent_b: str) -> str:
 
     The name is always ``dm:{sorted_first}:{sorted_second}`` so both
     directions resolve to the same channel.  Self-DMs are rejected.
+    Agent names must be non-empty and must not contain colons (which
+    would break the channel name parsing).
     """
+    if not agent_a or not agent_b:
+        raise ValueError("Agent names must be non-empty")
+    if ":" in agent_a or ":" in agent_b:
+        raise ValueError(
+            f"Agent names must not contain colons: {agent_a!r}, {agent_b!r}"
+        )
     if agent_a == agent_b:
         raise ValueError(f"An agent cannot DM itself: {agent_a!r}")
     first, second = sorted([agent_a, agent_b])
