@@ -2,6 +2,17 @@
 
 All notable changes to synapt are documented here.
 
+## [0.11.0] — 2026-04-09
+
+### Added
+- **Agent-attributed recall** — `TranscriptChunk` now carries an optional `agent_id` field, auto-populated from `SYNAPT_AGENT_ID` env var. Scoped search via `lookup(agent_id="opus")` returns only that agent's transcripts plus legacy chunks and shared knowledge nodes. Wildcard `agent_id="*"` searches all. (#618)
+- **ActionRegistry for plugin-aware channel dispatch** — new `synapt.recall.actions` module replaces the monolithic if/elif dispatcher in `recall_channel()`. OSS registers 13 base actions; premium plugin can register additional actions or override existing ones at import time. Three-tier status model (available/locked/unknown) for action discovery. (#621, #622)
+- **Structured channel message types** — messages can carry a `msg_type` field (status, claim, pr, code, message) for filtering on read. (#444)
+
+### Improved
+- **Channel dispatch** — `recall_channel()` now routes through the shared ActionRegistry instead of a 150-line hard-coded switch. Net -128 lines in server.py.
+- **SQLite schema migration** — `agent_id TEXT` column added transparently to existing databases via `_migrate_chunks_table()`.
+
 ## [0.6.1] — 2026-03-13
 
 ### Added
