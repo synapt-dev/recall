@@ -283,7 +283,8 @@ class TestRecallChannelIntegration(unittest.TestCase):
         from synapt.recall.server import recall_channel
 
         result = recall_channel(action="directive", channel="dev", message="test", to="opus")
-        self.assertIn("directive", result.lower())
+        self.assertIn("#dev", result)
+        self.assertIn("@opus", result)
         self.assertIn("test", result)
 
     def test_recall_channel_uses_shared_registry_overrides(self):
