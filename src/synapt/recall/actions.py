@@ -246,6 +246,96 @@ def _handle_rename(**kwargs: Any) -> str:
     return channel_rename(new_name=message)
 
 
+def _handle_directive(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_directive
+
+    message = kwargs.get("message")
+    to = kwargs.get("to")
+    if not message:
+        return "Error: message is required for 'directive' action."
+    if not to:
+        return "Error: 'to' (target agent) is required for 'directive' action."
+    return channel_directive(
+        channel=kwargs.get("channel", "dev"),
+        message=message,
+        to=to,
+        display_name=kwargs.get("name"),
+    )
+
+
+def _handle_mute(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_mute
+
+    target = kwargs.get("target")
+    if not target:
+        return "Error: target agent is required for 'mute' action."
+    return channel_mute(target=target, channel=kwargs.get("channel", "dev"))
+
+
+def _handle_unmute(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_unmute
+
+    target = kwargs.get("target")
+    if not target:
+        return "Error: target agent is required for 'unmute' action."
+    return channel_unmute(target=target, channel=kwargs.get("channel", "dev"))
+
+
+def _handle_kick(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_kick
+
+    target = kwargs.get("target")
+    if not target:
+        return "Error: target agent is required for 'kick' action."
+    return channel_kick(target=target, channel=kwargs.get("channel", "dev"))
+
+
+def _handle_broadcast(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_broadcast
+
+    message = kwargs.get("message")
+    if not message:
+        return "Error: message is required for 'broadcast' action."
+    return channel_broadcast(message=message, display_name=kwargs.get("name"))
+
+
+def _handle_board(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_board
+
+    return channel_board(
+        channel=kwargs.get("channel", "dev"),
+        message=kwargs.get("message"),
+    )
+
+
+def _handle_claim(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_claim
+
+    message = kwargs.get("message")
+    if not message:
+        return "Error: message is required for 'claim' action (the message_id to claim)."
+    return channel_claim(message_id=message, channel=kwargs.get("channel", "dev"))
+
+
+def _handle_unclaim_runtime(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_unclaim
+
+    message = kwargs.get("message")
+    if not message:
+        return "Error: message is required for 'unclaim' action (the message_id to release)."
+    return channel_unclaim(message_id=message)
+
+
+def _handle_intent(**kwargs: Any) -> str:
+    from synapt.recall.channel import channel_claim_intent
+
+    message = kwargs.get("message")
+    if not message:
+        return "Error: message is required for 'intent' action (describe what you're about to create)."
+    ok, result = channel_claim_intent(intent=message, channel=kwargs.get("channel", "dev"))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Default registry factory
 # ---------------------------------------------------------------------------
@@ -264,6 +354,18 @@ _OSS_HANDLERS: dict[str, tuple[Callable[..., str], str | None]] = {
     "list": (_handle_list, "List all channels"),
     "search": (_handle_search, "Search channel history"),
     "rename": (_handle_rename, "Rename your display name"),
+}
+
+_RUNTIME_COORDINATION_HANDLERS: dict[str, tuple[Callable[..., str], str | None]] = {
+    "directive": (_handle_directive, "Send a targeted directive to an agent"),
+    "mute": (_handle_mute, "Mute an agent in a channel"),
+    "unmute": (_handle_unmute, "Unmute an agent in a channel"),
+    "kick": (_handle_kick, "Remove an agent from a channel"),
+    "broadcast": (_handle_broadcast, "Broadcast a message across channels"),
+    "board": (_handle_board, "Read or update the channel status board"),
+    "claim": (_handle_claim, "Claim a task message"),
+    "unclaim": (_handle_unclaim_runtime, "Release a task claim"),
+    "intent": (_handle_intent, "Claim an intent before creating an issue or PR"),
 }
 
 
@@ -288,6 +390,8 @@ def get_action_registry() -> ActionRegistry:
     global _DEFAULT_REGISTRY
     if _DEFAULT_REGISTRY is None:
         _DEFAULT_REGISTRY = get_default_registry()
+        for name, (handler, desc) in _RUNTIME_COORDINATION_HANDLERS.items():
+            _DEFAULT_REGISTRY.register(name, handler, tier="oss", description=desc)
     return _DEFAULT_REGISTRY
 
 

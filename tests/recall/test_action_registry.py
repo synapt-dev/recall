@@ -278,13 +278,13 @@ class TestRecallChannelIntegration(unittest.TestCase):
         self.assertEqual(kwargs["channel"], "dev")
         self.assertEqual(kwargs["name"], "Atlas")
 
-    def test_recall_channel_gates_premium_action_without_plugin(self):
-        """recall_channel should return the premium gate message for locked actions."""
+    def test_recall_channel_preserves_live_coordination_actions(self):
+        """recall_channel should preserve currently-live coordination actions via the runtime registry."""
         from synapt.recall.server import recall_channel
 
         result = recall_channel(action="directive", channel="dev", message="test", to="opus")
-        self.assertIn("premium", result.lower())
         self.assertIn("directive", result.lower())
+        self.assertIn("test", result)
 
     def test_recall_channel_uses_shared_registry_overrides(self):
         """Premium-style overrides on the shared registry should affect the live dispatcher."""
