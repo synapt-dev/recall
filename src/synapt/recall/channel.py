@@ -1448,6 +1448,80 @@ def channel_leave(
     return f"Left #{channel}"
 
 
+# ---------------------------------------------------------------------------
+# DM (direct message) channels -- private 1:1 agent-to-agent messaging
+# ---------------------------------------------------------------------------
+
+
+def resolve_dm_channel(agent_a: str, agent_b: str) -> str:
+    """Return the canonical DM channel name for two agents.
+
+    The name is always ``dm:{sorted_first}:{sorted_second}`` so both
+    directions resolve to the same channel.  Self-DMs are rejected.
+    """
+    if agent_a == agent_b:
+        raise ValueError(f"An agent cannot DM itself: {agent_a!r}")
+    first, second = sorted([agent_a, agent_b])
+    return f"dm:{first}:{second}"
+
+
+def resolve_dm_channel_from_shorthand(channel: str, sender: str) -> str:
+    """Resolve a shorthand like ``dm:atlas`` into the canonical DM channel.
+
+    The shorthand encodes only the *recipient*; the sender is supplied
+    separately so the canonical sorted-pair name can be computed.
+    """
+    if not channel.startswith("dm:"):
+        raise ValueError(f"Not a DM shorthand: {channel!r}")
+    parts = channel.split(":")
+    if len(parts) != 2:
+        raise ValueError(
+            f"DM shorthand must be 'dm:<recipient>', got: {channel!r}"
+        )
+    recipient = parts[1]
+    return resolve_dm_channel(sender, recipient)
+
+
+def is_dm_channel(channel: str) -> bool:
+    """Return True if *channel* is a DM channel (``dm:<a>:<b>``)."""
+    parts = channel.split(":")
+    return len(parts) == 3 and parts[0] == "dm"
+
+
+def dm_participants(channel: str) -> tuple[str, str]:
+    """Extract the two participant names from a DM channel name.
+
+    Raises ValueError if *channel* is not a valid DM channel.
+    """
+    if not is_dm_channel(channel):
+        raise ValueError(f"Not a DM channel: {channel!r}")
+    parts = channel.split(":")
+    return (parts[1], parts[2])
+
+
+def is_dm_participant(channel: str, agent_id: str) -> bool:
+    """Return True if *agent_id* is one of the two DM participants."""
+    if not is_dm_channel(channel):
+        return False
+    a, b = dm_participants(channel)
+    return agent_id in (a, b)
+
+
+def list_dm_channels(
+    agent_id: str, project_dir: Path | None = None,
+) -> list[str]:
+    """Return all DM channel names that *agent_id* participates in."""
+    ch_dir = _channels_dir(project_dir)
+    if not ch_dir.exists():
+        return []
+    result = []
+    for p in ch_dir.glob("*.jsonl"):
+        name = p.stem
+        if is_dm_channel(name) and is_dm_participant(name, agent_id):
+            result.append(name)
+    return sorted(result)
+
+
 def channel_post(
     channel: str,
     message: str,
@@ -2412,12 +2486,17 @@ def channel_claim_intent(
 
 
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:
-    """Return list of all channel names (from JSONL files)."""
+    """Return list of all public channel names (from JSONL files).
+
+    DM channels (``dm:*``) are excluded from the global list.
+    Use :func:`list_dm_channels` to discover an agent's DM conversations.
+    """
     ch_dir = _channels_dir(project_dir)
     if not ch_dir.exists():
         return []
     return sorted(
         p.stem for p in ch_dir.glob("*.jsonl")
+        if not is_dm_channel(p.stem)
     )
 
 
@@ -2549,6 +2628,7 @@ def channel_search(
     max_results: int = 10,
     msg_type: str | None = None,
     project_dir: Path | None = None,
+    agent_id: str | None = None,
 ) -> list[dict]:
     """Search all channels for messages matching a query.
 
@@ -2558,6 +2638,9 @@ def channel_search(
         msg_type: Optional filter by message type (e.g. "directive",
                   "message", "join", "leave"). When set, only messages
                   of that type are searched.
+        agent_id: When provided, DM channels are included only if
+                  the agent is a participant.  Without this, DM
+                  channels are excluded from search results.
 
     Returns a list of dicts with channel, message_id, from, timestamp, body,
     type, and a match_score (number of query terms found).
@@ -2569,8 +2652,20 @@ def channel_search(
     # When filtering by type with no query, match all messages of that type
     match_all = not terms
 
+    # Build the list of channels to search: public channels + agent's DMs
+    ch_dir = _channels_dir(project_dir)
+    all_channels: list[str] = []
+    if ch_dir.exists():
+        for p in ch_dir.glob("*.jsonl"):
+            name = p.stem
+            if is_dm_channel(name):
+                if agent_id and is_dm_participant(name, agent_id):
+                    all_channels.append(name)
+            else:
+                all_channels.append(name)
+
     results: list[dict] = []
-    for ch in channel_list_channels(project_dir):
+    for ch in all_channels:
         path = _channel_path(ch, project_dir)
         for msg in _read_messages(path):
             # Type filter
@@ -2598,8 +2693,8 @@ def channel_search(
                 "score": score,
             })
 
-    # Sort by score descending, then timestamp descending
-    results.sort(key=lambda r: (-r["score"], r["timestamp"]), reverse=False)
+    # Sort by score descending, then timestamp descending (newest first)
+    results.sort(key=lambda r: (r["score"], r["timestamp"]), reverse=True)
     return results[:max_results]
 
 
