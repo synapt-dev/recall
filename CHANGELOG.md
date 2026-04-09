@@ -2,6 +2,21 @@
 
 All notable changes to synapt are documented here.
 
+## [0.11.0] — 2026-04-09
+
+### Added
+- **Agent-attributed recall with scoped search** — transcript chunks now carry `agent_id`, `SYNAPT_AGENT_ID` is picked up automatically, and `lookup(agent_id=...)` filters across FTS, BM25, embedding search, and source expansion paths while preserving backward compatibility for legacy chunks (#618)
+- **ActionRegistry for plugin-aware channel dispatch** — `synapt.recall.actions` now provides a registry-backed channel action surface with metadata, discoverability, and clear upgrade messaging for known-but-locked premium actions (#621)
+- **Live registry dispatch in the MCP server** — the runtime `recall_channel()` path in `server.py` now dispatches through the shared action registry instead of the old monolithic switch, turning the registry seam into actual host behavior (#622)
+
+### Changed
+- **Scoped search behavior** — agent filtering now happens at candidate selection, embedding search, and knowledge source expansion layers; knowledge nodes remain org-shared and legacy chunks without `agent_id` remain visible to all agents (#618)
+- **Channel action architecture** — OSS base actions are registered once and the runtime registry preserves the currently-live coordination actions while leaving room for premium overrides later (#621, #622)
+
+### Fixed
+- **Recall attribution edge cases** — wildcard and null `agent_id` behaviors preserve the old search contract, and the implementation fixes a test bug caused by iterating characters instead of result strings (#618)
+- **Runtime registry regression risk** — the live dispatcher now keeps existing OSS coordination actions available instead of incorrectly degrading them to premium-only upgrade errors (#622)
+
 ## [0.6.1] — 2026-03-13
 
 ### Added
