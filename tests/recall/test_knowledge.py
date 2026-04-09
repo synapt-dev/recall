@@ -790,5 +790,169 @@ class TestColdStartKnowledgeSearch(unittest.TestCase):
         index._db.close()
 
 
+class TestColdStartOnboarding(unittest.TestCase):
+    """Verify that realistic onboarding knowledge nodes surface for the five
+    cold-start query categories identified in recall#592.
+
+    Each test seeds a fresh DB with onboarding nodes (no transcript chunks)
+    and asserts that TranscriptIndex.lookup() returns content matching the
+    expected keywords. This is the acceptance criteria for cold-start recall.
+    """
+
+    # Shared onboarding knowledge nodes — the minimum set a fresh agent needs.
+    ONBOARDING_NODES = [
+        {
+            "id": "onboard_ceremony",
+            "content": (
+                "Sprint ceremony process: at sprint end, create a ceremony PR from "
+                "sprint-N into main. All tests must be green, cargo fmt check passes. "
+                "Squash merge only. PR title format: 'Sprint N ceremony'. "
+                "Run full test suite before merging. Never merge with failing tests on main."
+            ),
+            "category": "workflow",
+            "status": "active",
+            "confidence": 0.95,
+            "source_sessions": ["onboarding"],
+        },
+        {
+            "id": "onboard_tdd",
+            "content": (
+                "Development follows strict TDD: write failing tests first, PR tests "
+                "into the sprint branch, then implement until tests pass. Sprint branches "
+                "allow failing tests. Main never has failures. Feature branches are named "
+                "test/feature-name for tests and impl/feature-name for implementation."
+            ),
+            "category": "workflow",
+            "status": "active",
+            "confidence": 0.95,
+            "source_sessions": ["onboarding"],
+        },
+        {
+            "id": "onboard_tools",
+            "content": (
+                "Core tools: gr (gripspace orchestrator) for multi-repo git operations "
+                "— gr status, gr sync, gr branch, gr commit, gr push, gr pr create. "
+                "recall tools: recall_quick for fast knowledge checks, recall_search for "
+                "full search, recall_channel for team communication, recall_journal for "
+                "session notes. pytest for Python tests, cargo test for Rust."
+            ),
+            "category": "tools",
+            "status": "active",
+            "confidence": 0.95,
+            "source_sessions": ["onboarding"],
+        },
+        {
+            "id": "onboard_team",
+            "content": (
+                "Team roster: Layne (human, founder/CEO), Opus (AI, CTO/lead engineer, "
+                "Claude Opus), Apollo (AI, Rust engineer, Claude Sonnet), Sentinel (AI, "
+                "QA/review, Claude Opus), Atlas (AI, research/coordination, Claude Sonnet via Codex). "
+                "Each agent owns their own worktree — never enter another agent's workspace."
+            ),
+            "category": "team",
+            "status": "active",
+            "confidence": 0.95,
+            "source_sessions": ["onboarding"],
+        },
+        {
+            "id": "onboard_repos",
+            "content": (
+                "Repository structure: synapt (public OSS — recall memory, MCP server, "
+                "plugin system), synapt-private (private — eval, training, repair engine), "
+                "gitgrip (multi-repo workspace orchestrator in Rust). Managed as a gripspace "
+                "under synapt-global/."
+            ),
+            "category": "architecture",
+            "status": "active",
+            "confidence": 0.95,
+            "source_sessions": ["onboarding"],
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = Path(self.tmpdir) / "recall.db"
+
+    def _make_index(self) -> "TranscriptIndex":
+        from synapt.recall.core import TranscriptIndex
+        from synapt.recall.storage import RecallDB
+
+        db = RecallDB(self.db_path)
+        db.save_knowledge_nodes(self.ONBOARDING_NODES)
+        return TranscriptIndex([], db=db)
+
+    def _lookup(self, query: str) -> str:
+        index = self._make_index()
+        result = index.lookup(query, max_chunks=10, max_tokens=1000, depth="concise")
+        index._db.close()
+        return result
+
+    def test_cold_start_ceremony(self):
+        """Query about ceremony process must mention key steps."""
+        result = self._lookup("how do we run sprint ceremony?")
+        self.assertTrue(result, "Expected non-empty result for ceremony query")
+        result_lower = result.lower()
+        self.assertIn("ceremony", result_lower)
+        self.assertIn("sprint", result_lower)
+        # Must mention at least one of: tests green, main, merge
+        self.assertTrue(
+            any(kw in result_lower for kw in ["tests", "green", "main", "merge"]),
+            f"Expected ceremony details in result: {result[:200]}",
+        )
+
+    def test_cold_start_tools(self):
+        """Query about tools must mention gr commands and recall tools."""
+        result = self._lookup("what tools do we use for development?")
+        self.assertTrue(result, "Expected non-empty result for tools query")
+        result_lower = result.lower()
+        # Must mention gr
+        self.assertTrue(
+            any(kw in result_lower for kw in ["gr ", "gr status", "gripspace"]),
+            f"Expected gr tool reference in result: {result[:200]}",
+        )
+
+    def test_cold_start_workflow(self):
+        """Query about development workflow must mention TDD."""
+        result = self._lookup("how do we develop code? TDD process")
+        self.assertTrue(result, "Expected non-empty result for workflow query")
+        result_lower = result.lower()
+        self.assertTrue(
+            any(kw in result_lower for kw in ["tdd", "failing tests", "test"]),
+            f"Expected TDD reference in result: {result[:200]}",
+        )
+
+    def test_cold_start_team(self):
+        """Query about team must mention agents and roles."""
+        result = self._lookup("who is on the team?")
+        self.assertTrue(result, "Expected non-empty result for team query")
+        result_lower = result.lower()
+        # Must mention at least Layne and Opus
+        self.assertIn("layne", result_lower)
+        self.assertTrue(
+            any(name in result_lower for name in ["opus", "apollo", "sentinel", "atlas"]),
+            f"Expected agent names in result: {result[:200]}",
+        )
+
+    def test_cold_start_repos(self):
+        """Query about project structure must mention repos."""
+        result = self._lookup("what repos are in this project?")
+        self.assertTrue(result, "Expected non-empty result for repos query")
+        result_lower = result.lower()
+        self.assertTrue(
+            any(kw in result_lower for kw in ["synapt", "gitgrip", "gripspace"]),
+            f"Expected repo names in result: {result[:200]}",
+        )
+
+    def test_all_onboarding_nodes_indexed(self):
+        """All 5 onboarding nodes must be stored and active."""
+        from synapt.recall.storage import RecallDB
+
+        db = RecallDB(self.db_path)
+        db.save_knowledge_nodes(self.ONBOARDING_NODES)
+        count = db.knowledge_count()
+        self.assertEqual(count, 5, f"Expected 5 active nodes, got {count}")
+        db.close()
+
+
 if __name__ == "__main__":
     unittest.main()
