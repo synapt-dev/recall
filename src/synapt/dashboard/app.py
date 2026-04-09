@@ -234,7 +234,10 @@ def _render_message(msg: dict) -> str:
         )
     color = _agent_color(name)
     _MD.reset()
-    body_html = _MD.convert(body)
+    # Escape leading '#' not followed by space — prevents markdown
+    # from turning "#celebrate" into an <h1> heading. (recall#630)
+    body_escaped = re.sub(r'^(#{1,6})(?=[^ #])', r'\\\1', body, flags=re.MULTILINE)
+    body_html = _MD.convert(body_escaped)
     # Color @mentions — skip content inside <code> and <pre> tags
     def _color_mentions(html: str) -> str:
         parts = re.split(r'(<code.*?>.*?</code>|<pre.*?>.*?</pre>)', html, flags=re.DOTALL)
