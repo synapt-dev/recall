@@ -61,8 +61,7 @@ class TestTranscriptChunkAttribution(unittest.TestCase):
             )
             # Chunk should pick up agent_id from env if not explicitly set
             # Implementation may do this in __post_init__ or at ingest time
-            # This test validates the contract, not the mechanism
-            self.assertIn(chunk.agent_id, ("opus", None))
+            self.assertEqual(chunk.agent_id, "opus")
         finally:
             if old is None:
                 os.environ.pop("SYNAPT_AGENT_ID", None)
@@ -211,8 +210,8 @@ class TestScopedSearch(unittest.TestCase):
         self.assertIn("registration", result_text.lower())
 
         # Should NOT include sentinel's or atlas's raw transcripts
-        # (knowledge nodes derived from them are OK — they're shared)
-        # This test validates the scoping contract
+        self.assertNotIn("sanitization", result_text.lower())  # sentinel's content
+        self.assertNotIn("redis", result_text.lower())  # atlas's content
 
     def test_lookup_without_agent_id_returns_all(self):
         """lookup() without agent_id should search all transcripts (backwards compatible)."""
@@ -231,8 +230,10 @@ class TestScopedSearch(unittest.TestCase):
 
         result_text = " ".join(r for r in results if isinstance(r, str))
         # Should find sentinel's security review
+        self.assertIn("sanitization", result_text.lower())
         # Should NOT find opus's design or atlas's caching work
-        # Knowledge nodes are always included (shared layer)
+        self.assertNotIn("registration", result_text.lower())  # opus's content
+        self.assertNotIn("redis", result_text.lower())  # atlas's content
 
     def test_lookup_legacy_chunks_visible_to_all(self):
         """Chunks with agent_id=None should be searchable by any agent."""
