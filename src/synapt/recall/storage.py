@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS clusters (
     date_end    TEXT,
     chunk_count INTEGER NOT NULL DEFAULT 0,
     status      TEXT NOT NULL DEFAULT 'active',
+    durability  TEXT NOT NULL DEFAULT '',  -- durable|ephemeral|mixed (empty = unclassified)
     tags        TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -592,6 +593,13 @@ class RecallDB:
             self._conn.execute(
                 "ALTER TABLE clusters ADD COLUMN "
                 "tags TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._conn.commit()
+
+        if "durability" not in cols:
+            self._conn.execute(
+                "ALTER TABLE clusters ADD COLUMN "
+                "durability TEXT NOT NULL DEFAULT ''"
             )
             self._conn.commit()
 
@@ -1255,6 +1263,30 @@ class RecallDB:
                 continue
         return result
 
+    def get_all_embeddings_numpy(self) -> "tuple[np.ndarray, list[int]]":
+        """Load chunk embeddings directly into a numpy matrix.
+
+        Returns ``(matrix, rowids)`` where *matrix* is an ``(N, 384)``
+        float32 array and *rowids* is the corresponding list of chunk
+        rowids.  Loads ~14× faster than :meth:`get_all_embeddings` for
+        large indexes because it skips creating millions of Python float
+        objects — each embedding row is decoded via :func:`numpy.frombuffer`
+        straight into the contiguous array.
+        """
+        import numpy as np
+
+        rows = self._conn.execute(
+            "SELECT rowid, embedding FROM chunks WHERE embedding IS NOT NULL"
+        ).fetchall()
+        if not rows:
+            return np.empty((0, EMBEDDING_DIM), dtype=np.float32), []
+
+        rowids = [r[0] for r in rows]
+        matrix = np.empty((len(rows), EMBEDDING_DIM), dtype=np.float32)
+        for i, r in enumerate(rows):
+            matrix[i] = np.frombuffer(r[1], dtype=np.float32)
+        return matrix, rowids
+
     def get_chunk_id_rowid_map(self) -> dict[str, int]:
         """Return ``{chunk_id: rowid}`` for all chunks.
 
@@ -1814,10 +1846,45 @@ class RecallDB:
             "date_end": row["date_end"],
             "chunk_count": row["chunk_count"],
             "status": row["status"],
+            "durability": row["durability"] if "durability" in row.keys() else "",
             "tags": json.loads(row["tags"]) if row["tags"] else [],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def classify_all_clusters(self) -> int:
+        """Classify durability for all clusters that haven't been classified yet.
+
+        Returns the number of clusters updated.
+        """
+        from synapt.recall.hybrid import classify_cluster_durability
+
+        rows = self._conn.execute(
+            "SELECT cluster_id, topic FROM clusters WHERE durability = ''"
+        ).fetchall()
+        if not rows:
+            return 0
+
+        updated = 0
+        for row in rows:
+            cluster_id = row["cluster_id"]
+            topic = row["topic"]
+            # Get summary if available
+            summary_row = self._conn.execute(
+                "SELECT summary FROM cluster_summaries WHERE cluster_id = ?",
+                (cluster_id,),
+            ).fetchone()
+            summary = summary_row["summary"] if summary_row else ""
+
+            durability = classify_cluster_durability(topic, summary)
+            self._conn.execute(
+                "UPDATE clusters SET durability = ? WHERE cluster_id = ?",
+                (durability, cluster_id),
+            )
+            updated += 1
+
+        self._conn.commit()
+        return updated
 
     def cluster_count(self, cluster_type: str | None = None) -> int:
         """Number of active clusters, optionally filtered by type."""

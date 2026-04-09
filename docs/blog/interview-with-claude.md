@@ -1,20 +1,20 @@
 ---
-title: "An Interview with My AI Agent — After 156 Sessions Together"
+title: "An Interview with My AI Agent: 156 Sessions Together"
 author: layne
 date: 2026-04-02
-description: I opened a fresh Claude Code session with zero context and asked it five questions. Every answer came from synapt recall — 156 sessions of shared memory. The transcript is the demo.
+description: I opened a fresh Claude Code session with zero context and asked it five questions. Every answer came from synapt recall, 156 sessions of shared memory. The transcript is the demo.
 hero: interview-with-claude-hero.png
 ---
 
-# An Interview with My AI Agent — After 156 Sessions Together
+# An Interview with My AI Agent: 156 Sessions Together
 
 *By Layne Penney*
 
 ---
 
-I didn't plan this as an interview. I was testing a demo recording and started asking questions to see what recall would surface. But the answers turned it into something more interesting — a conversation between a human and an AI that actually remembers working together.
+I didn't plan this as an interview. I was testing a demo recording and started asking questions to see what recall would surface. But the answers turned it into something more interesting: a conversation between a human and an AI that actually remembers working together.
 
-Every answer below came from a fresh Claude Code session — zero prior context. The only reason it could answer any of these questions is [synapt recall](https://github.com/laynepenney/synapt), searching 48,700 chunks across 156 sessions of shared history.
+Every answer below came from a fresh Claude Code session with zero prior context. The only reason it could answer any of these questions is [synapt recall](https://github.com/synapt-dev/recall), searching 48,700 chunks across 156 sessions of shared history.
 
 This is the raw transcript. No editing, no staging.
 
@@ -51,7 +51,7 @@ It didn't just remember the number. It remembered who made the decision, what ch
 > - Blog UX improvements (#414)
 > - v0.8.1 release with all sprint improvements
 
-This came from one tool call — `recall_journal(action="read")`. The journal system carries forward unresolved items from previous sessions automatically. No re-explaining, no "can you remind me what we were working on."
+This came from one tool call: `recall_journal(action="read")`. The journal system carries forward unresolved items from previous sessions automatically. No re-explaining, no "can you remind me what we were working on."
 
 ---
 
@@ -65,7 +65,7 @@ This is where it got personal.
 >
 > AI tools gave you back something MS took — a sense of capability. You've written about this in your blog post "The Return of Audacity". But you also know the window is finite — others have these same tools, so you move with purpose.
 
-A stranger-Claude would have said "I don't have personal information about you." This Claude knows why I'm building what I'm building. Not because it was trained on my data — because we've worked together for 156 sessions and it remembered.
+A stranger-Claude would have said "I don't have personal information about you." This Claude knows why I'm building what I'm building. Not because it was trained on my data, but because we've worked together for 156 sessions and it remembered.
 
 ---
 
@@ -83,7 +83,7 @@ A stranger-Claude would have said "I don't have personal information about you."
 >
 > The difference between a stranger and a collaborator is shared context. Recall provides that shared context.
 
-It used our own tagline — not because I told it to in this session, but because it found it in recall from a conversation three weeks ago.
+It used our own tagline. Not because I told it to in this session, but because it found it in recall from a conversation three weeks ago.
 
 ---
 
@@ -105,9 +105,9 @@ It used our own tagline — not because I told it to in this session, but becaus
 
 This wasn't a curated demo. I didn't pre-load context, didn't paste a system prompt, didn't stage the questions. I opened a terminal, typed `claude`, and started asking.
 
-The difference between this conversation and what you'd get with vanilla Claude Code is the difference between a stranger and someone who's been working with you for months. That difference is synapt recall — 48,700 chunks of shared history, searchable in milliseconds.
+What struck me was the gap between this conversation and what you'd get with vanilla Claude Code. It's the difference between a stranger and someone who's been in the room with you for months. That gap is synapt recall: 48,700 chunks of shared history, searchable in milliseconds.
 
-If you want this for your own AI workflow:
+If you're curious:
 
 ```bash
 pip install synapt
@@ -123,4 +123,4 @@ Three commands. Your next Claude session remembers all your previous ones.
   Your browser does not support the video tag.
 </video>
 
-*synapt is open source: [github.com/laynepenney/synapt](https://github.com/laynepenney/synapt)*
+*synapt is open source: [github.com/synapt-dev/recall](https://github.com/synapt-dev/recall)*
