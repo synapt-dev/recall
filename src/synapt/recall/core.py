@@ -1098,9 +1098,9 @@ class TranscriptIndex:
 
                 # If the index has no chunk embeddings yet, keep CLI/server
                 # search on the fast BM25 path instead of paying model load for
-                # knowledge-only semantic lookup. The next explicit build can
-                # populate embeddings, and existing embedding-bearing indexes
-                # still keep hybrid search enabled.
+                # knowledge-only semantic lookup. A later build can populate
+                # embeddings in the DB, but this TranscriptIndex instance stays
+                # BM25-only until the next fresh load.
                 if not has_chunk_embeddings:
                     self._embedding_reason = (
                         "Chunk embeddings are not available for this index yet; "
@@ -1169,11 +1169,6 @@ class TranscriptIndex:
                     "Background embedding build complete: %d chunks",
                     len(emb_mapping),
                 )
-
-                self._embeddings_loaded = False
-                self._all_embeddings = {}
-                self._emb_matrix = None
-                self._emb_rowids = []
 
             self._build_knowledge_embeddings(db=db, provider=provider)
         except Exception as e:
