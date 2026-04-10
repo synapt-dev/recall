@@ -324,36 +324,57 @@ def test_cursor_survives_workspace_recreation(tmp_path):
     if ch_dir_a.exists():
         shutil.copytree(ch_dir_a, ch_dir_b)
 
+    # Capture cursor from clone A before moving to clone B
+    conn_a = _open_db(ws_a / ".synapt" / "recall")
+    try:
+        from synapt.recall.channel import _agent_id as _aid_fn
+        with patch("synapt.recall.channel.Path.cwd", return_value=agent_dir_a):
+            aid_a = _aid_fn()
+        cursor_a = conn_a.execute(
+            "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = 'test'",
+            (aid_a,),
+        ).fetchone()
+    finally:
+        conn_a.close()
+
+    assert cursor_a is not None, "Clone A must have a cursor after channel_read"
+
     with patch("synapt.recall.channel.Path.cwd", return_value=agent_dir_b), \
          patch("synapt.recall.channel.project_data_dir",
                return_value=ws_b / ".synapt" / "recall"):
-        channel_join(channel="test", display_name="opus")
-        # Post a new message
-        channel_post(channel="test", message="msg3")
-        # Verify cursor survived: agent_id should be the same (g2_ stable)
-        from synapt.recall.channel import _agent_id, _open_db
+        from synapt.recall.channel import _agent_id, channel_unread
         aid = _agent_id()
-        # Read unread to verify cursor position
-        output = channel_read(channel="test", since=None, limit=10)
+        # Join should find the existing cursor (INSERT OR IGNORE)
+        channel_join(channel="test", display_name="opus")
+        # Post a new message AFTER the cursor position
+        channel_post(channel="test", message="msg3")
+        # Unread count should reflect only messages after the cursor
+        unread = channel_unread()
 
     # The key property: agent ID is identical across clones (g2_ prefix)
     assert aid.startswith("g2_")
+    assert aid == aid_a, "Clone A and Clone B must produce the same agent ID"
 
-    # Verify cursor survived by checking the DB directly: the cursor
-    # from clone A should be present under the same agent_id in clone B.
+    # Verify cursor VALUE survived: the cursor from clone A should be
+    # present under the same agent_id in clone B's DB.
     conn = _open_db(ws_b / ".synapt" / "recall")
     try:
-        row = conn.execute(
+        cursor_b = conn.execute(
             "SELECT last_read_at FROM cursors WHERE agent_id = ? AND channel = 'test'",
             (aid,),
         ).fetchone()
     finally:
         conn.close()
 
-    assert row is not None, "Cursor should exist in clone B's DB (carried over from clone A)"
-    # The cursor should have been advanced by channel_read in clone B,
-    # but the critical test is that it existed at all (was not re-initialized
-    # to the tail on join, which would lose the read position).
+    assert cursor_b is not None, "Cursor should exist in clone B's DB"
+
+    # Behavioral contract: unread count should be small (just msg3 and
+    # possibly the join event), NOT the full history (msg1 + msg2 + msg3).
+    # If the cursor was reset, unread would include all messages.
+    assert unread.get("test", 0) <= 2, (
+        f"Expected at most 2 unread (msg3 + join event), got {unread.get('test', 0)}. "
+        "Cursor from clone A did not survive -- identity or cursor was reset."
+    )
 
 
 # ---------------------------------------------------------------------------
