@@ -36,6 +36,93 @@ from synapt.recall.core import project_data_dir, _worktree_name, _find_gripspace
 
 
 # ---------------------------------------------------------------------------
+# gr2 workspace context (recall#637)
+# ---------------------------------------------------------------------------
+
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
+
+@dataclass(frozen=True)
+class Gr2Context:
+    """gr2 workspace detected via .grip/workspace.toml."""
+    root: Path
+    name: str
+    kind: str = "gr2"
+
+
+@dataclass(frozen=True)
+class Gr1Context:
+    """gr1 gripspace detected via .gitgrip/griptrees.json."""
+    root: Path
+    kind: str = "gr1"
+
+
+@dataclass(frozen=True)
+class StandaloneContext:
+    """No workspace manager detected."""
+    root: Path
+    kind: str = "standalone"
+
+
+WorkspaceContext = Gr2Context | Gr1Context | StandaloneContext
+
+
+def _detect_workspace_context() -> WorkspaceContext:
+    """Detect whether we're in a gr2 workspace, gr1 gripspace, or standalone.
+
+    Walks up from CWD looking for:
+    1. .grip/workspace.toml (gr2) — explicit metadata-driven identity
+    2. .gitgrip/griptrees.json (gr1) — legacy git-worktree inference
+    3. Standalone fallback
+    """
+    cwd = Path.cwd()
+
+    # Walk up looking for .grip/workspace.toml (gr2)
+    for parent in [cwd, *cwd.parents]:
+        ws_toml = parent / ".grip" / "workspace.toml"
+        if ws_toml.exists():
+            try:
+                with open(ws_toml, "rb") as f:
+                    cfg = tomllib.load(f)
+                name = cfg.get("name", parent.name)
+            except Exception:
+                name = parent.name
+            return Gr2Context(root=parent, name=name)
+
+    # Fall back to gr1: walk up looking for .gitgrip/griptrees.json
+    for parent in [cwd, *cwd.parents]:
+        gt_json = parent / ".gitgrip" / "griptrees.json"
+        if gt_json.exists():
+            return Gr1Context(root=parent)
+
+    # Standalone (no workspace manager)
+    return StandaloneContext(root=cwd)
+
+
+def _detect_gr2_agent(ctx: Gr2Context) -> str | None:
+    """If CWD is inside agents/{name}/ with agent.toml, return the agent name."""
+    cwd = Path.cwd()
+    try:
+        rel = cwd.relative_to(ctx.root)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if len(parts) >= 2 and parts[0] == "agents":
+        agent_toml = ctx.root / "agents" / parts[1] / "agent.toml"
+        if agent_toml.exists():
+            try:
+                with open(agent_toml, "rb") as f:
+                    cfg = tomllib.load(f)
+                return cfg.get("name", parts[1])
+            except Exception:
+                return parts[1]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Stale-detection thresholds
 # ---------------------------------------------------------------------------
 
@@ -152,7 +239,21 @@ def _shared_channels_dir() -> Path | None:
 
 
 def _local_channels_dir(project_dir: Path | None = None) -> Path:
-    """Return the local (per-gripspace) channels directory."""
+    """Return the local (per-gripspace) channels directory.
+
+    Accepts either a project root or a data dir (.synapt/recall path).
+    If project_dir already ends with .synapt/recall, uses it directly
+    to avoid double-wrapping through project_data_dir().
+    """
+    if (
+        project_dir is not None
+        and isinstance(project_dir, Path)
+        and project_dir.name == "recall"
+        and project_dir.parent.name == ".synapt"
+    ):
+        ch = project_dir / "channels"
+        ch.mkdir(parents=True, exist_ok=True)
+        return ch
     return project_data_dir(project_dir) / "channels"
 
 
@@ -246,6 +347,17 @@ def _agent_id(project_dir: Path | None = None, name: str | None = None) -> str:
     if registered_id:
         return registered_id
 
+    # Phase 1 (recall#637): gr2 workspace + agent.toml -> clone-stable ID
+    ctx = _detect_workspace_context()
+    if isinstance(ctx, Gr2Context):
+        agent_name = _detect_gr2_agent(ctx)
+        if agent_name:
+            return f"g2_{ctx.name}:{agent_name}"
+        # gr2 workspace but not inside an agent dir: use named hash if name given
+        if name:
+            seed = f"named:{ctx.name}:{name}"
+            return "a_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+
     # Named agent: derive a distinct ID from name + griptree so multiple
     # callers in the same griptree get separate presence rows.
     if name:
@@ -266,9 +378,38 @@ def _agent_id(project_dir: Path | None = None, name: str | None = None) -> str:
 def _resolve_griptree(project_dir: Path | None = None) -> str:
     """Auto-detect griptree identity: gripspace_name/repo_name.
 
-    Derives the gripspace root from project_data_dir() by verifying the
-    expected ``.synapt/recall`` suffix rather than blindly using parents[1].
+    In gr2 workspaces (recall#637), derives identity from explicit metadata
+    in workspace.toml and repo.toml instead of filesystem path inference.
+
+    In gr1 gripspaces, derives the gripspace root from project_data_dir()
+    by verifying the expected ``.synapt/recall`` suffix.
     """
+    # gr2: use explicit workspace metadata (recall#637)
+    ctx = _detect_workspace_context()
+    if isinstance(ctx, Gr2Context):
+        cwd = Path.cwd()
+        try:
+            rel = cwd.relative_to(ctx.root)
+            parts = rel.parts
+            if parts and parts[0] == "repos" and len(parts) >= 2:
+                # Inside repos/{name}: try to read repo.toml for canonical name
+                repo_toml = ctx.root / "repos" / parts[1] / "repo.toml"
+                repo_name = parts[1]
+                if repo_toml.exists():
+                    try:
+                        with open(repo_toml, "rb") as f:
+                            cfg = tomllib.load(f)
+                        repo_name = cfg.get("name", parts[1])
+                    except Exception:
+                        pass
+                return f"{ctx.name}/{repo_name}"
+            if rel == Path("."):
+                return ctx.name
+            return f"{ctx.name}/{rel}"
+        except ValueError:
+            return ctx.name
+
+    # gr1: existing path-inference logic
     try:
         data_dir = project_data_dir(project_dir)
         # data_dir should be <gripspace>/.synapt/recall
@@ -576,7 +717,8 @@ CREATE TABLE IF NOT EXISTS presence (
     role TEXT NOT NULL DEFAULT 'agent',
     status TEXT DEFAULT 'online',
     last_seen TEXT NOT NULL,
-    joined_at TEXT NOT NULL
+    joined_at TEXT NOT NULL,
+    workspace TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS memberships (
@@ -722,6 +864,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "role" not in cols:
         try:
             conn.execute("ALTER TABLE presence ADD COLUMN role TEXT NOT NULL DEFAULT 'agent'")
+        except sqlite3.OperationalError:
+            pass
+    # Add workspace column to presence if missing (recall#637)
+    if "workspace" not in cols:
+        try:
+            conn.execute("ALTER TABLE presence ADD COLUMN workspace TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
     conn.commit()
@@ -1283,6 +1431,10 @@ def channel_join(
     display = display_name or _resolve_display_name(project_dir)
     now = _now_iso()
 
+    # Derive workspace name for presence table (recall#637)
+    ctx = _detect_workspace_context()
+    workspace = ctx.name if isinstance(ctx, Gr2Context) else ""
+
     conn = _open_db(project_dir)
     try:
         cursor_init = _seed_cursor_for_join(
@@ -1304,7 +1456,7 @@ def channel_join(
                 )
 
         # Upsert presence with identity.
-        # Role escalation: never downgrade human → agent. A human session
+        # Role escalation: never downgrade human -> agent. A human session
         # that shares an agent_id with an agent (same griptree) keeps the
         # human role and display name. Fixes recall#546.
         existing = conn.execute(
@@ -1312,18 +1464,18 @@ def channel_join(
             (aid,),
         ).fetchone()
         if existing and existing["role"] == "human" and role != "human":
-            # Agent joining with a human's agent_id — preserve human identity
+            # Agent joining with a human's agent_id -- preserve human identity
             conn.execute(
                 "UPDATE presence SET status='online', last_seen=? WHERE agent_id=?",
                 (now, aid),
             )
         else:
             conn.execute(
-                "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
-                "VALUES (?, ?, ?, ?, 'online', ?, ?) "
+                "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at, workspace) "
+                "VALUES (?, ?, ?, ?, 'online', ?, ?, ?) "
                 "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
-                "griptree=?, display_name=?, role=?",
-                (aid, griptree, display, role, now, now, now, griptree, display, role),
+                "griptree=?, display_name=?, role=?, workspace=?",
+                (aid, griptree, display, role, now, now, workspace, now, griptree, display, role, workspace),
             )
 
         # Add membership
