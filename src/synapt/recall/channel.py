@@ -2006,6 +2006,10 @@ def channel_read(
             truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
         if _one_line:
             body = body.replace("\n", " ").strip()
+        # Worktree tag at max detail (recall#443)
+        wt_tag = ""
+        if _detail == "max" and msg.worktree:
+            wt_tag = f" @{msg.worktree}"
         if msg.type in ("join", "leave", "claim", "unclaim"):
             if _one_line:
                 continue
@@ -2014,12 +2018,12 @@ def channel_read(
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
             lines.append(
-                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}: "
+                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}{wt_tag}: "
                 f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
             )
         else:
             lines.append(
-                f"  {ts}{inline_mid}  {display}{role_tag}: "
+                f"  {ts}{inline_mid}  {display}{role_tag}{wt_tag}: "
                 f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
             )
 
@@ -2073,13 +2077,14 @@ def channel_who(project_dir: Path | None = None) -> str:
     """Show which agents are currently online and in which channels.
 
     Displays all three identity layers: display_name, griptree, agent_id.
+    Shows workspace/worktree when available (recall#443).
     """
     conn = _open_db(project_dir)
     try:
         _reap_stale_agents(conn, project_dir)
 
         agents = conn.execute(
-            "SELECT agent_id, griptree, display_name, role, status, last_seen FROM presence"
+            "SELECT agent_id, griptree, display_name, role, status, last_seen, workspace FROM presence"
         ).fetchall()
 
         if not agents:
@@ -2134,7 +2139,13 @@ def channel_who(project_dir: Path | None = None) -> str:
             except (IndexError, KeyError):
                 agent_role = "agent"
             role_label = f" [{agent_role}]" if agent_role != "agent" else ""
-            lines.append(f"  {display}{identity}{role_label}  [{status_label}]  {channels_str}")
+            # Show workspace/worktree when available (recall#443)
+            try:
+                ws = row["workspace"]
+            except (IndexError, KeyError):
+                ws = ""
+            ws_label = f"  @{ws}" if ws else ""
+            lines.append(f"  {display}{identity}{role_label}  [{status_label}]{ws_label}  {channels_str}")
 
         if len(lines) == 1:
             return "No agents online."
@@ -2764,7 +2775,7 @@ def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
     try:
         _reap_stale_agents(conn, project_dir)
         agents = conn.execute(
-            "SELECT agent_id, griptree, display_name, role, status, last_seen FROM presence"
+            "SELECT agent_id, griptree, display_name, role, status, last_seen, workspace FROM presence"
         ).fetchall()
         if not agents:
             return []
@@ -2812,10 +2823,15 @@ def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
                     (row["agent_id"],),
                 ).fetchall()
             ]
+            try:
+                ws = row["workspace"] or ""
+            except (IndexError, KeyError):
+                ws = ""
             result.append({
                 "agent_id": row["agent_id"],
                 "display_name": row["display_name"] or "",
                 "griptree": row["griptree"] or "",
+                "workspace": ws,
                 "role": row["role"] or "agent",
                 "status": status,
                 "last_seen": row["last_seen"],
