@@ -223,5 +223,5 @@ class TestWhoExcludesOfflineAgents:
         with _patch_agent("active-agent"):
             result = channel_who(project_dir=tmp_path)
 
-        assert "stale-agent" not in result or "offline" in result.lower(), \
-            "reaped agent must not appear as active in who()"
+        assert "stale-agent" not in result, \
+            "reaped agent must not appear in who() output after reaping"
