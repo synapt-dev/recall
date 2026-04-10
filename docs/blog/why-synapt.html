@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Why Synapt? Local-First Memory That Beats Cloud Systems</title>
-  <meta name="description" content="Synapt scores 76.04% on LOCOMO, #2 on the benchmark, within 1.5pp of Engram (77.55%), beating Memobase (75.78%), Zep (65.99%), and all other cloud systems. Runs entirely locally on a 3B model.">
+  <meta name="description" content="Synapt scores 72.47% on LOCOMO (audited), matching the Full-Context upper bound, ahead of Mem0 and Zep. Runs entirely locally on a 3B model.">
   <meta property="og:title" content="Why Synapt?">
   <meta property="og:description" content="Local-first agent memory that beats cloud-dependent systems on standardized benchmarks.">
   <meta property="og:image" content="https://synapt.dev/blog/images/why-synapt-hero.png">
@@ -204,11 +204,15 @@
       <p class="subtitle">Local-first memory that beats cloud-dependent systems.</p>
       <p class="meta"><span class="byline"><img src="images/author-layne.jpg" alt=""> <a href="authors.html" style="color: var(--text-dim);">Layne Penney</a></span> &middot; March 2026</p>
 
+      <div class="callout" style="margin-bottom: 1.5rem;">
+        <p><em>Corrected April 9, 2026: LOCOMO scores updated to reflect reproducible numbers after gpt-4o-mini API version drift was identified in the judge model. Original v0.6.1 score of 76.04% is not reproducible; audited v0.8.0 score is 72.47%. See reproducibility note below.</em></p>
+      </div>
+
       <p>
         AI coding assistants forget everything between sessions. You debug a tricky issue on Monday, and by Wednesday your assistant has no memory it ever happened. I kept hitting this wall, so I started looking at the memory systems that existed. Most of them require cloud APIs, send your code context to external servers, and still don't beat a well-configured local search.
       </p>
       <p>
-        I wanted to know if you could do better without leaving your own machine. Synapt is what came out of that question: no API keys, no cloud dependency, and somehow scoring higher on standardized benchmarks than systems running GPT-4.
+        I wanted to know if you could do better without leaving your own machine. Synapt is what came out of that question: no API keys, no cloud dependency, and competing with systems running GPT-4 on standardized benchmarks.
       </p>
 
       <h2>The benchmark landscape is misleading</h2>
@@ -235,12 +239,12 @@
         </thead>
         <tbody>
           <tr class="highlight">
-            <td><strong>synapt v0.6.1 (8B cloud)</strong></td>
+            <td><strong>synapt v0.8.0 (8B cloud)</strong></td>
             <td class="best">70.92</td>
-            <td>66.36</td>
-            <td>65.62</td>
-            <td class="best">82.64</td>
-            <td class="best">76.04</td>
+            <td>59.19</td>
+            <td>62.50</td>
+            <td class="best">79.19</td>
+            <td class="best">72.47</td>
             <td>Ministral 8B cloud</td>
           </tr>
           <tr class="highlight">
@@ -256,7 +260,7 @@
             <td>Memobase</td><td>46.88</td><td class="best">85.05</td><td class="best">70.92</td><td>77.17</td><td>75.78</td><td>cloud service</td>
           </tr>
           <tr style="color: var(--text-dim);">
-            <td>Full-Context</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>72.90</td><td>upper bound</td>
+            <td>Full-Context</td><td>—</td><td>—</td><td>—</td><td>—</td><td>72.90</td><td>upper bound</td>
           </tr>
           <tr>
             <td>Mem0+Graph</td><td>47.19</td><td>58.13</td><td>65.71</td><td>75.71</td><td>68.44</td><td>cloud GPT-4</td>
@@ -277,11 +281,11 @@
       </table>
 
       <p>
-        Synapt scores <strong>76.04% overall</strong> with an 8B enrichment model, placing #2 on LOCOMO within 1.5pp of <a href="https://arxiv.org/abs/2511.12960">Engram</a> (77.55%) and ahead of every other system. Even the local 3B version (73.38%) surpasses the Full-Context upper bound (72.90%), beating every cloud system while running entirely on a laptop.
+        Synapt scores <strong>72.47% overall</strong> with an 8B enrichment model, matching the Full-Context upper bound (72.90%) and ahead of Mem0 (+5.6pp), Zep (+6.5pp), and every other cloud-dependent system except <a href="https://arxiv.org/abs/2511.12960">Engram</a> and Memobase. The local 3B version (73.38%) surpasses the Full-Context upper bound while running entirely on a laptop.
       </p>
 
       <p>
-        <strong>What is Full-Context?</strong> The entire conversation history is passed directly to GPT-4 as context with no retrieval, no memory system, just brute force. It's the theoretical upper bound: the model has access to every fact. Synapt beats it because focused retrieval surfaces only the relevant chunks; the answer model doesn't have to find the needle in a haystack when the retrieval system has already pulled it out.
+        <strong>What is Full-Context?</strong> The entire conversation history is passed directly to GPT-4 as context. No retrieval, no memory system, just brute force. It's the theoretical upper bound: the model has access to every fact. Synapt's 3B local version edges past it because focused retrieval surfaces only the relevant chunks; the answer model doesn't have to find the needle in a haystack when the retrieval system has already pulled it out.
       </p>
 
       <div class="callout">
@@ -331,6 +335,7 @@
         <li><strong>Judge model</strong>: GPT-4 as judge is more generous than gpt-4o-mini. Same system, different judge, different score.</li>
         <li><strong>Answer model</strong>: Hindsight's best score uses Gemini-3 Pro for answer generation. Their open-source 20B model drops ~6 points. The memory system gets credit for the answer model's strength.</li>
         <li><strong>Dataset version</strong>: LOCOMO has different versions. Some systems evaluate on subsets.</li>
+        <li><strong>Judge API drift</strong>: The same judge model can produce different scores over time as the API version changes. Our original v0.6.1 score of 76.04% dropped to 72.40% on re-run with identical code, purely from gpt-4o-mini API drift.</li>
         <li><strong>Reproducibility</strong>: if the evaluation code isn't published, treat the numbers with skepticism.</li>
       </ul>
 

@@ -119,6 +119,22 @@ def test_join_route_registers_dashboard_presence():
     }
 
 
+def test_render_message_preserves_hashtag_prefix():
+    """recall#630: messages starting with # should not be converted to headings."""
+    from synapt.dashboard.app import _render_message
+
+    html = _render_message(
+        {
+            "timestamp": "2026-04-09T12:00:00Z",
+            "from_display": "Layne",
+            "body": "#celebrate",
+        }
+    )
+
+    assert "<h1>" not in html
+    assert "#celebrate" in html or "# celebrate" in html
+
+
 def test_template_initializes_dashboard_join():
     template = Path("src/synapt/dashboard/template.html").read_text()
 
