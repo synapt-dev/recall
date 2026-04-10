@@ -984,7 +984,10 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
             _append_message(msg, project_dir)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
-        conn.execute("DELETE FROM memberships WHERE agent_id = ?", (aid,))
+        # Memberships are durable — reaping only clears presence, not
+        # channel membership.  Agents that time out remain joined so
+        # that monitoring loops (channel_unread) keep working across
+        # session boundaries.  See recall#639.
         conn.execute(
             "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
         )
