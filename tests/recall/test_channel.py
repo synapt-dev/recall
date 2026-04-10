@@ -579,11 +579,11 @@ class TestAutoLeaveTimeout(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row["status"], "offline")
 
-            # Verify membership removed
+            # Verify membership survives reaping (recall#639)
             mem = conn.execute(
                 "SELECT * FROM memberships WHERE agent_id ='stale-bot'"
             ).fetchone()
-            self.assertIsNone(mem)
+            self.assertIsNotNone(mem)
         finally:
             conn.close()
 
