@@ -252,5 +252,67 @@ class TestEmbeddingSearchNumpy(unittest.TestCase):
         self.assertEqual(results[0][0], 1)
 
 
+class TestShardedColdStartEmbeddingGate(unittest.TestCase):
+    """Sharded indexes without chunk embeddings stay on the fast BM25 path."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.index_dir = Path(self.tmpdir)
+
+    def _make_chunk(self):
+        from synapt.recall.core import TranscriptChunk
+
+        return TranscriptChunk(
+            id="s1:t0",
+            session_id="s1",
+            timestamp="2026-01-01T00:00:00Z",
+            turn_index=0,
+            user_text="cold start fact",
+            assistant_text="assistant",
+            tools_used=[],
+            files_touched=[],
+        )
+
+    def test_sharded_lookup_skips_provider_when_chunk_embeddings_missing(self):
+        from synapt.recall.core import TranscriptIndex
+
+        index_db = RecallDB(self.index_dir / "index.db")
+        data_db = RecallDB(self.index_dir / "data_001.db")
+        data_db.save_chunks([self._make_chunk()])
+        index_db.save_knowledge_nodes([
+            {
+                "id": "kn-1",
+                "content": "cold start fact",
+                "category": "workflow",
+                "confidence": 0.9,
+                "source_sessions": [],
+                "source_turns": [],
+                "source_offsets": [],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "status": "active",
+                "superseded_by": "",
+                "contradiction_note": "",
+                "tags": [],
+                "valid_from": None,
+                "valid_until": None,
+                "version": 1,
+                "lineage_id": "",
+            }
+        ])
+        index_db.save_knowledge_embeddings({1: _make_embedding(0.5)})
+        index_db.close()
+        data_db.close()
+
+        with patch("synapt.recall.embeddings.get_embedding_provider") as mock_get:
+            index = TranscriptIndex.load(self.index_dir, use_embeddings=True)
+            result = index.lookup("cold start fact", max_chunks=3, max_tokens=200)
+
+        self.assertIn("cold start fact", result)
+        self.assertIsNone(index._embed_provider)
+        self.assertIn("BM25-only", index._embedding_reason)
+        mock_get.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
