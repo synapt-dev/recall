@@ -64,14 +64,17 @@ class LocalEmbeddings(EmbeddingProvider):
             from sentence_transformers import SentenceTransformer
 
             # Skip the HuggingFace revision-check network call if the model is
-            # already in the local cache.  The cache dir name is deterministic:
-            # models--{org}--{model} with '/' replaced by '--'.
+            # already in the local cache. Accept both fully-qualified
+            # (`sentence-transformers/all-MiniLM-L6-v2`) and shorthand
+            # (`all-MiniLM-L6-v2`) cache directory forms.
             hf_cache = Path(
                 os.environ.get("HF_HOME",
                                os.path.join(os.path.expanduser("~"), ".cache", "huggingface"))
             ) / "hub"
-            model_cache_name = "models--" + self._model_name.replace("/", "--")
-            if (hf_cache / model_cache_name).exists():
+            cache_names = {"models--" + self._model_name.replace("/", "--")}
+            if "/" not in self._model_name:
+                cache_names.add(f"models--sentence-transformers--{self._model_name}")
+            if any((hf_cache / cache_name).exists() for cache_name in cache_names):
                 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
             self._model = SentenceTransformer(self._model_name, device=self._device)

@@ -1085,28 +1085,42 @@ class TranscriptIndex:
         self._kn_emb_matrix: "np.ndarray | None" = None
         self._kn_emb_rowids: list[int] = []
         self._embeddings_loaded: bool = False
+        self._cache_dir = cache_dir
         # Track embedding status for user-facing messages
         self._embedding_status: str = "disabled"  # disabled | active | unavailable
         self._embedding_reason: str = ""
         if use_embeddings:
             try:
-                from synapt.recall.embeddings import get_embedding_provider
-                provider = get_embedding_provider()
-                if provider:
-                    self._embed_provider = provider
-                    self._embedding_status = "active"
-                    # Only build embeddings if storage is available
-                    if self._db is None or self._idx_to_rowid:
-                        self._load_or_build_embeddings(cache_dir)
-                    # Embedding data is loaded lazily via
-                    # _ensure_embeddings_loaded() on first search call.
-                else:
-                    self._embedding_status = "unavailable"
+                has_chunk_embeddings = self._db.has_embeddings() if self._db is not None else True
+                # Only build embeddings if storage is available.
+                if self._db is None or self._idx_to_rowid:
+                    self._load_or_build_embeddings(cache_dir)
+
+                # If the index has no chunk embeddings yet, keep CLI/server
+                # search on the fast BM25 path instead of paying model load for
+                # knowledge-only semantic lookup. The next explicit build can
+                # populate embeddings, and existing embedding-bearing indexes
+                # still keep hybrid search enabled.
+                if not has_chunk_embeddings:
                     self._embedding_reason = (
-                        "No embedding provider found. "
-                        "Install sentence-transformers for semantic search: "
-                        "pip install sentence-transformers"
+                        "Chunk embeddings are not available for this index yet; "
+                        "using BM25-only search."
                     )
+                else:
+                    from synapt.recall.embeddings import get_embedding_provider
+                    provider = get_embedding_provider()
+                    if provider:
+                        self._embed_provider = provider
+                        self._embedding_status = "active"
+                        # Embedding data is loaded lazily via
+                        # _ensure_embeddings_loaded() on first search call.
+                    else:
+                        self._embedding_status = "unavailable"
+                        self._embedding_reason = (
+                            "No embedding provider found. "
+                            "Install sentence-transformers for semantic search: "
+                            "pip install sentence-transformers"
+                        )
             except Exception as e:
                 logger.warning("Embeddings unavailable: %s", e)
                 self._embedding_status = "unavailable"
@@ -1117,6 +1131,82 @@ class TranscriptIndex:
         self._use_reranker = is_reranker_enabled()
         if self._use_reranker:
             logger.info("Cross-encoder reranking enabled")
+
+    def _open_background_db(self):
+        """Open a fresh DB handle for background embedding work."""
+        if self._cache_dir is None:
+            return self._db
+        return ShardedRecallDB.open(self._cache_dir)
+
+    def _build_embeddings_background(self, content_hash: str) -> None:
+        """Build chunk + knowledge embeddings in a background thread."""
+        db = None
+        try:
+            from synapt.recall.embeddings import get_embedding_provider
+
+            db = self._open_background_db()
+            if db is None:
+                return
+            provider = get_embedding_provider()
+            if provider is None:
+                return
+
+            texts = [c.text[:500] for c in self._materialize_all_chunks()]
+            all_embs: list[list[float]] = []
+            for i in range(0, len(texts), 64):
+                batch = texts[i:i + 64]
+                all_embs.extend(provider.embed(batch))
+
+            emb_mapping: dict[int, list[float]] = {}
+            for i, emb in enumerate(all_embs):
+                rowid = self._idx_to_rowid.get(i)
+                if rowid is not None:
+                    emb_mapping[rowid] = emb
+            if emb_mapping:
+                db.save_embeddings(emb_mapping)
+                db.set_metadata("embedding_hash", content_hash)
+                logger.info(
+                    "Background embedding build complete: %d chunks",
+                    len(emb_mapping),
+                )
+
+                self._embeddings_loaded = False
+                self._all_embeddings = {}
+                self._emb_matrix = None
+                self._emb_rowids = []
+
+            self._build_knowledge_embeddings(db=db, provider=provider)
+        except Exception as e:
+            logger.warning("Background embedding build failed: %s", e)
+        finally:
+            if db is not None and db is not self._db:
+                with contextlib.suppress(Exception):
+                    db.close()
+
+    def _build_knowledge_embeddings(self, db=None, provider=None) -> None:
+        """Build embeddings for knowledge nodes that don't have them yet."""
+        db = db or self._db
+        provider = provider or self._embed_provider
+        if not db or not provider:
+            return
+        try:
+            missing = db.get_knowledge_rowids_without_embeddings()
+            if not missing:
+                return
+            texts = [content[:500] for _, content in missing]
+            rowids = [rowid for rowid, _ in missing]
+            all_embs: list[list[float]] = []
+            for i in range(0, len(texts), 64):
+                batch = texts[i:i + 64]
+                all_embs.extend(provider.embed(batch))
+            emb_mapping = dict(zip(rowids, all_embs))
+            if emb_mapping:
+                db.save_knowledge_embeddings(emb_mapping)
+                logger.info(
+                    "Built embeddings for %d knowledge nodes", len(emb_mapping),
+                )
+        except Exception as e:
+            logger.warning("Knowledge embedding build failed: %s", e)
 
     def _get_chunk(self, idx: int) -> TranscriptChunk:
         """Return a chunk, hydrating it from the DB on demand when needed."""
@@ -1427,6 +1517,9 @@ class TranscriptIndex:
         BM25-only results. The next search after the build finishes will
         pick up the fresh embeddings via _ensure_embeddings_loaded().
         """
+        if not self._db.has_embeddings():
+            return
+
         content_hash = self._content_hash()
         stored_hash = self._db.get_metadata("embedding_hash")
 
@@ -1448,55 +1541,6 @@ class TranscriptIndex:
             name="synapt-embedding-build",
         )
         self._embedding_build_thread.start()
-
-    def _build_embeddings_background(self, content_hash: str) -> None:
-        """Build chunk + knowledge embeddings in a background thread."""
-        try:
-            texts = [c.text[:500] for c in self._materialize_all_chunks()]
-            all_embs: list[list[float]] = []
-            for i in range(0, len(texts), 64):
-                batch = texts[i:i + 64]
-                all_embs.extend(self._embed_provider.embed(batch))
-
-            emb_mapping: dict[int, list[float]] = {}
-            for i, emb in enumerate(all_embs):
-                rowid = self._idx_to_rowid.get(i)
-                if rowid is not None:
-                    emb_mapping[rowid] = emb
-            if emb_mapping:
-                self._db.save_embeddings(emb_mapping)
-            self._db.set_metadata("embedding_hash", content_hash)
-            logger.info(
-                "Background embedding build complete: %d chunks",
-                len(emb_mapping),
-            )
-
-            self._build_knowledge_embeddings()
-        except Exception as e:
-            logger.warning("Background embedding build failed: %s", e)
-
-    def _build_knowledge_embeddings(self) -> None:
-        """Build embeddings for knowledge nodes that don't have them yet."""
-        if not self._db or not self._embed_provider:
-            return
-        try:
-            missing = self._db.get_knowledge_rowids_without_embeddings()
-            if not missing:
-                return
-            texts = [content[:500] for _, content in missing]
-            rowids = [rowid for rowid, _ in missing]
-            all_embs: list[list[float]] = []
-            for i in range(0, len(texts), 64):
-                batch = texts[i:i + 64]
-                all_embs.extend(self._embed_provider.embed(batch))
-            emb_mapping = dict(zip(rowids, all_embs))
-            if emb_mapping:
-                self._db.save_knowledge_embeddings(emb_mapping)
-                logger.info(
-                    "Built embeddings for %d knowledge nodes", len(emb_mapping),
-                )
-        except Exception as e:
-            logger.warning("Knowledge embedding build failed: %s", e)
 
     def _content_hash(self) -> str:
         """Hash of chunk IDs + text content for embedding cache invalidation.
