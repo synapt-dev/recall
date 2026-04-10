@@ -235,6 +235,14 @@ def _render_message(msg: dict) -> str:
     color = _agent_color(name)
     _MD.reset()
     body_html = _MD.convert(body)
+    # Convert headings back to plain text with '#' prefix (recall#630).
+    # Python-Markdown treats '#word' as a heading even without a space,
+    # which strips hashtags like '#celebrate' from chat messages.
+    body_html = re.sub(
+        r"<h([1-6])>(.*?)</h\1>",
+        lambda m: "<p>" + "#" * int(m.group(1)) + " " + m.group(2) + "</p>",
+        body_html,
+    )
     # Color @mentions — skip content inside <code> and <pre> tags
     def _color_mentions(html: str) -> str:
         parts = re.split(r'(<code.*?>.*?</code>|<pre.*?>.*?</pre>)', html, flags=re.DOTALL)
