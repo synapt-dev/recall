@@ -177,9 +177,27 @@ def _channels_dir(project_dir: Path | None = None) -> Path:
     return _local_channels_dir(project_dir)
 
 
+def _channel_to_filename(channel: str) -> str:
+    """Encode a channel name for use as a filename (Windows-safe)."""
+    return channel.replace(":", "--")
+
+
+def _filename_to_channel(stem: str) -> str:
+    """Decode a filename stem back to a channel name."""
+    return stem.replace("--", ":")
+
+
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
     """Return the JSONL log path for a channel."""
-    return _channels_dir(project_dir) / f"{channel}.jsonl"
+    ch_dir = _channels_dir(project_dir)
+    safe_name = _channel_to_filename(channel)
+    new_path = ch_dir / f"{safe_name}.jsonl"
+    # Migrate legacy colon-format files (not valid on Windows)
+    if ":" in channel and not new_path.exists():
+        old_path = ch_dir / f"{channel}.jsonl"
+        if old_path.exists():
+            old_path.rename(new_path)
+    return new_path
 
 
 def _db_path(project_dir: Path | None = None) -> Path:
@@ -1008,7 +1026,7 @@ def _append_message(
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
-        path = channels_dir / f"{msg.channel}.jsonl"
+        path = channels_dir / f"{_channel_to_filename(msg.channel)}.jsonl"
     else:
         path = _channel_path(msg.channel, project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1524,7 +1542,7 @@ def list_dm_channels(
         return []
     result = []
     for p in ch_dir.glob("*.jsonl"):
-        name = p.stem
+        name = _filename_to_channel(p.stem)
         if is_dm_channel(name) and is_dm_participant(name, agent_id):
             result.append(name)
     return sorted(result)
@@ -2503,8 +2521,8 @@ def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     if not ch_dir.exists():
         return []
     return sorted(
-        p.stem for p in ch_dir.glob("*.jsonl")
-        if not is_dm_channel(p.stem)
+        _filename_to_channel(p.stem) for p in ch_dir.glob("*.jsonl")
+        if not is_dm_channel(_filename_to_channel(p.stem))
     )
 
 
@@ -2601,7 +2619,7 @@ def channel_messages_json(
     ``channels_dir`` overrides path resolution for cross-project reads.
     ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
-    path = (channels_dir / f"{channel}.jsonl") if channels_dir else _channel_path(channel, project_dir)
+    path = (channels_dir / f"{_channel_to_filename(channel)}.jsonl") if channels_dir else _channel_path(channel, project_dir)
     if not path.exists():
         return []
     messages = _read_messages(path, since=since)
@@ -2665,7 +2683,7 @@ def channel_search(
     all_channels: list[str] = []
     if ch_dir.exists():
         for p in ch_dir.glob("*.jsonl"):
-            name = p.stem
+            name = _filename_to_channel(p.stem)
             if is_dm_channel(name):
                 if agent_id and is_dm_participant(name, agent_id):
                     all_channels.append(name)
