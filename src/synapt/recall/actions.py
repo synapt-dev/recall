@@ -384,15 +384,28 @@ _DEFAULT_REGISTRY: ActionRegistry | None = None
 def get_action_registry() -> ActionRegistry:
     """Return the process-wide channel action registry.
 
-    OSS installs the base registry once. Premium can then register additive
-    actions or overrides at import/startup time against this shared instance.
+    OSS installs the base registry once. Premium registers coordination
+    handlers (directive, claim, board, etc.) via the plugin entry point
+    system.  Without premium, those actions show as "locked".
+
+    See: premium#553 (channel seam split)
     """
     global _DEFAULT_REGISTRY
     if _DEFAULT_REGISTRY is None:
         _DEFAULT_REGISTRY = get_default_registry()
-        for name, (handler, desc) in _RUNTIME_COORDINATION_HANDLERS.items():
-            _DEFAULT_REGISTRY.register(name, handler, tier="oss", description=desc)
     return _DEFAULT_REGISTRY
+
+
+def register_coordination_handlers(registry: ActionRegistry | None = None) -> None:
+    """Register the runtime coordination handlers on a registry.
+
+    Called by the premium coordination plugin at startup.  Exposed as a
+    public function so premium can wire these without reaching into
+    private dicts.
+    """
+    reg = registry or get_action_registry()
+    for name, (handler, desc) in _RUNTIME_COORDINATION_HANDLERS.items():
+        reg.register(name, handler, tier="premium", description=desc)
 
 
 def reset_action_registry() -> None:

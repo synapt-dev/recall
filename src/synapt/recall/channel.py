@@ -133,6 +133,36 @@ _AWAY_MINUTES = 120       # 30-120 min => away
 _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on join
 
 # ---------------------------------------------------------------------------
+# Hook registration — premium coordination layer (#553)
+# ---------------------------------------------------------------------------
+# _append_message fires these hooks after writing a message to JSONL.
+# Premium registers handlers for @mention storage and wake emission.
+# OSS auto-registers its built-in handlers; without premium, the built-in
+# handlers still fire.  Premium can replace or extend them.
+
+from typing import Callable
+
+_message_posted_hooks: list[Callable[["ChannelMessage", "Path | None"], None]] = []
+
+
+def register_message_hook(
+    hook: Callable[["ChannelMessage", "Path | None"], None],
+) -> None:
+    """Register a callback invoked after a message is appended to JSONL.
+
+    Hooks receive (msg, project_dir) and run synchronously after the write.
+    Premium uses this to wire in @mention storage and wake emission without
+    coupling those systems into the OSS substrate.
+    """
+    _message_posted_hooks.append(hook)
+
+
+def _clear_message_hooks() -> None:
+    """Reset hooks — for tests only."""
+    _message_posted_hooks.clear()
+
+
+# ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
 
@@ -1194,12 +1224,14 @@ def _append_message(
         lock_exclusive(f)
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
-    # Store @mentions (non-blocking, best-effort)
-    if msg.type in ("message", "directive") and "@" in msg.body:
-        _store_mentions(msg, project_dir)
-    _emit_message_wakes(msg, project_dir)
-    # Set dirty flag for all other members of this channel
+    # Set dirty flag for all other members of this channel (OSS substrate)
     _set_dirty_flags(msg.channel, msg.from_agent, project_dir)
+    # Fire registered hooks (mention storage, wake emission, etc.)
+    for hook in _message_posted_hooks:
+        try:
+            hook(msg, project_dir)
+        except Exception:
+            pass  # hooks are best-effort
 
 
 def _set_dirty_flags(
@@ -3369,3 +3401,26 @@ def is_globally_claimed(
         return row["claimed_by"] if row else None
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Default hook registration — backward-compatible OSS behavior (#553)
+# ---------------------------------------------------------------------------
+# Auto-register mention storage and wake emission as hooks so the channel
+# substrate works identically whether or not a premium plugin is installed.
+# Premium coordination.py can call _clear_message_hooks() + register its
+# own hooks to replace or extend this behavior.
+
+def _default_mention_hook(msg: ChannelMessage, project_dir: Path | None = None) -> None:
+    """Store @mentions from a posted message (default OSS hook)."""
+    if msg.type in ("message", "directive") and "@" in msg.body:
+        _store_mentions(msg, project_dir)
+
+
+def _default_wake_hook(msg: ChannelMessage, project_dir: Path | None = None) -> None:
+    """Emit wake requests for a posted message (default OSS hook)."""
+    _emit_message_wakes(msg, project_dir)
+
+
+register_message_hook(_default_mention_hook)
+register_message_hook(_default_wake_hook)
