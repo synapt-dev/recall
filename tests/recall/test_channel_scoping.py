@@ -580,5 +580,65 @@ class TestBackwardCompat(unittest.TestCase):
         self.assertEqual(result, self._local_dir / "channels")
 
 
+class TestOrgEntitlementCheck(unittest.TestCase):
+    """Tests for register_agent() entitlement gate (recall#530)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir)
+
+    def test_db_path_bypasses_entitlement(self):
+        """Explicit db_path (test/internal use) always succeeds."""
+        db = Path(self._tmpdir) / "team.db"
+        _create_team_db(db, "test-org")
+        agent_id = register_agent("test-org", "TestAgent", db_path=db)
+        self.assertIsNotNone(agent_id)
+
+    def test_env_var_grants_entitlement(self):
+        """SYNAPT_AGENT_ID env var (set by gr spawn) grants access."""
+        # Create the org dir so _open_db can write
+        org_dir = Path(self._tmpdir) / "orgs" / "test-org"
+        org_dir.mkdir(parents=True)
+        with patch("synapt.recall.registry._team_db_path",
+                    return_value=org_dir / "team.db"):
+            with patch.dict(os.environ, {"SYNAPT_AGENT_ID": "opus-001"}):
+                agent_id = register_agent("test-org", "TestAgent")
+        self.assertIsNotNone(agent_id)
+
+    def test_existing_team_db_grants_entitlement(self):
+        """If team.db already exists (org initialized by gr), allow registration."""
+        org_dir = Path(self._tmpdir) / "orgs" / "test-org"
+        org_dir.mkdir(parents=True)
+        db = org_dir / "team.db"
+        _create_team_db(db, "test-org")
+        with patch("synapt.recall.registry._team_db_path", return_value=db):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("SYNAPT_AGENT_ID", None)
+                agent_id = register_agent("test-org", "NewAgent")
+        self.assertIsNotNone(agent_id)
+
+    def test_no_entitlement_raises_permission_error(self):
+        """Rogue process without entitlement cannot register agents."""
+        nonexistent_db = Path(self._tmpdir) / "orgs" / "rogue-org" / "team.db"
+        with patch("synapt.recall.registry._team_db_path", return_value=nonexistent_db):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("SYNAPT_AGENT_ID", None)
+                with self.assertRaises(PermissionError) as ctx:
+                    register_agent("rogue-org", "EvilAgent")
+        self.assertIn("no entitlement", str(ctx.exception))
+
+    def test_entitlement_error_names_org(self):
+        """Error message includes the org_id for debugging."""
+        nonexistent_db = Path(self._tmpdir) / "no-org" / "team.db"
+        with patch("synapt.recall.registry._team_db_path", return_value=nonexistent_db):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("SYNAPT_AGENT_ID", None)
+                with self.assertRaises(PermissionError) as ctx:
+                    register_agent("secret-org-42", "Intruder")
+        self.assertIn("secret-org-42", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

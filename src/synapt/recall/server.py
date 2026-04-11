@@ -260,15 +260,16 @@ def recall_search(
     max_tokens = _cap_tokens(max_tokens)
     index = _get_index()
 
-    # Always search the live transcript — covers the current session which is
-    # not yet archived.  Live results get ≤1/3 of the total token budget.
-    # Skip entirely when max_tokens=0 to avoid emitting output the caller
-    # did not budget for (the first-chunk guarantee in _format_live_results
-    # still fires at max_tokens=0, producing unexpected output).
+    # Search the live transcript for current-session context.
+    # Skip when: (a) max_tokens=0, (b) `before` is set (the current session
+    # is by definition "now" and cannot satisfy a historical cutoff).
+    # Fixes recall#634: before-filtered queries no longer leak current-session
+    # context that postdates the requested time window.
+    historical_filter = before is not None or after is not None
     from synapt.recall.live import search_live_transcript
     live_budget = min(500, max_tokens // 3)
     live_result = ""
-    if live_budget > 0:
+    if live_budget > 0 and not before:
         live_result = search_live_transcript(
             query,
             index=index,
@@ -290,6 +291,13 @@ def recall_search(
         indexed_budget = max(max_tokens - live_consumed, budget_floor)
 
     if index is None:
+        if historical_filter:
+            index_dir = project_index_dir()
+            return (
+                f"Historical search unavailable: no index found at {index_dir}. "
+                f"Run `synapt recall setup` first. "
+                f"Cannot satisfy date-filtered query without an index."
+            )
         if live_result:
             return live_result
         index_dir = project_index_dir()

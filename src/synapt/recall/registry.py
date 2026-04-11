@@ -91,6 +91,30 @@ def _open_db(org_id: str, db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _check_org_entitlement(org_id: str, db_path: Path | None = None) -> None:
+    """Verify the caller is entitled to register agents in this org.
+
+    Entitlement is established by any of:
+    - db_path explicitly passed (test/internal use, caller owns the path)
+    - SYNAPT_AGENT_ID env var is set (process was spawned by gr spawn)
+    - org directory already contains a team.db (org was initialized by gr)
+
+    Raises PermissionError if none of these conditions hold.
+    Security: recall#530.
+    """
+    if db_path is not None:
+        return
+    if os.environ.get("SYNAPT_AGENT_ID"):
+        return
+    team_db = _team_db_path(org_id)
+    if team_db.exists():
+        return
+    raise PermissionError(
+        f"Cannot register agent in org '{org_id}': no entitlement. "
+        f"Use `gr spawn` to create agents, or initialize the org first."
+    )
+
+
 def register_agent(
     org_id: str,
     display_name: str,
@@ -100,7 +124,9 @@ def register_agent(
     """Register a new agent in the org. Returns the assigned agent_id.
 
     Raises sqlite3.IntegrityError if display_name is already taken in this org.
+    Raises PermissionError if the caller lacks org entitlement (recall#530).
     """
+    _check_org_entitlement(org_id, db_path)
     conn = _open_db(org_id, db_path)
     try:
         now = datetime.now(timezone.utc).isoformat()

@@ -797,6 +797,14 @@ CREATE TABLE IF NOT EXISTS status_board_history (
     body TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS unread_flags (
+    agent_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    dirty INTEGER DEFAULT 0,
+    last_cleared_at TEXT,
+    PRIMARY KEY (agent_id, channel)
+);
 """
 
 _WAKE_PRIORITIES = {
@@ -1190,6 +1198,53 @@ def _append_message(
     if msg.type in ("message", "directive") and "@" in msg.body:
         _store_mentions(msg, project_dir)
     _emit_message_wakes(msg, project_dir)
+    # Set dirty flag for all other members of this channel
+    _set_dirty_flags(msg.channel, msg.from_agent, project_dir)
+
+
+def _set_dirty_flags(
+    channel: str, sender_id: str, project_dir: Path | None = None
+) -> None:
+    """Mark all other channel members as having unread messages."""
+    conn = _open_db(project_dir)
+    try:
+        members = conn.execute(
+            "SELECT agent_id FROM memberships WHERE channel = ? AND agent_id != ?",
+            (channel, sender_id),
+        ).fetchall()
+        for row in members:
+            conn.execute(
+                "INSERT INTO unread_flags (agent_id, channel, dirty) "
+                "VALUES (?, ?, 1) "
+                "ON CONFLICT(agent_id, channel) DO UPDATE SET dirty = 1",
+                (row["agent_id"], channel),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def channel_has_unread(
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> dict[str, bool]:
+    """Fast O(1) check for unread messages per channel.
+
+    Returns a dict mapping channel names to whether they have unread messages.
+    Uses the dirty-flag table instead of scanning JSONL files.
+    Returns empty dict if the agent has no flags set (no memberships or
+    everything is caught up).
+    """
+    aid = agent_name or _agent_id(project_dir)
+    conn = _open_db(project_dir)
+    try:
+        rows = conn.execute(
+            "SELECT channel, dirty FROM unread_flags WHERE agent_id = ?",
+            (aid,),
+        ).fetchall()
+        return {r["channel"]: bool(r["dirty"]) for r in rows}
+    finally:
+        conn.close()
 
 
 def channel_read_wakes(
@@ -1486,6 +1541,13 @@ def channel_join(
             "INSERT OR IGNORE INTO memberships (agent_id, channel, joined_at) "
             "VALUES (?, ?, ?)",
             (aid, channel, now),
+        )
+
+        # Initialize unread flag (clean on join)
+        conn.execute(
+            "INSERT OR IGNORE INTO unread_flags (agent_id, channel, dirty) "
+            "VALUES (?, ?, 0)",
+            (aid, channel),
         )
 
         # Preserve prior read position for restarted sessions that inherit a
@@ -1842,12 +1904,17 @@ def channel_read(
             (channel,),
         ).fetchall()
 
-        # Update read cursor
+        # Update read cursor and clear dirty flag
         conn.execute(
             "INSERT INTO cursors (agent_id, channel, last_read_at) "
             "VALUES (?, ?, ?) "
             "ON CONFLICT(agent_id, channel) DO UPDATE SET last_read_at = ?",
             (aid, channel, now, now),
+        )
+        conn.execute(
+            "UPDATE unread_flags SET dirty = 0, last_cleared_at = ? "
+            "WHERE agent_id = ? AND channel = ?",
+            (now, aid, channel),
         )
         conn.commit()
     finally:
@@ -1939,6 +2006,10 @@ def channel_read(
             truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
         if _one_line:
             body = body.replace("\n", " ").strip()
+        # Worktree tag at max detail (recall#443)
+        wt_tag = ""
+        if _detail == "max" and msg.worktree:
+            wt_tag = f" @{msg.worktree}"
         if msg.type in ("join", "leave", "claim", "unclaim"):
             if _one_line:
                 continue
@@ -1947,12 +2018,12 @@ def channel_read(
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
             lines.append(
-                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}: "
+                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}{wt_tag}: "
                 f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
             )
         else:
             lines.append(
-                f"  {ts}{inline_mid}  {display}{role_tag}: "
+                f"  {ts}{inline_mid}  {display}{role_tag}{wt_tag}: "
                 f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
             )
 
@@ -2006,13 +2077,14 @@ def channel_who(project_dir: Path | None = None) -> str:
     """Show which agents are currently online and in which channels.
 
     Displays all three identity layers: display_name, griptree, agent_id.
+    Shows workspace/worktree when available (recall#443).
     """
     conn = _open_db(project_dir)
     try:
         _reap_stale_agents(conn, project_dir)
 
         agents = conn.execute(
-            "SELECT agent_id, griptree, display_name, role, status, last_seen FROM presence"
+            "SELECT agent_id, griptree, display_name, role, status, last_seen, workspace FROM presence"
         ).fetchall()
 
         if not agents:
@@ -2067,7 +2139,13 @@ def channel_who(project_dir: Path | None = None) -> str:
             except (IndexError, KeyError):
                 agent_role = "agent"
             role_label = f" [{agent_role}]" if agent_role != "agent" else ""
-            lines.append(f"  {display}{identity}{role_label}  [{status_label}]  {channels_str}")
+            # Show workspace/worktree when available (recall#443)
+            try:
+                ws = row["workspace"]
+            except (IndexError, KeyError):
+                ws = ""
+            ws_label = f"  @{ws}" if ws else ""
+            lines.append(f"  {display}{identity}{role_label}  [{status_label}]{ws_label}  {channels_str}")
 
         if len(lines) == 1:
             return "No agents online."
@@ -2222,6 +2300,7 @@ def channel_pin(
     finally:
         conn.close()
 
+    _set_dirty_flags(channel, aid, project_dir)
     return f"Pinned [{message_id}] in #{channel}: {body}"
 
 
@@ -2696,7 +2775,7 @@ def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
     try:
         _reap_stale_agents(conn, project_dir)
         agents = conn.execute(
-            "SELECT agent_id, griptree, display_name, role, status, last_seen FROM presence"
+            "SELECT agent_id, griptree, display_name, role, status, last_seen, workspace FROM presence"
         ).fetchall()
         if not agents:
             return []
@@ -2744,10 +2823,15 @@ def channel_agents_json(project_dir: Path | None = None) -> list[dict]:
                     (row["agent_id"],),
                 ).fetchall()
             ]
+            try:
+                ws = row["workspace"] or ""
+            except (IndexError, KeyError):
+                ws = ""
             result.append({
                 "agent_id": row["agent_id"],
                 "display_name": row["display_name"] or "",
                 "griptree": row["griptree"] or "",
+                "workspace": ws,
                 "role": row["role"] or "agent",
                 "status": status,
                 "last_seen": row["last_seen"],
