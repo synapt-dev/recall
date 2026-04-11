@@ -574,6 +574,89 @@ class TestRecallSearchLiveIntegration(unittest.TestCase):
         self.assertIn("Run `synapt recall setup`", result)
 
 
+    def test_before_filter_suppresses_live_results(self):
+        """recall_search with before= should NOT include current-session context."""
+        from synapt.recall.server import recall_search
+
+        with tempfile.TemporaryDirectory() as d:
+            transcript = Path(d) / "session.jsonl"
+            _write_transcript(transcript, "live-session", [
+                {"user": "swift adapter training pipeline", "assistant": "done"},
+            ])
+
+            mock_index = MagicMock()
+            mock_index.sessions = {}
+            mock_index.lookup.return_value = "Past session context:\n--- historical result ---"
+            mock_index._last_diagnostics = None
+
+            with (
+                patch("synapt.recall.server._get_index", return_value=mock_index),
+                patch("synapt.recall.live.latest_transcript_path", return_value=str(transcript)),
+            ):
+                result = recall_search("swift adapter", before="2026-04-09")
+
+        self.assertNotIn("Current session context:", result,
+                         "Live results should be suppressed when before= is set")
+        self.assertIn("Past session context:", result)
+
+    def test_after_filter_still_includes_live_results(self):
+        """recall_search with after= (but no before=) should still include live."""
+        from synapt.recall.server import recall_search
+
+        with tempfile.TemporaryDirectory() as d:
+            transcript = Path(d) / "session.jsonl"
+            _write_transcript(transcript, "live-session", [
+                {"user": "swift adapter training pipeline", "assistant": "done"},
+            ])
+
+            mock_index = MagicMock()
+            mock_index.sessions = {}
+            mock_index.lookup.return_value = "Past session context:\n--- indexed result ---"
+            mock_index._last_diagnostics = None
+
+            with (
+                patch("synapt.recall.server._get_index", return_value=mock_index),
+                patch("synapt.recall.live.latest_transcript_path", return_value=str(transcript)),
+            ):
+                result = recall_search("swift adapter", after="2026-04-01")
+
+        self.assertIn("Current session context:", result,
+                       "Live results should still appear with after= only")
+
+    def test_before_filter_no_index_returns_unavailable(self):
+        """When before= is set but no index exists, return clear error."""
+        from synapt.recall.server import recall_search
+
+        with tempfile.TemporaryDirectory() as d:
+            transcript = Path(d) / "session.jsonl"
+            _write_transcript(transcript, "live-session", [
+                {"user": "swift adapter training pipeline", "assistant": "done"},
+            ])
+
+            with (
+                patch("synapt.recall.server._get_index", return_value=None),
+                patch("synapt.recall.live.latest_transcript_path", return_value=str(transcript)),
+            ):
+                result = recall_search("swift adapter", before="2026-04-09")
+
+        self.assertIn("Historical search unavailable", result,
+                       "Should explain that historical search needs an index")
+        self.assertNotIn("Current session context:", result,
+                         "Should not fall back to live results for historical query")
+
+    def test_after_filter_no_index_returns_unavailable(self):
+        """When after= is set but no index exists, return clear error."""
+        from synapt.recall.server import recall_search
+
+        with (
+            patch("synapt.recall.server._get_index", return_value=None),
+            patch("synapt.recall.live.latest_transcript_path", return_value=None),
+        ):
+            result = recall_search("swift adapter", after="2026-04-01")
+
+        self.assertIn("Historical search unavailable", result)
+
+
 class TestRecallQuickStatusRouting(unittest.TestCase):
 
     def test_pending_query_uses_summary_depth(self):
