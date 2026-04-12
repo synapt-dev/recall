@@ -9,9 +9,45 @@ Verifies that:
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from synapt.recall.channel import ChannelMessage
+
+
+def _patch_data_dir(tmpdir):
+    """Return a combined patcher for project_data_dir + disable global store.
+
+    Keep this helper local to avoid importing through a top-level `tests`
+    package path, which is not importable in CI.
+    """
+    data_dir = Path(tmpdir) / "project" / ".synapt" / "recall"
+    patcher_data = patch(
+        "synapt.recall.channel.project_data_dir",
+        return_value=data_dir,
+    )
+    patcher_manifest = patch(
+        "synapt.recall.channel._read_manifest_url",
+        return_value=None,
+    )
+
+    class _CombinedPatcher:
+        def start(self):
+            patcher_data.start()
+            patcher_manifest.start()
+
+        def stop(self):
+            patcher_manifest.stop()
+            patcher_data.stop()
+
+        def __enter__(self):
+            self.start()
+            return self
+
+        def __exit__(self, *args):
+            self.stop()
+
+    return _CombinedPatcher()
 
 
 class TestChannelMessageWorktree(unittest.TestCase):
@@ -97,7 +133,6 @@ class TestWorktreeInWho(unittest.TestCase):
     def setUp(self):
         import tempfile, shutil
         self.tmpdir = tempfile.mkdtemp()
-        from tests.recall.test_channel import _patch_data_dir
         self.patcher = _patch_data_dir(self.tmpdir)
         self.patcher.start()
 
@@ -134,7 +169,6 @@ class TestWorktreeInRead(unittest.TestCase):
     def setUp(self):
         import tempfile, shutil
         self.tmpdir = tempfile.mkdtemp()
-        from tests.recall.test_channel import _patch_data_dir
         self.patcher = _patch_data_dir(self.tmpdir)
         self.patcher.start()
 

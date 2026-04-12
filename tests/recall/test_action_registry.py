@@ -278,14 +278,22 @@ class TestRecallChannelIntegration(unittest.TestCase):
         self.assertEqual(kwargs["channel"], "dev")
         self.assertEqual(kwargs["name"], "Atlas")
 
-    def test_recall_channel_preserves_live_coordination_actions(self):
-        """recall_channel should preserve currently-live coordination actions via the runtime registry."""
+    def test_coordination_actions_gated_without_premium(self):
+        """Coordination actions should return 'requires premium' without plugin registered."""
         from synapt.recall.server import recall_channel
 
         result = recall_channel(action="directive", channel="dev", message="test", to="opus")
+        self.assertIn("requires premium", result)
+
+    def test_coordination_actions_work_after_registration(self):
+        """Coordination actions should work after register_coordination_handlers() is called."""
+        from synapt.recall.actions import register_coordination_handlers
+        from synapt.recall.server import recall_channel
+
+        register_coordination_handlers()
+        result = recall_channel(action="directive", channel="dev", message="test", to="opus")
         self.assertIn("#dev", result)
         self.assertIn("@opus", result)
-        self.assertIn("test", result)
 
     def test_recall_channel_uses_shared_registry_overrides(self):
         """Premium-style overrides on the shared registry should affect the live dispatcher."""
