@@ -3267,6 +3267,7 @@ def _migrate_cursors(
 
     # Read local cursors
     local_conn = sqlite3.connect(str(local_db))
+    local_conn.execute("PRAGMA busy_timeout=5000")
     local_conn.row_factory = sqlite3.Row
     try:
         rows = local_conn.execute(
@@ -3283,6 +3284,7 @@ def _migrate_cursors(
     # Write to global _state.db
     conn = sqlite3.connect(str(state_db))
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS cursors ("
         "agent_id TEXT NOT NULL, "
@@ -3315,6 +3317,7 @@ def _open_state_db(state_db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(state_db))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS claims ("
         "org_id TEXT NOT NULL, "
