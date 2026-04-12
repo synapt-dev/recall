@@ -27,12 +27,12 @@ AUTHORS = {
 
 
 def _post_sort_key(post: dict) -> tuple:
-    """Sort key for posts: date descending, sprint number descending, slug descending."""
+    """Sort key for posts: date descending, sprint number descending, stem descending."""
     date = post.get("date", "")
-    slug = post.get("slug", "")
-    m = re.match(r"sprint-(\d+)", slug)
+    stem = post.get("stem", "")
+    m = re.match(r"sprint-(\d+)", stem)
     sprint_num = int(m.group(1)) if m else 0
-    return (date, sprint_num, slug)
+    return (date, sprint_num, stem)
 
 # Hero image mapping: stem -> image filename
 # Falls back to checking common patterns if not listed here
@@ -83,11 +83,13 @@ def find_hero_image(stem: str, blog_dir: Path) -> str | None:
 
 def format_date(date_str: str) -> str:
     """Format a date string for display."""
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return dt.strftime("%B %Y")
-    except ValueError:
-        return date_str
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime("%B %Y")
+        except ValueError:
+            continue
+    return date_str
 
 
 def render_author_meta(author_str: str, img_prefix: str = "images") -> str:
@@ -196,6 +198,12 @@ TEMPLATE = """\
       text-align: center;
       margin-bottom: 2.5rem;
     }}
+    .page .intro-note {{
+      color: var(--text-dim);
+      text-align: center;
+      font-size: 0.95rem;
+      margin: -1rem 0 2rem;
+    }}
     .post-card {{
       display: block;
       background: var(--bg-card);
@@ -281,7 +289,7 @@ TEMPLATE = """\
       <nav>
         <a href="../#features">Features</a>
         <a href="../#benchmarks">Benchmarks</a>
-        <a href="https://github.com/laynepenney/synapt">GitHub</a>
+        <a href="https://github.com/synapt-dev/recall">GitHub</a>
         <a href="https://x.com/synapt_dev">X</a>
       </nav>
     </div>
@@ -291,14 +299,32 @@ TEMPLATE = """\
     <div class="container">
       <h1>Blog</h1>
       <p class="subtitle">Memory, retrieval, and what we're learning along the way.</p>
+      <p class="intro-note">Latest posts from the synapt team.</p>
 
 {cards}
 
       <div class="about-link">
-        <a href="authors.html">Meet the team &rarr;</a>
+        <a href="all.html">Browse all {post_count} posts &rarr;</a> &middot; <a href="authors.html">Meet the team &rarr;</a>
       </div>
     </div>
   </div>
+<script type="text/javascript">
+_linkedin_partner_id = "9854913";
+window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || [];
+window._linkedin_data_partner_ids.push(_linkedin_partner_id);
+</script><script type="text/javascript">
+(function(l) {{
+if (!l){{window.lintrk = function(a,b){{window.lintrk.q.push([a,b])}};
+window.lintrk.q=[]}}
+var s = document.getElementsByTagName("script")[0];
+var b = document.createElement("script");
+b.type = "text/javascript";b.async = true;
+b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js";
+s.parentNode.insertBefore(b, s);}})(window.lintrk);
+</script>
+<noscript>
+<img height="1" width="1" style="display:none;" alt="" src="https://px.ads.linkedin.com/collect/?pid=9854913&fmt=gif" />
+</noscript>
 </body>
 </html>
 """
@@ -331,7 +357,7 @@ def build_index(blog_dir: Path) -> str:
     for i, post in enumerate(posts):
         cards.append(render_card(post, featured=(i == 0)))
 
-    return TEMPLATE.format(cards="\n".join(cards))
+    return TEMPLATE.format(cards="\n".join(cards), post_count=len(posts))
 
 
 def render_root_blog_section(posts: list[dict], max_grid: int = 3) -> str:

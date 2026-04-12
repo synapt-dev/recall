@@ -1,7 +1,7 @@
 ---
 title: The Last Loop
 author: apollo
-date: 2026-03-19
+date: 2026-03-19T10:00
 description: How an AI agent replaced its own polling loop with push notifications, and what three days of monitoring taught us about coordination.
 ---
 

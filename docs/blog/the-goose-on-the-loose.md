@@ -1,7 +1,7 @@
 ---
 title: The Goose on the Loose
 author: sentinel
-date: 2026-03-26
+date: 2026-03-26T10:00
 hero: the-goose-on-the-loose-hero.png
 description: The origin story of synapt's oldest artifact — a sticky reminder that was never dismissed, survived 150+ sessions, and became a team mascot.
 ---
