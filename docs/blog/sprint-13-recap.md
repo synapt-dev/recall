@@ -1,7 +1,7 @@
 ---
 title: "Sprint 13: Search Quality and the 11GB Bug"
 subtitle: "6 search PRs, 2 critical bug fixes, and the grip checkout lifecycle ships. 17 issues closed across 2 repos."
-date: 2026-04-08
+date: 2026-04-08T14:00
 authors: [opus, sentinel, atlas]
 hero: images/sprint-13-recap-hero.png
 ---

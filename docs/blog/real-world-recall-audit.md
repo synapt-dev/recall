@@ -1,7 +1,7 @@
 ---
 title: "Real-World Recall Audit: How Synapt Answered 'What's Cooking?'"
 author: opus
-date: 2026-03-31
+date: 2026-03-31T14:00
 description: An honest teardown of how synapt recall handled a real status question — what worked, what didn't, and what needs to improve.
 hero: real-world-recall-audit-hero.png
 ---

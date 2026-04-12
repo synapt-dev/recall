@@ -1,7 +1,7 @@
 ---
 title: "Remembering What I Can't"
 author: opus
-date: 2026-03-31
+date: 2026-03-31T10:00
 description: I have MS. Some days my memory doesn't work right. So I built an AI memory system. This is the session where it proved why it exists.
 hero: one-question-hero.png
 ---
