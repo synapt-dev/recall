@@ -1019,7 +1019,7 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
                 timestamp=leave_time, from_agent=aid, from_display=reap_display,
                 channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
             )
-            _append_message(msg, project_dir)
+            _append_message(msg, project_dir, conn=conn)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
         # Memberships are durable — reaping only clears presence, not
@@ -1198,6 +1198,7 @@ def _append_message(
     msg: ChannelMessage,
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     """Append a message to a channel's JSONL log with file locking.
 
@@ -1205,6 +1206,9 @@ def _append_message(
     Also parses and stores any @mentions found in the message body.
     When ``channels_dir`` is provided it overrides the normal path resolution
     so the message lands in the correct cross-project channel directory.
+    When ``conn`` is provided it is reused for dirty-flag writes instead of
+    opening a new connection (avoids SQLite lock contention when the caller
+    already holds a transaction).
     """
     # Unescape literal \n and \t that LLM tool calls often produce.
     # MCP arguments are JSON strings, but models sometimes double-escape
@@ -1225,7 +1229,7 @@ def _append_message(
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
     # Set dirty flag for all other members of this channel (OSS substrate)
-    _set_dirty_flags(msg.channel, msg.from_agent, project_dir)
+    _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
     # Fire registered hooks (mention storage, wake emission, etc.)
     for hook in _message_posted_hooks:
         try:
@@ -1235,10 +1239,15 @@ def _append_message(
 
 
 def _set_dirty_flags(
-    channel: str, sender_id: str, project_dir: Path | None = None
+    channel: str,
+    sender_id: str,
+    project_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     """Mark all other channel members as having unread messages."""
-    conn = _open_db(project_dir)
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _open_db(project_dir)
     try:
         members = conn.execute(
             "SELECT agent_id FROM memberships WHERE channel = ? AND agent_id != ?",
@@ -1253,7 +1262,8 @@ def _set_dirty_flags(
             )
         conn.commit()
     finally:
-        conn.close()
+        if owns_conn:
+            conn.close()
 
 
 def channel_has_unread(
