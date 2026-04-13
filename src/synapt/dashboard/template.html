@@ -348,6 +348,29 @@
     0%, 100% { opacity: 0.8; }
     50% { opacity: 0; }
   }
+  /* Drop zone overlay for drag-and-drop images */
+  .drop-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(139, 92, 246, 0.15);
+    border: 2px dashed var(--accent);
+    border-radius: 8px;
+    z-index: 100;
+    pointer-events: none;
+    align-items: center;
+    justify-content: center;
+  }
+  .drop-overlay.active { display: flex; }
+  .drop-overlay-text {
+    background: var(--surface);
+    color: var(--accent);
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid var(--accent);
+  }
   /* Inline input bar — visible only in fullscreen/expanded */
   .output-input-bar {
     display: none;
@@ -359,7 +382,7 @@
   }
   #agent-output-panel.fullscreen .output-input-bar,
   #agent-output-panel.expanded .output-input-bar { display: flex; }
-  .output-input-bar input {
+  .output-input-bar textarea {
     flex: 1;
     background: var(--bg);
     color: var(--text);
@@ -369,8 +392,12 @@
     font-family: inherit;
     font-size: 13px;
     outline: none;
+    line-height: 1.4;
+    resize: none;
+    max-height: 120px;
+    overflow-y: auto;
   }
-  .output-input-bar input:focus { border-color: var(--accent); }
+  .output-input-bar textarea:focus { border-color: var(--accent); }
   .output-input-bar button {
     background: var(--accent);
     color: white;
@@ -526,6 +553,7 @@
             <button id="output-close-btn" title="Close">close</button>
           </div>
         </div>
+        <div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop image to send to agent</span></div>
         <div id="agent-output-content">No output yet.</div>
         <div id="scroll-indicator">new output below</div>
         <div class="key-palette" id="key-palette">
@@ -544,7 +572,7 @@
           <button data-key="q" title="Quit">q</button>
         </div>
         <div class="output-input-bar">
-          <input type="text" id="output-inline-input" placeholder="Send to agent..." autocomplete="off">
+          <textarea id="output-inline-input" placeholder="Send to agent... (Shift+Enter for newline)" autocomplete="off" rows="1"></textarea>
           <button id="output-inline-send">Send</button>
         </div>
       </div>
@@ -1093,8 +1121,13 @@ function sendInlineInput() {
 }
 inlineSendBtn.addEventListener('click', sendInlineInput);
 inlineInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && e.shiftKey) return; // allow newline
   if (handleInputKeydown(inlineInput, e)) return;
   if (e.key === 'Enter') { e.preventDefault(); sendInlineInput(); }
+});
+inlineInput.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
 
 // Expand toggle
@@ -1200,6 +1233,60 @@ document.addEventListener('keydown', function(e) {
     outputPanel.classList.remove('fullscreen');
     document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
   }
+});
+
+// ── Drag-and-drop image upload to agent ──────────────────
+var dropOverlay = document.getElementById('drop-overlay');
+var dragCounter = 0;
+
+outputPanel.addEventListener('dragenter', function(e) {
+  e.preventDefault();
+  dragCounter++;
+  if (selectedAgent && e.dataTransfer.types.indexOf('Files') !== -1) {
+    dropOverlay.classList.add('active');
+  }
+});
+
+outputPanel.addEventListener('dragleave', function(e) {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+  }
+});
+
+outputPanel.addEventListener('dragover', function(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+
+outputPanel.addEventListener('drop', function(e) {
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.remove('active');
+  if (!selectedAgent || !e.dataTransfer.files.length) return;
+  var file = e.dataTransfer.files[0];
+  var formData = new FormData();
+  formData.append('file', file);
+  dropOverlay.querySelector('.drop-overlay-text').textContent = 'Uploading ' + file.name + '...';
+  dropOverlay.classList.add('active');
+  fetch('/api/agent/' + selectedAgent + '/upload', {
+    method: 'POST',
+    body: formData,
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    dropOverlay.classList.remove('active');
+    dropOverlay.querySelector('.drop-overlay-text').textContent = 'Drop image to send to agent';
+    if (d.ok) {
+      setTimeout(refreshOutputNow, 150);
+    }
+  })
+  .catch(function() {
+    dropOverlay.classList.remove('active');
+    dropOverlay.querySelector('.drop-overlay-text').textContent = 'Drop image to send to agent';
+  });
 });
 
 function showAgentOutput(name) {

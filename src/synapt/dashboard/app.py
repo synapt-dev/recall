@@ -258,12 +258,7 @@ def _render_message(msg: dict) -> str:
     attachments_html = _render_attachments(msg)
 
     if msg_type in ("join", "leave"):
-        return (
-            f'<div class="msg sys">'
-            f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
-            f'<span class="sys-text">-- {escape(name)} {"joined" if msg_type == "join" else "left"}</span>'
-            f'</div>'
-        )
+        return ''
     color = _agent_color(name)
     _MD.reset()
     # Escape leading '#' not followed by space — prevents markdown
@@ -714,6 +709,56 @@ def create_app() -> FastAPI:
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="tmux send-keys timed out")
         return {"ok": True, "agent": name, "codex": is_codex}
+
+    # Upload directory for images/files sent to agents
+    _UPLOAD_DIR = Path(tempfile.gettempdir()) / "synapt-uploads"
+    _UPLOAD_DIR.mkdir(exist_ok=True)
+
+    @app.post("/api/agent/{name}/upload")
+    async def api_agent_upload(name: str, file: UploadFile = File(...)):
+        """Upload a file and send its path to an agent's tmux pane.
+
+        Saves the file to a persistent temp directory so the agent can
+        read it.  The absolute file path is sent as text input to the
+        agent's tmux pane.
+        """
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        suffix = Path(file.filename).suffix
+        stem = Path(file.filename).stem
+        # Unique filename to avoid collisions
+        ts = int(time.time())
+        dest = _UPLOAD_DIR / f"{stem}-{ts}{suffix}"
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        # Send the file path to the agent's tmux pane
+        target = f"{name}"
+        file_path = str(dest)
+        is_codex = name in _CODEX_AGENTS
+        try:
+            result = subprocess.run(
+                ["tmux", "send-keys", "-t", target, file_path, "Enter"],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"tmux send-keys failed: {result.stderr.decode().strip()}",
+                )
+            if is_codex:
+                await asyncio.sleep(0.3)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
+        except FileNotFoundError:
+            raise HTTPException(status_code=503, detail="tmux not available")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="tmux send-keys timed out")
+        return {"ok": True, "agent": name, "path": file_path}
 
     @app.post("/api/agent/{name}/key")
     async def api_agent_key(name: str, key: str = Form("")):

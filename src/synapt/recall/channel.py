@@ -1005,12 +1005,21 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
         if _agent_status(last_seen) != "offline":
             continue
 
-        # Session-scoped identities (s_*) are ephemeral — reap them
-        # silently without generating channel "left" messages. These
-        # are created as fallback identities when SYNAPT_AGENT_ID is
-        # not set (e.g. MCP server processes, manual CLI sessions).
-        # Generating visible leave events for them spams #dev.
+        # Determine if this agent is ephemeral:
+        # - s_* are session-scoped fallback identities (MCP processes, CLI)
+        # - agents whose display_name equals their griptree name are
+        #   unnamed sessions that resolved to the bare repo name
         is_ephemeral = aid.startswith("s_")
+        if not is_ephemeral:
+            row_display = conn.execute(
+                "SELECT display_name, griptree FROM presence WHERE agent_id = ?",
+                (aid,),
+            ).fetchone()
+            if (row_display
+                    and row_display["display_name"]
+                    and row_display["griptree"]
+                    and row_display["display_name"] == row_display["griptree"]):
+                is_ephemeral = True
 
         channels = [
             r["channel"]
@@ -1019,15 +1028,9 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
             ).fetchall()
         ]
 
-        if not is_ephemeral:
-            leave_time = _now_iso()
-            reap_display = _resolve_display_name_for(aid, project_dir)
-            for ch in channels:
-                msg = ChannelMessage(
-                    timestamp=leave_time, from_agent=aid, from_display=reap_display,
-                    channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
-                )
-                _append_message(msg, project_dir, conn=conn)
+        # Never write leave messages to the channel log. The presence
+        # table already tracks online/offline status; JSONL leave events
+        # are redundant noise that clutters the feed. (recall#677)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
         if is_ephemeral:
