@@ -86,6 +86,7 @@ def _open_db(org_id: str, db_path: Path | None = None) -> sqlite3.Connection:
     path = db_path or _team_db_path(org_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     return conn
@@ -246,6 +247,7 @@ def update_agent_status(
 ) -> None:
     """Update process tracking columns for an agent."""
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     try:
@@ -263,6 +265,7 @@ def update_agent_status(
 def get_agent_status(db_path: Path, agent_id: str) -> dict[str, Any] | None:
     """Return process tracking info for an agent."""
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     try:
@@ -281,6 +284,7 @@ def get_agent_status(db_path: Path, agent_id: str) -> dict[str, Any] | None:
 def detect_crashed_agents(db_path: Path) -> list[dict[str, Any]]:
     """Find agents with status='running' but dead PIDs."""
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     try:
@@ -311,6 +315,7 @@ def detect_crashed_agents(db_path: Path) -> list[dict[str, Any]]:
 def clear_agent_session(db_path: Path, agent_id: str) -> None:
     """Reset process columns while preserving agent identity."""
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     try:
