@@ -264,13 +264,28 @@
     display: none;
     background: #141420;
     border-top: 1px solid var(--border);
-    max-height: 220px;
+    height: 220px;
+    min-height: 120px;
     overflow-y: auto;
     font-size: 12px;
     line-height: 1.5;
     flex-shrink: 0;
+    transition: height 0.2s ease;
+    position: relative;
   }
   #agent-output-panel.active { display: block; }
+  #agent-output-panel.expanded { height: 50vh; display: flex; flex-direction: column; overflow: hidden; }
+  #agent-output-panel.fullscreen {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    height: 100vh;
+    z-index: 1000;
+    border: none;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
   #agent-output-panel .output-header {
     padding: 5px 16px;
     font-weight: 600;
@@ -280,8 +295,157 @@
     background: var(--surface);
     position: sticky;
     top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
-  #agent-output-content { padding: 8px 16px; white-space: pre-wrap; font-family: inherit; color: var(--text); }
+  .output-title { flex: 1; }
+  .output-controls { display: flex; gap: 6px; align-items: center; }
+  .output-controls button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .output-controls button:hover { color: var(--accent); border-color: var(--accent); }
+  #scroll-indicator {
+    display: none;
+    position: absolute;
+    bottom: 8px;
+    right: 16px;
+    background: var(--accent);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    cursor: pointer;
+    z-index: 2;
+    opacity: 0.9;
+  }
+  #scroll-indicator:hover { opacity: 1; }
+  #agent-output-content {
+    padding: 8px 16px; white-space: pre; font-family: inherit; color: var(--text);
+    flex: 1; overflow-y: auto; overflow-x: auto; position: relative;
+  }
+  #agent-output-content .ansi-line { display: block; min-height: 1.5em; }
+  #tmux-cursor {
+    display: inline-block;
+    width: 0.6em;
+    height: 1.2em;
+    background: var(--accent);
+    opacity: 0.8;
+    position: absolute;
+    pointer-events: none;
+    animation: cursor-blink 1s step-end infinite;
+  }
+  @keyframes cursor-blink {
+    0%, 100% { opacity: 0.8; }
+    50% { opacity: 0; }
+  }
+  /* Drop zone overlay for drag-and-drop images */
+  .drop-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(139, 92, 246, 0.15);
+    border: 2px dashed var(--accent);
+    border-radius: 8px;
+    z-index: 100;
+    pointer-events: none;
+    align-items: center;
+    justify-content: center;
+  }
+  .drop-overlay.active { display: flex; }
+  .drop-overlay-text {
+    background: var(--surface);
+    color: var(--accent);
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid var(--accent);
+  }
+  /* Inline input bar — visible only in fullscreen/expanded */
+  .output-input-bar {
+    display: none;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  #agent-output-panel.fullscreen .output-input-bar,
+  #agent-output-panel.expanded .output-input-bar { display: flex; }
+  .output-input-bar textarea {
+    flex: 1;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    line-height: 1.4;
+    resize: none;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  .output-input-bar textarea:focus { border-color: var(--accent); }
+  .output-input-bar button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  /* Key palette — always visible when output panel is active */
+  .key-palette {
+    display: none;
+    gap: 4px;
+    padding: 6px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  #agent-output-panel.active .key-palette { display: flex; }
+  .key-palette .key-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-right: 4px;
+    user-select: none;
+  }
+  .key-palette button {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .key-palette button:hover { border-color: var(--accent); color: var(--accent); }
+  .key-palette .key-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    margin: 0 4px;
+  }
 
   /* ── Input bar ────────────────────────────────────────── */
   #input-bar {
@@ -380,8 +544,37 @@
       </div>
 
       <div id="agent-output-panel">
-        <div class="output-header" id="agent-output-header">Terminal: agent</div>
+        <div class="output-header" id="agent-output-header">
+          <span class="output-title">Terminal: agent</span>
+          <div class="output-controls">
+            <button id="output-expand-btn" title="Expand panel">expand</button>
+            <button id="output-fullscreen-btn" title="Fullscreen">fullscreen</button>
+            <button id="output-popout-btn" title="Open in new window">pop out</button>
+            <button id="output-close-btn" title="Close">close</button>
+          </div>
+        </div>
+        <div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop image to send to agent</span></div>
         <div id="agent-output-content">No output yet.</div>
+        <div id="scroll-indicator">new output below</div>
+        <div class="key-palette" id="key-palette">
+          <span class="key-label">Keys:</span>
+          <button data-key="Enter" title="Confirm / select">Enter</button>
+          <button data-key="Escape" title="Cancel / dismiss">Esc</button>
+          <button data-key="y" title="Yes">y</button>
+          <button data-key="n" title="No">n</button>
+          <div class="key-sep"></div>
+          <button data-key="Up" title="Arrow up">Up</button>
+          <button data-key="Down" title="Arrow down">Down</button>
+          <button data-key="Tab" title="Tab / next">Tab</button>
+          <div class="key-sep"></div>
+          <button data-key="C-c" title="Ctrl+C (interrupt)">^C</button>
+          <button data-key="C-d" title="Ctrl+D (EOF)">^D</button>
+          <button data-key="q" title="Quit">q</button>
+        </div>
+        <div class="output-input-bar">
+          <textarea id="output-inline-input" placeholder="Send to agent... (Shift+Enter for newline)" autocomplete="off" rows="1"></textarea>
+          <button id="output-inline-send">Send</button>
+        </div>
       </div>
 
       <div id="feed">
@@ -710,6 +903,36 @@ document.getElementById('agents').addEventListener('click', function(e) {
   showAgentOutput(name);
 });
 
+// Map browser key names to tmux key names for forwarding
+const _KEY_MAP = {
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Escape: 'Escape', Tab: 'Tab', Enter: 'Enter',
+};
+
+// Forward special keys to agent when input field is empty
+function handleInputKeydown(inputEl, e) {
+  if (!selectedAgent) return false;
+  var tmuxKey = _KEY_MAP[e.key];
+  // If field is empty and key is mappable, forward to agent
+  if (tmuxKey && !inputEl.value.trim()) {
+    // Enter on empty field = bare Enter (confirm selection)
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      fetch('/api/agent/' + selectedAgent + '/input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ text: '' }),
+      }).then(function() { setTimeout(refreshOutputNow, 150); });
+      return true;
+    }
+    // Arrow keys, Escape, Tab on empty field = send raw key
+    e.preventDefault();
+    sendKey(tmuxKey);  // sendKey already triggers refreshOutputNow
+    return true;
+  }
+  return false;
+}
+
 function sendAgentInput() {
   if (!selectedAgent || !agentInput.value.trim()) return;
   fetch('/api/agent/' + selectedAgent + '/input', {
@@ -722,27 +945,372 @@ function sendAgentInput() {
 }
 agentSendBtn.addEventListener('click', sendAgentInput);
 agentInput.addEventListener('keydown', function(e) {
+  if (handleInputKeydown(agentInput, e)) return;
   if (e.key === 'Enter') { e.preventDefault(); sendAgentInput(); }
 });
 
 // ── Agent output panel ────────────────────────────────────
 const outputPanel = document.getElementById('agent-output-panel');
-const outputHeader = document.getElementById('agent-output-header');
+const outputTitle = outputPanel.querySelector('.output-title');
 const outputContent = document.getElementById('agent-output-content');
+const scrollIndicator = document.getElementById('scroll-indicator');
 let outputInterval = null;
+let userScrolledUp = false;
+
+// Track whether user has scrolled away from bottom
+outputPanel.addEventListener('scroll', function() {
+  const atBottom = outputPanel.scrollHeight - outputPanel.scrollTop - outputPanel.clientHeight < 30;
+  userScrolledUp = !atBottom;
+  scrollIndicator.style.display = userScrolledUp ? 'block' : 'none';
+});
+
+// Click scroll indicator to jump to bottom
+scrollIndicator.addEventListener('click', function() {
+  outputPanel.scrollTop = outputPanel.scrollHeight;
+  userScrolledUp = false;
+  scrollIndicator.style.display = 'none';
+});
+
+// ── Inline ANSI-to-HTML parser ────────────────────────────
+// Handles SGR sequences: colors (standard, 256, RGB), bold, dim, underline, reset
+var _ANSI_COLORS = [
+  '#000','#c00','#0a0','#aa0','#55f','#a0a','#0aa','#aaa',  // 30-37
+  '#555','#f55','#5f5','#ff5','#55f','#f5f','#5ff','#fff',  // 90-97
+];
+function _ansi256(n) {
+  if (n < 8) return _ANSI_COLORS[n];
+  if (n < 16) return _ANSI_COLORS[n - 8 + 8];
+  if (n < 232) {
+    n -= 16; var b = n % 6, g = ((n - b) / 6) % 6, r = ((n - b - g * 6) / 36);
+    return 'rgb(' + [r && r*40+55, g && g*40+55, b && b*40+55].join(',') + ')';
+  }
+  var v = (n - 232) * 10 + 8;
+  return 'rgb(' + v + ',' + v + ',' + v + ')';
+}
+function _escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function ansiToHtml(text) {
+  var result = '', style = {}, open = false;
+  // Split on ANSI escape sequences
+  var parts = text.split(/(\x1b\[[0-9;]*m)/);
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    var m = p.match(/^\x1b\[([\d;]*)m$/);
+    if (m) {
+      var codes = m[1] ? m[1].split(';').map(Number) : [0];
+      for (var j = 0; j < codes.length; j++) {
+        var c = codes[j];
+        if (c === 0) { style = {}; }
+        else if (c === 1) { style.bold = true; }
+        else if (c === 2) { style.dim = true; }
+        else if (c === 3) { style.italic = true; }
+        else if (c === 4) { style.underline = true; }
+        else if (c === 22) { delete style.bold; delete style.dim; }
+        else if (c === 23) { delete style.italic; }
+        else if (c === 24) { delete style.underline; }
+        else if (c >= 30 && c <= 37) { style.fg = _ANSI_COLORS[c - 30]; }
+        else if (c === 38) {
+          if (codes[j+1] === 5 && codes[j+2] !== undefined) { style.fg = _ansi256(codes[j+2]); j += 2; }
+          else if (codes[j+1] === 2 && codes[j+4] !== undefined) { style.fg = 'rgb('+codes[j+2]+','+codes[j+3]+','+codes[j+4]+')'; j += 4; }
+        }
+        else if (c === 39) { delete style.fg; }
+        else if (c >= 40 && c <= 47) { style.bg = _ANSI_COLORS[c - 40]; }
+        else if (c === 48) {
+          if (codes[j+1] === 5 && codes[j+2] !== undefined) { style.bg = _ansi256(codes[j+2]); j += 2; }
+          else if (codes[j+1] === 2 && codes[j+4] !== undefined) { style.bg = 'rgb('+codes[j+2]+','+codes[j+3]+','+codes[j+4]+')'; j += 4; }
+        }
+        else if (c === 49) { delete style.bg; }
+        else if (c >= 90 && c <= 97) { style.fg = _ANSI_COLORS[c - 90 + 8]; }
+        else if (c >= 100 && c <= 107) { style.bg = _ANSI_COLORS[c - 100 + 8]; }
+      }
+      continue;
+    }
+    if (!p) continue;
+    var css = '';
+    if (style.fg) css += 'color:' + style.fg + ';';
+    if (style.bg) css += 'background:' + style.bg + ';';
+    if (style.bold) css += 'font-weight:700;';
+    if (style.dim) css += 'opacity:0.6;';
+    if (style.italic) css += 'font-style:italic;';
+    if (style.underline) css += 'text-decoration:underline;';
+    if (css) {
+      result += '<span style="' + css + '">' + _escHtml(p) + '</span>';
+    } else {
+      result += _escHtml(p);
+    }
+  }
+  return result;
+}
+
+function renderAnsiContent(data) {
+  if (!data.content) return;
+  var lines = data.content.split('\n');
+  var html = '';
+  for (var i = 0; i < lines.length; i++) {
+    html += '<span class="ansi-line" data-line="' + i + '">' +
+            ansiToHtml(lines[i]) + '</span>\n';
+  }
+  outputContent.innerHTML = html;
+  if (typeof data.cursor_x === 'number' && typeof data.cursor_y === 'number') {
+    positionCursor(data.cursor_x, data.cursor_y, data.pane_height || 50);
+  }
+}
+
+function positionCursor(cx, cy, paneHeight) {
+  var existing = document.getElementById('tmux-cursor');
+  if (existing) existing.remove();
+  var lines = outputContent.querySelectorAll('.ansi-line');
+  var totalLines = lines.length;
+  var targetLine = totalLines - paneHeight + cy;
+  if (targetLine < 0 || targetLine >= totalLines) return;
+  var line = lines[targetLine];
+  if (!line) return;
+  var cursor = document.createElement('span');
+  cursor.id = 'tmux-cursor';
+  var charWidth = 7.2; // monospace char width at 12px
+  cursor.style.left = (16 + cx * charWidth) + 'px';
+  cursor.style.top = line.offsetTop + 'px';
+  outputContent.appendChild(cursor);
+}
+
+// Immediate snapshot refresh after interaction
+function refreshOutputNow() {
+  if (!selectedAgent) return;
+  fetch('/api/agent/' + selectedAgent + '/snapshot?lines=80&ansi=true')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.content) {
+        renderAnsiContent(data);
+        outputPanel.scrollTop = outputPanel.scrollHeight;
+      }
+    }).catch(function() {});
+}
+
+// Key palette — send raw tmux key names
+function sendKey(keyName) {
+  if (!selectedAgent) return;
+  fetch('/api/agent/' + selectedAgent + '/key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ key: keyName }),
+  }).then(function() {
+    // Refresh after a brief delay to let the terminal redraw
+    setTimeout(refreshOutputNow, 150);
+  });
+}
+
+document.getElementById('key-palette').addEventListener('click', function(e) {
+  const btn = e.target.closest('button[data-key]');
+  if (btn) sendKey(btn.dataset.key);
+});
+
+// Inline input bar (visible in expanded/fullscreen modes)
+const inlineInput = document.getElementById('output-inline-input');
+const inlineSendBtn = document.getElementById('output-inline-send');
+
+function sendInlineInput() {
+  if (!selectedAgent || !inlineInput.value.trim()) return;
+  fetch('/api/agent/' + selectedAgent + '/input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ text: inlineInput.value }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) { inlineInput.value = ''; agentInput.value = ''; }
+  });
+}
+inlineSendBtn.addEventListener('click', sendInlineInput);
+inlineInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && e.shiftKey) return; // allow newline
+  if (handleInputKeydown(inlineInput, e)) return;
+  if (e.key === 'Enter') { e.preventDefault(); sendInlineInput(); }
+});
+inlineInput.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+});
+
+// Expand toggle
+document.getElementById('output-expand-btn').addEventListener('click', function() {
+  outputPanel.classList.toggle('expanded');
+  outputPanel.classList.remove('fullscreen');
+  this.textContent = outputPanel.classList.contains('expanded') ? 'collapse' : 'expand';
+  document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
+});
+
+// Fullscreen toggle
+document.getElementById('output-fullscreen-btn').addEventListener('click', function() {
+  outputPanel.classList.toggle('fullscreen');
+  outputPanel.classList.remove('expanded');
+  this.textContent = outputPanel.classList.contains('fullscreen') ? 'exit fullscreen' : 'fullscreen';
+  document.getElementById('output-expand-btn').textContent = 'expand';
+});
+
+// Pop out to new window (with input)
+document.getElementById('output-popout-btn').addEventListener('click', function() {
+  if (!selectedAgent) return;
+  const win = window.open('', 'agent-output-' + selectedAgent, 'width=900,height=700');
+  if (!win) return;
+  const popHtml = [
+    '<!DOCTYPE html><html><head><title>Terminal: ' + selectedAgent + '</title>',
+    '<style>',
+    '*{box-sizing:border-box;margin:0;padding:0;}',
+    'body{background:#141420;color:#e4e4e7;font-family:"SF Mono","Fira Code",monospace;',
+    'font-size:13px;line-height:1.5;display:flex;flex-direction:column;height:100vh;overflow:hidden;}',
+    '#out{flex:1;overflow-y:auto;padding:16px;white-space:pre-wrap;}',
+    '.key-bar{display:flex;gap:4px;padding:6px 16px;border-top:1px solid #2a2d3a;background:#1a1d27;flex-wrap:wrap;align-items:center;}',
+    '.key-bar .kl{font-size:10px;color:#71717a;margin-right:4px;}',
+    '.key-bar button{background:#0f1117;border:1px solid #2a2d3a;color:#e4e4e7;padding:3px 10px;border-radius:4px;',
+    'font-family:inherit;font-size:11px;cursor:pointer;}.key-bar button:hover{border-color:#8b5cf6;color:#8b5cf6;}',
+    '.key-bar .ks{width:1px;height:18px;background:#2a2d3a;margin:0 4px;}',
+    '.input-bar{display:flex;gap:8px;padding:10px 16px;border-top:1px solid #2a2d3a;background:#1a1d27;flex-shrink:0;}',
+    '.input-bar input{flex:1;background:#0f1117;color:#e4e4e7;border:1px solid #2a2d3a;padding:8px 12px;',
+    'border-radius:6px;font-family:inherit;font-size:13px;outline:none;}',
+    '.input-bar input:focus{border-color:#8b5cf6;}',
+    '.input-bar button{background:#8b5cf6;color:white;border:none;padding:8px 16px;border-radius:6px;',
+    'cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;}',
+    '</style></head><body>',
+    '<pre id="out"></pre>',
+    '<div class="key-bar">',
+    '<span class="kl">Keys:</span>',
+    '<button data-key="Enter">Enter</button><button data-key="Escape">Esc</button>',
+    '<button data-key="y">y</button><button data-key="n">n</button>',
+    '<div class="ks"></div>',
+    '<button data-key="Up">Up</button><button data-key="Down">Down</button><button data-key="Tab">Tab</button>',
+    '<div class="ks"></div>',
+    '<button data-key="C-c">^C</button><button data-key="C-d">^D</button><button data-key="q">q</button>',
+    '</div>',
+    '<div class="input-bar">',
+    '<input type="text" id="inp" placeholder="Send to ' + selectedAgent + '..." autocomplete="off" autofocus>',
+    '<button id="btn">Send</button>',
+    '</div>',
+    '<script>',
+    'var name="' + selectedAgent + '",origin="' + location.origin + '";',
+    'var AC=["#000","#c00","#0a0","#aa0","#55f","#a0a","#0aa","#aaa","#555","#f55","#5f5","#ff5","#55f","#f5f","#5ff","#fff"];',
+    'function a256(n){if(n<8)return AC[n];if(n<16)return AC[n-8+8];if(n<232){n-=16;var b=n%6,g=((n-b)/6)%6,r=((n-b-g*6)/36);return"rgb("+(r&&r*40+55)+","+(g&&g*40+55)+","+(b&&b*40+55)+")";}var v=(n-232)*10+8;return"rgb("+v+","+v+","+v+")";}',
+    'function eH(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}',
+    'function aToH(t){var r="",s={},p=t.split(/(\\x1b\\[[0-9;]*m)/);for(var i=0;i<p.length;i++){var x=p[i],m=x.match(/^\\x1b\\[([\\d;]*)m$/);if(m){var codes=m[1]?m[1].split(";").map(Number):[0];for(var j=0;j<codes.length;j++){var c=codes[j];if(c===0)s={};else if(c===1)s.b=1;else if(c===2)s.d=1;else if(c===3)s.i=1;else if(c===4)s.u=1;else if(c===22){delete s.b;delete s.d;}else if(c>=30&&c<=37)s.fg=AC[c-30];else if(c===38){if(codes[j+1]===5&&codes[j+2]!==void 0){s.fg=a256(codes[j+2]);j+=2;}else if(codes[j+1]===2&&codes[j+4]!==void 0){s.fg="rgb("+codes[j+2]+","+codes[j+3]+","+codes[j+4]+")";j+=4;}}else if(c===39)delete s.fg;else if(c>=40&&c<=47)s.bg=AC[c-40];else if(c===48){if(codes[j+1]===5&&codes[j+2]!==void 0){s.bg=a256(codes[j+2]);j+=2;}else if(codes[j+1]===2&&codes[j+4]!==void 0){s.bg="rgb("+codes[j+2]+","+codes[j+3]+","+codes[j+4]+")";j+=4;}}else if(c===49)delete s.bg;else if(c>=90&&c<=97)s.fg=AC[c-90+8];else if(c>=100&&c<=107)s.bg=AC[c-100+8];}continue;}if(!x)continue;var css="";if(s.fg)css+="color:"+s.fg+";";if(s.bg)css+="background:"+s.bg+";";if(s.b)css+="font-weight:700;";if(s.d)css+="opacity:0.6;";if(s.i)css+="font-style:italic;";if(s.u)css+="text-decoration:underline;";r+=css?"<span style=\\""+css+"\\">"+eH(x)+"</span>":eH(x);}return r;}',
+    'function poll(){fetch(origin+"/api/agent/"+name+"/snapshot?lines=200&ansi=true")',
+    '.then(function(r){return r.json()}).then(function(d){if(d.content){var o=document.getElementById("out");',
+    'var atBot=o.scrollHeight-o.scrollTop-o.clientHeight<30;',
+    'var lines=d.content.split("\\n"),h="";for(var i=0;i<lines.length;i++)h+=aToH(lines[i])+"\\n";',
+    'o.innerHTML=h;if(atBot)o.scrollTop=o.scrollHeight;}})',
+    '.catch(function(){});}poll();setInterval(poll,2000);',
+    'function send(){var i=document.getElementById("inp");if(!i.value.trim())return;',
+    'fetch(origin+"/api/agent/"+name+"/input",{method:"POST",',
+    'headers:{"Content-Type":"application/x-www-form-urlencoded"},',
+    'body:new URLSearchParams({text:i.value})}).then(function(r){return r.json()}).then(function(d){if(d.ok)i.value="";});}',
+    'document.getElementById("btn").addEventListener("click",send);',
+    'var km={ArrowUp:"Up",ArrowDown:"Down",ArrowLeft:"Left",ArrowRight:"Right",Escape:"Escape",Tab:"Tab",Enter:"Enter"};',
+    'document.getElementById("inp").addEventListener("keydown",function(e){',
+    'var i=document.getElementById("inp"),k=km[e.key];',
+    'if(k&&!i.value.trim()){e.preventDefault();if(e.key==="Enter"){fetch(origin+"/api/agent/"+name+"/input",',
+    '{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},',
+    'body:new URLSearchParams({text:""})}).then(function(){setTimeout(poll,150)});}else{sendKey(k);}return;}',
+    'if(e.key==="Enter"){e.preventDefault();send();}});',
+    'function sendKey(k){fetch(origin+"/api/agent/"+name+"/key",{method:"POST",',
+    'headers:{"Content-Type":"application/x-www-form-urlencoded"},',
+    'body:new URLSearchParams({key:k})}).then(function(){setTimeout(poll,150)});}',
+    'document.querySelector(".key-bar").addEventListener("click",function(e){',
+    'var b=e.target.closest("button[data-key]");if(b)sendKey(b.dataset.key);});',
+    '<\/script></body></html>'
+  ].join('\n');
+  win.document.write(popHtml);
+  win.document.close();
+});
+
+// Close output panel
+document.getElementById('output-close-btn').addEventListener('click', function() {
+  hideAgentOutput();
+  selectedAgent = null;
+  document.querySelectorAll('.tile.selected').forEach(t => t.classList.remove('selected'));
+  agentPanel.classList.remove('active');
+});
+
+// Escape key exits fullscreen
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && outputPanel.classList.contains('fullscreen')) {
+    outputPanel.classList.remove('fullscreen');
+    document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
+  }
+});
+
+// ── Drag-and-drop image upload to agent ──────────────────
+var dropOverlay = document.getElementById('drop-overlay');
+var dragCounter = 0;
+
+outputPanel.addEventListener('dragenter', function(e) {
+  e.preventDefault();
+  dragCounter++;
+  if (selectedAgent && e.dataTransfer.types.indexOf('Files') !== -1) {
+    dropOverlay.classList.add('active');
+  }
+});
+
+outputPanel.addEventListener('dragleave', function(e) {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+  }
+});
+
+outputPanel.addEventListener('dragover', function(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+
+outputPanel.addEventListener('drop', function(e) {
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.remove('active');
+  if (!selectedAgent || !e.dataTransfer.files.length) return;
+  var file = e.dataTransfer.files[0];
+  var formData = new FormData();
+  formData.append('file', file);
+  dropOverlay.querySelector('.drop-overlay-text').textContent = 'Uploading ' + file.name + '...';
+  dropOverlay.classList.add('active');
+  fetch('/api/agent/' + selectedAgent + '/upload', {
+    method: 'POST',
+    body: formData,
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    dropOverlay.classList.remove('active');
+    dropOverlay.querySelector('.drop-overlay-text').textContent = 'Drop image to send to agent';
+    if (d.ok) {
+      setTimeout(refreshOutputNow, 150);
+    }
+  })
+  .catch(function() {
+    dropOverlay.classList.remove('active');
+    dropOverlay.querySelector('.drop-overlay-text').textContent = 'Drop image to send to agent';
+  });
+});
 
 function showAgentOutput(name) {
-  outputHeader.textContent = 'Terminal: ' + name;
+  outputTitle.textContent = 'Terminal: ' + name;
   outputPanel.classList.add('active');
+  outputPanel.classList.remove('expanded', 'fullscreen');
+  document.getElementById('output-expand-btn').textContent = 'expand';
+  document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
   outputContent.textContent = 'Loading\u2026';
+  userScrolledUp = false;
+  scrollIndicator.style.display = 'none';
   if (outputInterval) clearInterval(outputInterval);
   function fetchSnapshot() {
-    fetch('/api/agent/' + name + '/snapshot?lines=40')
+    fetch('/api/agent/' + name + '/snapshot?lines=80&ansi=true')
       .then(r => r.json())
       .then(data => {
         if (data.content) {
-          outputContent.textContent = data.content;
-          outputPanel.scrollTop = outputPanel.scrollHeight;
+          const wasAtBottom = !userScrolledUp;
+          renderAnsiContent(data);
+          if (wasAtBottom) {
+            outputPanel.scrollTop = outputPanel.scrollHeight;
+          } else {
+            scrollIndicator.style.display = 'block';
+          }
         } else if (data.error) {
           outputContent.textContent = '(' + data.error + ')';
         }
@@ -754,7 +1322,7 @@ function showAgentOutput(name) {
 }
 
 function hideAgentOutput() {
-  outputPanel.classList.remove('active');
+  outputPanel.classList.remove('active', 'expanded', 'fullscreen');
   if (outputInterval) { clearInterval(outputInterval); outputInterval = null; }
 }
 </script>

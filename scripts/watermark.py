@@ -9,6 +9,18 @@ Watermark style: synapt logo icon (cropped, transparent) + purple "synapt"
 text on subtle dark pill, top-left corner. Matches the pixel-perfect style
 iterated in the 2026-03-27 session.
 
+Hero image standard:
+    - Canonical size: 1408x768 (exact). All blog hero images must be this size.
+    - Generated via fal-ai/nano-banana-2 (nano-banana-2 may produce 1376x768 or
+      1584x672; resize to 1408x768 with cover-crop before watermarking).
+    - Naming: {slug}-hero-raw.png (pre-watermark), {slug}-hero.png (final).
+    - Style: cyberpunk owl theme, purple/teal accent lighting, dark background.
+    - Owl theme is enforced by hero.py and generate_hero.py via STYLE_SUFFIX.
+      Owls must always be the focal subject. Humans may appear alongside owls
+      when the post context calls for it (e.g. human-AI collaboration themes).
+    - The blog CSS uses aspect-ratio: 16/9 + object-fit: cover on card thumbnails,
+      so non-standard sizes will crop unevenly and may hide the watermark.
+
 Requires: Pillow, and the birefnet-cleaned icon at /tmp/icon-nobg.png
 or assets/logo.png as fallback.
 """
@@ -33,9 +45,29 @@ def find_icon() -> Path:
     raise FileNotFoundError("No logo icon found. Need /tmp/icon-nobg.png or assets/logo.png")
 
 
-def apply_watermark(image_path: str, output_path: str | None = None) -> str:
+HERO_SIZE = (1408, 768)  # Canonical blog hero dimensions
+
+
+def resize_to_standard(img: Image.Image) -> Image.Image:
+    """Resize image to canonical HERO_SIZE using cover-crop."""
+    if img.size == HERO_SIZE:
+        return img
+    scale = max(HERO_SIZE[0] / img.width, HERO_SIZE[1] / img.height)
+    new_w = int(img.width * scale)
+    new_h = int(img.height * scale)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    left = (new_w - HERO_SIZE[0]) // 2
+    top = (new_h - HERO_SIZE[1]) // 2
+    return img.crop((left, top, left + HERO_SIZE[0], top + HERO_SIZE[1]))
+
+
+def apply_watermark(image_path: str, output_path: str | None = None, resize: bool = True) -> str:
     """Apply synapt watermark to an image. Returns output path."""
     hero = Image.open(image_path).convert("RGBA")
+    if resize and hero.size != HERO_SIZE:
+        old = hero.size
+        hero = resize_to_standard(hero)
+        print(f"Resized: {old[0]}x{old[1]} -> {HERO_SIZE[0]}x{HERO_SIZE[1]}")
     icon = Image.open(find_icon()).convert("RGBA")
     icon_cropped = icon.crop(icon.getbbox())
 
@@ -95,5 +127,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apply synapt watermark to hero image")
     parser.add_argument("image", help="Path to hero image")
     parser.add_argument("--output", "-o", help="Output path (default: overwrite input)")
+    parser.add_argument("--no-resize", action="store_true", help="Skip auto-resize to 1408x768")
     args = parser.parse_args()
-    apply_watermark(args.image, args.output)
+    apply_watermark(args.image, args.output, resize=not args.no_resize)

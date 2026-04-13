@@ -25,7 +25,8 @@ from PIL import Image, ImageDraw, ImageFont
 # Style guide — append to user prompts for visual consistency across blog posts.
 # All hero images should match this aesthetic.
 STYLE_SUFFIX = (
-    ", wireframe holographic style, glowing cyan and purple neon lines, "
+    ", wireframe holographic owl as focal subject, "
+    "glowing cyan and purple neon lines, "
     "dark ethereal cave background with floating particles, "
     "digital circuitry details, synapt brand aesthetic"
 )
@@ -55,7 +56,9 @@ STYLE_SUFFIX = (
 #
 # Key learnings:
 # - Add "no text, no words, no letters" when you don't want baked-in text
-# - Owls are the synapt mascot — always include
+# - Owls are the synapt mascot — ALWAYS include (enforced via STYLE_SUFFIX)
+# - STYLE_SUFFIX auto-appends "wireframe holographic owl" + negative prompts
+#   for humans/robots so agents can't accidentally generate non-owl heroes
 # - Purple/teal/cyan are brand colors
 # - Dark backgrounds with particles/bioluminescence = consistent look
 
