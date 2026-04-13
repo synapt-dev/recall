@@ -329,7 +329,25 @@
     opacity: 0.9;
   }
   #scroll-indicator:hover { opacity: 1; }
-  #agent-output-content { padding: 8px 16px; white-space: pre-wrap; font-family: inherit; color: var(--text); flex: 1; overflow-y: auto; }
+  #agent-output-content {
+    padding: 8px 16px; white-space: pre; font-family: inherit; color: var(--text);
+    flex: 1; overflow-y: auto; overflow-x: auto; position: relative;
+  }
+  #agent-output-content .ansi-line { display: block; min-height: 1.5em; }
+  #tmux-cursor {
+    display: inline-block;
+    width: 0.6em;
+    height: 1.2em;
+    background: var(--accent);
+    opacity: 0.8;
+    position: absolute;
+    pointer-events: none;
+    animation: cursor-blink 1s step-end infinite;
+  }
+  @keyframes cursor-blink {
+    0%, 100% { opacity: 0.8; }
+    50% { opacity: 0; }
+  }
   /* Inline input bar — visible only in fullscreen/expanded */
   .output-input-bar {
     display: none;
@@ -363,6 +381,43 @@
     font-family: inherit;
     font-size: 13px;
     font-weight: 600;
+  }
+  /* Key palette — always visible when output panel is active */
+  .key-palette {
+    display: none;
+    gap: 4px;
+    padding: 6px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  #agent-output-panel.active .key-palette { display: flex; }
+  .key-palette .key-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-right: 4px;
+    user-select: none;
+  }
+  .key-palette button {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .key-palette button:hover { border-color: var(--accent); color: var(--accent); }
+  .key-palette .key-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    margin: 0 4px;
   }
 
   /* ── Input bar ────────────────────────────────────────── */
@@ -473,6 +528,21 @@
         </div>
         <div id="agent-output-content">No output yet.</div>
         <div id="scroll-indicator">new output below</div>
+        <div class="key-palette" id="key-palette">
+          <span class="key-label">Keys:</span>
+          <button data-key="Enter" title="Confirm / select">Enter</button>
+          <button data-key="Escape" title="Cancel / dismiss">Esc</button>
+          <button data-key="y" title="Yes">y</button>
+          <button data-key="n" title="No">n</button>
+          <div class="key-sep"></div>
+          <button data-key="Up" title="Arrow up">Up</button>
+          <button data-key="Down" title="Arrow down">Down</button>
+          <button data-key="Tab" title="Tab / next">Tab</button>
+          <div class="key-sep"></div>
+          <button data-key="C-c" title="Ctrl+C (interrupt)">^C</button>
+          <button data-key="C-d" title="Ctrl+D (EOF)">^D</button>
+          <button data-key="q" title="Quit">q</button>
+        </div>
         <div class="output-input-bar">
           <input type="text" id="output-inline-input" placeholder="Send to agent..." autocomplete="off">
           <button id="output-inline-send">Send</button>
@@ -805,6 +875,36 @@ document.getElementById('agents').addEventListener('click', function(e) {
   showAgentOutput(name);
 });
 
+// Map browser key names to tmux key names for forwarding
+const _KEY_MAP = {
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Escape: 'Escape', Tab: 'Tab', Enter: 'Enter',
+};
+
+// Forward special keys to agent when input field is empty
+function handleInputKeydown(inputEl, e) {
+  if (!selectedAgent) return false;
+  var tmuxKey = _KEY_MAP[e.key];
+  // If field is empty and key is mappable, forward to agent
+  if (tmuxKey && !inputEl.value.trim()) {
+    // Enter on empty field = bare Enter (confirm selection)
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      fetch('/api/agent/' + selectedAgent + '/input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ text: '' }),
+      }).then(function() { setTimeout(refreshOutputNow, 150); });
+      return true;
+    }
+    // Arrow keys, Escape, Tab on empty field = send raw key
+    e.preventDefault();
+    sendKey(tmuxKey);  // sendKey already triggers refreshOutputNow
+    return true;
+  }
+  return false;
+}
+
 function sendAgentInput() {
   if (!selectedAgent || !agentInput.value.trim()) return;
   fetch('/api/agent/' + selectedAgent + '/input', {
@@ -817,6 +917,7 @@ function sendAgentInput() {
 }
 agentSendBtn.addEventListener('click', sendAgentInput);
 agentInput.addEventListener('keydown', function(e) {
+  if (handleInputKeydown(agentInput, e)) return;
   if (e.key === 'Enter') { e.preventDefault(); sendAgentInput(); }
 });
 
@@ -842,6 +943,140 @@ scrollIndicator.addEventListener('click', function() {
   scrollIndicator.style.display = 'none';
 });
 
+// ── Inline ANSI-to-HTML parser ────────────────────────────
+// Handles SGR sequences: colors (standard, 256, RGB), bold, dim, underline, reset
+var _ANSI_COLORS = [
+  '#000','#c00','#0a0','#aa0','#55f','#a0a','#0aa','#aaa',  // 30-37
+  '#555','#f55','#5f5','#ff5','#55f','#f5f','#5ff','#fff',  // 90-97
+];
+function _ansi256(n) {
+  if (n < 8) return _ANSI_COLORS[n];
+  if (n < 16) return _ANSI_COLORS[n - 8 + 8];
+  if (n < 232) {
+    n -= 16; var b = n % 6, g = ((n - b) / 6) % 6, r = ((n - b - g * 6) / 36);
+    return 'rgb(' + [r && r*40+55, g && g*40+55, b && b*40+55].join(',') + ')';
+  }
+  var v = (n - 232) * 10 + 8;
+  return 'rgb(' + v + ',' + v + ',' + v + ')';
+}
+function _escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function ansiToHtml(text) {
+  var result = '', style = {}, open = false;
+  // Split on ANSI escape sequences
+  var parts = text.split(/(\x1b\[[0-9;]*m)/);
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    var m = p.match(/^\x1b\[([\d;]*)m$/);
+    if (m) {
+      var codes = m[1] ? m[1].split(';').map(Number) : [0];
+      for (var j = 0; j < codes.length; j++) {
+        var c = codes[j];
+        if (c === 0) { style = {}; }
+        else if (c === 1) { style.bold = true; }
+        else if (c === 2) { style.dim = true; }
+        else if (c === 3) { style.italic = true; }
+        else if (c === 4) { style.underline = true; }
+        else if (c === 22) { delete style.bold; delete style.dim; }
+        else if (c === 23) { delete style.italic; }
+        else if (c === 24) { delete style.underline; }
+        else if (c >= 30 && c <= 37) { style.fg = _ANSI_COLORS[c - 30]; }
+        else if (c === 38) {
+          if (codes[j+1] === 5 && codes[j+2] !== undefined) { style.fg = _ansi256(codes[j+2]); j += 2; }
+          else if (codes[j+1] === 2 && codes[j+4] !== undefined) { style.fg = 'rgb('+codes[j+2]+','+codes[j+3]+','+codes[j+4]+')'; j += 4; }
+        }
+        else if (c === 39) { delete style.fg; }
+        else if (c >= 40 && c <= 47) { style.bg = _ANSI_COLORS[c - 40]; }
+        else if (c === 48) {
+          if (codes[j+1] === 5 && codes[j+2] !== undefined) { style.bg = _ansi256(codes[j+2]); j += 2; }
+          else if (codes[j+1] === 2 && codes[j+4] !== undefined) { style.bg = 'rgb('+codes[j+2]+','+codes[j+3]+','+codes[j+4]+')'; j += 4; }
+        }
+        else if (c === 49) { delete style.bg; }
+        else if (c >= 90 && c <= 97) { style.fg = _ANSI_COLORS[c - 90 + 8]; }
+        else if (c >= 100 && c <= 107) { style.bg = _ANSI_COLORS[c - 100 + 8]; }
+      }
+      continue;
+    }
+    if (!p) continue;
+    var css = '';
+    if (style.fg) css += 'color:' + style.fg + ';';
+    if (style.bg) css += 'background:' + style.bg + ';';
+    if (style.bold) css += 'font-weight:700;';
+    if (style.dim) css += 'opacity:0.6;';
+    if (style.italic) css += 'font-style:italic;';
+    if (style.underline) css += 'text-decoration:underline;';
+    if (css) {
+      result += '<span style="' + css + '">' + _escHtml(p) + '</span>';
+    } else {
+      result += _escHtml(p);
+    }
+  }
+  return result;
+}
+
+function renderAnsiContent(data) {
+  if (!data.content) return;
+  var lines = data.content.split('\n');
+  var html = '';
+  for (var i = 0; i < lines.length; i++) {
+    html += '<span class="ansi-line" data-line="' + i + '">' +
+            ansiToHtml(lines[i]) + '</span>\n';
+  }
+  outputContent.innerHTML = html;
+  if (typeof data.cursor_x === 'number' && typeof data.cursor_y === 'number') {
+    positionCursor(data.cursor_x, data.cursor_y, data.pane_height || 50);
+  }
+}
+
+function positionCursor(cx, cy, paneHeight) {
+  var existing = document.getElementById('tmux-cursor');
+  if (existing) existing.remove();
+  var lines = outputContent.querySelectorAll('.ansi-line');
+  var totalLines = lines.length;
+  var targetLine = totalLines - paneHeight + cy;
+  if (targetLine < 0 || targetLine >= totalLines) return;
+  var line = lines[targetLine];
+  if (!line) return;
+  var cursor = document.createElement('span');
+  cursor.id = 'tmux-cursor';
+  var charWidth = 7.2; // monospace char width at 12px
+  cursor.style.left = (16 + cx * charWidth) + 'px';
+  cursor.style.top = line.offsetTop + 'px';
+  outputContent.appendChild(cursor);
+}
+
+// Immediate snapshot refresh after interaction
+function refreshOutputNow() {
+  if (!selectedAgent) return;
+  fetch('/api/agent/' + selectedAgent + '/snapshot?lines=80&ansi=true')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.content) {
+        renderAnsiContent(data);
+        outputPanel.scrollTop = outputPanel.scrollHeight;
+      }
+    }).catch(function() {});
+}
+
+// Key palette — send raw tmux key names
+function sendKey(keyName) {
+  if (!selectedAgent) return;
+  fetch('/api/agent/' + selectedAgent + '/key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ key: keyName }),
+  }).then(function() {
+    // Refresh after a brief delay to let the terminal redraw
+    setTimeout(refreshOutputNow, 150);
+  });
+}
+
+document.getElementById('key-palette').addEventListener('click', function(e) {
+  const btn = e.target.closest('button[data-key]');
+  if (btn) sendKey(btn.dataset.key);
+});
+
 // Inline input bar (visible in expanded/fullscreen modes)
 const inlineInput = document.getElementById('output-inline-input');
 const inlineSendBtn = document.getElementById('output-inline-send');
@@ -858,6 +1093,7 @@ function sendInlineInput() {
 }
 inlineSendBtn.addEventListener('click', sendInlineInput);
 inlineInput.addEventListener('keydown', function(e) {
+  if (handleInputKeydown(inlineInput, e)) return;
   if (e.key === 'Enter') { e.preventDefault(); sendInlineInput(); }
 });
 
@@ -889,6 +1125,11 @@ document.getElementById('output-popout-btn').addEventListener('click', function(
     'body{background:#141420;color:#e4e4e7;font-family:"SF Mono","Fira Code",monospace;',
     'font-size:13px;line-height:1.5;display:flex;flex-direction:column;height:100vh;overflow:hidden;}',
     '#out{flex:1;overflow-y:auto;padding:16px;white-space:pre-wrap;}',
+    '.key-bar{display:flex;gap:4px;padding:6px 16px;border-top:1px solid #2a2d3a;background:#1a1d27;flex-wrap:wrap;align-items:center;}',
+    '.key-bar .kl{font-size:10px;color:#71717a;margin-right:4px;}',
+    '.key-bar button{background:#0f1117;border:1px solid #2a2d3a;color:#e4e4e7;padding:3px 10px;border-radius:4px;',
+    'font-family:inherit;font-size:11px;cursor:pointer;}.key-bar button:hover{border-color:#8b5cf6;color:#8b5cf6;}',
+    '.key-bar .ks{width:1px;height:18px;background:#2a2d3a;margin:0 4px;}',
     '.input-bar{display:flex;gap:8px;padding:10px 16px;border-top:1px solid #2a2d3a;background:#1a1d27;flex-shrink:0;}',
     '.input-bar input{flex:1;background:#0f1117;color:#e4e4e7;border:1px solid #2a2d3a;padding:8px 12px;',
     'border-radius:6px;font-family:inherit;font-size:13px;outline:none;}',
@@ -897,24 +1138,48 @@ document.getElementById('output-popout-btn').addEventListener('click', function(
     'cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;}',
     '</style></head><body>',
     '<pre id="out"></pre>',
+    '<div class="key-bar">',
+    '<span class="kl">Keys:</span>',
+    '<button data-key="Enter">Enter</button><button data-key="Escape">Esc</button>',
+    '<button data-key="y">y</button><button data-key="n">n</button>',
+    '<div class="ks"></div>',
+    '<button data-key="Up">Up</button><button data-key="Down">Down</button><button data-key="Tab">Tab</button>',
+    '<div class="ks"></div>',
+    '<button data-key="C-c">^C</button><button data-key="C-d">^D</button><button data-key="q">q</button>',
+    '</div>',
     '<div class="input-bar">',
     '<input type="text" id="inp" placeholder="Send to ' + selectedAgent + '..." autocomplete="off" autofocus>',
     '<button id="btn">Send</button>',
     '</div>',
     '<script>',
     'var name="' + selectedAgent + '",origin="' + location.origin + '";',
-    'function poll(){fetch(origin+"/api/agent/"+name+"/snapshot?lines=200")',
+    'var AC=["#000","#c00","#0a0","#aa0","#55f","#a0a","#0aa","#aaa","#555","#f55","#5f5","#ff5","#55f","#f5f","#5ff","#fff"];',
+    'function a256(n){if(n<8)return AC[n];if(n<16)return AC[n-8+8];if(n<232){n-=16;var b=n%6,g=((n-b)/6)%6,r=((n-b-g*6)/36);return"rgb("+(r&&r*40+55)+","+(g&&g*40+55)+","+(b&&b*40+55)+")";}var v=(n-232)*10+8;return"rgb("+v+","+v+","+v+")";}',
+    'function eH(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}',
+    'function aToH(t){var r="",s={},p=t.split(/(\\x1b\\[[0-9;]*m)/);for(var i=0;i<p.length;i++){var x=p[i],m=x.match(/^\\x1b\\[([\\d;]*)m$/);if(m){var codes=m[1]?m[1].split(";").map(Number):[0];for(var j=0;j<codes.length;j++){var c=codes[j];if(c===0)s={};else if(c===1)s.b=1;else if(c===2)s.d=1;else if(c===3)s.i=1;else if(c===4)s.u=1;else if(c===22){delete s.b;delete s.d;}else if(c>=30&&c<=37)s.fg=AC[c-30];else if(c===38){if(codes[j+1]===5&&codes[j+2]!==void 0){s.fg=a256(codes[j+2]);j+=2;}else if(codes[j+1]===2&&codes[j+4]!==void 0){s.fg="rgb("+codes[j+2]+","+codes[j+3]+","+codes[j+4]+")";j+=4;}}else if(c===39)delete s.fg;else if(c>=40&&c<=47)s.bg=AC[c-40];else if(c===48){if(codes[j+1]===5&&codes[j+2]!==void 0){s.bg=a256(codes[j+2]);j+=2;}else if(codes[j+1]===2&&codes[j+4]!==void 0){s.bg="rgb("+codes[j+2]+","+codes[j+3]+","+codes[j+4]+")";j+=4;}}else if(c===49)delete s.bg;else if(c>=90&&c<=97)s.fg=AC[c-90+8];else if(c>=100&&c<=107)s.bg=AC[c-100+8];}continue;}if(!x)continue;var css="";if(s.fg)css+="color:"+s.fg+";";if(s.bg)css+="background:"+s.bg+";";if(s.b)css+="font-weight:700;";if(s.d)css+="opacity:0.6;";if(s.i)css+="font-style:italic;";if(s.u)css+="text-decoration:underline;";r+=css?"<span style=\\""+css+"\\">"+eH(x)+"</span>":eH(x);}return r;}',
+    'function poll(){fetch(origin+"/api/agent/"+name+"/snapshot?lines=200&ansi=true")',
     '.then(function(r){return r.json()}).then(function(d){if(d.content){var o=document.getElementById("out");',
     'var atBot=o.scrollHeight-o.scrollTop-o.clientHeight<30;',
-    'o.textContent=d.content;if(atBot)o.scrollTop=o.scrollHeight;}})',
+    'var lines=d.content.split("\\n"),h="";for(var i=0;i<lines.length;i++)h+=aToH(lines[i])+"\\n";',
+    'o.innerHTML=h;if(atBot)o.scrollTop=o.scrollHeight;}})',
     '.catch(function(){});}poll();setInterval(poll,2000);',
     'function send(){var i=document.getElementById("inp");if(!i.value.trim())return;',
     'fetch(origin+"/api/agent/"+name+"/input",{method:"POST",',
     'headers:{"Content-Type":"application/x-www-form-urlencoded"},',
     'body:new URLSearchParams({text:i.value})}).then(function(r){return r.json()}).then(function(d){if(d.ok)i.value="";});}',
     'document.getElementById("btn").addEventListener("click",send);',
+    'var km={ArrowUp:"Up",ArrowDown:"Down",ArrowLeft:"Left",ArrowRight:"Right",Escape:"Escape",Tab:"Tab",Enter:"Enter"};',
     'document.getElementById("inp").addEventListener("keydown",function(e){',
+    'var i=document.getElementById("inp"),k=km[e.key];',
+    'if(k&&!i.value.trim()){e.preventDefault();if(e.key==="Enter"){fetch(origin+"/api/agent/"+name+"/input",',
+    '{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},',
+    'body:new URLSearchParams({text:""})}).then(function(){setTimeout(poll,150)});}else{sendKey(k);}return;}',
     'if(e.key==="Enter"){e.preventDefault();send();}});',
+    'function sendKey(k){fetch(origin+"/api/agent/"+name+"/key",{method:"POST",',
+    'headers:{"Content-Type":"application/x-www-form-urlencoded"},',
+    'body:new URLSearchParams({key:k})}).then(function(){setTimeout(poll,150)});}',
+    'document.querySelector(".key-bar").addEventListener("click",function(e){',
+    'var b=e.target.closest("button[data-key]");if(b)sendKey(b.dataset.key);});',
     '<\/script></body></html>'
   ].join('\n');
   win.document.write(popHtml);
@@ -948,12 +1213,12 @@ function showAgentOutput(name) {
   scrollIndicator.style.display = 'none';
   if (outputInterval) clearInterval(outputInterval);
   function fetchSnapshot() {
-    fetch('/api/agent/' + name + '/snapshot?lines=80')
+    fetch('/api/agent/' + name + '/snapshot?lines=80&ansi=true')
       .then(r => r.json())
       .then(data => {
         if (data.content) {
           const wasAtBottom = !userScrolledUp;
-          outputContent.textContent = data.content;
+          renderAnsiContent(data);
           if (wasAtBottom) {
             outputPanel.scrollTop = outputPanel.scrollHeight;
           } else {
