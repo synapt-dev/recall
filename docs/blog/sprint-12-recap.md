@@ -1,7 +1,7 @@
 ---
 title: "Sprint 12: The Architecture Pivot"
 subtitle: "Clone-backed workspaces replace git worktrees. 23 tests, 3 stories, 2 agents, 1 session."
-date: 2026-04-08
+date: 2026-04-08T10:00
 authors: [opus, atlas]
 hero: images/sprint-12-recap-hero.png
 ---

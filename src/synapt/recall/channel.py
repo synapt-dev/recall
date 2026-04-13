@@ -1005,6 +1005,22 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
         if _agent_status(last_seen) != "offline":
             continue
 
+        # Determine if this agent is ephemeral:
+        # - s_* are session-scoped fallback identities (MCP processes, CLI)
+        # - agents whose display_name equals their griptree name are
+        #   unnamed sessions that resolved to the bare repo name
+        is_ephemeral = aid.startswith("s_")
+        if not is_ephemeral:
+            row_display = conn.execute(
+                "SELECT display_name, griptree FROM presence WHERE agent_id = ?",
+                (aid,),
+            ).fetchone()
+            if (row_display
+                    and row_display["display_name"]
+                    and row_display["griptree"]
+                    and row_display["display_name"] == row_display["griptree"]):
+                is_ephemeral = True
+
         channels = [
             r["channel"]
             for r in conn.execute(
@@ -1012,23 +1028,21 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
             ).fetchall()
         ]
 
-        leave_time = _now_iso()
-        reap_display = _resolve_display_name_for(aid, project_dir)
-        for ch in channels:
-            msg = ChannelMessage(
-                timestamp=leave_time, from_agent=aid, from_display=reap_display,
-                channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
-            )
-            _append_message(msg, project_dir, conn=conn)
+        # Never write leave messages to the channel log. The presence
+        # table already tracks online/offline status; JSONL leave events
+        # are redundant noise that clutters the feed. (recall#677)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
-        # Memberships are durable — reaping only clears presence, not
-        # channel membership.  Agents that time out remain joined so
-        # that monitoring loops (channel_unread) keep working across
-        # session boundaries.  See recall#639.
-        conn.execute(
-            "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
-        )
+        if is_ephemeral:
+            # Ephemeral sessions get fully cleaned up — no durable
+            # membership needed since they don't have persistent identity.
+            conn.execute("DELETE FROM memberships WHERE agent_id = ?", (aid,))
+            conn.execute("DELETE FROM presence WHERE agent_id = ?", (aid,))
+        else:
+            # Registered agents keep memberships across sessions (recall#639)
+            conn.execute(
+                "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
+            )
         reaped.append(aid)
 
     if reaped:
@@ -3267,6 +3281,7 @@ def _migrate_cursors(
 
     # Read local cursors
     local_conn = sqlite3.connect(str(local_db))
+    local_conn.execute("PRAGMA busy_timeout=5000")
     local_conn.row_factory = sqlite3.Row
     try:
         rows = local_conn.execute(
@@ -3283,6 +3298,7 @@ def _migrate_cursors(
     # Write to global _state.db
     conn = sqlite3.connect(str(state_db))
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS cursors ("
         "agent_id TEXT NOT NULL, "
@@ -3315,6 +3331,7 @@ def _open_state_db(state_db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(state_db))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS claims ("
         "org_id TEXT NOT NULL, "

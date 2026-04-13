@@ -588,7 +588,8 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_reap_posts_leave_message(self):
+    def test_reap_does_not_post_leave_message(self):
+        """Reaper silently updates presence without writing leave events to JSONL."""
         stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -609,9 +610,9 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         finally:
             conn.close()
 
-        # Check channel log for the leave message
+        # Reaper should NOT write leave messages to the channel log
         result = channel_read("dev")
-        self.assertIn("timed out", result)
+        self.assertNotIn("timed out", result)
 
     def test_reap_releases_claims(self):
         stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(

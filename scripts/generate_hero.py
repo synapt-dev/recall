@@ -35,7 +35,7 @@ BLOG_DIR = Path(__file__).resolve().parent.parent / "docs" / "blog"
 IMAGES_DIR = BLOG_DIR / "images"
 FAL_ENDPOINT = "https://queue.fal.run/fal-ai/nano-banana-2"
 DEFAULT_STYLE = (
-    "wireframe holographic on dark background, "
+    "wireframe holographic owl as focal subject on dark background, "
     "teal and purple neon, circuit board aesthetic, digital art"
 )
 POLL_INTERVAL = 3
