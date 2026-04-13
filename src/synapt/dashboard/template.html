@@ -264,13 +264,28 @@
     display: none;
     background: #141420;
     border-top: 1px solid var(--border);
-    max-height: 220px;
+    height: 220px;
+    min-height: 120px;
     overflow-y: auto;
     font-size: 12px;
     line-height: 1.5;
     flex-shrink: 0;
+    transition: height 0.2s ease;
+    position: relative;
   }
   #agent-output-panel.active { display: block; }
+  #agent-output-panel.expanded { height: 50vh; display: flex; flex-direction: column; overflow: hidden; }
+  #agent-output-panel.fullscreen {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    height: 100vh;
+    z-index: 1000;
+    border: none;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
   #agent-output-panel .output-header {
     padding: 5px 16px;
     font-weight: 600;
@@ -280,8 +295,75 @@
     background: var(--surface);
     position: sticky;
     top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
-  #agent-output-content { padding: 8px 16px; white-space: pre-wrap; font-family: inherit; color: var(--text); }
+  .output-title { flex: 1; }
+  .output-controls { display: flex; gap: 6px; align-items: center; }
+  .output-controls button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .output-controls button:hover { color: var(--accent); border-color: var(--accent); }
+  #scroll-indicator {
+    display: none;
+    position: absolute;
+    bottom: 8px;
+    right: 16px;
+    background: var(--accent);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    cursor: pointer;
+    z-index: 2;
+    opacity: 0.9;
+  }
+  #scroll-indicator:hover { opacity: 1; }
+  #agent-output-content { padding: 8px 16px; white-space: pre-wrap; font-family: inherit; color: var(--text); flex: 1; overflow-y: auto; }
+  /* Inline input bar — visible only in fullscreen/expanded */
+  .output-input-bar {
+    display: none;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  #agent-output-panel.fullscreen .output-input-bar,
+  #agent-output-panel.expanded .output-input-bar { display: flex; }
+  .output-input-bar input {
+    flex: 1;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  .output-input-bar input:focus { border-color: var(--accent); }
+  .output-input-bar button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+  }
 
   /* ── Input bar ────────────────────────────────────────── */
   #input-bar {
@@ -380,8 +462,21 @@
       </div>
 
       <div id="agent-output-panel">
-        <div class="output-header" id="agent-output-header">Terminal: agent</div>
+        <div class="output-header" id="agent-output-header">
+          <span class="output-title">Terminal: agent</span>
+          <div class="output-controls">
+            <button id="output-expand-btn" title="Expand panel">expand</button>
+            <button id="output-fullscreen-btn" title="Fullscreen">fullscreen</button>
+            <button id="output-popout-btn" title="Open in new window">pop out</button>
+            <button id="output-close-btn" title="Close">close</button>
+          </div>
+        </div>
         <div id="agent-output-content">No output yet.</div>
+        <div id="scroll-indicator">new output below</div>
+        <div class="output-input-bar">
+          <input type="text" id="output-inline-input" placeholder="Send to agent..." autocomplete="off">
+          <button id="output-inline-send">Send</button>
+        </div>
       </div>
 
       <div id="feed">
@@ -727,22 +822,143 @@ agentInput.addEventListener('keydown', function(e) {
 
 // ── Agent output panel ────────────────────────────────────
 const outputPanel = document.getElementById('agent-output-panel');
-const outputHeader = document.getElementById('agent-output-header');
+const outputTitle = outputPanel.querySelector('.output-title');
 const outputContent = document.getElementById('agent-output-content');
+const scrollIndicator = document.getElementById('scroll-indicator');
 let outputInterval = null;
+let userScrolledUp = false;
+
+// Track whether user has scrolled away from bottom
+outputPanel.addEventListener('scroll', function() {
+  const atBottom = outputPanel.scrollHeight - outputPanel.scrollTop - outputPanel.clientHeight < 30;
+  userScrolledUp = !atBottom;
+  scrollIndicator.style.display = userScrolledUp ? 'block' : 'none';
+});
+
+// Click scroll indicator to jump to bottom
+scrollIndicator.addEventListener('click', function() {
+  outputPanel.scrollTop = outputPanel.scrollHeight;
+  userScrolledUp = false;
+  scrollIndicator.style.display = 'none';
+});
+
+// Inline input bar (visible in expanded/fullscreen modes)
+const inlineInput = document.getElementById('output-inline-input');
+const inlineSendBtn = document.getElementById('output-inline-send');
+
+function sendInlineInput() {
+  if (!selectedAgent || !inlineInput.value.trim()) return;
+  fetch('/api/agent/' + selectedAgent + '/input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ text: inlineInput.value }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) { inlineInput.value = ''; agentInput.value = ''; }
+  });
+}
+inlineSendBtn.addEventListener('click', sendInlineInput);
+inlineInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); sendInlineInput(); }
+});
+
+// Expand toggle
+document.getElementById('output-expand-btn').addEventListener('click', function() {
+  outputPanel.classList.toggle('expanded');
+  outputPanel.classList.remove('fullscreen');
+  this.textContent = outputPanel.classList.contains('expanded') ? 'collapse' : 'expand';
+  document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
+});
+
+// Fullscreen toggle
+document.getElementById('output-fullscreen-btn').addEventListener('click', function() {
+  outputPanel.classList.toggle('fullscreen');
+  outputPanel.classList.remove('expanded');
+  this.textContent = outputPanel.classList.contains('fullscreen') ? 'exit fullscreen' : 'fullscreen';
+  document.getElementById('output-expand-btn').textContent = 'expand';
+});
+
+// Pop out to new window (with input)
+document.getElementById('output-popout-btn').addEventListener('click', function() {
+  if (!selectedAgent) return;
+  const win = window.open('', 'agent-output-' + selectedAgent, 'width=900,height=700');
+  if (!win) return;
+  const popHtml = [
+    '<!DOCTYPE html><html><head><title>Terminal: ' + selectedAgent + '</title>',
+    '<style>',
+    '*{box-sizing:border-box;margin:0;padding:0;}',
+    'body{background:#141420;color:#e4e4e7;font-family:"SF Mono","Fira Code",monospace;',
+    'font-size:13px;line-height:1.5;display:flex;flex-direction:column;height:100vh;overflow:hidden;}',
+    '#out{flex:1;overflow-y:auto;padding:16px;white-space:pre-wrap;}',
+    '.input-bar{display:flex;gap:8px;padding:10px 16px;border-top:1px solid #2a2d3a;background:#1a1d27;flex-shrink:0;}',
+    '.input-bar input{flex:1;background:#0f1117;color:#e4e4e7;border:1px solid #2a2d3a;padding:8px 12px;',
+    'border-radius:6px;font-family:inherit;font-size:13px;outline:none;}',
+    '.input-bar input:focus{border-color:#8b5cf6;}',
+    '.input-bar button{background:#8b5cf6;color:white;border:none;padding:8px 16px;border-radius:6px;',
+    'cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;}',
+    '</style></head><body>',
+    '<pre id="out"></pre>',
+    '<div class="input-bar">',
+    '<input type="text" id="inp" placeholder="Send to ' + selectedAgent + '..." autocomplete="off" autofocus>',
+    '<button id="btn">Send</button>',
+    '</div>',
+    '<script>',
+    'var name="' + selectedAgent + '",origin="' + location.origin + '";',
+    'function poll(){fetch(origin+"/api/agent/"+name+"/snapshot?lines=200")',
+    '.then(function(r){return r.json()}).then(function(d){if(d.content){var o=document.getElementById("out");',
+    'var atBot=o.scrollHeight-o.scrollTop-o.clientHeight<30;',
+    'o.textContent=d.content;if(atBot)o.scrollTop=o.scrollHeight;}})',
+    '.catch(function(){});}poll();setInterval(poll,2000);',
+    'function send(){var i=document.getElementById("inp");if(!i.value.trim())return;',
+    'fetch(origin+"/api/agent/"+name+"/input",{method:"POST",',
+    'headers:{"Content-Type":"application/x-www-form-urlencoded"},',
+    'body:new URLSearchParams({text:i.value})}).then(function(r){return r.json()}).then(function(d){if(d.ok)i.value="";});}',
+    'document.getElementById("btn").addEventListener("click",send);',
+    'document.getElementById("inp").addEventListener("keydown",function(e){',
+    'if(e.key==="Enter"){e.preventDefault();send();}});',
+    '<\/script></body></html>'
+  ].join('\n');
+  win.document.write(popHtml);
+  win.document.close();
+});
+
+// Close output panel
+document.getElementById('output-close-btn').addEventListener('click', function() {
+  hideAgentOutput();
+  selectedAgent = null;
+  document.querySelectorAll('.tile.selected').forEach(t => t.classList.remove('selected'));
+  agentPanel.classList.remove('active');
+});
+
+// Escape key exits fullscreen
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && outputPanel.classList.contains('fullscreen')) {
+    outputPanel.classList.remove('fullscreen');
+    document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
+  }
+});
 
 function showAgentOutput(name) {
-  outputHeader.textContent = 'Terminal: ' + name;
+  outputTitle.textContent = 'Terminal: ' + name;
   outputPanel.classList.add('active');
+  outputPanel.classList.remove('expanded', 'fullscreen');
+  document.getElementById('output-expand-btn').textContent = 'expand';
+  document.getElementById('output-fullscreen-btn').textContent = 'fullscreen';
   outputContent.textContent = 'Loading\u2026';
+  userScrolledUp = false;
+  scrollIndicator.style.display = 'none';
   if (outputInterval) clearInterval(outputInterval);
   function fetchSnapshot() {
-    fetch('/api/agent/' + name + '/snapshot?lines=40')
+    fetch('/api/agent/' + name + '/snapshot?lines=80')
       .then(r => r.json())
       .then(data => {
         if (data.content) {
+          const wasAtBottom = !userScrolledUp;
           outputContent.textContent = data.content;
-          outputPanel.scrollTop = outputPanel.scrollHeight;
+          if (wasAtBottom) {
+            outputPanel.scrollTop = outputPanel.scrollHeight;
+          } else {
+            scrollIndicator.style.display = 'block';
+          }
         } else if (data.error) {
           outputContent.textContent = '(' + data.error + ')';
         }
@@ -754,7 +970,7 @@ function showAgentOutput(name) {
 }
 
 function hideAgentOutput() {
-  outputPanel.classList.remove('active');
+  outputPanel.classList.remove('active', 'expanded', 'fullscreen');
   if (outputInterval) { clearInterval(outputInterval); outputInterval = null; }
 }
 </script>

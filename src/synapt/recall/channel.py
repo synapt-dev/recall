@@ -1005,6 +1005,13 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
         if _agent_status(last_seen) != "offline":
             continue
 
+        # Session-scoped identities (s_*) are ephemeral — reap them
+        # silently without generating channel "left" messages. These
+        # are created as fallback identities when SYNAPT_AGENT_ID is
+        # not set (e.g. MCP server processes, manual CLI sessions).
+        # Generating visible leave events for them spams #dev.
+        is_ephemeral = aid.startswith("s_")
+
         channels = [
             r["channel"]
             for r in conn.execute(
@@ -1012,23 +1019,27 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
             ).fetchall()
         ]
 
-        leave_time = _now_iso()
-        reap_display = _resolve_display_name_for(aid, project_dir)
-        for ch in channels:
-            msg = ChannelMessage(
-                timestamp=leave_time, from_agent=aid, from_display=reap_display,
-                channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
-            )
-            _append_message(msg, project_dir, conn=conn)
+        if not is_ephemeral:
+            leave_time = _now_iso()
+            reap_display = _resolve_display_name_for(aid, project_dir)
+            for ch in channels:
+                msg = ChannelMessage(
+                    timestamp=leave_time, from_agent=aid, from_display=reap_display,
+                    channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
+                )
+                _append_message(msg, project_dir, conn=conn)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
-        # Memberships are durable — reaping only clears presence, not
-        # channel membership.  Agents that time out remain joined so
-        # that monitoring loops (channel_unread) keep working across
-        # session boundaries.  See recall#639.
-        conn.execute(
-            "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
-        )
+        if is_ephemeral:
+            # Ephemeral sessions get fully cleaned up — no durable
+            # membership needed since they don't have persistent identity.
+            conn.execute("DELETE FROM memberships WHERE agent_id = ?", (aid,))
+            conn.execute("DELETE FROM presence WHERE agent_id = ?", (aid,))
+        else:
+            # Registered agents keep memberships across sessions (recall#639)
+            conn.execute(
+                "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
+            )
         reaped.append(aid)
 
     if reaped:

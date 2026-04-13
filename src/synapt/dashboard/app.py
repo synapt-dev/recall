@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from html import escape
 from pathlib import Path
 from urllib.parse import quote
@@ -38,6 +39,37 @@ from synapt.recall.channel import (
 from synapt.recall.registry import list_agents as _registry_list_agents
 
 _MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
+
+# ---------------------------------------------------------------------------
+# Agent tool detection (codex vs claude)
+# ---------------------------------------------------------------------------
+
+_CODEX_AGENTS: set[str] = set()
+
+
+def _load_codex_agents() -> None:
+    """Load agents.toml and populate _CODEX_AGENTS with names using the codex tool."""
+    from synapt.recall.core import _find_gripspace_root
+
+    grip_root = _find_gripspace_root(Path.cwd())
+    if grip_root is None:
+        return
+    toml_path = grip_root / ".gitgrip" / "agents.toml"
+    if not toml_path.is_file():
+        toml_path = grip_root / "config" / "agents.toml"
+    if not toml_path.is_file():
+        return
+    try:
+        with open(toml_path, "rb") as f:
+            cfg = tomllib.load(f)
+        for name, agent_cfg in cfg.get("agents", {}).items():
+            if agent_cfg.get("tool") == "codex":
+                _CODEX_AGENTS.add(name)
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+
+_load_codex_agents()
 
 # ---------------------------------------------------------------------------
 # HTML fragment renderers
@@ -632,11 +664,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/agent/{name}/input")
     async def api_agent_input(name: str, text: str = Form("")):
-        """Send input to an agent's tmux pane via send-keys."""
+        """Send input to an agent's tmux pane via send-keys.
+
+        Codex agents require a second Enter to confirm the prompt (two-step
+        input protocol).  The agent tool type is detected from agents.toml at
+        startup; codex agents get an extra Enter after a short delay.
+        """
         if not text.strip():
             raise HTTPException(status_code=400, detail="Input text required")
         # Resolve tmux target from team.db or convention
         target = f"{name}"  # Will be refined with session:window format
+        is_codex = name in _CODEX_AGENTS
         try:
             result = subprocess.run(
                 ["tmux", "send-keys", "-t", target, text, "Enter"],
@@ -648,11 +686,19 @@ def create_app() -> FastAPI:
                     status_code=502,
                     detail=f"tmux send-keys failed: {result.stderr.decode().strip()}",
                 )
+            # Codex needs a second Enter to confirm the prompt
+            if is_codex:
+                await asyncio.sleep(0.3)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
         except FileNotFoundError:
             raise HTTPException(status_code=503, detail="tmux not available")
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="tmux send-keys timed out")
-        return {"ok": True, "agent": name}
+        return {"ok": True, "agent": name, "codex": is_codex}
 
     @app.get("/api/agent/{name}/output")
     async def api_agent_output(request: Request, name: str, lines: int = 50):
