@@ -71,6 +71,59 @@ def _load_codex_agents() -> None:
 
 _load_codex_agents()
 
+_TMUX_SESSION: str = "synapt"
+
+
+def _load_tmux_session() -> None:
+    """Load tmux session name from spawn config."""
+    global _TMUX_SESSION
+    from synapt.recall.core import _find_gripspace_root
+
+    grip_root = _find_gripspace_root(Path.cwd())
+    if grip_root is None:
+        return
+    for candidate in [
+        grip_root / ".gitgrip" / "spawn.toml",
+        grip_root / "config" / "spawn.toml",
+    ]:
+        if candidate.is_file():
+            try:
+                with open(candidate, "rb") as f:
+                    cfg = tomllib.load(f)
+                name = cfg.get("spawn", {}).get("session_name", "")
+                if name:
+                    _TMUX_SESSION = name
+                return
+            except (OSError, tomllib.TOMLDecodeError):
+                pass
+
+
+_load_tmux_session()
+
+
+def _resolve_tmux_target(name: str) -> str:
+    """Resolve a qualified tmux target for an agent (recall#692 fix 3).
+
+    Checks cached agent data for a stored tmux_target. Falls back to
+    {session}:{name} to avoid ambiguity when multiple sessions exist.
+    """
+    org_id = _resolve_org_id(None)
+    if org_id:
+        db_path = Path.home() / ".synapt" / "orgs" / org_id / "team.db"
+        if db_path.exists():
+            try:
+                agents = _registry_list_agents(org_id, db_path=db_path)
+                for agent in agents:
+                    if agent.get("display_name") == name:
+                        stored = agent.get("tmux_target")
+                        if stored:
+                            return stored
+                        break
+            except Exception:
+                pass
+    return f"{_TMUX_SESSION}:{name}"
+
+
 # ---------------------------------------------------------------------------
 # HTML fragment renderers
 # ---------------------------------------------------------------------------
@@ -113,12 +166,11 @@ def _is_pid_alive(pid: int) -> bool:
         return False
 
 
-def _combined_agents_json() -> list[dict]:
+def _combined_agents_json_sync() -> list[dict]:
     """Return agents from both team.db (process tracking) and channel presence.
 
-    Fixes recall#552: spawned agents weren't visible because presence is
-    per-gripspace (local channels.db) but the dashboard may be in a
-    different gripspace. team.db is global and updated by gr spawn.
+    Scoped to the current org only (recall#692) to avoid SQLite lock
+    contention when multiple workspaces are active simultaneously.
 
     Merge strategy: team.db agents are the authority for process status.
     Channel presence supplements with channel memberships and heartbeat.
@@ -132,32 +184,26 @@ def _combined_agents_json() -> list[dict]:
     except Exception:
         pass
 
-    # Overlay with team.db agents (global process tracking)
-    try:
-        for org_dir in (Path.home() / ".synapt" / "orgs").iterdir():
-            if not org_dir.is_dir():
-                continue
-            db_path = org_dir / "team.db"
-            if not db_path.exists():
-                continue
-            org_id = org_dir.name
+    # Overlay with team.db agents — current org only (recall#692 fix 1)
+    current_org = _resolve_org_id(None)
+    if current_org:
+        db_path = Path.home() / ".synapt" / "orgs" / current_org / "team.db"
+        if db_path.exists():
             try:
-                registered = _registry_list_agents(org_id, db_path=db_path)
+                registered = _registry_list_agents(current_org, db_path=db_path)
             except Exception:
-                continue
+                registered = []
             for agent in registered:
                 name = agent.get("display_name", "")
                 status = agent.get("status") or "offline"
-                # Verify PID is alive — team.db status can be stale if the
-                # process exited without updating the DB (crash, kill, etc.)
                 pid = agent.get("pid")
                 if status in ("running", "online") and pid:
                     if not _is_pid_alive(pid):
                         status = "offline"
                 if status in ("offline", "stopped") and name not in agents_by_name:
-                    continue  # Don't show offline agents that aren't in presence
+                    continue
+                tmux_target = agent.get("tmux_target") or ""
                 if name not in agents_by_name:
-                    # Agent visible in team.db but not in local presence
                     agents_by_name[name] = {
                         "agent_id": agent.get("agent_id", ""),
                         "display_name": name,
@@ -166,16 +212,21 @@ def _combined_agents_json() -> list[dict]:
                         "status": status,
                         "last_seen": agent.get("last_seen_at", ""),
                         "channels": [],
+                        "tmux_target": tmux_target,
                     }
                 else:
-                    # Merge: use team.db status if agent is running/online
                     existing = agents_by_name[name]
                     if status in ("running", "online"):
                         existing["status"] = status
-    except FileNotFoundError:
-        pass  # No orgs directory
+                    if tmux_target:
+                        existing["tmux_target"] = tmux_target
 
     return sorted(agents_by_name.values(), key=lambda a: a.get("display_name", ""))
+
+
+async def _combined_agents_json() -> list[dict]:
+    """Async wrapper — runs SQLite reads off the event loop (recall#692 fix 2)."""
+    return await asyncio.to_thread(_combined_agents_json_sync)
 
 
 def _render_agent_tile(agent: dict) -> str:
@@ -534,7 +585,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/agents")
     async def api_agents():
-        return _combined_agents_json()
+        return await _combined_agents_json()
 
     @app.get("/api/org")
     async def api_org():
@@ -675,7 +726,7 @@ def create_app() -> FastAPI:
 
         If text is empty, sends a bare Enter (for confirming selections).
         """
-        target = f"{name}"
+        target = _resolve_tmux_target(name)
         is_codex = name in _CODEX_AGENTS
         try:
             if text.strip():
@@ -733,7 +784,7 @@ def create_app() -> FastAPI:
             shutil.copyfileobj(file.file, f)
 
         # Send the file path to the agent's tmux pane
-        target = f"{name}"
+        target = _resolve_tmux_target(name)
         file_path = str(dest)
         is_codex = name in _CODEX_AGENTS
         try:
@@ -773,7 +824,7 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail=f"Key not allowed: {key}. Allowed: {sorted(_ALLOWED_KEYS)}",
             )
-        target = f"{name}"
+        target = _resolve_tmux_target(name)
         try:
             result = subprocess.run(
                 ["tmux", "send-keys", "-t", target, key],
@@ -828,7 +879,7 @@ def create_app() -> FastAPI:
         includes cursor_x, cursor_y, pane_width, pane_height for cursor
         rendering.
         """
-        target = f"{name}"
+        target = _resolve_tmux_target(name)
         try:
             cmd = ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{lines}"]
             if ansi:
@@ -871,7 +922,7 @@ def create_app() -> FastAPI:
     async def terminal_ws(websocket: WebSocket, name: str):
         """WebSocket bridge: tmux capture-pane -> client, client input -> tmux send-keys."""
         await websocket.accept()
-        target = f"{name}"
+        target = _resolve_tmux_target(name)
         is_codex = name in _CODEX_AGENTS
 
         async def send_snapshots():
