@@ -1421,16 +1421,45 @@ def channel_join(
         # Role escalation: never downgrade human -> agent. A human session
         # that shares an agent_id with an agent (same griptree) keeps the
         # human role and display name. Fixes recall#546.
+        #
+        # Collision split (recall#665): when an agent resolves to a human's
+        # agent_id, derive a distinct a_* identity for the agent instead of
+        # absorbing it into the human's presence row. Cache the split id so
+        # subsequent calls (channel_post) also use it.
+        #
+        # Registered agent override (recall#665): when the agent explicitly
+        # owns the id via SYNAPT_AGENT_ID, allow role correction (the
+        # session-start hook may have incorrectly set role="human").
         existing = conn.execute(
             "SELECT role, display_name, status FROM presence WHERE agent_id = ?",
             (aid,),
         ).fetchone()
         if existing and existing["role"] == "human" and role != "human":
-            # Agent joining with a human's agent_id -- preserve human identity
-            conn.execute(
-                "UPDATE presence SET status='online', last_seen=? WHERE agent_id=?",
-                (now, aid),
-            )
+            registered = os.environ.get("SYNAPT_AGENT_ID")
+            if registered and registered == aid:
+                # Registered agent owns this id; correct the role.
+                conn.execute(
+                    "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, 'online', ?, ?) "
+                    "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
+                    "griptree=?, display_name=?, role=?",
+                    (aid, griptree, display, role, now, now, now, griptree, display, role),
+                )
+            else:
+                # Collision: agent resolved to a human's s_* hash.
+                # Derive a distinct identity and cache it.
+                gt = _resolve_griptree(project_dir)
+                seed = f"agent_split:{gt}:{aid}"
+                aid = "a_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+                key = str(project_data_dir(project_dir))
+                _AGENT_ID_CACHE[key] = aid
+                conn.execute(
+                    "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, 'online', ?, ?) "
+                    "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
+                    "griptree=?, display_name=?, role=?",
+                    (aid, griptree, display, role, now, now, now, griptree, display, role),
+                )
         else:
             conn.execute(
                 "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "

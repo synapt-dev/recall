@@ -1941,7 +1941,8 @@ def generate_startup_context(project: Path) -> list[str]:
     # 7. Channel unread summary
     try:
         from synapt.recall.channel import channel_join, channel_unread, channel_read
-        channel_join("dev", role="human")
+        role = "agent" if os.environ.get("SYNAPT_AGENT_ID") else "human"
+        channel_join("dev", role=role)
         counts = channel_unread()
         if counts:
             unread_parts = [f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0]
