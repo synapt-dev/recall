@@ -15,7 +15,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
 from html import escape
 from pathlib import Path
 from urllib.parse import quote
