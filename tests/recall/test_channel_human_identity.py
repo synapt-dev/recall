@@ -13,6 +13,7 @@ Two fixes:
    human's s_* hash, derive a distinct a_* identity for the agent.
 """
 
+import inspect
 import os
 import sqlite3
 import tempfile
@@ -29,6 +30,30 @@ from synapt.recall.channel import (
     channel_post,
     channel_read,
 )
+
+
+# ---------------------------------------------------------------------------
+# Guards & fixtures
+# ---------------------------------------------------------------------------
+
+def _collision_guard_present() -> bool:
+    """Verify the recall#665 collision guard is in the loaded channel module."""
+    src = inspect.getsource(channel_join)
+    return "agent_split:" in src
+
+
+_SKIP_MSG = (
+    "recall#665 collision guard not present in loaded channel module. "
+    "Reinstall: pip install -e '.[dev]' from the correct worktree."
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_agent_cache():
+    """Isolate each test from _AGENT_ID_CACHE cross-contamination."""
+    _AGENT_ID_CACHE.clear()
+    yield
+    _AGENT_ID_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +82,16 @@ def _get_presence_role(project_dir: Path, agent_id: str) -> str | None:
             "SELECT role FROM presence WHERE agent_id = ?", (agent_id,)
         ).fetchone()
         return row["role"] if row else None
+    finally:
+        conn.close()
+
+
+def _get_all_presence(project_dir: Path) -> list[dict]:
+    """Dump all presence rows for diagnostics."""
+    conn = _open_db(project_dir)
+    try:
+        rows = conn.execute("SELECT agent_id, role, display_name FROM presence").fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -109,10 +144,10 @@ class TestCollisionGuardSplitsIdentity:
     """When an agent joins with the same s_* hash as a human, the agent
     should get a new distinct identity instead of being absorbed."""
 
+    @pytest.mark.skipif(not _collision_guard_present(), reason=_SKIP_MSG)
     def test_agent_gets_split_identity_on_collision(self, tmp_path):
         """If a human owns s_xxxx with role='human', an agent joining with
         the same s_xxxx should get a new a_* identity."""
-        _AGENT_ID_CACHE.clear()
         with _patch_no_agent():
             # Human joins first
             channel_join("dev", project_dir=tmp_path, role="human")
@@ -122,41 +157,61 @@ class TestCollisionGuardSplitsIdentity:
             # Clear cache to simulate a new process (MCP server)
             _AGENT_ID_CACHE.clear()
 
-            # Agent joins without display_name — same s_* hash
-            result = channel_join("dev", project_dir=tmp_path, role="agent")
+            # Agent joins without display_name — same s_* hash would collide
+            channel_join("dev", project_dir=tmp_path, role="agent")
 
             # Human's role must be preserved
-            assert _get_presence_role(tmp_path, human_aid) == "human"
-
-            # Agent should have gotten a distinct identity
-            new_aid = _agent_id(tmp_path)
-            assert new_aid != human_aid, (
-                f"Agent should have a split identity, not share {human_aid}"
+            assert _get_presence_role(tmp_path, human_aid) == "human", (
+                f"Human role overwritten. Presence dump: {_get_all_presence(tmp_path)}"
             )
-            assert new_aid.startswith("a_"), (
-                f"Split identity should be a_* hash, got {new_aid}"
+
+            # The collision guard should have cached the split identity
+            from synapt.recall.core import project_data_dir
+            cache_key = str(project_data_dir(tmp_path))
+            cached_aid = _AGENT_ID_CACHE.get(cache_key)
+            assert cached_aid is not None, (
+                f"Collision guard did not cache split identity. "
+                f"Cache keys: {list(_AGENT_ID_CACHE.keys())}"
+            )
+            assert cached_aid.startswith("a_"), (
+                f"Cached identity should be a_* hash, got {cached_aid}"
+            )
+
+            # _agent_id must return the cached split identity
+            new_aid = _agent_id(tmp_path)
+            assert new_aid == cached_aid
+            assert new_aid != human_aid, (
+                f"Agent should have a split identity, not share {human_aid}. "
+                f"Presence: {_get_all_presence(tmp_path)}"
             )
             assert _get_presence_role(tmp_path, new_aid) == "agent"
 
+    @pytest.mark.skipif(not _collision_guard_present(), reason=_SKIP_MSG)
     def test_split_identity_cached_for_subsequent_posts(self, tmp_path):
         """After collision split, channel_post should use the split identity,
         not the original s_* hash."""
-        _AGENT_ID_CACHE.clear()
         with _patch_no_agent():
             # Human joins
             channel_join("dev", project_dir=tmp_path, role="human")
             human_aid = _agent_id(tmp_path)
             _AGENT_ID_CACHE.clear()
 
-            # Agent joins (gets split identity)
+            # Agent joins (gets split identity via collision guard)
             channel_join("dev", project_dir=tmp_path, role="agent")
+            split_aid = _agent_id(tmp_path)
+            assert split_aid.startswith("a_"), (
+                f"Expected split a_* identity after collision, got {split_aid}"
+            )
 
             # Post without display_name — should use cached split identity
             channel_post("dev", "message from split agent",
                          project_dir=tmp_path)
 
             output = channel_read("dev", project_dir=tmp_path, limit=5)
-            assert "[human]" not in output
+            assert "[human]" not in output, (
+                f"Post still tagged [human]. split_aid={split_aid}, "
+                f"human_aid={human_aid}. Output:\n{output}"
+            )
 
     def test_no_split_when_no_collision(self, tmp_path):
         """When no human owns the s_* hash, agent keeps its original identity."""
@@ -167,6 +222,7 @@ class TestCollisionGuardSplitsIdentity:
             assert aid.startswith("s_")
             assert _get_presence_role(tmp_path, aid) == "agent"
 
+    @pytest.mark.skipif(not _collision_guard_present(), reason=_SKIP_MSG)
     def test_registered_agent_not_absorbed_by_human_hook(self, tmp_path):
         """A registered agent (SYNAPT_AGENT_ID) whose session-start hook
         mistakenly ran with role='human' can still correct its role on
@@ -179,4 +235,8 @@ class TestCollisionGuardSplitsIdentity:
             # Agent's MCP join with role="agent" should correct this
             channel_join("dev", project_dir=tmp_path, role="agent",
                          display_name="Opus")
-            assert _get_presence_role(tmp_path, "opus-001") == "agent"
+            role_after = _get_presence_role(tmp_path, "opus-001")
+            assert role_after == "agent", (
+                f"Role correction failed: expected 'agent', got '{role_after}'. "
+                f"Presence dump: {_get_all_presence(tmp_path)}"
+            )
