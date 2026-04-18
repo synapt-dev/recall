@@ -2,6 +2,12 @@
 
 <!-- What does this PR do? 1-3 sentences. -->
 
+## Closes
+
+<!-- Link issues this PR resolves. Use "Closes #N" for auto-close on merge. -->
+<!-- Example: Closes #123, Closes #456 -->
+
+
 ## Premium Boundary
 
 **Premium boundary**: <!-- e.g. "recall is OSS. This PR adds channel infrastructure, not identity or quality improvement." -->
