@@ -1,0 +1,70 @@
+name: boundary-lint
+
+on:
+  pull_request:
+
+jobs:
+  boundary-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for premium markers in OSS code
+        run: |
+          EXIT_CODE=0
+
+          # Pattern groups — each line is: <label> <grep-pattern>
+          # Using word-boundary-safe patterns to reduce false positives.
+          PATTERNS=(
+            "workspace.toml:workspace\.toml"
+            "agent.toml:agent\.toml"
+            "repo.toml:repo\.toml"
+            "g2_ prefix:g2_[a-z]"
+            "Gr2Context:Gr2Context"
+            "_detect_workspace_context:_detect_workspace_context"
+            "_detect_gr2_agent:_detect_gr2_agent"
+          )
+
+          # Files to scan: Python source and config, excluding tests and this workflow.
+          INCLUDE=(
+            --include='*.py'
+            --include='*.toml'
+            --include='*.yaml'
+            --include='*.yml'
+          )
+          EXCLUDE=(
+            --exclude-dir='.git'
+            --exclude-dir='node_modules'
+            --exclude-dir='__pycache__'
+            --exclude-dir='.venv'
+            --exclude='boundary-lint.yml'
+          )
+
+          for entry in "${PATTERNS[@]}"; do
+            LABEL="${entry%%:*}"
+            PATTERN="${entry#*:}"
+
+            HITS=$(grep -rn "${INCLUDE[@]}" "${EXCLUDE[@]}" -E "$PATTERN" . || true)
+            if [ -n "$HITS" ]; then
+              echo "::error::Premium marker detected: $LABEL"
+              echo "$HITS"
+              echo ""
+              EXIT_CODE=1
+            fi
+          done
+
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo ""
+            echo "============================================================"
+            echo "BOUNDARY VIOLATION: Premium markers found in OSS code."
+            echo ""
+            echo "Identity, org, and workspace-context code belongs in"
+            echo "synapt-private, not in this repo."
+            echo ""
+            echo "See: config/process/premium-boundary-policy.md"
+            echo "See: CLAUDE.md -> Premium Boundary Policy -> Identity test"
+            echo "============================================================"
+            exit 1
+          fi
+
+          echo "Boundary lint passed. No premium markers found."

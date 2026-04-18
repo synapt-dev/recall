@@ -885,16 +885,9 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
         # are redundant noise that clutters the feed. (recall#677)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
-        if is_ephemeral:
-            # Ephemeral sessions get fully cleaned up — no durable
-            # membership needed since they don't have persistent identity.
-            conn.execute("DELETE FROM memberships WHERE agent_id = ?", (aid,))
-            conn.execute("DELETE FROM presence WHERE agent_id = ?", (aid,))
-        else:
-            # Registered agents keep memberships across sessions (recall#639)
-            conn.execute(
-                "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
-            )
+        conn.execute(
+            "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
+        )
         reaped.append(aid)
 
     if reaped:
