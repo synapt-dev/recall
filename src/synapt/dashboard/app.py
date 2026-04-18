@@ -48,10 +48,11 @@ _MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
 # ---------------------------------------------------------------------------
 
 _CODEX_AGENTS: set[str] = set()
+_KNOWN_AGENTS: dict[str, dict] = {}
 
 
-def _load_codex_agents() -> None:
-    """Load agents.toml and populate _CODEX_AGENTS with names using the codex tool."""
+def _load_agents_toml() -> None:
+    """Load agents.toml: populate _CODEX_AGENTS and _KNOWN_AGENTS."""
     from synapt.recall.core import _find_gripspace_root
 
     grip_root = _find_gripspace_root(Path.cwd())
@@ -68,11 +69,27 @@ def _load_codex_agents() -> None:
         for name, agent_cfg in cfg.get("agents", {}).items():
             if agent_cfg.get("tool") == "codex":
                 _CODEX_AGENTS.add(name)
+            _KNOWN_AGENTS[name] = agent_cfg
     except (OSError, tomllib.TOMLDecodeError):
         pass
 
 
-_load_codex_agents()
+_load_agents_toml()
+
+
+def _tmux_window_agents() -> dict[str, str]:
+    """Return {window_name: status} for agent windows in the tmux session."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-windows", "-t", _TMUX_SESSION, "-F", "#{window_name}"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0:
+            return {}
+        windows = set(result.stdout.strip().splitlines())
+        return {w: "online" for w in windows if w in _KNOWN_AGENTS}
+    except Exception:
+        return {}
 
 _TMUX_SESSION: str = "synapt"
 
@@ -124,7 +141,7 @@ def _resolve_tmux_target(name: str) -> str:
                         break
             except Exception:
                 pass
-    return f"{_TMUX_SESSION}:{name}"
+    return f"{_TMUX_SESSION}:{name.lower()}"
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +240,22 @@ def _combined_agents_json_sync() -> list[dict]:
                         existing["status"] = status
                     if tmux_target:
                         existing["tmux_target"] = tmux_target
+
+    # Discover agents from tmux windows that match agents.toml
+    for window_name, status in _tmux_window_agents().items():
+        display = window_name.capitalize()
+        if display not in agents_by_name and window_name not in agents_by_name:
+            agent_cfg = _KNOWN_AGENTS.get(window_name, {})
+            agents_by_name[display] = {
+                "agent_id": window_name,
+                "display_name": display,
+                "griptree": agent_cfg.get("worktree", ""),
+                "role": agent_cfg.get("role", "agent"),
+                "status": status,
+                "last_seen": "",
+                "channels": [],
+                "tmux_target": f"{_TMUX_SESSION}:{window_name}",
+            }
 
     return sorted(agents_by_name.values(), key=lambda a: a.get("display_name", ""))
 
