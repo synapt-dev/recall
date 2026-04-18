@@ -32,6 +32,7 @@ Wrapper options:
   --max-runs N           Stop after N runs (default: 0 = infinite)
   --log FILE             Append loop output to a log file
   --stop-file PATH       Stop when this file exists
+  --no-startup           Skip startup context injection
   -h, --help             Show this help
 
 All arguments after `--` are forwarded to `codex exec`.
@@ -58,6 +59,7 @@ PROMPT_FILE=""
 MAX_RUNS=0
 LOG_FILE=""
 STOP_FILE=""
+NO_STARTUP=false
 CODEX_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -89,6 +91,10 @@ while [[ $# -gt 0 ]]; do
         --stop-file)
             STOP_FILE="${2:?missing value for --stop-file}"
             shift 2
+            ;;
+        --no-startup)
+            NO_STARTUP=true
+            shift
             ;;
         -h|--help)
             usage
@@ -154,6 +160,18 @@ while true; do
     started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     header="=== codex-loop run ${run_count} @ ${started_at} ==="
 
+    # Inject startup context (journal, reminders, channel) before the prompt.
+    # This gives Codex the same session context Claude gets via SessionStart.
+    FULL_PROMPT="$PROMPT"
+    if [[ "$NO_STARTUP" != "true" ]]; then
+        startup_ctx="$(cd "$WORKDIR" && synapt recall startup --compact 2>/dev/null || true)"
+        if [[ -n "$startup_ctx" ]]; then
+            FULL_PROMPT="[Recall context] ${startup_ctx}
+
+${PROMPT}"
+        fi
+    fi
+
     set +e
     if [[ -n "$LOG_FILE" ]]; then
         {
@@ -161,7 +179,7 @@ while true; do
             echo "workdir: $WORKDIR"
             echo "stop-file: $STOP_FILE"
             echo
-            codex exec --cd "$WORKDIR" "${CODEX_ARGS[@]}" "$PROMPT"
+            codex exec --cd "$WORKDIR" "${CODEX_ARGS[@]}" "$FULL_PROMPT"
             status=$?
             echo
             echo "--- exit status: $status ---"
@@ -173,7 +191,7 @@ while true; do
         echo "workdir: $WORKDIR"
         echo "stop-file: $STOP_FILE"
         echo
-        codex exec --cd "$WORKDIR" "${CODEX_ARGS[@]}" "$PROMPT"
+        codex exec --cd "$WORKDIR" "${CODEX_ARGS[@]}" "$FULL_PROMPT"
         status=$?
         echo
         echo "--- exit status: $status ---"

@@ -46,6 +46,36 @@ _AWAY_MINUTES = 120       # 30-120 min => away
 _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on join
 
 # ---------------------------------------------------------------------------
+# Hook registration — premium coordination layer (#553)
+# ---------------------------------------------------------------------------
+# _append_message fires these hooks after writing a message to JSONL.
+# Premium registers handlers for @mention storage and wake emission.
+# OSS auto-registers its built-in handlers; without premium, the built-in
+# handlers still fire.  Premium can replace or extend them.
+
+from typing import Callable
+
+_message_posted_hooks: list[Callable[["ChannelMessage", "Path | None"], None]] = []
+
+
+def register_message_hook(
+    hook: Callable[["ChannelMessage", "Path | None"], None],
+) -> None:
+    """Register a callback invoked after a message is appended to JSONL.
+
+    Hooks receive (msg, project_dir) and run synchronously after the write.
+    Premium uses this to wire in @mention storage and wake emission without
+    coupling those systems into the OSS substrate.
+    """
+    _message_posted_hooks.append(hook)
+
+
+def _clear_message_hooks() -> None:
+    """Reset hooks — for tests only."""
+    _message_posted_hooks.clear()
+
+
+# ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
 
@@ -655,6 +685,14 @@ CREATE TABLE IF NOT EXISTS status_board_history (
     body TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS unread_flags (
+    agent_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    dirty INTEGER DEFAULT 0,
+    last_cleared_at TEXT,
+    PRIMARY KEY (agent_id, channel)
+);
 """
 
 _WAKE_PRIORITIES = {
@@ -819,6 +857,22 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
         if _agent_status(last_seen) != "offline":
             continue
 
+        # Determine if this agent is ephemeral:
+        # - s_* are session-scoped fallback identities (MCP processes, CLI)
+        # - agents whose display_name equals their griptree name are
+        #   unnamed sessions that resolved to the bare repo name
+        is_ephemeral = aid.startswith("s_")
+        if not is_ephemeral:
+            row_display = conn.execute(
+                "SELECT display_name, griptree FROM presence WHERE agent_id = ?",
+                (aid,),
+            ).fetchone()
+            if (row_display
+                    and row_display["display_name"]
+                    and row_display["griptree"]
+                    and row_display["display_name"] == row_display["griptree"]):
+                is_ephemeral = True
+
         channels = [
             r["channel"]
             for r in conn.execute(
@@ -826,20 +880,11 @@ def _reap_stale_agents(conn: sqlite3.Connection, project_dir: Path | None = None
             ).fetchall()
         ]
 
-        leave_time = _now_iso()
-        reap_display = _resolve_display_name_for(aid, project_dir)
-        for ch in channels:
-            msg = ChannelMessage(
-                timestamp=leave_time, from_agent=aid, from_display=reap_display,
-                channel=ch, type="leave", body=f"{reap_display} timed out from #{ch}",
-            )
-            _append_message(msg, project_dir)
+        # Never write leave messages to the channel log. The presence
+        # table already tracks online/offline status; JSONL leave events
+        # are redundant noise that clutters the feed. (recall#677)
 
         conn.execute("DELETE FROM claims WHERE claimed_by = ?", (aid,))
-        # Memberships are durable — reaping only clears presence, not
-        # channel membership.  Agents that time out remain joined so
-        # that monitoring loops (channel_unread) keep working across
-        # session boundaries.  See recall#639.
         conn.execute(
             "UPDATE presence SET status = 'offline' WHERE agent_id = ?", (aid,)
         )
@@ -1012,6 +1057,7 @@ def _append_message(
     msg: ChannelMessage,
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     """Append a message to a channel's JSONL log with file locking.
 
@@ -1019,6 +1065,9 @@ def _append_message(
     Also parses and stores any @mentions found in the message body.
     When ``channels_dir`` is provided it overrides the normal path resolution
     so the message lands in the correct cross-project channel directory.
+    When ``conn`` is provided it is reused for dirty-flag writes instead of
+    opening a new connection (avoids SQLite lock contention when the caller
+    already holds a transaction).
     """
     # Unescape literal \n and \t that LLM tool calls often produce.
     # MCP arguments are JSON strings, but models sometimes double-escape
@@ -1038,10 +1087,65 @@ def _append_message(
         lock_exclusive(f)
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
-    # Store @mentions (non-blocking, best-effort)
-    if msg.type in ("message", "directive") and "@" in msg.body:
-        _store_mentions(msg, project_dir)
-    _emit_message_wakes(msg, project_dir)
+    # Set dirty flag for all other members of this channel (OSS substrate)
+    _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+    # Fire registered hooks (mention storage, wake emission, etc.)
+    for hook in _message_posted_hooks:
+        try:
+            hook(msg, project_dir)
+        except Exception:
+            pass  # hooks are best-effort
+
+
+def _set_dirty_flags(
+    channel: str,
+    sender_id: str,
+    project_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Mark all other channel members as having unread messages."""
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _open_db(project_dir)
+    try:
+        members = conn.execute(
+            "SELECT agent_id FROM memberships WHERE channel = ? AND agent_id != ?",
+            (channel, sender_id),
+        ).fetchall()
+        for row in members:
+            conn.execute(
+                "INSERT INTO unread_flags (agent_id, channel, dirty) "
+                "VALUES (?, ?, 1) "
+                "ON CONFLICT(agent_id, channel) DO UPDATE SET dirty = 1",
+                (row["agent_id"], channel),
+            )
+        conn.commit()
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def channel_has_unread(
+    agent_name: str | None = None,
+    project_dir: Path | None = None,
+) -> dict[str, bool]:
+    """Fast O(1) check for unread messages per channel.
+
+    Returns a dict mapping channel names to whether they have unread messages.
+    Uses the dirty-flag table instead of scanning JSONL files.
+    Returns empty dict if the agent has no flags set (no memberships or
+    everything is caught up).
+    """
+    aid = agent_name or _agent_id(project_dir)
+    conn = _open_db(project_dir)
+    try:
+        rows = conn.execute(
+            "SELECT channel, dirty FROM unread_flags WHERE agent_id = ?",
+            (aid,),
+        ).fetchall()
+        return {r["channel"]: bool(r["dirty"]) for r in rows}
+    finally:
+        conn.close()
 
 
 def channel_read_wakes(
@@ -1307,19 +1411,48 @@ def channel_join(
                 )
 
         # Upsert presence with identity.
-        # Role escalation: never downgrade human → agent. A human session
+        # Role escalation: never downgrade human -> agent. A human session
         # that shares an agent_id with an agent (same griptree) keeps the
         # human role and display name. Fixes recall#546.
+        #
+        # Collision split (recall#665): when an agent resolves to a human's
+        # agent_id, derive a distinct a_* identity for the agent instead of
+        # absorbing it into the human's presence row. Cache the split id so
+        # subsequent calls (channel_post) also use it.
+        #
+        # Registered agent override (recall#665): when the agent explicitly
+        # owns the id via SYNAPT_AGENT_ID, allow role correction (the
+        # session-start hook may have incorrectly set role="human").
         existing = conn.execute(
             "SELECT role, display_name, status FROM presence WHERE agent_id = ?",
             (aid,),
         ).fetchone()
         if existing and existing["role"] == "human" and role != "human":
-            # Agent joining with a human's agent_id — preserve human identity
-            conn.execute(
-                "UPDATE presence SET status='online', last_seen=? WHERE agent_id=?",
-                (now, aid),
-            )
+            registered = os.environ.get("SYNAPT_AGENT_ID")
+            if registered and registered == aid:
+                # Registered agent owns this id; correct the role.
+                conn.execute(
+                    "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, 'online', ?, ?) "
+                    "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
+                    "griptree=?, display_name=?, role=?",
+                    (aid, griptree, display, role, now, now, now, griptree, display, role),
+                )
+            else:
+                # Collision: agent resolved to a human's s_* hash.
+                # Derive a distinct identity and cache it.
+                gt = _resolve_griptree(project_dir)
+                seed = f"agent_split:{gt}:{aid}"
+                aid = "a_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+                key = str(project_data_dir(project_dir))
+                _AGENT_ID_CACHE[key] = aid
+                conn.execute(
+                    "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, 'online', ?, ?) "
+                    "ON CONFLICT(agent_id) DO UPDATE SET status='online', last_seen=?, "
+                    "griptree=?, display_name=?, role=?",
+                    (aid, griptree, display, role, now, now, now, griptree, display, role),
+                )
         else:
             conn.execute(
                 "INSERT INTO presence (agent_id, griptree, display_name, role, status, last_seen, joined_at) "
@@ -1334,6 +1467,13 @@ def channel_join(
             "INSERT OR IGNORE INTO memberships (agent_id, channel, joined_at) "
             "VALUES (?, ?, ?)",
             (aid, channel, now),
+        )
+
+        # Initialize unread flag (clean on join)
+        conn.execute(
+            "INSERT OR IGNORE INTO unread_flags (agent_id, channel, dirty) "
+            "VALUES (?, ?, 0)",
+            (aid, channel),
         )
 
         # Preserve prior read position for restarted sessions that inherit a
@@ -1690,12 +1830,17 @@ def channel_read(
             (channel,),
         ).fetchall()
 
-        # Update read cursor
+        # Update read cursor and clear dirty flag
         conn.execute(
             "INSERT INTO cursors (agent_id, channel, last_read_at) "
             "VALUES (?, ?, ?) "
             "ON CONFLICT(agent_id, channel) DO UPDATE SET last_read_at = ?",
             (aid, channel, now, now),
+        )
+        conn.execute(
+            "UPDATE unread_flags SET dirty = 0, last_cleared_at = ? "
+            "WHERE agent_id = ? AND channel = ?",
+            (now, aid, channel),
         )
         conn.commit()
     finally:
@@ -1787,6 +1932,10 @@ def channel_read(
             truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
         if _one_line:
             body = body.replace("\n", " ").strip()
+        # Worktree tag at max detail (recall#443)
+        wt_tag = ""
+        if _detail == "max" and msg.worktree:
+            wt_tag = f" @{msg.worktree}"
         if msg.type in ("join", "leave", "claim", "unclaim"):
             if _one_line:
                 continue
@@ -1795,12 +1944,12 @@ def channel_read(
             target = f" @{msg.to}" if msg.to else ""
             prefix = "[DIRECTIVE]" if msg.to in (aid, "*") else "[directive]"
             lines.append(
-                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}: "
+                f"  {ts}{inline_mid}  {prefix}{target} {display}{role_tag}{wt_tag}: "
                 f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
             )
         else:
             lines.append(
-                f"  {ts}{inline_mid}  {display}{role_tag}: "
+                f"  {ts}{inline_mid}  {display}{role_tag}{wt_tag}: "
                 f"{body}{truncation_tag}{attachment_tag}{claim_tag}"
             )
 
@@ -2070,6 +2219,7 @@ def channel_pin(
     finally:
         conn.close()
 
+    _set_dirty_flags(channel, aid, project_dir)
     return f"Pinned [{message_id}] in #{channel}: {body}"
 
 
@@ -2989,6 +3139,7 @@ def _migrate_cursors(
 
     # Read local cursors
     local_conn = sqlite3.connect(str(local_db))
+    local_conn.execute("PRAGMA busy_timeout=5000")
     local_conn.row_factory = sqlite3.Row
     try:
         rows = local_conn.execute(
@@ -3005,6 +3156,7 @@ def _migrate_cursors(
     # Write to global _state.db
     conn = sqlite3.connect(str(state_db))
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS cursors ("
         "agent_id TEXT NOT NULL, "
@@ -3037,6 +3189,7 @@ def _open_state_db(state_db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(state_db))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS claims ("
         "org_id TEXT NOT NULL, "
@@ -3133,3 +3286,26 @@ def is_globally_claimed(
         return row["claimed_by"] if row else None
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Default hook registration — backward-compatible OSS behavior (#553)
+# ---------------------------------------------------------------------------
+# Auto-register mention storage and wake emission as hooks so the channel
+# substrate works identically whether or not a premium plugin is installed.
+# Premium coordination.py can call _clear_message_hooks() + register its
+# own hooks to replace or extend this behavior.
+
+def _default_mention_hook(msg: ChannelMessage, project_dir: Path | None = None) -> None:
+    """Store @mentions from a posted message (default OSS hook)."""
+    if msg.type in ("message", "directive") and "@" in msg.body:
+        _store_mentions(msg, project_dir)
+
+
+def _default_wake_hook(msg: ChannelMessage, project_dir: Path | None = None) -> None:
+    """Emit wake requests for a posted message (default OSS hook)."""
+    _emit_message_wakes(msg, project_dir)
+
+
+register_message_hook(_default_mention_hook)
+register_message_hook(_default_wake_hook)

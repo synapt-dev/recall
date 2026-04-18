@@ -1835,6 +1835,182 @@ def _catchup_archive_and_journal(project: Path, transcript_dir: Path) -> None:
         print(f"  Catch-up: wrote {journaled} journal entry(ies)", file=sys.stderr)
 
 
+def generate_startup_context(project: Path) -> list[str]:
+    """Generate startup context lines for any tool (Claude, Codex, etc.).
+
+    Returns a list of context strings covering:
+    - Branch-aware journal context
+    - Open PR status
+    - Recent journal entries
+    - Knowledge nodes
+    - Pending reminders
+    - Pending contradictions
+    - Channel unread summary
+    - Pending directives
+
+    This is the shared core used by both cmd_hook (Claude SessionStart)
+    and cmd_startup (Codex / tool-agnostic startup). Side effects like
+    background indexing, archiving, and enrichment are NOT included here;
+    those belong in cmd_hook which runs inside Claude's hook lifecycle.
+    """
+    lines: list[str] = []
+
+    # 1. Branch-aware context
+    try:
+        from synapt.recall.journal import _get_branch
+        branch = _get_branch(str(project))
+        if branch and branch not in ("main", "master"):
+            from synapt.recall.journal import _read_all_entries, _journal_path
+            all_entries = []
+            jf = _journal_path(project)
+            if jf.exists():
+                all_entries.extend(_read_all_entries(jf))
+            branch_entries = [e for e in all_entries if e.branch == branch]
+            if branch_entries:
+                latest = sorted(branch_entries, key=lambda e: e.timestamp)[-1]
+                if latest.focus:
+                    lines.append(f"Branch context ({branch}): {latest.focus}")
+                    if latest.decisions:
+                        lines.append(f"  Decisions: {'; '.join(latest.decisions[:3])}")
+                    if latest.next_steps:
+                        lines.append(f"  Next steps: {'; '.join(latest.next_steps[:3])}")
+    except Exception:
+        pass
+
+    # 2. Open PR status for current branch
+    try:
+        from synapt.recall.journal import _get_branch
+        branch = _get_branch(str(project))
+        if branch and branch not in ("main", "master"):
+            import subprocess as _sp
+            pr_result = _sp.run(
+                ["gh", "pr", "list", "--head", branch, "--state", "open",
+                 "--json", "number,title,reviews,url", "--limit", "1"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if pr_result.returncode == 0 and pr_result.stdout.strip() not in ("", "[]"):
+                import json as _json
+                prs = _json.loads(pr_result.stdout)
+                for pr in prs:
+                    n_reviews = len(pr.get("reviews", []))
+                    lines.append(f"Open PR: #{pr['number']} -- {pr['title']} ({n_reviews} review(s))")
+    except Exception:
+        pass
+
+    # 3. Journal entries (last 3 rich entries)
+    try:
+        from synapt.recall.journal import _read_all_entries, _journal_path, _dedup_entries
+        from synapt.recall.journal import format_for_session_start
+        jf = _journal_path(project)
+        if jf.exists():
+            all_entries = _dedup_entries(_read_all_entries(jf))
+            rich = [e for e in all_entries if e.has_rich_content()]
+            rich.sort(key=lambda e: e.timestamp, reverse=True)
+            for entry in rich[:3]:
+                lines.append(format_for_session_start(entry))
+    except Exception:
+        pass
+
+    # 4. Knowledge nodes
+    try:
+        from synapt.recall.knowledge import read_nodes, format_knowledge_for_session_start
+        kn_text = format_knowledge_for_session_start(read_nodes())
+        if kn_text:
+            lines.append(kn_text)
+    except Exception:
+        pass
+
+    # 5. Pending reminders
+    try:
+        from synapt.recall.reminders import pop_pending, format_for_session_start as fmt_reminders
+        pending = pop_pending()
+        if pending:
+            lines.append(fmt_reminders(pending))
+    except Exception:
+        pass
+
+    # 6. Pending contradictions
+    try:
+        from synapt.recall.server import format_contradictions_for_session_start
+        contradictions_text = format_contradictions_for_session_start()
+        if contradictions_text:
+            lines.append(contradictions_text)
+    except Exception:
+        pass
+
+    # 7. Channel unread summary
+    try:
+        from synapt.recall.channel import channel_join, channel_unread, channel_read
+        role = "agent" if os.environ.get("SYNAPT_AGENT_ID") else "human"
+        channel_join("dev", role=role)
+        counts = channel_unread()
+        if counts:
+            unread_parts = [f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0]
+            if unread_parts:
+                lines.append(f"Channel: {', '.join(unread_parts)} unread")
+            total_unread = sum(counts.values())
+            if total_unread > 0:
+                summary = channel_read("dev", limit=min(total_unread, 5), show_pins=False)
+                if summary:
+                    lines.append(f"\nRecent #dev messages:\n{summary}")
+    except Exception:
+        pass
+
+    # 8. Pending directives
+    try:
+        from synapt.recall.channel import check_directives
+        directives = check_directives()
+        if directives:
+            lines.append(f"\nPending directives:\n{directives}")
+    except Exception:
+        pass
+
+    return lines
+
+
+def cmd_startup(args: argparse.Namespace) -> None:
+    """Generate startup context for any tool (Codex, Claude, etc.).
+
+    Prints the same context that Claude gets via SessionStart hooks,
+    enabling Codex and other tools to achieve startup parity.
+
+    Usage:
+        synapt recall startup              # context for cwd
+        synapt recall startup --compact    # single-line summary
+        synapt recall startup --json       # machine-readable output
+    """
+    project = Path.cwd().resolve()
+
+    # Optional: compact journal before surfacing (same as SessionStart)
+    try:
+        from synapt.recall.journal import compact_journal
+        compact_journal()
+    except Exception:
+        pass
+
+    context_lines = generate_startup_context(project)
+
+    if not context_lines:
+        if getattr(args, "json", False):
+            print("{}")
+        return
+
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps({"context": "\n".join(context_lines)}, indent=2))
+    elif getattr(args, "compact", False):
+        # Single line for embedding in prompts — flatten multi-line blocks
+        parts = []
+        for line in context_lines:
+            flat = " ".join(s.strip() for s in line.splitlines() if s.strip())
+            if flat:
+                parts.append(flat)
+        print(" | ".join(parts))
+    else:
+        for line in context_lines:
+            print(line)
+
+
 def cmd_hook(args: argparse.Namespace) -> None:
     """Versioned hook handler — replaces shell scripts.
 
@@ -1900,118 +2076,9 @@ def cmd_hook(args: argparse.Namespace) -> None:
             stderr=subprocess.DEVNULL,
         )
 
-        # 4. Surface branch-aware context (search for work on current branch)
-        try:
-            from synapt.recall.journal import _get_branch
-            branch = _get_branch(str(project))
-            if branch and branch not in ("main", "master"):
-                from synapt.recall.journal import _read_all_entries, _journal_path
-                all_entries = []
-                jf = _journal_path(project)
-                if jf.exists():
-                    all_entries.extend(_read_all_entries(jf))
-                branch_entries = [e for e in all_entries if e.branch == branch]
-                if branch_entries:
-                    latest = sorted(branch_entries, key=lambda e: e.timestamp)[-1]
-                    if latest.focus:
-                        print(f"Branch context ({branch}): {latest.focus}")
-                        if latest.decisions:
-                            print(f"  Decisions: {'; '.join(latest.decisions[:3])}")
-                        if latest.next_steps:
-                            print(f"  Next steps: {'; '.join(latest.next_steps[:3])}")
-        except Exception:
-            pass  # Branch context is non-critical
-
-        # 4b. Surface open PR status for current branch
-        try:
-            from synapt.recall.journal import _get_branch
-            branch = _get_branch(str(project))
-            if branch and branch not in ("main", "master"):
-                import subprocess as _sp
-                pr_result = _sp.run(
-                    ["gh", "pr", "list", "--head", branch, "--state", "open",
-                     "--json", "number,title,reviews,url", "--limit", "1"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if pr_result.returncode == 0 and pr_result.stdout.strip() not in ("", "[]"):
-                    import json as _json
-                    prs = _json.loads(pr_result.stdout)
-                    for pr in prs:
-                        n_reviews = len(pr.get("reviews", []))
-                        print(f"Open PR: #{pr['number']} — {pr['title']} ({n_reviews} review(s))")
-        except Exception:
-            pass  # PR status is non-critical
-
-        # 5. Surface journal context — show last 3 entries for continuity
-        try:
-            from synapt.recall.journal import _read_all_entries, _journal_path, _dedup_entries
-            from synapt.recall.journal import format_for_session_start
-            jf = _journal_path(project)
-            if jf.exists():
-                all_entries = _dedup_entries(_read_all_entries(jf))
-                # Filter to entries with real content, sort by timestamp
-                rich = [e for e in all_entries if e.has_rich_content()]
-                rich.sort(key=lambda e: e.timestamp, reverse=True)
-                # Show up to 3 most recent rich entries
-                for entry in rich[:3]:
-                    print(format_for_session_start(entry))
-            else:
-                # Fallback to single-entry display
-                cmd_journal(argparse.Namespace(read=True, write=False, list=False, show=None,
-                                               focus=None, done=None, decisions=None, next=None))
-        except Exception:
-            # Fallback on any error
-            cmd_journal(argparse.Namespace(read=True, write=False, list=False, show=None,
-                                           focus=None, done=None, decisions=None, next=None))
-
-        # 5. Surface knowledge nodes (if any exist)
-        try:
-            from synapt.recall.knowledge import read_nodes, format_knowledge_for_session_start
-            kn_text = format_knowledge_for_session_start(read_nodes())
-            if kn_text:
-                print(kn_text)
-        except Exception:
-            pass  # Knowledge surfacing is non-critical
-
-        # 6. Surface pending reminders
-        cmd_remind(argparse.Namespace(text=None, sticky=False, list=False,
-                                      clear=None, pending=True))
-
-        # 7. Surface pending contradictions (model asks user to resolve)
-        try:
-            from synapt.recall.server import format_contradictions_for_session_start
-            contradictions_text = format_contradictions_for_session_start()
-            if contradictions_text:
-                print(contradictions_text)
-        except Exception:
-            pass  # Contradiction surfacing is non-critical
-
-        # 8. Auto-join channel + surface unread summary
-        try:
-            from synapt.recall.channel import channel_join, channel_unread, channel_read
-            channel_join("dev", role="human")
-            counts = channel_unread()
-            if counts:
-                unread_parts = [f"#{ch}: {n}" for ch, n in sorted(counts.items()) if n > 0]
-                if unread_parts:
-                    print(f"  Channel: {', '.join(unread_parts)} unread", file=sys.stderr)
-                # Surface recent channel messages (last 5) so agent has context
-                total_unread = sum(counts.values())
-                if total_unread > 0:
-                    summary = channel_read("dev", limit=min(total_unread, 5), show_pins=False)
-                    if summary:
-                        print(f"\nRecent #dev messages:\n{summary}")
-        except Exception:
-            pass  # Channel is non-critical
-
-        # 9. Surface pending directives targeted at this agent (#431)
-        try:
-            from synapt.recall.channel import check_directives
-            directives = check_directives()
-            if directives:
-                print(f"\nPending directives:\n{directives}")
-        except Exception:
-            pass  # Directives are non-critical
+        # 4-9. Surface startup context (shared with cmd_startup for Codex parity)
+        for line in generate_startup_context(project):
+            print(line)
 
         # 10. Dev-loop activation prompt — deterministic hook replaces
         #     unreliable skill auto-activation (~20%). The agent reads this
@@ -2646,6 +2713,16 @@ def main():
     remind_parser.add_argument("--clear", nargs="?", const="", default=None, help="Clear reminder by ID (or all if no ID)")
     remind_parser.add_argument("--pending", action="store_true", help="Show and mark pending reminders (for hooks)")
 
+    # Startup (tool-agnostic startup context — Codex parity with Claude SessionStart)
+    startup_parser = subparsers.add_parser(
+        "startup",
+        help="Generate startup context (journal, reminders, channel) for any tool",
+    )
+    startup_parser.add_argument("--json", action="store_true", dest="json",
+                                help="Output as JSON")
+    startup_parser.add_argument("--compact", action="store_true",
+                                help="Single-line summary for prompt injection")
+
     # Hook (versioned hook commands — called directly from Claude Code hooks config)
     hook_parser = subparsers.add_parser("hook", help="Run a Claude Code hook (session-start, session-end, precompact, check-directives)")
     hook_parser.add_argument("event", choices=["session-start", "session-end", "precompact", "check-directives"],
@@ -2739,6 +2816,8 @@ def main():
         cmd_consolidate(args)
     elif args.command == "remind":
         cmd_remind(args)
+    elif args.command == "startup":
+        cmd_startup(args)
     elif args.command == "hook":
         cmd_hook(args)
     elif args.command == "install-hook":

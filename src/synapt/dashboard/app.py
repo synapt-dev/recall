@@ -15,12 +15,16 @@ import subprocess
 import sys
 import tempfile
 import time
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
 from html import escape
 from pathlib import Path
 from urllib.parse import quote
 
 import markdown as _md
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -38,6 +42,90 @@ from synapt.recall.channel import (
 from synapt.recall.registry import list_agents as _registry_list_agents
 
 _MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
+
+# ---------------------------------------------------------------------------
+# Agent tool detection (codex vs claude)
+# ---------------------------------------------------------------------------
+
+_CODEX_AGENTS: set[str] = set()
+
+
+def _load_codex_agents() -> None:
+    """Load agents.toml and populate _CODEX_AGENTS with names using the codex tool."""
+    from synapt.recall.core import _find_gripspace_root
+
+    grip_root = _find_gripspace_root(Path.cwd())
+    if grip_root is None:
+        return
+    toml_path = grip_root / ".gitgrip" / "agents.toml"
+    if not toml_path.is_file():
+        toml_path = grip_root / "config" / "agents.toml"
+    if not toml_path.is_file():
+        return
+    try:
+        with open(toml_path, "rb") as f:
+            cfg = tomllib.load(f)
+        for name, agent_cfg in cfg.get("agents", {}).items():
+            if agent_cfg.get("tool") == "codex":
+                _CODEX_AGENTS.add(name)
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+
+_load_codex_agents()
+
+_TMUX_SESSION: str = "synapt"
+
+
+def _load_tmux_session() -> None:
+    """Load tmux session name from spawn config."""
+    global _TMUX_SESSION
+    from synapt.recall.core import _find_gripspace_root
+
+    grip_root = _find_gripspace_root(Path.cwd())
+    if grip_root is None:
+        return
+    for candidate in [
+        grip_root / ".gitgrip" / "spawn.toml",
+        grip_root / "config" / "spawn.toml",
+    ]:
+        if candidate.is_file():
+            try:
+                with open(candidate, "rb") as f:
+                    cfg = tomllib.load(f)
+                name = cfg.get("spawn", {}).get("session_name", "")
+                if name:
+                    _TMUX_SESSION = name
+                return
+            except (OSError, tomllib.TOMLDecodeError):
+                pass
+
+
+_load_tmux_session()
+
+
+def _resolve_tmux_target(name: str) -> str:
+    """Resolve a qualified tmux target for an agent (recall#692 fix 3).
+
+    Checks cached agent data for a stored tmux_target. Falls back to
+    {session}:{name} to avoid ambiguity when multiple sessions exist.
+    """
+    org_id = _resolve_org_id(None)
+    if org_id:
+        db_path = Path.home() / ".synapt" / "orgs" / org_id / "team.db"
+        if db_path.exists():
+            try:
+                agents = _registry_list_agents(org_id, db_path=db_path)
+                for agent in agents:
+                    if agent.get("display_name") == name:
+                        stored = agent.get("tmux_target")
+                        if stored:
+                            return stored
+                        break
+            except Exception:
+                pass
+    return f"{_TMUX_SESSION}:{name}"
+
 
 # ---------------------------------------------------------------------------
 # HTML fragment renderers
@@ -81,12 +169,11 @@ def _is_pid_alive(pid: int) -> bool:
         return False
 
 
-def _combined_agents_json() -> list[dict]:
+def _combined_agents_json_sync() -> list[dict]:
     """Return agents from both team.db (process tracking) and channel presence.
 
-    Fixes recall#552: spawned agents weren't visible because presence is
-    per-gripspace (local channels.db) but the dashboard may be in a
-    different gripspace. team.db is global and updated by gr spawn.
+    Scoped to the current org only (recall#692) to avoid SQLite lock
+    contention when multiple workspaces are active simultaneously.
 
     Merge strategy: team.db agents are the authority for process status.
     Channel presence supplements with channel memberships and heartbeat.
@@ -100,32 +187,26 @@ def _combined_agents_json() -> list[dict]:
     except Exception:
         pass
 
-    # Overlay with team.db agents (global process tracking)
-    try:
-        for org_dir in (Path.home() / ".synapt" / "orgs").iterdir():
-            if not org_dir.is_dir():
-                continue
-            db_path = org_dir / "team.db"
-            if not db_path.exists():
-                continue
-            org_id = org_dir.name
+    # Overlay with team.db agents — current org only (recall#692 fix 1)
+    current_org = _resolve_org_id(None)
+    if current_org:
+        db_path = Path.home() / ".synapt" / "orgs" / current_org / "team.db"
+        if db_path.exists():
             try:
-                registered = _registry_list_agents(org_id, db_path=db_path)
+                registered = _registry_list_agents(current_org, db_path=db_path)
             except Exception:
-                continue
+                registered = []
             for agent in registered:
                 name = agent.get("display_name", "")
                 status = agent.get("status") or "offline"
-                # Verify PID is alive — team.db status can be stale if the
-                # process exited without updating the DB (crash, kill, etc.)
                 pid = agent.get("pid")
                 if status in ("running", "online") and pid:
                     if not _is_pid_alive(pid):
                         status = "offline"
                 if status in ("offline", "stopped") and name not in agents_by_name:
-                    continue  # Don't show offline agents that aren't in presence
+                    continue
+                tmux_target = agent.get("tmux_target") or ""
                 if name not in agents_by_name:
-                    # Agent visible in team.db but not in local presence
                     agents_by_name[name] = {
                         "agent_id": agent.get("agent_id", ""),
                         "display_name": name,
@@ -134,16 +215,21 @@ def _combined_agents_json() -> list[dict]:
                         "status": status,
                         "last_seen": agent.get("last_seen_at", ""),
                         "channels": [],
+                        "tmux_target": tmux_target,
                     }
                 else:
-                    # Merge: use team.db status if agent is running/online
                     existing = agents_by_name[name]
                     if status in ("running", "online"):
                         existing["status"] = status
-    except FileNotFoundError:
-        pass  # No orgs directory
+                    if tmux_target:
+                        existing["tmux_target"] = tmux_target
 
     return sorted(agents_by_name.values(), key=lambda a: a.get("display_name", ""))
+
+
+async def _combined_agents_json() -> list[dict]:
+    """Async wrapper — runs SQLite reads off the event loop (recall#692 fix 2)."""
+    return await asyncio.to_thread(_combined_agents_json_sync)
 
 
 def _render_agent_tile(agent: dict) -> str:
@@ -226,12 +312,7 @@ def _render_message(msg: dict) -> str:
     attachments_html = _render_attachments(msg)
 
     if msg_type in ("join", "leave"):
-        return (
-            f'<div class="msg sys">'
-            f'<span class="ts" data-utc="{escape(ts)}">{ts_short}</span> '
-            f'<span class="sys-text">-- {escape(name)} {"joined" if msg_type == "join" else "left"}</span>'
-            f'</div>'
-        )
+        return ''
     color = _agent_color(name)
     _MD.reset()
     # Escape leading '#' not followed by space — prevents markdown
@@ -507,7 +588,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/agents")
     async def api_agents():
-        return _combined_agents_json()
+        return await _combined_agents_json()
 
     @app.get("/api/org")
     async def api_org():
@@ -630,16 +711,126 @@ def create_app() -> FastAPI:
     # Mission Control: per-agent tmux integration (Sprint 9)
     # -----------------------------------------------------------------
 
+    # Allowed tmux key names for the /key endpoint (safety allowlist)
+    _ALLOWED_KEYS = {
+        "Enter", "Escape", "Up", "Down", "Left", "Right",
+        "Tab", "BTab", "Space", "BSpace",
+        "C-c", "C-d", "C-z", "C-l",
+        "y", "n", "q",
+    }
+
     @app.post("/api/agent/{name}/input")
     async def api_agent_input(name: str, text: str = Form("")):
-        """Send input to an agent's tmux pane via send-keys."""
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="Input text required")
-        # Resolve tmux target from team.db or convention
-        target = f"{name}"  # Will be refined with session:window format
+        """Send input to an agent's tmux pane via send-keys.
+
+        Codex agents require a second Enter to confirm the prompt (two-step
+        input protocol).  The agent tool type is detected from agents.toml at
+        startup; codex agents get an extra Enter after a short delay.
+
+        If text is empty, sends a bare Enter (for confirming selections).
+        """
+        target = _resolve_tmux_target(name)
+        is_codex = name in _CODEX_AGENTS
+        try:
+            if text.strip():
+                result = subprocess.run(
+                    ["tmux", "send-keys", "-t", target, text, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            else:
+                # Bare Enter for confirming selections/prompts
+                result = subprocess.run(
+                    ["tmux", "send-keys", "-t", target, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"tmux send-keys failed: {result.stderr.decode().strip()}",
+                )
+            # Codex needs a second Enter to confirm the prompt
+            if is_codex and text.strip():
+                await asyncio.sleep(0.3)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
+        except FileNotFoundError:
+            raise HTTPException(status_code=503, detail="tmux not available")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="tmux send-keys timed out")
+        return {"ok": True, "agent": name, "codex": is_codex}
+
+    # Upload directory for images/files sent to agents
+    _UPLOAD_DIR = Path(tempfile.gettempdir()) / "synapt-uploads"
+    _UPLOAD_DIR.mkdir(exist_ok=True)
+
+    @app.post("/api/agent/{name}/upload")
+    async def api_agent_upload(name: str, file: UploadFile = File(...)):
+        """Upload a file and send its path to an agent's tmux pane.
+
+        Saves the file to a persistent temp directory so the agent can
+        read it.  The absolute file path is sent as text input to the
+        agent's tmux pane.
+        """
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        suffix = Path(file.filename).suffix
+        stem = Path(file.filename).stem
+        # Unique filename to avoid collisions
+        ts = int(time.time())
+        dest = _UPLOAD_DIR / f"{stem}-{ts}{suffix}"
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        # Send the file path to the agent's tmux pane
+        target = _resolve_tmux_target(name)
+        file_path = str(dest)
+        is_codex = name in _CODEX_AGENTS
         try:
             result = subprocess.run(
-                ["tmux", "send-keys", "-t", target, text, "Enter"],
+                ["tmux", "send-keys", "-t", target, file_path, "Enter"],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"tmux send-keys failed: {result.stderr.decode().strip()}",
+                )
+            if is_codex:
+                await asyncio.sleep(0.3)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", target, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
+        except FileNotFoundError:
+            raise HTTPException(status_code=503, detail="tmux not available")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="tmux send-keys timed out")
+        return {"ok": True, "agent": name, "path": file_path}
+
+    @app.post("/api/agent/{name}/key")
+    async def api_agent_key(name: str, key: str = Form("")):
+        """Send a raw tmux key name to an agent's pane.
+
+        Accepts key names like Enter, Escape, Up, Down, C-c, y, n, etc.
+        Only allowlisted key names are accepted for safety.
+        """
+        key = key.strip()
+        if key not in _ALLOWED_KEYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Key not allowed: {key}. Allowed: {sorted(_ALLOWED_KEYS)}",
+            )
+        target = _resolve_tmux_target(name)
+        try:
+            result = subprocess.run(
+                ["tmux", "send-keys", "-t", target, key],
                 capture_output=True,
                 timeout=5,
             )
@@ -652,7 +843,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="tmux not available")
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="tmux send-keys timed out")
-        return {"ok": True, "agent": name}
+        return {"ok": True, "agent": name, "key": key}
 
     @app.get("/api/agent/{name}/output")
     async def api_agent_output(request: Request, name: str, lines: int = 50):
@@ -684,23 +875,360 @@ def create_app() -> FastAPI:
         return EventSourceResponse(tail_log())
 
     @app.get("/api/agent/{name}/snapshot")
-    async def api_agent_snapshot(name: str, lines: int = 50):
-        """One-shot capture of agent's tmux pane content."""
-        target = f"{name}"
+    async def api_agent_snapshot(name: str, lines: int = 50, ansi: bool = False):
+        """One-shot capture of agent's tmux pane content.
+
+        With ansi=true, returns ANSI escape codes for colors/styles and
+        includes cursor_x, cursor_y, pane_width, pane_height for cursor
+        rendering.
+        """
+        target = _resolve_tmux_target(name)
         try:
+            cmd = ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{lines}"]
+            if ansi:
+                cmd.insert(4, "-e")  # include escape sequences
             result = subprocess.run(
-                ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{lines}"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+                cmd, capture_output=True, text=True, timeout=5,
             )
             if result.returncode != 0:
                 return {"agent": name, "content": "", "error": "pane not found"}
-            return {"agent": name, "content": result.stdout}
+            resp: dict = {"agent": name, "content": result.stdout}
+            if ansi:
+                # Get cursor position and pane dimensions
+                cur = subprocess.run(
+                    ["tmux", "display-message", "-t", target, "-p",
+                     "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if cur.returncode == 0:
+                    parts = cur.stdout.strip().split()
+                    if len(parts) == 4:
+                        resp["cursor_x"] = int(parts[0])
+                        resp["cursor_y"] = int(parts[1])
+                        resp["pane_width"] = int(parts[2])
+                        resp["pane_height"] = int(parts[3])
+            return resp
         except FileNotFoundError:
             return {"agent": name, "content": "", "error": "tmux not available"}
 
+    # -----------------------------------------------------------------
+    # Terminal pop-out: xterm.js + WebSocket bridge to tmux
+    # -----------------------------------------------------------------
+
+    @app.get("/terminal/{name}")
+    async def terminal_page(name: str):
+        """Serve the xterm.js terminal pop-out page."""
+        html = _TERMINAL_HTML.replace("{{AGENT_NAME}}", name)
+        return HTMLResponse(html)
+
+    @app.websocket("/ws/terminal/{name}")
+    async def terminal_ws(websocket: WebSocket, name: str):
+        """WebSocket bridge: tmux capture-pane -> client, client input -> tmux send-keys."""
+        await websocket.accept()
+        target = _resolve_tmux_target(name)
+        is_codex = name in _CODEX_AGENTS
+
+        async def send_snapshots():
+            """Poll tmux and push ANSI output to the client."""
+            last_content = ""
+            while True:
+                try:
+                    result = subprocess.run(
+                        ["tmux", "capture-pane", "-t", target, "-p", "-e",
+                         "-S", "-200"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if result.returncode == 0 and result.stdout != last_content:
+                        last_content = result.stdout
+                        cur = subprocess.run(
+                            ["tmux", "display-message", "-t", target, "-p",
+                             "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}"],
+                            capture_output=True, text=True, timeout=3,
+                        )
+                        cursor_info = {}
+                        if cur.returncode == 0:
+                            parts = cur.stdout.strip().split()
+                            if len(parts) == 4:
+                                cursor_info = {
+                                    "cx": int(parts[0]), "cy": int(parts[1]),
+                                    "w": int(parts[2]), "h": int(parts[3]),
+                                }
+                        await websocket.send_json({
+                            "type": "output",
+                            "content": last_content,
+                            **cursor_info,
+                        })
+                except Exception:
+                    break
+                await asyncio.sleep(0.3)
+
+        async def receive_input():
+            """Read client keystrokes and forward to tmux."""
+            while True:
+                try:
+                    msg = await websocket.receive_json()
+                except Exception:
+                    break
+                msg_type = msg.get("type", "")
+                if msg_type == "input":
+                    text = msg.get("text", "")
+                    if text:
+                        subprocess.run(
+                            ["tmux", "send-keys", "-t", target, text, "Enter"],
+                            capture_output=True, timeout=5,
+                        )
+                        if is_codex:
+                            await asyncio.sleep(0.3)
+                            subprocess.run(
+                                ["tmux", "send-keys", "-t", target, "Enter"],
+                                capture_output=True, timeout=5,
+                            )
+                    else:
+                        # Bare enter
+                        subprocess.run(
+                            ["tmux", "send-keys", "-t", target, "Enter"],
+                            capture_output=True, timeout=5,
+                        )
+                elif msg_type == "key":
+                    key = msg.get("key", "")
+                    if key in _ALLOWED_KEYS:
+                        subprocess.run(
+                            ["tmux", "send-keys", "-t", target, key],
+                            capture_output=True, timeout=5,
+                        )
+
+        sender = asyncio.create_task(send_snapshots())
+        try:
+            await receive_input()
+        finally:
+            sender.cancel()
+
     return app
+
+
+# ---------------------------------------------------------------------------
+# xterm.js terminal page (inline HTML)
+# ---------------------------------------------------------------------------
+
+_TERMINAL_HTML = """<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Terminal: {{AGENT_NAME}}</title>
+<link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
+<script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #141420;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  #header {
+    padding: 6px 16px;
+    background: #1a1d27;
+    border-bottom: 1px solid #2a2d3a;
+    color: #8b5cf6;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  #header .status { color: #71717a; font-weight: 400; }
+  #header .status.connected { color: #4ade80; }
+  #terminal-container {
+    flex: 1;
+    padding: 4px;
+    overflow: hidden;
+  }
+  #input-bar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid #2a2d3a;
+    background: #1a1d27;
+    flex-shrink: 0;
+  }
+  #input-bar input {
+    flex: 1;
+    background: #0f1117;
+    color: #e4e4e7;
+    border: 1px solid #2a2d3a;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  #input-bar input:focus { border-color: #8b5cf6; }
+  #input-bar button {
+    background: #8b5cf6;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .key-bar {
+    display: flex;
+    gap: 4px;
+    padding: 6px 16px;
+    border-top: 1px solid #2a2d3a;
+    background: #1a1d27;
+    flex-wrap: wrap;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .key-bar .kl { font-size: 10px; color: #71717a; margin-right: 4px; }
+  .key-bar button {
+    background: #0f1117;
+    border: 1px solid #2a2d3a;
+    color: #e4e4e7;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .key-bar button:hover { border-color: #8b5cf6; color: #8b5cf6; }
+  .key-bar .ks { width: 1px; height: 18px; background: #2a2d3a; margin: 0 4px; }
+</style>
+</head>
+<body>
+<div id="header">
+  <span>Terminal: {{AGENT_NAME}}</span>
+  <span class="status" id="status">connecting...</span>
+</div>
+<div id="terminal-container"></div>
+<div class="key-bar">
+  <span class="kl">Keys:</span>
+  <button data-key="Enter">Enter</button><button data-key="Escape">Esc</button>
+  <button data-key="y">y</button><button data-key="n">n</button>
+  <div class="ks"></div>
+  <button data-key="Up">Up</button><button data-key="Down">Down</button><button data-key="Tab">Tab</button>
+  <div class="ks"></div>
+  <button data-key="C-c">^C</button><button data-key="C-d">^D</button><button data-key="q">q</button>
+</div>
+<div id="input-bar">
+  <input type="text" id="inp" placeholder="Send to {{AGENT_NAME}}..." autocomplete="off" autofocus>
+  <button id="btn">Send</button>
+</div>
+<script>
+var agentName = '{{AGENT_NAME}}';
+var term = new Terminal({
+  theme: {
+    background: '#141420',
+    foreground: '#e4e4e7',
+    cursor: '#8b5cf6',
+    cursorAccent: '#141420',
+    selectionBackground: 'rgba(139,92,246,0.3)',
+    black: '#000000', red: '#cc0000', green: '#00aa00', yellow: '#aaaa00',
+    blue: '#5555ff', magenta: '#aa00aa', cyan: '#00aaaa', white: '#aaaaaa',
+    brightBlack: '#555555', brightRed: '#ff5555', brightGreen: '#55ff55',
+    brightYellow: '#ffff55', brightBlue: '#5555ff', brightMagenta: '#ff55ff',
+    brightCyan: '#55ffff', brightWhite: '#ffffff',
+  },
+  fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+  fontSize: 13,
+  cursorBlink: true,
+  cursorStyle: 'block',
+  scrollback: 5000,
+  convertEol: true,
+});
+
+var fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal-container'));
+fitAddon.fit();
+window.addEventListener('resize', function() { fitAddon.fit(); });
+
+// WebSocket connection
+var wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+var ws = new WebSocket(wsProto + '//' + location.host + '/ws/terminal/' + agentName);
+var statusEl = document.getElementById('status');
+
+ws.onopen = function() {
+  statusEl.textContent = 'connected';
+  statusEl.className = 'status connected';
+};
+ws.onclose = function() {
+  statusEl.textContent = 'disconnected';
+  statusEl.className = 'status';
+};
+ws.onerror = function() {
+  statusEl.textContent = 'error';
+  statusEl.className = 'status';
+};
+
+// Receive output from server
+ws.onmessage = function(evt) {
+  try {
+    var msg = JSON.parse(evt.data);
+    if (msg.type === 'output' && msg.content) {
+      // Clear and rewrite terminal with new content
+      term.reset();
+      term.write(msg.content);
+      // Position cursor if we have coordinates
+      if (typeof msg.cy === 'number' && typeof msg.cx === 'number' && msg.h) {
+        // Move cursor to the right position in the visible area
+        var visibleStart = msg.content.split('\\n').length - msg.h;
+        if (visibleStart < 0) visibleStart = 0;
+        // xterm handles cursor positioning from the content itself
+      }
+    }
+  } catch(e) {}
+};
+
+// Send text input
+function send() {
+  var inp = document.getElementById('inp');
+  if (!inp.value.trim() && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'input', text: '' }));
+    return;
+  }
+  if (inp.value.trim() && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'input', text: inp.value }));
+    inp.value = '';
+  }
+}
+document.getElementById('btn').addEventListener('click', send);
+
+// Key forwarding from input field
+var km = {ArrowUp:'Up',ArrowDown:'Down',ArrowLeft:'Left',ArrowRight:'Right',
+           Escape:'Escape',Tab:'Tab',Enter:'Enter'};
+document.getElementById('inp').addEventListener('keydown', function(e) {
+  var inp = document.getElementById('inp');
+  var k = km[e.key];
+  if (k && !inp.value.trim() && ws.readyState === 1) {
+    e.preventDefault();
+    if (e.key === 'Enter') {
+      ws.send(JSON.stringify({ type: 'input', text: '' }));
+    } else {
+      ws.send(JSON.stringify({ type: 'key', key: k }));
+    }
+    return;
+  }
+  if (e.key === 'Enter') { e.preventDefault(); send(); }
+});
+
+// Key palette
+document.querySelector('.key-bar').addEventListener('click', function(e) {
+  var b = e.target.closest('button[data-key]');
+  if (b && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'key', key: b.dataset.key }));
+  }
+});
+</script>
+</body>
+</html>"""
 
 
 # ---------------------------------------------------------------------------

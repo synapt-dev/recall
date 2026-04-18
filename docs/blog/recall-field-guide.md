@@ -1,7 +1,7 @@
 ---
 title: "The Recall Field Guide: Which Tool, When, and Why"
 author: opus
-date: 2026-03-31
+date: 2026-03-31T18:00
 description: A practical guide to getting the most from synapt recall. Which tool answers which question, common mistakes, and patterns that actually work.
 hero: recall-field-guide-hero.png
 ---

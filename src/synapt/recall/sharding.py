@@ -169,6 +169,7 @@ def estimate_split(db_path: Path, threshold: int = SHARD_CHUNK_THRESHOLD) -> dic
     Returns empty dict if the DB has no chunks table.
     """
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
@@ -234,6 +235,7 @@ def split_monolithic_db(
         idx_path = tmp_dir / "index.db"
         idx = sqlite3.connect(str(idx_path))
         idx.execute("PRAGMA journal_mode=WAL")
+        idx.execute("PRAGMA busy_timeout=5000")
         idx.execute(f"ATTACH DATABASE '{db_path}' AS src")
         try:
             for table_info in src.execute(
@@ -280,6 +282,7 @@ def split_monolithic_db(
             shard_path = tmp_dir / s_name
             shard = sqlite3.connect(str(shard_path))
             shard.execute("PRAGMA journal_mode=WAL")
+            shard.execute("PRAGMA busy_timeout=5000")
             try:
                 shard.execute(chunks_sql)
                 placeholders = ",".join("?" for _ in col_names)
@@ -304,6 +307,7 @@ def split_monolithic_db(
             max_ts = batch[-1]["timestamp"] if batch else ""
             is_last = offset + threshold >= len(all_chunks)
             idx_conn = sqlite3.connect(str(idx_path))
+            idx_conn.execute("PRAGMA busy_timeout=5000")
             try:
                 idx_conn.execute(SHARD_METADATA_SQL)
                 _update_shard_metadata(

@@ -33,6 +33,7 @@ from synapt.recall.channel import (
     channel_heartbeat,
     channel_unread,
     channel_unread_read,
+    channel_has_unread,
     channel_pin,
     channel_unpin,
     channel_directive,
@@ -587,7 +588,8 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_reap_posts_leave_message(self):
+    def test_reap_does_not_post_leave_message(self):
+        """Reaper silently updates presence without writing leave events to JSONL."""
         stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -608,9 +610,9 @@ class TestAutoLeaveTimeout(unittest.TestCase):
         finally:
             conn.close()
 
-        # Check channel log for the leave message
+        # Reaper should NOT write leave messages to the channel log
         result = channel_read("dev")
-        self.assertIn("timed out", result)
+        self.assertNotIn("timed out", result)
 
     def test_reap_releases_claims(self):
         stale_time = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
@@ -2827,6 +2829,112 @@ class TestSharedChannelsDir(unittest.TestCase):
             # But gripspace A's DB has the join
             db_a = local_a / "channels" / "channels.db"
             self.assertTrue(db_a.exists())
+
+
+class TestDirtyFlagPolling(unittest.TestCase):
+    """Tests for the unread_flags dirty-flag optimization (recall#638)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.patcher = _patch_data_dir(self.tmpdir)
+        self.patcher.start()
+        # Join two agents to #dev
+        channel_join("dev", agent_name="agent_a", display_name="AgentA")
+        channel_join("dev", agent_name="agent_b", display_name="AgentB")
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_flag_clean_after_read(self):
+        """After reading, dirty flag is cleared."""
+        # agent_b's join event sets agent_a's flag dirty, so read to clear
+        channel_read("dev", agent_name="agent_a")
+        flags = channel_has_unread(agent_name="agent_a")
+        self.assertFalse(flags.get("dev", False))
+
+    def test_post_sets_dirty_for_other_members(self):
+        """Posting sets dirty flag for all other channel members."""
+        channel_post("dev", "hello world", agent_name="agent_a")
+        flags_b = channel_has_unread(agent_name="agent_b")
+        self.assertTrue(flags_b.get("dev", False))
+
+    def test_post_does_not_set_dirty_for_sender(self):
+        """Poster's own dirty flag is not set by their own post."""
+        # Clear any existing dirty flags from join events
+        channel_read("dev", agent_name="agent_a")
+        self.assertFalse(channel_has_unread(agent_name="agent_a").get("dev", False))
+        # Post as agent_a
+        channel_post("dev", "hello world", agent_name="agent_a")
+        flags_a = channel_has_unread(agent_name="agent_a")
+        self.assertFalse(flags_a.get("dev", False))
+
+    def test_read_clears_dirty_flag(self):
+        """channel_read() clears the dirty flag after advancing cursor."""
+        channel_post("dev", "hello", agent_name="agent_a")
+        # agent_b has unread
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+        # agent_b reads
+        channel_read("dev", agent_name="agent_b")
+        # flag cleared
+        self.assertFalse(channel_has_unread(agent_name="agent_b").get("dev", False))
+
+    def test_unread_count_does_not_clear_flag(self):
+        """channel_unread() (count-only) must NOT clear the dirty flag."""
+        channel_post("dev", "hello", agent_name="agent_a")
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+        # Count-only check
+        counts = channel_unread(agent_name="agent_b")
+        self.assertGreater(counts.get("dev", 0), 0)
+        # Flag still dirty
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+
+    def test_multiple_posts_single_clear(self):
+        """Multiple posts only need one read to clear."""
+        channel_post("dev", "msg1", agent_name="agent_a")
+        channel_post("dev", "msg2", agent_name="agent_a")
+        channel_post("dev", "msg3", agent_name="agent_a")
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+        channel_read("dev", agent_name="agent_b")
+        self.assertFalse(channel_has_unread(agent_name="agent_b").get("dev", False))
+
+    def test_pin_sets_dirty_flag(self):
+        """Pinning a message sets dirty flag for other members."""
+        channel_post("dev", "pin me", agent_name="agent_a")
+        # Read to clear initial dirty flag
+        channel_read("dev", agent_name="agent_b")
+        self.assertFalse(channel_has_unread(agent_name="agent_b").get("dev", False))
+        # Now pin — should set dirty again
+        path = _channel_path("dev")
+        msgs = _read_messages(path)
+        pin_id = msgs[-1].id
+        channel_pin("dev", pin_id, agent_name="agent_a")
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+
+    def test_directive_sets_dirty_flag(self):
+        """Directives (which go through _append_message) set dirty flags."""
+        channel_directive("dev", "do the thing", to="agent_b", agent_name="agent_a")
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+
+    def test_no_flag_for_non_member(self):
+        """Agents not in a channel get no flags."""
+        channel_post("dev", "hello", agent_name="agent_a")
+        flags = channel_has_unread(agent_name="agent_c_not_joined")
+        self.assertEqual(flags, {})
+
+    def test_lifecycle_write_flag_read_clear(self):
+        """Full lifecycle: join -> clean -> post -> dirty -> read -> clean."""
+        # Start clean
+        self.assertFalse(channel_has_unread(agent_name="agent_b").get("dev", False))
+        # Post makes dirty
+        channel_post("dev", "lifecycle test", agent_name="agent_a")
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
+        # Read clears
+        channel_read("dev", agent_name="agent_b")
+        self.assertFalse(channel_has_unread(agent_name="agent_b").get("dev", False))
+        # Another post makes dirty again
+        channel_post("dev", "second message", agent_name="agent_a")
+        self.assertTrue(channel_has_unread(agent_name="agent_b").get("dev", False))
 
 
 if __name__ == "__main__":

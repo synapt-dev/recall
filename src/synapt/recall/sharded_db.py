@@ -15,6 +15,7 @@ See issue #89 for the full design.
 
 from __future__ import annotations
 
+import heapq
 import logging
 import sqlite3
 from pathlib import Path
@@ -210,6 +211,36 @@ class ShardedRecallDB:
         if self._data_dbs:
             return sum(db.chunk_count() for db in self._data_dbs)
         return self._index.chunk_count()
+
+    def content_hash(self) -> str:
+        """Hash chunk content across all shards in global timestamp order.
+
+        Mirrors ``RecallDB.content_hash()`` semantics so sharded and monolithic
+        indexes produce the same invalidation signal for identical content.
+        """
+        if not self._data_dbs:
+            return self._index.content_hash()
+
+        import hashlib
+
+        def _rows(db: RecallDB):
+            return db._conn.execute(
+                "SELECT timestamp, rowid, id, user_text, assistant_text, tool_content "
+                "FROM chunks ORDER BY timestamp DESC, rowid DESC"
+            )
+
+        h = hashlib.sha256()
+        merged = heapq.merge(
+            *(_rows(db) for db in self._data_dbs),
+            key=lambda row: (row[0], row[1]),
+            reverse=True,
+        )
+        for _, _, chunk_id, user_text, assistant_text, tool_content in merged:
+            h.update(
+                f"{chunk_id}|{user_text or ''}|{assistant_text or ''}|{tool_content or ''}\n"
+                .encode()
+            )
+        return h.hexdigest()[:16]
 
     def chunk_session_map(self) -> dict[int, str]:
         """Return a global ``{rowid: session_id}`` mapping for all chunks."""

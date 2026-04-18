@@ -199,6 +199,16 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         self.assertAlmostEqual(loaded[mapping["s2:t0"]][0], emb2[0], places=6)
         db.close()
 
+    def test_content_hash_spans_all_shards_in_global_timestamp_order(self):
+        db = self._create_two_shard_layout()
+        import hashlib
+
+        h = hashlib.sha256()
+        h.update("s2:t0|beta memory|assistant|\n".encode())
+        h.update("s1:t0|alpha memory|assistant|\n".encode())
+        self.assertEqual(db.content_hash(), h.hexdigest()[:16])
+        db.close()
+
     def test_transcript_index_load_can_search_sharded_chunks(self):
         self._create_two_shard_layout().close()
         index = TranscriptIndex.load(self.index_dir)
