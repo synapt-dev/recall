@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "synapt": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "synapt", "synapt", "server"]
+    }
+  }
+}

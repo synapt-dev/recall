@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "synapt": {
+      "command": "synapt",
+      "args": [
+        "server"
+      ]
+    }
+  }
+}

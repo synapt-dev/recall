@@ -1,0 +1,20 @@
+{
+  "name": "synapt-plugins",
+  "interface": {
+    "displayName": "synapt Plugins"
+  },
+  "plugins": [
+    {
+      "name": "synapt-recall",
+      "source": {
+        "source": "local",
+        "path": "./codex-plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
