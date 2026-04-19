@@ -1,0 +1,13 @@
+{
+  "name": "synapt-recall",
+  "version": "0.1.0",
+  "description": "Persistent memory for Claude Code sessions via synapt recall",
+  "author": {
+    "name": "synapt",
+    "url": "https://github.com/synapt-dev"
+  },
+  "homepage": "https://synapt.dev",
+  "repository": "https://github.com/synapt-dev/recall",
+  "license": "MIT",
+  "keywords": ["memory", "recall", "persistent", "context", "sessions"]
+}
