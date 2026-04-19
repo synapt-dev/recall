@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.messages import BaseMessage, messages_from_dict
+from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
 
 _DEFAULT_DB_DIR = Path.home() / ".synapt" / "integrations"
 
@@ -77,16 +77,13 @@ class SynaptChatMessageHistory(BaseChatMessageHistory):
         now = time.time()
         rows = []
         for msg in messages:
-            data = {
-                "content": msg.content,
-                "additional_kwargs": msg.additional_kwargs,
-                "type": msg.type,
-            }
-            if hasattr(msg, "tool_call_id"):
-                data["tool_call_id"] = msg.tool_call_id
-            if hasattr(msg, "name") and msg.name:
-                data["name"] = msg.name
-            rows.append((self.session_id, msg.type, json.dumps(data), now))
+            serialized = message_to_dict(msg)
+            rows.append((
+                self.session_id,
+                serialized["type"],
+                json.dumps(serialized["data"]),
+                now,
+            ))
         self._conn.executemany(
             "INSERT INTO messages (session_id, type, data, timestamp) VALUES (?, ?, ?, ?)",
             rows,

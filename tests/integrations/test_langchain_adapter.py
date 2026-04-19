@@ -163,6 +163,32 @@ class TestEdgeCases:
         from synapt.integrations.langchain import SynaptChatMessageHistory
         assert SynaptChatMessageHistory is not None
 
+    def test_response_metadata_preserved(self, history):
+        msg = AIMessage(
+            content="hello",
+            response_metadata={"model": "claude-opus-4-6", "stop_reason": "end_turn"},
+        )
+        history.add_messages([msg])
+        retrieved = history.messages[0]
+        assert retrieved.response_metadata["model"] == "claude-opus-4-6"
+        assert retrieved.response_metadata["stop_reason"] == "end_turn"
+
+    def test_message_id_preserved(self, history):
+        msg = AIMessage(content="hi", id="msg_abc123")
+        history.add_messages([msg])
+        retrieved = history.messages[0]
+        assert retrieved.id == "msg_abc123"
+
+    def test_tool_calls_preserved(self, history):
+        msg = AIMessage(
+            content="",
+            tool_calls=[{"name": "search", "args": {"q": "test"}, "id": "call_1"}],
+        )
+        history.add_messages([msg])
+        retrieved = history.messages[0]
+        assert len(retrieved.tool_calls) == 1
+        assert retrieved.tool_calls[0]["name"] == "search"
+
 
 class TestRecallIntegration:
 
