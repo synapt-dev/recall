@@ -1,5 +1,5 @@
 {
-  "name": "synapt plugins",
+  "name": "synapt-plugins",
   "interface": {
     "displayName": "synapt Plugins"
   },
