@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+langchain_core = pytest.importorskip("langchain_core")
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("pytest_asyncio")
+
 
 @pytest.fixture
 def session(tmp_path: Path):
