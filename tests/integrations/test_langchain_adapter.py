@@ -1,84 +1,173 @@
+"""Tests for the LangChain SynaptChatMessageHistory adapter."""
+
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
-
-langchain_history = pytest.importorskip("langchain_core.chat_history")
-langchain_messages = pytest.importorskip("langchain_core.messages")
-
-BaseChatMessageHistory = langchain_history.BaseChatMessageHistory
-AIMessage = langchain_messages.AIMessage
-HumanMessage = langchain_messages.HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
-def _adapter_cls():
+@pytest.fixture
+def history(tmp_path: Path):
     from synapt.integrations.langchain import SynaptChatMessageHistory
 
-    return SynaptChatMessageHistory
-
-
-def test_langchain_adapter_instantiates_and_matches_interface(tmp_path):
-    SynaptChatMessageHistory = _adapter_cls()
-
-    history = SynaptChatMessageHistory(
-        db_path=tmp_path / "recall.db",
-        session_id="thread-1",
+    h = SynaptChatMessageHistory(
+        session_id="test-session-1",
+        db_path=tmp_path / "test.db",
     )
-
-    assert isinstance(history, BaseChatMessageHistory)
-    assert history.session_id == "thread-1"
-    assert history.messages == []
+    yield h
+    h.close()
 
 
-def test_langchain_adapter_round_trips_messages_for_same_session(tmp_path):
-    SynaptChatMessageHistory = _adapter_cls()
+@pytest.fixture
+def history_b(tmp_path: Path):
+    from synapt.integrations.langchain import SynaptChatMessageHistory
 
-    history = SynaptChatMessageHistory(
-        db_path=tmp_path / "recall.db",
-        session_id="thread-1",
+    h = SynaptChatMessageHistory(
+        session_id="test-session-2",
+        db_path=tmp_path / "test.db",
     )
-    history.add_messages(
-        [
-            HumanMessage(content="Remember that Alice prefers concise status updates."),
-            AIMessage(content="Stored. Alice prefers concise status updates."),
-        ]
-    )
-
-    reloaded = SynaptChatMessageHistory(
-        db_path=tmp_path / "recall.db",
-        session_id="thread-1",
-    )
-
-    assert [message.content for message in reloaded.messages] == [
-        "Remember that Alice prefers concise status updates.",
-        "Stored. Alice prefers concise status updates.",
-    ]
+    yield h
+    h.close()
 
 
-def test_langchain_adapter_isolates_sessions_and_clear_only_resets_current_session(tmp_path):
-    SynaptChatMessageHistory = _adapter_cls()
+class TestBaseChatMessageHistoryContract:
 
-    thread_one = SynaptChatMessageHistory(
-        db_path=tmp_path / "recall.db",
-        session_id="thread-1",
-    )
-    thread_two = SynaptChatMessageHistory(
-        db_path=tmp_path / "recall.db",
-        session_id="thread-2",
-    )
+    def test_empty_on_init(self, history):
+        assert history.messages == []
 
-    thread_one.add_messages([HumanMessage(content="Project Falcon is in design review.")])
-    thread_two.add_messages([HumanMessage(content="Project Zephyr is blocked on legal.")])
+    def test_add_and_retrieve_human_message(self, history):
+        history.add_messages([HumanMessage(content="hello")])
+        msgs = history.messages
+        assert len(msgs) == 1
+        assert msgs[0].content == "hello"
+        assert msgs[0].type == "human"
 
-    assert [message.content for message in thread_one.messages] == [
-        "Project Falcon is in design review."
-    ]
-    assert [message.content for message in thread_two.messages] == [
-        "Project Zephyr is blocked on legal."
-    ]
+    def test_add_and_retrieve_ai_message(self, history):
+        history.add_messages([AIMessage(content="hi there")])
+        msgs = history.messages
+        assert len(msgs) == 1
+        assert msgs[0].content == "hi there"
+        assert msgs[0].type == "ai"
 
-    thread_one.clear()
+    def test_add_and_retrieve_system_message(self, history):
+        history.add_messages([SystemMessage(content="you are helpful")])
+        msgs = history.messages
+        assert len(msgs) == 1
+        assert msgs[0].type == "system"
 
-    assert thread_one.messages == []
-    assert [message.content for message in thread_two.messages] == [
-        "Project Zephyr is blocked on legal."
-    ]
+    def test_add_tool_message(self, history):
+        history.add_messages([
+            ToolMessage(content="result", tool_call_id="call_123"),
+        ])
+        msgs = history.messages
+        assert len(msgs) == 1
+        assert msgs[0].content == "result"
+
+    def test_add_multiple_messages_preserves_order(self, history):
+        history.add_messages([
+            HumanMessage(content="first"),
+            AIMessage(content="second"),
+            HumanMessage(content="third"),
+        ])
+        msgs = history.messages
+        assert len(msgs) == 3
+        assert [m.content for m in msgs] == ["first", "second", "third"]
+        assert [m.type for m in msgs] == ["human", "ai", "human"]
+
+    def test_add_messages_across_calls(self, history):
+        history.add_messages([HumanMessage(content="a")])
+        history.add_messages([AIMessage(content="b")])
+        msgs = history.messages
+        assert len(msgs) == 2
+        assert msgs[0].content == "a"
+        assert msgs[1].content == "b"
+
+    def test_clear(self, history):
+        history.add_messages([
+            HumanMessage(content="hello"),
+            AIMessage(content="hi"),
+        ])
+        assert len(history.messages) == 2
+        history.clear()
+        assert history.messages == []
+
+    def test_clear_is_idempotent(self, history):
+        history.clear()
+        history.clear()
+        assert history.messages == []
+
+
+class TestSessionIsolation:
+
+    def test_sessions_are_isolated(self, history, history_b):
+        history.add_messages([HumanMessage(content="session 1")])
+        history_b.add_messages([HumanMessage(content="session 2")])
+        assert len(history.messages) == 1
+        assert history.messages[0].content == "session 1"
+        assert len(history_b.messages) == 1
+        assert history_b.messages[0].content == "session 2"
+
+    def test_clear_only_affects_own_session(self, history, history_b):
+        history.add_messages([HumanMessage(content="keep me")])
+        history_b.add_messages([HumanMessage(content="delete me")])
+        history_b.clear()
+        assert len(history.messages) == 1
+        assert history_b.messages == []
+
+    def test_session_count(self, history):
+        assert history.session_count == 0
+        history.add_messages([HumanMessage(content="one")])
+        assert history.session_count == 1
+        history.add_messages([HumanMessage(content="two"), AIMessage(content="three")])
+        assert history.session_count == 3
+
+    def test_get_session_ids(self, history, history_b):
+        history.add_messages([HumanMessage(content="a")])
+        history_b.add_messages([HumanMessage(content="b")])
+        ids = history.get_session_ids()
+        assert "test-session-1" in ids
+        assert "test-session-2" in ids
+
+
+class TestEdgeCases:
+
+    def test_empty_content(self, history):
+        history.add_messages([HumanMessage(content="")])
+        msgs = history.messages
+        assert len(msgs) == 1
+        assert msgs[0].content == ""
+
+    def test_unicode_content(self, history):
+        history.add_messages([HumanMessage(content="Hello, world.")])
+        assert history.messages[0].content == "Hello, world."
+
+    def test_large_message(self, history):
+        big = "x" * 100_000
+        history.add_messages([HumanMessage(content=big)])
+        assert history.messages[0].content == big
+
+    def test_additional_kwargs_preserved(self, history):
+        msg = AIMessage(content="hi", additional_kwargs={"custom": "value"})
+        history.add_messages([msg])
+        retrieved = history.messages[0]
+        assert retrieved.additional_kwargs.get("custom") == "value"
+
+    def test_repr(self, history):
+        r = repr(history)
+        assert "test-session-1" in r
+        assert "messages=0" in r
+
+    def test_importable_from_integrations(self):
+        from synapt.integrations.langchain import SynaptChatMessageHistory
+        assert SynaptChatMessageHistory is not None
+
+
+class TestRecallIntegration:
+
+    def test_search_method_exists(self, history):
+        assert callable(history.search)
+
+    def test_save_to_recall_method_exists(self, history):
+        assert callable(history.save_to_recall)
