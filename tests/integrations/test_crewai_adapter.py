@@ -51,19 +51,20 @@ def test_crewai_adapter_remember_and_recall_round_trip(tmp_path):
 
 def test_crewai_adapter_persists_and_isolates_by_scope(tmp_path):
     SynaptMemory = _adapter_cls()
+    shared_path = tmp_path / "crewai.jsonl"
 
     first = SynaptMemory(
-        path=tmp_path / "crewai.jsonl",
+        path=shared_path,
         root_scope="/crew/session-1",
     )
     first.remember("Escalations for Acme should go to Dana first.")
 
     reloaded = SynaptMemory(
-        path=tmp_path / "crewai.jsonl",
+        path=shared_path,
         root_scope="/crew/session-1",
     )
     other_scope = SynaptMemory(
-        path=tmp_path / "other.jsonl",
+        path=shared_path,
         root_scope="/crew/session-2",
     )
 
@@ -75,14 +76,17 @@ def test_crewai_adapter_persists_and_isolates_by_scope(tmp_path):
     assert other_scope_matches == []
 
 
-def test_crewai_adapter_reset_clears_only_own_storage(tmp_path):
+def test_crewai_adapter_reset_clears_only_own_scope(tmp_path):
     SynaptMemory = _adapter_cls()
+    shared_path = tmp_path / "crewai.jsonl"
 
     first = SynaptMemory(
-        path=tmp_path / "alpha.jsonl",
+        path=shared_path,
+        root_scope="/crew/alpha",
     )
     second = SynaptMemory(
-        path=tmp_path / "beta.jsonl",
+        path=shared_path,
+        root_scope="/crew/beta",
     )
 
     first.remember("Alpha crew owns incident response.")
