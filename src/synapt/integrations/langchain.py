@@ -52,10 +52,8 @@ class SynaptChatMessageHistory(BaseChatMessageHistory):
         session_id: str,
         *,
         db_path: Optional[Path] = None,
-        recall_project: Optional[Path] = None,
     ) -> None:
         self.session_id = session_id
-        self._recall_project = recall_project
 
         if db_path is None:
             db_path = _DEFAULT_DB_DIR / "langchain_messages.db"
