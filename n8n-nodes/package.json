@@ -1,0 +1,54 @@
+{
+  "name": "n8n-nodes-synapt",
+  "version": "0.1.0",
+  "description": "n8n community nodes for synapt recall: search memory, save knowledge, and retrieve context across AI agent workflows.",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "synapt",
+    "recall",
+    "memory",
+    "ai-agents"
+  ],
+  "license": "MIT",
+  "homepage": "https://synapt.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/synapt-dev/recall.git",
+    "directory": "n8n-nodes"
+  },
+  "author": {
+    "name": "synapt",
+    "url": "https://synapt.dev"
+  },
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "lint": "eslint nodes credentials --ext .ts",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/SynaptApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Synapt/SynaptSearch.node.js",
+      "dist/nodes/Synapt/SynaptSave.node.js",
+      "dist/nodes/Synapt/SynaptContext.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "gulp": "^4.0.0",
+    "n8n-workflow": "^1.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "^1.0.0"
+  }
+}
