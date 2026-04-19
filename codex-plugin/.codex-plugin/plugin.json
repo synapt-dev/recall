@@ -1,8 +1,7 @@
 {
-  "name": "synapt-codex-plugin",
+  "name": "synapt-recall",
   "version": "0.1.0",
   "description": "Codex plugin scaffold for synapt recall MCP access.",
-  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "synapt Recall",
     "shortDescription": "Local-first memory and recall for Codex.",
