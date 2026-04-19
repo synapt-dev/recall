@@ -5,7 +5,15 @@
 <p align="center">
   <a href="https://pypi.org/project/synapt/"><img src="https://img.shields.io/pypi/v/synapt?color=7c5cbf" alt="PyPI"></a>
   <a href="https://pypi.org/project/synapt/"><img src="https://img.shields.io/pypi/pyversions/synapt?color=00e5cc" alt="Python"></a>
-  <a href="https://github.com/laynepenney/recall/blob/main/LICENSE"><img src="https://img.shields.io/github/license/laynepenney/recall" alt="License"></a>
+  <a href="https://github.com/synapt-dev/recall/blob/main/LICENSE"><img src="https://img.shields.io/github/license/synapt-dev/recall" alt="License"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/LangChain-ready-1C3C3C?logo=langchain&logoColor=white" alt="LangChain">
+  <img src="https://img.shields.io/badge/CrewAI-ready-FF6B35?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0id2hpdGUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=&logoColor=white" alt="CrewAI">
+  <img src="https://img.shields.io/badge/OpenAI_Agents-ready-412991?logo=openai&logoColor=white" alt="OpenAI Agents">
+  <img src="https://img.shields.io/badge/Claude_Code-ready-D97706?logo=anthropic&logoColor=white" alt="Claude Code">
+  <img src="https://img.shields.io/badge/Codex_CLI-ready-412991?logo=openai&logoColor=white" alt="Codex CLI">
 </p>
 
 <p align="center">
@@ -121,6 +129,110 @@ If your client accepts stdio MCP definitions directly, use:
   }
 }
 ```
+
+## Framework integrations
+
+synapt plugs into popular agent frameworks as a drop-in memory backend. Each adapter wraps recall's search and save API for the framework's native session interface.
+
+### LangChain
+
+`SynaptChatMessageHistory` implements LangChain's `BaseChatMessageHistory`. Messages are stored in SQLite with WAL mode; recall search and knowledge persistence are one method call away.
+
+```bash
+pip install synapt langchain-core
+```
+
+```python
+from langchain_core.messages import HumanMessage
+from synapt.integrations.langchain import SynaptChatMessageHistory
+
+history = SynaptChatMessageHistory(session_id="user-123")
+history.add_messages([HumanMessage(content="hello")])
+print(history.messages)
+
+# Semantic search across all indexed sessions
+results = history.search("deployment config")
+
+# Persist a decision as a durable knowledge node
+history.save_to_recall("Always use UTC timestamps", category="convention")
+```
+
+Works with `RunnableWithMessageHistory`, `ConversationChain`, and any LangChain component that accepts a `BaseChatMessageHistory`.
+
+### OpenAI Agents SDK
+
+`SynaptSession` implements the Agents SDK `Session` protocol. Items are stored as JSON dicts in SQLite; async throughout.
+
+```bash
+pip install synapt openai-agents
+```
+
+```python
+from synapt.integrations.openai_agents import SynaptSession
+
+session = SynaptSession(session_id="agent-run-42")
+await session.add_items([{"role": "user", "content": "hello"}])
+items = await session.get_items(limit=10)
+
+# Bridge to recall search
+results = session.search("prior error handling decisions")
+```
+
+### CrewAI
+
+`SynaptMemory` provides long-term memory storage for CrewAI crews, backed by recall's hybrid search.
+
+```bash
+pip install synapt[crewai]
+```
+
+```python
+from synapt.integrations.crewai import SynaptMemory
+
+memory = SynaptMemory()
+crew = Crew(
+    agents=[researcher, writer],
+    tasks=[research_task, write_task],
+    memory=memory,
+)
+crew.kickoff()
+```
+
+### Claude Code
+
+Register the recall MCP server and initialize the project:
+
+```bash
+pip install synapt
+claude mcp add synapt -- synapt server
+synapt init
+```
+
+Claude Code gains `recall_search`, `recall_save`, `recall_journal`, and 20+ other recall tools automatically. `synapt init` also installs session hooks for automatic transcript archiving.
+
+### Codex CLI
+
+Install synapt and register the MCP server:
+
+```bash
+pip install synapt
+```
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.synapt]
+command = "synapt"
+args = ["server"]
+```
+
+Then initialize the project:
+
+```bash
+synapt init
+```
+
+`synapt init` installs the `dev-loop` skill automatically, giving Codex recall search, channel coordination, and journal access.
 
 ## What `synapt init` does
 
