@@ -143,6 +143,7 @@ pip install synapt langchain-core
 ```
 
 ```python
+from langchain_core.messages import HumanMessage
 from synapt.integrations.langchain import SynaptChatMessageHistory
 
 history = SynaptChatMessageHistory(session_id="user-123")
@@ -182,7 +183,7 @@ results = session.search("prior error handling decisions")
 `SynaptMemory` provides long-term memory storage for CrewAI crews, backed by recall's hybrid search.
 
 ```bash
-pip install synapt crewai
+pip install synapt[crewai]
 ```
 
 ```python
@@ -197,19 +198,27 @@ crew = Crew(
 crew.kickoff()
 ```
 
-### Claude Code (plugin)
+### Claude Code
 
-Install the synapt plugin to give Claude Code persistent memory across sessions. The plugin auto-starts the recall MCP server and installs recall skills.
+Register the recall MCP server and initialize the project:
 
 ```bash
-claude plugin add synapt-recall
+pip install synapt
+claude mcp add synapt -- synapt server
+synapt init
 ```
 
-Once installed, Claude Code gains `recall_search`, `recall_save`, `recall_journal`, and 20+ other recall tools automatically. No manual MCP configuration needed.
+Claude Code gains `recall_search`, `recall_save`, `recall_journal`, and 20+ other recall tools automatically. `synapt init` also installs session hooks for automatic transcript archiving.
 
 ### Codex CLI
 
-Codex CLI connects to synapt via MCP. Add to `~/.codex/config.toml`:
+Install synapt and register the MCP server:
+
+```bash
+pip install synapt
+```
+
+Add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.synapt]
@@ -217,14 +226,13 @@ command = "synapt"
 args = ["server"]
 ```
 
-Then initialize:
+Then initialize the project:
 
 ```bash
-pip install synapt
 synapt init
 ```
 
-The `dev-loop` skill is installed automatically, giving Codex recall search, channel coordination, and journal access.
+`synapt init` installs the `dev-loop` skill automatically, giving Codex recall search, channel coordination, and journal access.
 
 ## What `synapt init` does
 
