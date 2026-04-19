@@ -20,12 +20,12 @@ def test_crewai_adapter_instantiates_and_matches_memory_interface(tmp_path):
     SynaptMemory = _adapter_cls()
 
     memory = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-1",
+        path=tmp_path / "crewai.jsonl",
+        root_scope="/crew/session-1",
     )
 
     assert isinstance(memory, CrewAIMemory)
-    assert memory.session_id == "crew-session-1"
+    assert memory.root_scope == "/crew/session-1"
     assert memory.recall("anything", limit=3) == []
 
 
@@ -33,8 +33,7 @@ def test_crewai_adapter_remember_and_recall_round_trip(tmp_path):
     SynaptMemory = _adapter_cls()
 
     memory = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-1",
+        path=tmp_path / "crewai.jsonl",
     )
 
     record = memory.remember(
@@ -50,42 +49,44 @@ def test_crewai_adapter_remember_and_recall_round_trip(tmp_path):
     assert matches[0].record.content == "The customer prefers JSON payloads and terse summaries."
 
 
-def test_crewai_adapter_persists_session_state_and_isolates_other_sessions(tmp_path):
+def test_crewai_adapter_persists_and_isolates_by_scope(tmp_path):
     SynaptMemory = _adapter_cls()
+    shared_path = tmp_path / "crewai.jsonl"
 
     first = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-1",
+        path=shared_path,
+        root_scope="/crew/session-1",
     )
     first.remember("Escalations for Acme should go to Dana first.")
 
     reloaded = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-1",
+        path=shared_path,
+        root_scope="/crew/session-1",
     )
-    other_session = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-2",
+    other_scope = SynaptMemory(
+        path=shared_path,
+        root_scope="/crew/session-2",
     )
 
-    same_session_matches = reloaded.recall("Who handles Acme escalations?", limit=3)
-    other_session_matches = other_session.recall("Who handles Acme escalations?", limit=3)
+    same_scope_matches = reloaded.recall("Who handles Acme escalations?", limit=3)
+    other_scope_matches = other_scope.recall("Who handles Acme escalations?", limit=3)
 
-    assert same_session_matches
-    assert same_session_matches[0].record.content == "Escalations for Acme should go to Dana first."
-    assert other_session_matches == []
+    assert same_scope_matches
+    assert same_scope_matches[0].record.content == "Escalations for Acme should go to Dana first."
+    assert other_scope_matches == []
 
 
-def test_crewai_adapter_reset_clears_only_the_current_session(tmp_path):
+def test_crewai_adapter_reset_clears_only_own_scope(tmp_path):
     SynaptMemory = _adapter_cls()
+    shared_path = tmp_path / "crewai.jsonl"
 
     first = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-1",
+        path=shared_path,
+        root_scope="/crew/alpha",
     )
     second = SynaptMemory(
-        db_path=tmp_path / "recall.db",
-        session_id="crew-session-2",
+        path=shared_path,
+        root_scope="/crew/beta",
     )
 
     first.remember("Alpha crew owns incident response.")
