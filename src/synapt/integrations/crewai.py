@@ -5,9 +5,6 @@ import math
 from pathlib import Path
 from typing import Any
 
-from synapt.recall.core import project_data_dir
-from synapt.recall.server import recall_save
-
 try:
     from crewai.memory import Memory
     from crewai.memory.storage.backend import MemoryRecord, ScopeInfo
@@ -23,13 +20,27 @@ def _require_crewai() -> None:
         raise ImportError("Install synapt[crewai] to use the CrewAI adapter") from _IMPORT_ERROR
 
 
+def _storage_path(project_dir: str | Path | None, path: str | Path | None) -> Path:
+    if path:
+        return Path(path).resolve()
+    from synapt.recall.core import project_data_dir
+
+    root = project_data_dir(Path(project_dir) if project_dir else None) / "crewai-memory.jsonl"
+    return root.resolve()
+
+
+def _recall_save(**kwargs: Any) -> str:
+    from synapt.recall.server import recall_save
+
+    return recall_save(**kwargs)
+
+
 class SynaptStorage:
     """CrewAI storage backend backed by local recall persistence."""
 
     def __init__(self, project_dir: str | Path | None = None, path: str | Path | None = None) -> None:
         _require_crewai()
-        root = Path(path) if path else project_data_dir(Path(project_dir) if project_dir else None) / "crewai-memory.jsonl"
-        self.path = root.resolve()
+        self.path = _storage_path(project_dir, path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _load(self) -> list[MemoryRecord]:
@@ -61,7 +72,7 @@ class SynaptStorage:
         saved = {r.id: r for r in self._load()}
         for record in records:
             saved[record.id] = record
-            recall_save(
+            _recall_save(
                 content=record.content,
                 category=record.categories[0] if record.categories else "workflow",
                 confidence=record.importance,
@@ -86,7 +97,7 @@ class SynaptStorage:
             doomed = (record_ids and record.id in record_ids) or (older_than and record.created_at < older_than) or (not record_ids and self._match(record, scope_prefix, categories, metadata_filter))
             if doomed:
                 removed += 1
-                recall_save(node_id=record.id, retract=True)
+                _recall_save(node_id=record.id, retract=True)
             else:
                 keep.append(record)
         self._write(keep)
@@ -138,4 +149,3 @@ def SynaptMemory(*, project_dir: str | Path | None = None, path: str | Path | No
     """Build a CrewAI Memory instance backed by synapt."""
     _require_crewai()
     return Memory(storage=SynaptStorage(project_dir=project_dir, path=path), **kwargs)
-

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-crewai = pytest.importorskip("crewai")
+pytest.importorskip("crewai")
 from crewai.memory.storage.backend import MemoryRecord
 
 from synapt.integrations import crewai as synapt_crewai
@@ -13,11 +13,11 @@ from synapt.integrations import crewai as synapt_crewai
 def test_synapt_storage_saves_and_searches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     saved: list[tuple[str, str, bool]] = []
 
-    def fake_recall_save(content: str = "", category: str = "workflow", confidence: float = 0.8, tags=None, source_sessions=None, source_turns=None, node_id: str | None = None, retract: bool = False) -> str:
-        saved.append((node_id or "", content, retract))
+    def fake_recall_save(**kwargs) -> str:
+        saved.append((kwargs.get("node_id", ""), kwargs.get("content", ""), kwargs.get("retract", False)))
         return "ok"
 
-    monkeypatch.setattr(synapt_crewai, "recall_save", fake_recall_save)
+    monkeypatch.setattr(synapt_crewai, "_recall_save", fake_recall_save)
     storage = synapt_crewai.SynaptStorage(path=tmp_path / "crewai.jsonl")
     record = MemoryRecord(content="CrewAI adapter stored in recall", scope="/crew/test", categories=["integration"], metadata={"kind": "note"}, importance=0.9, embedding=[1.0, 0.0])
 
@@ -32,12 +32,12 @@ def test_synapt_storage_saves_and_searches(tmp_path: Path, monkeypatch: pytest.M
 def test_synapt_storage_delete_retracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     retracted: list[str] = []
 
-    def fake_recall_save(content: str = "", category: str = "workflow", confidence: float = 0.8, tags=None, source_sessions=None, source_turns=None, node_id: str | None = None, retract: bool = False) -> str:
-        if retract and node_id:
-            retracted.append(node_id)
+    def fake_recall_save(**kwargs) -> str:
+        if kwargs.get("retract") and kwargs.get("node_id"):
+            retracted.append(kwargs["node_id"])
         return "ok"
 
-    monkeypatch.setattr(synapt_crewai, "recall_save", fake_recall_save)
+    monkeypatch.setattr(synapt_crewai, "_recall_save", fake_recall_save)
     storage = synapt_crewai.SynaptStorage(path=tmp_path / "crewai.jsonl")
     record = MemoryRecord(content="delete me", embedding=[0.0, 1.0])
     storage.save([record])
