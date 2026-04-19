@@ -5,6 +5,10 @@ import {
 	INodeTypeDescription,
 } from 'n8n-workflow';
 
+// TODO: synapt server currently exposes stdio MCP transport only.
+// These nodes are scaffolded against a planned HTTP transport endpoint.
+// See: https://github.com/synapt-dev/recall/issues for tracking.
+
 export class SynaptSave implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Synapt Save',
