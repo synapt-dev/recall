@@ -45,3 +45,17 @@ def test_synapt_storage_delete_retracts(tmp_path: Path, monkeypatch: pytest.Monk
     assert storage.delete(record_ids=[record.id]) == 1
     assert retracted == [record.id]
     assert storage.count() == 0
+
+
+def test_list_scopes_returns_immediate_children(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(synapt_crewai, "_recall_save", lambda **kwargs: "ok")
+    storage = synapt_crewai.SynaptStorage(path=tmp_path / "crewai.jsonl")
+    storage.save(
+        [
+            MemoryRecord(content="alpha", scope="/crew/test", embedding=[1.0, 0.0]),
+            MemoryRecord(content="beta", scope="/ops/runbook", embedding=[0.0, 1.0]),
+        ]
+    )
+
+    assert storage.list_scopes("/") == ["/crew", "/ops"]
+    assert storage.list_scopes("/crew") == ["/crew/test"]

@@ -116,7 +116,15 @@ class SynaptStorage:
 
     def get_scope_info(self, scope: str) -> ScopeInfo:
         records = [r for r in self._load() if r.scope.startswith(scope)]
-        child_scopes = sorted({"/" + "/".join(parts[: len(scope.strip("/").split("/")) + 1]) for r in records for parts in [r.scope.strip("/").split("/")] if len(parts) > len(scope.strip("/").split("/"))})
+        depth = 0 if scope == "/" else len([part for part in scope.strip("/").split("/") if part])
+        child_scopes = sorted(
+            {
+                "/" + "/".join(parts[: depth + 1])
+                for r in records
+                for parts in [[part for part in r.scope.strip("/").split("/") if part]]
+                if len(parts) > depth
+            }
+        )
         return ScopeInfo(path=scope, record_count=len(records), categories=sorted({c for r in records for c in r.categories}), oldest_record=min((r.created_at for r in records), default=None), newest_record=max((r.created_at for r in records), default=None), child_scopes=child_scopes)
 
     def list_scopes(self, parent: str = "/") -> list[str]:
