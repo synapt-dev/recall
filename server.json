@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/schema/server.json",
   "name": "io.github.synapt-dev/recall",
-  "description": "Persistent conversational memory for AI coding assistants. Search past sessions, preserve decisions, coordinate agents.",
+  "description": "Persistent conversational memory for AI coding assistants.",
   "repository": {
     "url": "https://github.com/synapt-dev/recall",
     "source": "github"
@@ -9,7 +9,7 @@
   "version": "0.13.0",
   "packages": [
     {
-      "registry_type": "pypi",
+      "registryType": "pypi",
       "identifier": "synapt",
       "version": "0.13.0"
     }
