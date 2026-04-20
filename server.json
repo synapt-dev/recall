@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/schema/server.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.synapt-dev/recall",
   "description": "Persistent conversational memory for AI coding assistants.",
   "repository": {
@@ -11,7 +11,10 @@
     {
       "registryType": "pypi",
       "identifier": "synapt",
-      "version": "0.13.0"
+      "version": "0.13.0",
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
