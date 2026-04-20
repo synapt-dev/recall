@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.synapt-dev/recall -->
 <p align="center">
   <img src="assets/banner.png" alt="Synapt" width="100%">
 </p>
