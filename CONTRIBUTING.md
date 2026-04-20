@@ -3,8 +3,8 @@
 ## Getting started
 
 ```bash
-git clone https://github.com/laynepenney/recall.git
-cd synapt
+git clone https://github.com/synapt-dev/recall.git
+cd recall
 pip install -e ".[test]"
 pytest tests/ -v
 ```

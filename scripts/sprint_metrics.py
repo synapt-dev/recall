@@ -10,7 +10,7 @@ are not captured here — those would need channel JSONL parsing for
 "approved"/"LGTM" signals.
 
 Usage:
-    python scripts/sprint_metrics.py [--sprint 4] [--repo laynepenney/synapt]
+    python scripts/sprint_metrics.py [--sprint 4] [--repo synapt-dev/recall]
     python scripts/sprint_metrics.py --prs 471,472,475,477,478,479,481
     python scripts/sprint_metrics.py --prs 471,472 --channel-dir ~/.synapt/recall/channels
 """
@@ -240,7 +240,7 @@ def format_report(metrics: dict, sprint: str = "") -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Sprint metrics")
-    parser.add_argument("--repo", default="laynepenney/synapt")
+    parser.add_argument("--repo", default="synapt-dev/recall")
     parser.add_argument("--prs", help="Comma-separated PR numbers")
     parser.add_argument("--sprint", default="")
     parser.add_argument("--channel-dir", help="Path to channel JSONL dir for claim times")
