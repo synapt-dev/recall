@@ -22,12 +22,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: ".github/contributors/cla-signatures.json"
-          path-to-document: "https://github.com/laynepenney/recall/blob/main/CLA.md"
+          path-to-document: "https://github.com/synapt-dev/recall/blob/main/CLA.md"
           branch: "main"
           allowlist: dependabot[bot],renovate[bot],github-actions[bot],claude
           custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
           custom-notsigned-prcomment: |
-            Thank you for your contribution! Before we can merge this PR, we need you to sign our [Contributor License Agreement](https://github.com/laynepenney/recall/blob/main/CLA.md).
+            Thank you for your contribution! Before we can merge this PR, we need you to sign our [Contributor License Agreement](https://github.com/synapt-dev/recall/blob/main/CLA.md).
 
             To sign, please comment on this PR with the following exact text:
 
