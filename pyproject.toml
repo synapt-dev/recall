@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synapt"
-version = "0.13.0"
+version = "0.13.1"
 description = "Persistent conversational memory for AI coding assistants"
 readme = "README.md"
 license = "MIT"
@@ -34,9 +34,10 @@ authors = [
 
 [project.urls]
 Homepage = "https://synapt.dev"
-Repository = "https://github.com/laynepenney/recall"
+Repository = "https://github.com/synapt-dev/recall"
 
 [project.optional-dependencies]
+langchain = ["langchain-core>=0.2"]
 hf = ["huggingface_hub>=0.20"]
 onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
 transformers = ["transformers>=4.30", "peft>=0.7"]
