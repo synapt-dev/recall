@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pytest_asyncio")
+agents_session = pytest.importorskip("agents.memory.session")
 
 
 @pytest.fixture
@@ -28,6 +29,11 @@ def session_b(tmp_path: Path):
 
 
 class TestSessionProtocolContract:
+
+    def test_implements_session_abc(self):
+        from synapt.integrations.openai_agents import SynaptSession
+
+        assert issubclass(SynaptSession, agents_session.SessionABC)
 
     @pytest.mark.asyncio
     async def test_empty_on_init(self, session):

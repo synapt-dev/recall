@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+try:  # pragma: no cover - optional dependency surface
+    from agents.memory.session import SessionABC
+except ImportError:  # pragma: no cover
+    SessionABC = object  # type: ignore[assignment,misc]
+
 _DEFAULT_DB_DIR = Path.home() / ".synapt" / "integrations"
 
 _SCHEMA = """\
@@ -37,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_items_session
 """
 
 
-class SynaptSession:
+class SynaptSession(SessionABC):
     """OpenAI Agents SDK Session backed by SQLite with recall integration.
 
     Implements the Session protocol: get_items, add_items, pop_item,
