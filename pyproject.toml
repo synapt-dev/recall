@@ -64,6 +64,7 @@ synapt-convert = "synapt._models.convert:main"
 
 [project.entry-points."synapt.plugins"]
 x = "synapt.x.server"
+persistent = "synapt.persistent.server"
 # External plugins register via their own pyproject.toml. Example:
 # repair = "synapt_repair.server"
 

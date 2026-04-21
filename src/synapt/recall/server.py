@@ -16,6 +16,7 @@ Provides fifteen tools via the Model Context Protocol:
   - recall_enrich: Enrich chunks with LLM-generated summaries
   - recall_consolidate: Extract durable knowledge from journal entries
   - recall_contradict: Manage pending knowledge contradictions
+  - recall_career: Manage career lessons (premium stub)
 
 Can run standalone (synapt-server) or be composed into the
 unified synapt server via register_tools(mcp).
@@ -2085,6 +2086,40 @@ def _with_directive_check(fn):
     return wrapper
 
 
+def recall_career(
+    action: str = "search",
+    query: str = "",
+    lesson: str = "",
+    scope: str = "agent",
+    source_project: str = "",
+    lesson_id: str = "",
+    agent_name: str | None = None,
+    project_dir: str = "",
+) -> str:
+    """Manage career lessons learned across projects.
+
+    Career memory stores durable lessons that persist across projects and
+    sessions. Lessons have three scopes: project (local), team (org-shared),
+    and agent (personal career knowledge).
+
+    This is an OSS stub. Install synapt-private for full career memory.
+
+    Args:
+        action: "search", "list", "save", "retract".
+        query: Search query for "search" action.
+        lesson: Lesson text for "save" action.
+        scope: "project", "team", or "agent" (default "agent").
+        source_project: Project that generated the lesson.
+        lesson_id: Lesson ID for "retract" action.
+        agent_name: Agent identity (resolved from env if omitted).
+        project_dir: Project directory for scope resolution.
+    """
+    return (
+        "recall_career requires premium. "
+        "Install synapt-private to unlock persistent agent memory."
+    )
+
+
 def recall_reload() -> str:
     """Restart the MCP server to pick up code changes after pip install.
 
@@ -2138,6 +2173,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(_with_directive_check(recall_context))
     mcp.tool()(_with_directive_check(recall_timeline))
     mcp.tool()(_with_directive_check(recall_channel))
+    mcp.tool()(recall_career)
     mcp.tool()(recall_reload)
 
 
