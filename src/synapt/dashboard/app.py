@@ -81,7 +81,7 @@ def _tmux_window_agents() -> dict[str, str]:
     """Return {window_name: status} for agent windows in the tmux session."""
     try:
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", _TMUX_SESSION, "-F", "#{window_name}"],
+            ["tmux", "list-windows", "-a", "-F", "#{window_name}"],
             capture_output=True, text=True, timeout=3,
         )
         if result.returncode != 0:
