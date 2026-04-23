@@ -77,17 +77,30 @@ def _load_agents_toml() -> None:
 _load_agents_toml()
 
 
-def _tmux_window_agents() -> dict[str, str]:
-    """Return {window_name: status} for agent windows in the tmux session."""
+def _tmux_window_agents() -> dict[str, dict[str, str]]:
+    """Return tmux-discovered agents across all sessions.
+
+    Shape: {window_name: {"status": "online", "session_name": "<session>"}}
+    """
     try:
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", _TMUX_SESSION, "-F", "#{window_name}"],
+            ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}"],
             capture_output=True, text=True, timeout=3,
         )
         if result.returncode != 0:
             return {}
-        windows = set(result.stdout.strip().splitlines())
-        return {w: "online" for w in windows if w in _KNOWN_AGENTS}
+        agents: dict[str, dict[str, str]] = {}
+        for line in result.stdout.strip().splitlines():
+            if ":" not in line:
+                continue
+            session_name, window_name = line.split(":", 1)
+            if window_name not in _KNOWN_AGENTS or window_name in agents:
+                continue
+            agents[window_name] = {
+                "status": "online",
+                "session_name": session_name,
+            }
+        return agents
     except Exception:
         return {}
 
@@ -142,6 +155,13 @@ def _resolve_tmux_target(name: str) -> str:
             except Exception:
                 pass
     return f"{_TMUX_SESSION}:{name.lower()}"
+
+
+def _session_from_tmux_target(tmux_target: str) -> str:
+    """Extract the tmux session name from a qualified target."""
+    if ":" not in tmux_target:
+        return ""
+    return tmux_target.split(":", 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +252,7 @@ def _combined_agents_json_sync() -> list[dict]:
                         "status": status,
                         "last_seen": agent.get("last_seen_at", ""),
                         "channels": [],
+                        "session_name": _session_from_tmux_target(tmux_target),
                         "tmux_target": tmux_target,
                     }
                 else:
@@ -239,22 +260,25 @@ def _combined_agents_json_sync() -> list[dict]:
                     if status in ("running", "online"):
                         existing["status"] = status
                     if tmux_target:
+                        existing["session_name"] = _session_from_tmux_target(tmux_target)
                         existing["tmux_target"] = tmux_target
 
     # Discover agents from tmux windows that match agents.toml
-    for window_name, status in _tmux_window_agents().items():
+    for window_name, tmux_info in _tmux_window_agents().items():
         display = window_name.capitalize()
         if display not in agents_by_name and window_name not in agents_by_name:
             agent_cfg = _KNOWN_AGENTS.get(window_name, {})
+            session_name = tmux_info.get("session_name", _TMUX_SESSION)
             agents_by_name[display] = {
                 "agent_id": window_name,
                 "display_name": display,
                 "griptree": agent_cfg.get("worktree", ""),
                 "role": agent_cfg.get("role", "agent"),
-                "status": status,
+                "status": tmux_info.get("status", "online"),
                 "last_seen": "",
                 "channels": [],
-                "tmux_target": f"{_TMUX_SESSION}:{window_name}",
+                "session_name": session_name,
+                "tmux_target": f"{session_name}:{window_name}",
             }
 
     return sorted(agents_by_name.values(), key=lambda a: a.get("display_name", ""))
@@ -271,15 +295,22 @@ def _render_agent_tile(agent: dict) -> str:
     name = agent["display_name"] or agent["griptree"] or agent["agent_id"]
     role = agent["role"] if agent["role"] != "agent" else ""
     griptree = agent.get("griptree", "")
+    session_name = agent.get("session_name", "")
     channels = ", ".join(f"#{c}" for c in agent["channels"]) or "no channels"
     seen = agent["last_seen"][11:16] if len(agent["last_seen"]) > 16 else ""
     project_badge = (
         f'<div class="tile-project">{escape(griptree)}</div>' if griptree else ""
     )
+    session_badge = (
+        f'<div class="tile-project">session: {escape(session_name)}</div>'
+        if session_name
+        else ""
+    )
     return (
         f'<div class="tile clickable" data-agent="{escape(name)}" style="border-left:4px solid {color}">'
         f'<div class="tile-name">{escape(name)}</div>'
         f'{project_badge}'
+        f'{session_badge}'
         f'<div class="tile-role">{escape(role)}</div>'
         f'<div class="tile-meta">'
         f'<span style="color:{color}">{status}</span>'

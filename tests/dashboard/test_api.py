@@ -423,6 +423,7 @@ class TestDashboardTemplateUI(unittest.TestCase):
             "status": "online",
             "display_name": "Opus",
             "griptree": "synapt-codex/recall",
+            "session_name": "conversa",
             "agent_id": "s_123",
             "role": "CTO",
             "channels": ["dev"],
@@ -430,6 +431,53 @@ class TestDashboardTemplateUI(unittest.TestCase):
         })
         self.assertIn("clickable", tile_html)
         self.assertIn('data-agent="Opus"', tile_html)
+        self.assertIn("conversa", tile_html)
+
+
+class TestDashboardTmuxDiscovery(unittest.TestCase):
+    """Test cross-session tmux discovery for dashboard agent tiles."""
+
+    def test_tmux_window_agents_scans_all_sessions(self):
+        """Discovery should scan panes across all tmux sessions."""
+        from synapt.dashboard.app import _tmux_window_agents
+
+        result = MagicMock(
+            returncode=0,
+            stdout="synapt:opus\nconversa:atlas\nsynapt:shell\nconversa:notes\n",
+        )
+        with patch("synapt.dashboard.app.subprocess.run", return_value=result), \
+             patch.dict("synapt.dashboard.app._KNOWN_AGENTS", {"opus": {}, "atlas": {}}, clear=True):
+            agents = _tmux_window_agents()
+
+        self.assertEqual(
+            agents,
+            {
+                "opus": {"status": "online", "session_name": "synapt"},
+                "atlas": {"status": "online", "session_name": "conversa"},
+            },
+        )
+
+    def test_combined_agents_json_sync_includes_session_name(self):
+        """Tmux-discovered agents should carry session_name into the dashboard model."""
+        from synapt.dashboard.app import _combined_agents_json_sync
+
+        with patch("synapt.dashboard.app.channel_agents_json", return_value=[]), \
+             patch("synapt.dashboard.app._resolve_org_id", return_value=None), \
+             patch(
+                 "synapt.dashboard.app._tmux_window_agents",
+                 return_value={"atlas": {"status": "online", "session_name": "conversa"}},
+             ), \
+             patch.dict(
+                 "synapt.dashboard.app._KNOWN_AGENTS",
+                 {"atlas": {"worktree": "synapt-codex/recall", "role": "architect"}},
+                 clear=True,
+             ):
+            agents = _combined_agents_json_sync()
+
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["display_name"], "Atlas")
+        self.assertEqual(agents[0]["session_name"], "conversa")
+        self.assertEqual(agents[0]["tmux_target"], "conversa:atlas")
 
 
 @pytest.mark.integration
