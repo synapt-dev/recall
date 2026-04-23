@@ -255,6 +255,25 @@ class TestDashboardAgentIO(unittest.TestCase):
 
         shutil.rmtree(tmpdir)
 
+    def test_tmux_discovery_scans_all_sessions(self):
+        """Dashboard agent discovery should not hardcode a single tmux session."""
+        from synapt.dashboard.app import _tmux_window_agents
+
+        mock_run = MagicMock()
+        mock_run.return_value = MagicMock(returncode=0, stdout="opus\natlas\n")
+
+        with patch("synapt.dashboard.app.subprocess.run", mock_run), \
+             patch.dict("synapt.dashboard.app._KNOWN_AGENTS", {"opus": {}, "atlas": {}}, clear=True):
+            agents = _tmux_window_agents()
+
+        mock_run.assert_called_once_with(
+            ["tmux", "list-windows", "-a", "-F", "#{window_name}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        self.assertEqual(agents, {"opus": "online", "atlas": "online"})
+
     def test_dashboard_works_without_tmux_session(self):
         """Dashboard serves with empty agent grid when no tmux session."""
         mock_run = MagicMock()
