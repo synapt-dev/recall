@@ -282,14 +282,13 @@ class TestPathNormalization:
 
 class TestPathTraversal:
 
-    def test_traversal_returns_error_string(self, tool):
-        result = tool.view(_view("/memories/../../outside.txt"))
-        assert "error" in result.lower()
-        assert "outside.txt" in result
+    def test_traversal_raises_on_view(self, tool):
+        with pytest.raises(Exception, match="traversal"):
+            tool.view(_view("/memories/../../outside.txt"))
 
-    def test_traversal_does_not_raise(self, tool):
-        result = tool.create(_create("/memories/../../../etc/passwd", "hack"))
-        assert "error" in result.lower()
+    def test_traversal_raises_on_create(self, tool):
+        with pytest.raises(Exception, match="traversal"):
+            tool.create(_create("/memories/../../../etc/passwd", "hack"))
 
 
 class TestImportability:

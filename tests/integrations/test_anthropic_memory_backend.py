@@ -196,15 +196,14 @@ def test_delete_and_rename_match_documented_success_messages(tmp_path: Path) -> 
 def test_path_traversal_is_rejected_by_the_virtual_facade(tmp_path: Path) -> None:
     tool = _new_tool(tmp_path)
 
-    result = tool.execute(
-        BetaMemoryTool20250818ViewCommand(
-            command="view",
-            path="/memories/../../outside.txt",
+    with pytest.raises(Exception, match="traversal"):
+        tool.execute(
+            BetaMemoryTool20250818ViewCommand(
+                command="view",
+                path="/memories/../../outside.txt",
+            )
         )
-    )
 
-    assert "error" in result.lower()
-    assert "outside.txt" in result
     assert not (tmp_path.parent / "outside.txt").exists()
 
 

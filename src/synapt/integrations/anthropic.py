@@ -245,10 +245,7 @@ class _MemoryToolCore:
 
     def do_view(self, command: Any) -> str:
         self._ensure_initialized()
-        try:
-            path = _normalize_path(command.path)
-        except _PathTraversalError as e:
-            return str(e)
+        path = _normalize_path(command.path)
 
         if path == _VIRTUAL_ROOT or path == _VIRTUAL_ROOT + "/":
             entries = list(_VIRTUAL_DIRS)
@@ -293,10 +290,7 @@ class _MemoryToolCore:
 
     def do_create(self, command: Any) -> str:
         self._ensure_initialized()
-        try:
-            path = _normalize_path(command.path)
-        except _PathTraversalError as e:
-            return str(e)
+        path = _normalize_path(command.path)
 
         if self._cache.get(path) is not None:
             raise Exception(f"file '{path}' already exists. Use `str_replace` to edit or `delete` first.")
@@ -312,10 +306,7 @@ class _MemoryToolCore:
 
     def do_str_replace(self, command: Any) -> str:
         self._ensure_initialized()
-        try:
-            path = _normalize_path(command.path)
-        except _PathTraversalError as e:
-            return str(e)
+        path = _normalize_path(command.path)
         content = self._cache.get(path)
 
         if content is None:
@@ -354,10 +345,7 @@ class _MemoryToolCore:
 
     def do_insert(self, command: Any) -> str:
         self._ensure_initialized()
-        try:
-            path = _normalize_path(command.path)
-        except _PathTraversalError as e:
-            return str(e)
+        path = _normalize_path(command.path)
         content = self._cache.get(path)
 
         if content is None:
@@ -386,10 +374,7 @@ class _MemoryToolCore:
 
     def do_delete(self, command: Any) -> str:
         self._ensure_initialized()
-        try:
-            path = _normalize_path(command.path)
-        except _PathTraversalError as e:
-            return str(e)
+        path = _normalize_path(command.path)
 
         children = self._cache.list_dir(path)
         if children:
@@ -414,11 +399,8 @@ class _MemoryToolCore:
 
     def do_rename(self, command: Any) -> str:
         self._ensure_initialized()
-        try:
-            old_path = _normalize_path(command.old_path)
-            new_path = _normalize_path(command.new_path)
-        except _PathTraversalError as e:
-            return str(e)
+        old_path = _normalize_path(command.old_path)
+        new_path = _normalize_path(command.new_path)
 
         if self._cache.get(new_path) is not None:
             raise Exception(f"destination '{new_path}' already exists.")
@@ -474,19 +456,13 @@ if BetaAbstractMemoryTool is not None:
 
         def create(self, command: BetaMemoryTool20250818CreateCommand) -> BetaFunctionToolResultType:
             result = self._core.do_create(command)
-            try:
-                path = _normalize_path(command.path)
-            except _PathTraversalError:
-                return result
+            path = _normalize_path(command.path)
             self._schedule_enrichment(path, command.file_text)
             return result
 
         def str_replace(self, command: BetaMemoryTool20250818StrReplaceCommand) -> BetaFunctionToolResultType:
             result = self._core.do_str_replace(command)
-            try:
-                path = _normalize_path(command.path)
-            except _PathTraversalError:
-                return result
+            path = _normalize_path(command.path)
             content = self._core._cache.get(path)
             if content is not None:
                 self._schedule_enrichment(path, content)
@@ -494,10 +470,7 @@ if BetaAbstractMemoryTool is not None:
 
         def insert(self, command: BetaMemoryTool20250818InsertCommand) -> BetaFunctionToolResultType:
             result = self._core.do_insert(command)
-            try:
-                path = _normalize_path(command.path)
-            except _PathTraversalError:
-                return result
+            path = _normalize_path(command.path)
             content = self._core._cache.get(path)
             if content is not None:
                 self._schedule_enrichment(path, content)
@@ -554,19 +527,13 @@ if BetaAsyncAbstractMemoryTool is not None:
 
         async def create(self, command: BetaMemoryTool20250818CreateCommand) -> BetaFunctionToolResultType:
             result = self._core.do_create(command)
-            try:
-                path = _normalize_path(command.path)
-            except _PathTraversalError:
-                return result
+            path = _normalize_path(command.path)
             self._schedule_enrichment(path, command.file_text)
             return result
 
         async def str_replace(self, command: BetaMemoryTool20250818StrReplaceCommand) -> BetaFunctionToolResultType:
             result = self._core.do_str_replace(command)
-            try:
-                path = _normalize_path(command.path)
-            except _PathTraversalError:
-                return result
+            path = _normalize_path(command.path)
             content = self._core._cache.get(path)
             if content is not None:
                 self._schedule_enrichment(path, content)
@@ -574,10 +541,7 @@ if BetaAsyncAbstractMemoryTool is not None:
 
         async def insert(self, command: BetaMemoryTool20250818InsertCommand) -> BetaFunctionToolResultType:
             result = self._core.do_insert(command)
-            try:
-                path = _normalize_path(command.path)
-            except _PathTraversalError:
-                return result
+            path = _normalize_path(command.path)
             content = self._core._cache.get(path)
             if content is not None:
                 self._schedule_enrichment(path, content)
