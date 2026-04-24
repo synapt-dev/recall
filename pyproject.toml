@@ -37,12 +37,22 @@ Homepage = "https://synapt.dev"
 Repository = "https://github.com/synapt-dev/recall"
 
 [project.optional-dependencies]
+anthropic = ["anthropic>=0.77.0"]
+openai = ["openai-agents>=0.10.0"]
+google-adk = ["google-adk>=1.0.0"]
 langchain = ["langchain-core>=0.2"]
+crewai = ["crewai>=1.4.0"]
+all-integrations = [
+    "anthropic>=0.77.0",
+    "openai-agents>=0.10.0",
+    "google-adk>=1.0.0",
+    "langchain-core>=0.2",
+    "crewai>=1.4.0",
+]
 hf = ["huggingface_hub>=0.20"]
 onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
 transformers = ["transformers>=4.30", "peft>=0.7"]
 x = ["tweepy>=4.14"]
-crewai = ["crewai>=1.4.0"]
 dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "sse-starlette>=1.0", "markdown>=3.4"]
 dev = ["watchfiles>=0.20"]
 test = [

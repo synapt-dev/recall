@@ -10,9 +10,11 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Anthropic_Memory-ready-D97706?logo=anthropic&logoColor=white" alt="Anthropic Memory Tool">
+  <img src="https://img.shields.io/badge/OpenAI_Agents-ready-412991?logo=openai&logoColor=white" alt="OpenAI Agents">
+  <img src="https://img.shields.io/badge/Google_ADK-ready-4285F4?logo=google&logoColor=white" alt="Google ADK">
   <img src="https://img.shields.io/badge/LangChain-ready-1C3C3C?logo=langchain&logoColor=white" alt="LangChain">
   <img src="https://img.shields.io/badge/CrewAI-ready-FF6B35?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0id2hpdGUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=&logoColor=white" alt="CrewAI">
-  <img src="https://img.shields.io/badge/OpenAI_Agents-ready-412991?logo=openai&logoColor=white" alt="OpenAI Agents">
   <img src="https://img.shields.io/badge/Claude_Code-ready-D97706?logo=anthropic&logoColor=white" alt="Claude Code">
   <img src="https://img.shields.io/badge/Codex_CLI-ready-412991?logo=openai&logoColor=white" alt="Codex CLI">
 </p>
@@ -135,12 +137,129 @@ If your client accepts stdio MCP definitions directly, use:
 
 synapt plugs into popular agent frameworks as a drop-in memory backend. Each adapter wraps recall's search and save API for the framework's native session interface.
 
+Install all integration dependencies at once:
+
+```bash
+pip install synapt[all-integrations]
+```
+
+Or install only the ones you need:
+
+```bash
+pip install synapt[anthropic]    # Anthropic Memory Tool
+pip install synapt[openai]       # OpenAI Agents SDK
+pip install synapt[google-adk]   # Google ADK
+pip install synapt[langchain]    # LangChain
+pip install synapt[crewai]       # CrewAI
+```
+
+### Anthropic Memory Tool
+
+`SynaptMemoryTool` is a drop-in replacement for `BetaAbstractMemoryTool`. It presents recall's knowledge graph as a virtual filesystem that Claude can view, create, edit, and search. All writes are persisted as durable recall knowledge nodes.
+
+```bash
+pip install synapt[anthropic]
+```
+
+**Before** (default memory, no cross-session persistence):
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic()
+response = client.beta.messages.run_tools(
+    model="claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Remember that we use blue-green deploys"}],
+    tools=[{"type": "memory_20250818", "name": "memory"}],
+).until_done()
+```
+
+**After** (recall-backed memory with hybrid search):
+
+```python
+from anthropic import Anthropic
+from synapt.integrations.anthropic import SynaptMemoryTool
+
+client = Anthropic()
+memory = SynaptMemoryTool()
+
+response = client.beta.messages.run_tools(
+    model="claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "Remember that we use blue-green deploys"}],
+    tools=[memory],
+).until_done()
+```
+
+An async variant (`SynaptAsyncMemoryTool`) is available for `AsyncAnthropic` clients.
+
+### OpenAI Agents SDK
+
+`SynaptSession` is a session persistence adapter for the Agents SDK `Session` protocol. Items are stored in SQLite with non-blocking async DB access. Recall search and memory context are available as convenience methods.
+
+```bash
+pip install synapt[openai]
+```
+
+**Before** (default SQLiteSession, no cross-session search):
+
+```python
+from agents import Agent, Runner
+from agents.memory import SQLiteSession
+
+session = SQLiteSession(session_id="user-123", db_path="sessions.db")
+runner = Runner(agent=agent, session=session)
+```
+
+**After** (recall-backed session with memory context):
+
+```python
+from agents import Agent, Runner
+from synapt.integrations.openai_agents import SynaptSession
+
+session = SynaptSession(session_id="user-123")
+runner = Runner(agent=agent, session=session)
+
+# Retrieve recall context for agent prompts
+context = session.get_memory_context("deployment strategy")
+
+# Persist durable knowledge
+session.save_to_recall("Always use UTC timestamps", category="convention")
+```
+
+### Google ADK
+
+`SynaptMemoryService` is a drop-in replacement for ADK's `InMemoryMemoryService`. Session events are indexed in recall's knowledge graph; `search_memory` uses hybrid retrieval instead of keyword matching.
+
+```bash
+pip install synapt[google-adk]
+```
+
+**Before** (default in-memory, keyword-only search):
+
+```python
+from google.adk.agents import LlmAgent
+from google.adk.memory import InMemoryMemoryService
+
+memory = InMemoryMemoryService()
+agent = LlmAgent(model="gemini-2.5-flash", name="my_agent", memory_service=memory)
+```
+
+**After** (recall-backed, hybrid search):
+
+```python
+from google.adk.agents import LlmAgent
+from synapt.integrations.google_adk import SynaptMemoryService
+
+memory = SynaptMemoryService()
+agent = LlmAgent(model="gemini-2.5-flash", name="my_agent", memory_service=memory)
+```
+
 ### LangChain
 
 `SynaptChatMessageHistory` implements LangChain's `BaseChatMessageHistory`. Messages are stored in SQLite with WAL mode; recall search and knowledge persistence are one method call away.
 
 ```bash
-pip install synapt langchain-core
+pip install synapt[langchain]
 ```
 
 ```python
@@ -159,25 +278,6 @@ history.save_to_recall("Always use UTC timestamps", category="convention")
 ```
 
 Works with `RunnableWithMessageHistory`, `ConversationChain`, and any LangChain component that accepts a `BaseChatMessageHistory`.
-
-### OpenAI Agents SDK
-
-`SynaptSession` implements the Agents SDK `Session` protocol. Items are stored as JSON dicts in SQLite; async throughout.
-
-```bash
-pip install synapt openai-agents
-```
-
-```python
-from synapt.integrations.openai_agents import SynaptSession
-
-session = SynaptSession(session_id="agent-run-42")
-await session.add_items([{"role": "user", "content": "hello"}])
-items = await session.get_items(limit=10)
-
-# Bridge to recall search
-results = session.search("prior error handling decisions")
-```
 
 ### CrewAI
 
