@@ -23,10 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-try:  # pragma: no cover - optional dependency surface
-    from agents.memory.session import SessionABC
-except ImportError:  # pragma: no cover
-    SessionABC = object  # type: ignore[assignment,misc]
+from agents.memory.session import SessionABC
 
 _DEFAULT_DB_DIR = Path.home() / ".synapt" / "integrations"
 
