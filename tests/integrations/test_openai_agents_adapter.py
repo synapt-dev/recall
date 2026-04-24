@@ -73,6 +73,11 @@ class TestSessionProtocolContract:
         assert retrieved[1]["content"] == "b"
 
     @pytest.mark.asyncio
+    async def test_add_empty_items_noop(self, session):
+        await session.add_items([])
+        assert await session.get_items() == []
+
+    @pytest.mark.asyncio
     async def test_pop_item(self, session):
         await session.add_items([
             {"role": "user", "content": "first"},
@@ -141,6 +146,56 @@ class TestSessionIsolation:
         assert "test-session-2" in ids
 
 
+class TestSessionSettings:
+
+    @pytest.mark.asyncio
+    async def test_default_limit_from_settings(self, tmp_path):
+        from agents.memory.session_settings import SessionSettings
+        from synapt.integrations.openai_agents import SynaptSession
+
+        settings = SessionSettings(limit=2)
+        s = SynaptSession(
+            session_id="settings-test",
+            db_path=tmp_path / "test.db",
+            session_settings=settings,
+        )
+        try:
+            await s.add_items([
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "b"},
+                {"role": "user", "content": "c"},
+            ])
+            items = await s.get_items()
+            assert len(items) == 2
+            assert items[0]["content"] == "b"
+            assert items[1]["content"] == "c"
+        finally:
+            s.close()
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_overrides_settings(self, tmp_path):
+        from agents.memory.session_settings import SessionSettings
+        from synapt.integrations.openai_agents import SynaptSession
+
+        settings = SessionSettings(limit=2)
+        s = SynaptSession(
+            session_id="override-test",
+            db_path=tmp_path / "test.db",
+            session_settings=settings,
+        )
+        try:
+            await s.add_items([
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "b"},
+                {"role": "user", "content": "c"},
+            ])
+            items = await s.get_items(limit=1)
+            assert len(items) == 1
+            assert items[0]["content"] == "c"
+        finally:
+            s.close()
+
+
 class TestEdgeCases:
 
     @pytest.mark.asyncio
@@ -184,3 +239,17 @@ class TestRecallIntegration:
 
     def test_save_to_recall_method_exists(self, session):
         assert callable(session.save_to_recall)
+
+    def test_get_memory_context_method_exists(self, session):
+        assert callable(session.get_memory_context)
+
+    def test_get_memory_context_returns_string(self, session):
+        result = session.get_memory_context("test query")
+        assert isinstance(result, str)
+
+
+class TestThreadSafety:
+
+    def test_close_idempotent(self, session):
+        session.close()
+        session.close()
