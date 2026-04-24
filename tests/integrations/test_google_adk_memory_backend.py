@@ -7,10 +7,13 @@ import importlib
 from pathlib import Path
 
 import pytest
-from google.adk.events import Event
-from google.adk.memory.base_memory_service import BaseMemoryService, SearchMemoryResponse
-from google.adk.sessions import Session
-from google.genai import types
+
+pytest.importorskip("google.adk", reason="google-adk not installed")
+
+from google.adk.events import Event  # noqa: E402
+from google.adk.memory.base_memory_service import BaseMemoryService, SearchMemoryResponse  # noqa: E402
+from google.adk.sessions import Session  # noqa: E402
+from google.genai import types  # noqa: E402
 
 
 def _load_synapt_memory_service():
