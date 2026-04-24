@@ -15,6 +15,7 @@
   <img src="https://img.shields.io/badge/OpenAI_Agents-ready-412991?logo=openai&logoColor=white" alt="OpenAI Agents">
   <img src="https://img.shields.io/badge/Claude_Code-ready-D97706?logo=anthropic&logoColor=white" alt="Claude Code">
   <img src="https://img.shields.io/badge/Codex_CLI-ready-412991?logo=openai&logoColor=white" alt="Codex CLI">
+  <img src="https://img.shields.io/badge/Google_ADK-ready-4285F4?logo=google&logoColor=white" alt="Google ADK">
 </p>
 
 <p align="center">
@@ -162,11 +163,7 @@ Works with `RunnableWithMessageHistory`, `ConversationChain`, and any LangChain 
 
 ### OpenAI Agents SDK
 
-`SynaptSession` implements the Agents SDK `Session` protocol. Items are stored as JSON dicts in SQLite; async throughout.
-
-```bash
-pip install synapt openai-agents
-```
+`SynaptSession` implements the Agents SDK `Session` protocol. Items are stored as JSON dicts in SQLite; async throughout. Included with `pip install synapt`.
 
 ```python
 from synapt.integrations.openai_agents import SynaptSession
@@ -199,9 +196,36 @@ crew = Crew(
 crew.kickoff()
 ```
 
-### Claude Code
+### Google ADK
 
-Register the recall MCP server and initialize the project:
+`SynaptMemoryService` implements ADK's `BaseMemoryService` with tenant-scoped search and persistence.
+
+```bash
+pip install synapt[google-adk]
+```
+
+```python
+from synapt.integrations.google_adk import SynaptMemoryService
+
+memory = SynaptMemoryService()
+# search_memory scopes results by app_name and user_id
+# add_memory persists with tenant tags for isolation
+```
+
+### Claude Code (native memory backend)
+
+Replace Claude Code's built-in memory with recall-backed persistent memory in one line:
+
+```python
+from synapt.integrations.anthropic import SynaptMemoryTool
+
+# Drop-in replacement for BetaLocalFilesystemMemoryTool
+tool = SynaptMemoryTool()
+```
+
+Every `create`, `view`, `str_replace`, and `search` call now goes through recall: files are persisted, content is enriched, and search returns semantically relevant results across sessions. No configuration needed; `pip install synapt` includes everything.
+
+For MCP-based recall (search, journals, channels, 20+ tools):
 
 ```bash
 pip install synapt
@@ -209,7 +233,7 @@ claude mcp add synapt -- synapt server
 synapt init
 ```
 
-Claude Code gains `recall_search`, `recall_save`, `recall_journal`, and 20+ other recall tools automatically. `synapt init` also installs session hooks for automatic transcript archiving.
+`synapt init` installs session hooks for automatic transcript archiving.
 
 ### Codex CLI
 
