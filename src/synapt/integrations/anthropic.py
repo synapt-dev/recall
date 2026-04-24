@@ -34,9 +34,8 @@ import hashlib
 import logging
 import re
 import threading
-from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from typing import Any, Optional
+from typing import Any
 
 try:
     from anthropic.lib.tools import (
@@ -62,7 +61,7 @@ else:
 
 log = logging.getLogger("synapt.integrations.anthropic")
 
-_VIRTUAL_ROOT = "/memory"
+_VIRTUAL_ROOT = "/memories"
 _VIRTUAL_DIRS = ("knowledge", "sessions", "notes")
 
 
@@ -155,7 +154,7 @@ class _RecallBridge:
 
         category = "memory"
         parts = PurePosixPath(path).parts
-        if len(parts) >= 3 and parts[1] == "memory":
+        if len(parts) >= 3 and parts[1] == "memories":
             category = parts[2]
 
         return recall_save(
@@ -218,10 +217,9 @@ class _RecallBridge:
 class _MemoryToolCore:
     """Shared implementation for sync and async memory tools."""
 
-    def __init__(self, *, search_augment: bool = True) -> None:
+    def __init__(self) -> None:
         self._cache = _FileCache()
         self._bridge = _RecallBridge()
-        self._search_augment = search_augment
         self._initialized = False
 
     def _ensure_initialized(self) -> None:
@@ -254,7 +252,7 @@ class _MemoryToolCore:
             if path.rstrip("/").split("/")[-1] in _VIRTUAL_DIRS:
                 return f"Here's the result of running `view` on {path}:\n  (empty directory)\n"
 
-            return f"Error: path '{path}' does not exist. Use `view` on '{_VIRTUAL_ROOT}' to see available files."
+            raise Exception(f"path '{path}' does not exist. Use `view` on '{_VIRTUAL_ROOT}' to see available files.")
 
         view_range = getattr(command, "view_range", None)
         lines = content.split("\n")
@@ -268,28 +266,14 @@ class _MemoryToolCore:
         else:
             numbered = _numbered_lines(content)
 
-        result = f"Here's the result of running `view` on {path}:\n{numbered}\n"
-
-        if self._search_augment and not view_range:
-            filename = PurePosixPath(path).stem.replace("-", " ")
-            try:
-                search_result = self._bridge.search(
-                    f"{filename} {content[:200]}",
-                    max_chunks=2,
-                )
-                if search_result and "No results" not in search_result:
-                    result += f"\n--- Related recall context ---\n{search_result}\n"
-            except Exception as e:
-                log.debug("Search augmentation failed: %s", e)
-
-        return result
+        return f"Here's the result of running `view` on {path}:\n{numbered}\n"
 
     def do_create(self, command: Any) -> str:
         self._ensure_initialized()
         path = _normalize_path(command.path)
 
         if self._cache.get(path) is not None:
-            return f"Error: file '{path}' already exists. Use `str_replace` to edit or `delete` first."
+            raise Exception(f"file '{path}' already exists. Use `str_replace` to edit or `delete` first.")
 
         self._cache.set(path, command.file_text)
 
@@ -306,13 +290,13 @@ class _MemoryToolCore:
         content = self._cache.get(path)
 
         if content is None:
-            return f"Error: file '{path}' does not exist."
+            raise Exception(f"file '{path}' does not exist.")
 
         occurrences = content.count(command.old_str)
         if occurrences == 0:
-            return f"Error: `old_str` not found in {path}. No changes made."
+            raise Exception(f"`old_str` not found in {path}. No changes made.")
         if occurrences > 1:
-            return f"Error: `old_str` found {occurrences} times in {path}. Please provide a more unique string."
+            raise Exception(f"`old_str` found {occurrences} times in {path}. Please provide a more unique string.")
 
         new_content = content.replace(command.old_str, command.new_str, 1)
         self._cache.set(path, new_content)
@@ -330,13 +314,13 @@ class _MemoryToolCore:
         content = self._cache.get(path)
 
         if content is None:
-            return f"Error: file '{path}' does not exist."
+            raise Exception(f"file '{path}' does not exist.")
 
         lines = content.split("\n")
         insert_line = command.insert_line
 
         if insert_line < 0 or insert_line > len(lines):
-            return f"Error: insert_line {insert_line} is out of range [0, {len(lines)}]."
+            raise Exception(f"insert_line {insert_line} is out of range [0, {len(lines)}].")
 
         new_lines = command.insert_text.split("\n")
         lines[insert_line:insert_line] = new_lines
@@ -366,7 +350,7 @@ class _MemoryToolCore:
             return f"Directory '{path}' and {len(children)} file(s) deleted."
 
         if not self._cache.delete(path):
-            return f"Error: path '{path}' does not exist."
+            raise Exception(f"path '{path}' does not exist.")
 
         try:
             self._bridge.retract(path)
@@ -381,10 +365,10 @@ class _MemoryToolCore:
         new_path = _normalize_path(command.new_path)
 
         if self._cache.get(new_path) is not None:
-            return f"Error: destination '{new_path}' already exists."
+            raise Exception(f"destination '{new_path}' already exists.")
 
         if not self._cache.rename(old_path, new_path):
-            return f"Error: source '{old_path}' does not exist."
+            raise Exception(f"source '{old_path}' does not exist.")
 
         try:
             content = self._cache.get(new_path)
@@ -412,20 +396,17 @@ if BetaAbstractMemoryTool is not None:
         hybrid search and knowledge persistence.
 
         Args:
-            search_augment: If True (default), view responses include related
-                recall context from hybrid search below the file content.
             cache_control: Optional Anthropic cache control parameter.
         """
 
         def __init__(
             self,
             *,
-            search_augment: bool = True,
             cache_control: BetaCacheControlEphemeralParam | None = None,
         ) -> None:
             _require_anthropic()
             super().__init__(cache_control=cache_control)
-            self._core = _MemoryToolCore(search_augment=search_augment)
+            self._core = _MemoryToolCore()
 
         def view(self, command: BetaMemoryTool20250818ViewCommand) -> BetaFunctionToolResultType:
             return self._core.do_view(command)
@@ -448,6 +429,20 @@ if BetaAbstractMemoryTool is not None:
         def clear_all_memory(self) -> BetaFunctionToolResultType:
             return self._core.do_clear_all()
 
+        def get_context(self, query: str, *, max_chunks: int = 3) -> str:
+            """Search recall for context related to a query.
+
+            Use this outside the memory tool loop to retrieve relevant
+            recall context without polluting view() responses.
+            """
+            try:
+                result = self._core._bridge.search(query, max_chunks=max_chunks)
+                if result and "No results" not in result:
+                    return result
+                return ""
+            except Exception:
+                return ""
+
 
 if BetaAsyncAbstractMemoryTool is not None:
 
@@ -461,12 +456,11 @@ if BetaAsyncAbstractMemoryTool is not None:
         def __init__(
             self,
             *,
-            search_augment: bool = True,
             cache_control: BetaCacheControlEphemeralParam | None = None,
         ) -> None:
             _require_anthropic()
             super().__init__(cache_control=cache_control)
-            self._core = _MemoryToolCore(search_augment=search_augment)
+            self._core = _MemoryToolCore()
 
         async def view(self, command: BetaMemoryTool20250818ViewCommand) -> BetaFunctionToolResultType:
             return self._core.do_view(command)
@@ -488,6 +482,16 @@ if BetaAsyncAbstractMemoryTool is not None:
 
         async def clear_all_memory(self) -> BetaFunctionToolResultType:
             return self._core.do_clear_all()
+
+        def get_context(self, query: str, *, max_chunks: int = 3) -> str:
+            """Search recall for context related to a query."""
+            try:
+                result = self._core._bridge.search(query, max_chunks=max_chunks)
+                if result and "No results" not in result:
+                    return result
+                return ""
+            except Exception:
+                return ""
 
 else:
 

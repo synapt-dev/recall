@@ -155,7 +155,7 @@ pip install synapt[crewai]       # CrewAI
 
 ### Anthropic Memory Tool
 
-`SynaptMemoryTool` is a drop-in replacement for `BetaAbstractMemoryTool`. It presents recall's knowledge graph as a virtual filesystem that Claude can view, create, edit, and search. File reads are augmented with hybrid search context from recall.
+`SynaptMemoryTool` is a drop-in replacement for `BetaAbstractMemoryTool`. It presents recall's knowledge graph as a virtual filesystem that Claude can view, create, edit, and search. All writes are persisted as durable recall knowledge nodes.
 
 ```bash
 pip install synapt[anthropic]
@@ -194,7 +194,7 @@ An async variant (`SynaptAsyncMemoryTool`) is available for `AsyncAnthropic` cli
 
 ### OpenAI Agents SDK
 
-`SynaptSession` implements the Agents SDK `Session` protocol with `SessionSettings` support. Items are stored in SQLite with non-blocking async DB access. Recall search and memory context are built in.
+`SynaptSession` is a session persistence adapter for the Agents SDK `Session` protocol. Items are stored in SQLite with non-blocking async DB access. Recall search and memory context are available as convenience methods.
 
 ```bash
 pip install synapt[openai]
