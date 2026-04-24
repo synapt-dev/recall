@@ -27,6 +27,8 @@ dependencies = [
     "mcp[cli]>=1.0",
     "sentence-transformers>=2.0",
     "mlx-lm>=0.10; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "anthropic>=0.70",
+    "openai-agents>=0.10",
 ]
 authors = [
     {name = "Layne Penney"},
@@ -43,6 +45,7 @@ onnx = ["onnxruntime>=1.16", "optimum[onnxruntime]>=1.16"]
 transformers = ["transformers>=4.30", "peft>=0.7"]
 x = ["tweepy>=4.14"]
 crewai = ["crewai>=1.4.0"]
+google-adk = ["google-adk>=1.0"]
 dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "sse-starlette>=1.0", "markdown>=3.4"]
 dev = ["watchfiles>=0.20"]
 test = [
