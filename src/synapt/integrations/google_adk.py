@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
+
+from synapt.recall.core import project_index_dir
+from synapt.recall.storage import RecallDB
 
 try:
     from google.adk.memory.base_memory_service import (
@@ -68,6 +71,10 @@ def _session_key(app_name: str, user_id: str) -> str:
 def _node_id(app_name: str, user_id: str, content_hash: str) -> str:
     raw = f"{app_name}/{user_id}/{content_hash}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _words(text: str) -> set[str]:
+    return {word.lower() for word in re.findall(r"[A-Za-z0-9_]+", text)}
 
 
 if BaseMemoryService is not None:
@@ -173,34 +180,17 @@ if BaseMemoryService is not None:
             query: str,
         ) -> SearchMemoryResponse:
             try:
-                from synapt.recall.server import recall_search
-
-                result_text = recall_search(
+                entries = self._search_scoped_recall(
+                    app_name=app_name,
+                    user_id=user_id,
                     query=query,
-                    max_chunks=self._max_results,
-                    max_tokens=2000,
                 )
             except Exception as e:
                 log.warning("Recall search failed: %s", e)
                 return SearchMemoryResponse()
 
-            if not result_text or "No results" in result_text:
+            if not entries:
                 return SearchMemoryResponse()
-
-            entries = []
-            for chunk in result_text.split("\n\n"):
-                chunk = chunk.strip()
-                if not chunk or chunk.startswith("---"):
-                    continue
-                entry = MemoryEntry(
-                    content=types.Content(
-                        parts=[types.Part(text=chunk)],
-                        role="model",
-                    ),
-                    author="recall",
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                )
-                entries.append(entry)
 
             return SearchMemoryResponse(memories=entries[:self._max_results])
 
@@ -220,11 +210,75 @@ if BaseMemoryService is not None:
                     content=text,
                     category="conversation",
                     confidence=0.8,
-                    tags=["google-adk", app_name, author],
+                    tags=[
+                        "google-adk",
+                        f"app:{app_name}",
+                        f"user:{user_id}",
+                        f"author:{author}",
+                    ],
                     node_id=_node_id(app_name, user_id, content_hash),
                 )
             except Exception as e:
                 log.warning("Recall save failed: %s", e)
+
+        def _search_scoped_recall(
+            self,
+            *,
+            app_name: str,
+            user_id: str,
+            query: str,
+        ) -> list[MemoryEntry]:
+            query_words = _words(query)
+            if not query_words:
+                return []
+
+            app_tag = f"app:{app_name}"
+            user_tag = f"user:{user_id}"
+            db = RecallDB(project_index_dir() / "recall.db")
+            try:
+                nodes = db.load_knowledge_nodes(status="active")
+            finally:
+                db.close()
+
+            scored: list[tuple[float, dict[str, Any]]] = []
+            for node in nodes:
+                tags = set(node.get("tags", []))
+                if "google-adk" not in tags or app_tag not in tags or user_tag not in tags:
+                    continue
+                content = node.get("content", "")
+                content_words = _words(content)
+                if not content_words:
+                    continue
+
+                overlap = len(query_words & content_words)
+                if overlap == 0:
+                    continue
+
+                score = float(overlap)
+                if query.lower() in content.lower():
+                    score += 0.5
+                scored.append((score, node))
+
+            scored.sort(key=lambda item: item[0], reverse=True)
+            entries: list[MemoryEntry] = []
+            for _, node in scored[: self._max_results]:
+                tags = node.get("tags", [])
+                author = "recall"
+                for tag in tags:
+                    if tag.startswith("author:"):
+                        author = tag.split(":", 1)[1] or "recall"
+                        break
+                entries.append(
+                    MemoryEntry(
+                        content=types.Content(
+                            parts=[types.Part(text=node.get("content", ""))],
+                            role="model",
+                        ),
+                        author=author,
+                        timestamp=node.get("updated_at") or node.get("created_at"),
+                    )
+                )
+            return entries
 
 else:
 

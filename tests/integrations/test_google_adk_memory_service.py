@@ -8,8 +8,6 @@ import pytest
 
 pytest.importorskip("google.adk")
 
-import pytest_asyncio
-
 from google.genai import types
 from google.adk.memory.memory_entry import MemoryEntry
 
@@ -139,18 +137,38 @@ class TestSearchMemory:
 
     @pytest.mark.asyncio
     async def test_search_returns_entries(self, service):
-        with patch("synapt.recall.server.recall_search", return_value="chunk one\n\nchunk two"):
+        fake_nodes = [
+            {
+                "content": "chunk one",
+                "tags": ["google-adk", "app:myapp", "user:user1", "author:recall"],
+                "updated_at": "2026-04-24T00:00:00Z",
+                "created_at": "2026-04-24T00:00:00Z",
+            },
+            {
+                "content": "chunk two",
+                "tags": ["google-adk", "app:myapp", "user:user1", "author:recall"],
+                "updated_at": "2026-04-24T00:00:01Z",
+                "created_at": "2026-04-24T00:00:01Z",
+            },
+        ]
+        mock_db = MagicMock()
+        mock_db.load_knowledge_nodes.return_value = fake_nodes
+        with patch("synapt.integrations.google_adk.RecallDB", return_value=mock_db), \
+             patch("synapt.integrations.google_adk.project_index_dir", return_value=MagicMock()):
             result = await service.search_memory(
                 app_name="myapp",
                 user_id="user1",
-                query="hello",
+                query="chunk",
             )
         assert len(result.memories) == 2
         assert result.memories[0].content.parts[0].text == "chunk one"
 
     @pytest.mark.asyncio
     async def test_search_empty_results(self, service):
-        with patch("synapt.recall.server.recall_search", return_value="No results found."):
+        mock_db = MagicMock()
+        mock_db.load_knowledge_nodes.return_value = []
+        with patch("synapt.integrations.google_adk.RecallDB", return_value=mock_db), \
+             patch("synapt.integrations.google_adk.project_index_dir", return_value=MagicMock()):
             result = await service.search_memory(
                 app_name="myapp",
                 user_id="user1",
@@ -160,7 +178,7 @@ class TestSearchMemory:
 
     @pytest.mark.asyncio
     async def test_search_handles_error(self, service):
-        with patch("synapt.recall.server.recall_search", side_effect=Exception("boom")):
+        with patch("synapt.integrations.google_adk.RecallDB", side_effect=Exception("boom")):
             result = await service.search_memory(
                 app_name="myapp",
                 user_id="user1",
@@ -170,8 +188,19 @@ class TestSearchMemory:
 
     @pytest.mark.asyncio
     async def test_search_respects_max_results(self, service):
-        chunks = "\n\n".join(f"chunk {i}" for i in range(20))
-        with patch("synapt.recall.server.recall_search", return_value=chunks):
+        fake_nodes = [
+            {
+                "content": f"lots chunk {i}",
+                "tags": ["google-adk", "app:myapp", "user:user1", "author:recall"],
+                "updated_at": f"2026-04-24T00:00:{i:02d}Z",
+                "created_at": f"2026-04-24T00:00:{i:02d}Z",
+            }
+            for i in range(20)
+        ]
+        mock_db = MagicMock()
+        mock_db.load_knowledge_nodes.return_value = fake_nodes
+        with patch("synapt.integrations.google_adk.RecallDB", return_value=mock_db), \
+             patch("synapt.integrations.google_adk.project_index_dir", return_value=MagicMock()):
             result = await service.search_memory(
                 app_name="myapp",
                 user_id="user1",
@@ -179,21 +208,109 @@ class TestSearchMemory:
             )
         assert len(result.memories) <= 5
 
+    @pytest.mark.asyncio
+    async def test_search_scopes_by_app_and_user(self, service):
+        fake_nodes = [
+            {
+                "content": "deployment strategy is blue green",
+                "tags": ["google-adk", "app:myapp", "user:user1", "author:atlas"],
+                "updated_at": "2026-04-24T00:00:00Z",
+                "created_at": "2026-04-24T00:00:00Z",
+            },
+            {
+                "content": "deployment strategy is canary",
+                "tags": ["google-adk", "app:otherapp", "user:user1", "author:apollo"],
+                "updated_at": "2026-04-24T00:00:01Z",
+                "created_at": "2026-04-24T00:00:01Z",
+            },
+            {
+                "content": "deployment strategy is rolling",
+                "tags": ["google-adk", "app:myapp", "user:user2", "author:sentinel"],
+                "updated_at": "2026-04-24T00:00:02Z",
+                "created_at": "2026-04-24T00:00:02Z",
+            },
+        ]
+        mock_db = MagicMock()
+        mock_db.load_knowledge_nodes.return_value = fake_nodes
+        with patch("synapt.integrations.google_adk.RecallDB", return_value=mock_db), \
+             patch("synapt.integrations.google_adk.project_index_dir", return_value=MagicMock()):
+            result = await service.search_memory(
+                app_name="myapp",
+                user_id="user1",
+                query="deployment strategy",
+            )
+        assert len(result.memories) == 1
+        assert result.memories[0].content.parts[0].text == "deployment strategy is blue green"
+        assert result.memories[0].author == "atlas"
+
+    @pytest.mark.asyncio
+    async def test_search_ignores_legacy_unscoped_nodes(self, service):
+        fake_nodes = [
+            {
+                "content": "deployment strategy is blue green",
+                "tags": ["google-adk", "myapp", "atlas"],
+                "updated_at": "2026-04-24T00:00:00Z",
+                "created_at": "2026-04-24T00:00:00Z",
+            }
+        ]
+        mock_db = MagicMock()
+        mock_db.load_knowledge_nodes.return_value = fake_nodes
+        with patch("synapt.integrations.google_adk.RecallDB", return_value=mock_db), \
+             patch("synapt.integrations.google_adk.project_index_dir", return_value=MagicMock()):
+            result = await service.search_memory(
+                app_name="myapp",
+                user_id="user1",
+                query="deployment strategy",
+            )
+        assert len(result.memories) == 0
+
 
 class TestSearchMemoryResponse:
 
     @pytest.mark.asyncio
     async def test_entries_have_correct_fields(self, service):
-        with patch("synapt.recall.server.recall_search", return_value="some context"):
+        fake_nodes = [
+            {
+                "content": "some context",
+                "tags": ["google-adk", "app:myapp", "user:user1", "author:recall"],
+                "updated_at": "2026-04-24T00:00:00Z",
+                "created_at": "2026-04-24T00:00:00Z",
+            }
+        ]
+        mock_db = MagicMock()
+        mock_db.load_knowledge_nodes.return_value = fake_nodes
+        with patch("synapt.integrations.google_adk.RecallDB", return_value=mock_db), \
+             patch("synapt.integrations.google_adk.project_index_dir", return_value=MagicMock()):
             result = await service.search_memory(
                 app_name="myapp",
                 user_id="user1",
-                query="test",
+                query="context",
             )
         entry = result.memories[0]
         assert entry.author == "recall"
         assert entry.timestamp is not None
         assert entry.content.role == "model"
+
+
+class TestSaveToRecallTags:
+
+    @pytest.mark.asyncio
+    async def test_direct_memory_write_tags_app_and_user(self, service):
+        entry = MemoryEntry(
+            content=types.Content(
+                parts=[types.Part(text="important fact")],
+                role="model",
+            ),
+            author="agent",
+        )
+        await service.add_memory(
+            app_name="myapp",
+            user_id="user1",
+            memories=[entry],
+        )
+        _, kwargs = service._mock_save.call_args
+        assert kwargs["app_name"] == "myapp"
+        assert kwargs["user_id"] == "user1"
 
 
 class TestImportability:
