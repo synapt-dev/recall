@@ -149,6 +149,9 @@ class _FileCache:
 class _RecallBridge:
     """Bridges virtual file operations to recall's knowledge store."""
 
+    def __init__(self, *, project_root: "Path | None" = None) -> None:
+        self._project_root = project_root
+
     def save(self, path: str, content: str) -> str:
         from synapt.recall.server import recall_save
 
@@ -189,7 +192,7 @@ class _RecallBridge:
             from synapt.recall.storage import RecallDB
             from pathlib import Path
 
-            project = Path.cwd().resolve()
+            project = self._project_root.resolve() if self._project_root else Path.cwd().resolve()
             db_path = project_index_dir(project) / "recall.db"
             if not db_path.exists():
                 return
@@ -217,9 +220,10 @@ class _RecallBridge:
 class _MemoryToolCore:
     """Shared implementation for sync and async memory tools."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, project_root: "Path | None" = None) -> None:
         self._cache = _FileCache()
-        self._bridge = _RecallBridge()
+        self._bridge = _RecallBridge(project_root=project_root)
+        self._project_root = project_root
         self._initialized = False
 
     def _ensure_initialized(self) -> None:
@@ -397,16 +401,18 @@ if BetaAbstractMemoryTool is not None:
 
         Args:
             cache_control: Optional Anthropic cache control parameter.
+            project_root: Optional project root for recall discovery (test isolation).
         """
 
         def __init__(
             self,
             *,
             cache_control: BetaCacheControlEphemeralParam | None = None,
+            project_root: "Path | None" = None,
         ) -> None:
             _require_anthropic()
             super().__init__(cache_control=cache_control)
-            self._core = _MemoryToolCore()
+            self._core = _MemoryToolCore(project_root=project_root)
 
         def view(self, command: BetaMemoryTool20250818ViewCommand) -> BetaFunctionToolResultType:
             return self._core.do_view(command)
@@ -457,10 +463,11 @@ if BetaAsyncAbstractMemoryTool is not None:
             self,
             *,
             cache_control: BetaCacheControlEphemeralParam | None = None,
+            project_root: "Path | None" = None,
         ) -> None:
             _require_anthropic()
             super().__init__(cache_control=cache_control)
-            self._core = _MemoryToolCore()
+            self._core = _MemoryToolCore(project_root=project_root)
 
         async def view(self, command: BetaMemoryTool20250818ViewCommand) -> BetaFunctionToolResultType:
             return self._core.do_view(command)
