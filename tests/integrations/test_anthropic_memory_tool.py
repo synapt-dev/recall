@@ -134,7 +134,7 @@ class TestStrReplaceCommand:
     def test_replace_succeeds(self, tool):
         tool.create(_create("/memories/notes/edit.md", "old text here"))
         result = tool.str_replace(_str_replace("/memories/notes/edit.md", "old text", "new text"))
-        assert "edited successfully" in result
+        assert "The memory file has been edited." in result
         view = tool.view(_view("/memories/notes/edit.md"))
         assert "new text" in view
         assert "old text" not in view
@@ -159,7 +159,7 @@ class TestInsertCommand:
     def test_insert_at_beginning(self, tool):
         tool.create(_create("/memories/notes/ins.md", "line 1\nline 2"))
         result = tool.insert(_insert("/memories/notes/ins.md", 0, "new first"))
-        assert "edited successfully" in result
+        assert "has been edited." in result
         view = tool.view(_view("/memories/notes/ins.md"))
         assert "1\tnew first" in view
 
@@ -210,7 +210,7 @@ class TestRenameCommand:
     def test_rename_succeeds(self, tool):
         tool.create(_create("/memories/notes/old.md", "content"))
         result = tool.rename(_rename("/memories/notes/old.md", "/memories/notes/new.md"))
-        assert "Renamed" in result
+        assert "Successfully renamed" in result
         with pytest.raises(Exception, match="does not exist"):
             tool.view(_view("/memories/notes/old.md"))
         view_new = tool.view(_view("/memories/notes/new.md"))
@@ -278,6 +278,18 @@ class TestPathNormalization:
         tool.create(_create("test.md", "bare"))
         result = tool.view(_view("/memories/test.md"))
         assert "bare" in result
+
+
+class TestPathTraversal:
+
+    def test_traversal_returns_error_string(self, tool):
+        result = tool.view(_view("/memories/../../outside.txt"))
+        assert "error" in result.lower()
+        assert "outside.txt" in result
+
+    def test_traversal_does_not_raise(self, tool):
+        result = tool.create(_create("/memories/../../../etc/passwd", "hack"))
+        assert "error" in result.lower()
 
 
 class TestImportability:
