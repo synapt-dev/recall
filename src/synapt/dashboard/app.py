@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import markdown as _md
+import nh3
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse
 from sse_starlette.sse import EventSourceResponse
@@ -42,6 +43,30 @@ from synapt.recall.channel import (
 from synapt.recall.registry import list_agents as _registry_list_agents
 
 _MD = _md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
+
+_SAFE_TAGS = {
+    "p", "br", "hr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "strong", "em", "b", "i", "u", "s", "del",
+    "code", "pre",
+    "a",
+    "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "th", "td",
+    "blockquote",
+    "span", "div", "img",
+    "sup", "sub",
+}
+_SAFE_ATTRS = {
+    "*": {"class", "style"},
+    "a": {"href", "title", "target"},
+    "img": {"src", "alt", "title"},
+    "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan"},
+}
+
+
+def _sanitize_html(html: str) -> str:
+    return nh3.clean(html, tags=_SAFE_TAGS, attributes=_SAFE_ATTRS, link_rel=None)
 
 # ---------------------------------------------------------------------------
 # Agent tool detection (codex vs claude)
@@ -363,7 +388,7 @@ def _render_message(msg: dict) -> str:
                     part,
                 )
         return ''.join(parts)
-    body_html = _color_mentions(body_html)
+    body_html = _sanitize_html(_color_mentions(body_html))
     if msg_type == "directive":
         return (
             f'<div class="msg directive">'
