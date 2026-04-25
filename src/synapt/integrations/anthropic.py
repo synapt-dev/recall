@@ -72,18 +72,30 @@ def _require_anthropic() -> None:
         ) from _IMPORT_ERROR
 
 
+class _PathTraversalError(Exception):
+    """Raised when a path escapes the virtual root."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(f"Error: path traversal detected in '{path}'")
+
+
 def _normalize_path(path: str) -> str:
     p = PurePosixPath(path)
     if not p.is_absolute():
         p = PurePosixPath(_VIRTUAL_ROOT) / p
-    parts = []
+    parts: list[str] = []
     for part in p.parts:
         if part == "/":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
             continue
         parts.append(part)
     result = "/" + "/".join(parts) if parts else "/"
     if not result.startswith(_VIRTUAL_ROOT):
-        result = _VIRTUAL_ROOT + result
+        raise _PathTraversalError(path)
     return result
 
 
@@ -238,23 +250,25 @@ class _MemoryToolCore:
         if path == _VIRTUAL_ROOT or path == _VIRTUAL_ROOT + "/":
             entries = list(_VIRTUAL_DIRS)
             cached_top = set()
-            for p in self._cache.list_all():
+            all_files = self._cache.list_all()
+            for p in all_files:
                 rel = p[len(_VIRTUAL_ROOT) + 1:] if p.startswith(_VIRTUAL_ROOT + "/") else p
                 top = rel.split("/")[0]
                 cached_top.add(top)
             entries = sorted(set(entries) | cached_top)
-            listing = "\n".join(f"  {e}/" for e in entries)
-            return f"Here's the result of running `view` on {path}:\n{listing}\n"
+            dir_listing = "\n".join(f"  {e}/" for e in entries)
+            file_listing = "\n".join(f"  {f}" for f in all_files)
+            return f"Here's the content of {path}\n{dir_listing}\n{file_listing}\n"
 
         content = self._cache.get(path)
         if content is None:
             children = self._cache.list_dir(path)
             if children:
                 listing = "\n".join(f"  {c}" for c in children)
-                return f"Here's the result of running `view` on {path}:\n{listing}\n"
+                return f"Here's the content of {path}\n{listing}\n"
 
             if path.rstrip("/").split("/")[-1] in _VIRTUAL_DIRS:
-                return f"Here's the result of running `view` on {path}:\n  (empty directory)\n"
+                return f"Here's the content of {path}\n  (empty directory)\n"
 
             raise Exception(f"path '{path}' does not exist. Use `view` on '{_VIRTUAL_ROOT}' to see available files.")
 
@@ -264,13 +278,15 @@ class _MemoryToolCore:
         if view_range and len(view_range) == 2:
             start, end = view_range
             start = max(1, start)
+            if end == -1:
+                end = len(lines)
             end = min(len(lines), end)
             selected = lines[start - 1:end]
             numbered = _numbered_lines("\n".join(selected), start=start)
         else:
             numbered = _numbered_lines(content)
 
-        return f"Here's the result of running `view` on {path}:\n{numbered}\n"
+        return f"Here's the content of {path}\n{numbered}\n"
 
     def do_create(self, command: Any) -> str:
         self._ensure_initialized()
@@ -286,7 +302,7 @@ class _MemoryToolCore:
         except Exception as e:
             log.warning("Recall save failed for %s: %s", path, e)
 
-        return f"File created successfully at {path}."
+        return f"File created successfully at: {path}"
 
     def do_str_replace(self, command: Any) -> str:
         self._ensure_initialized()
@@ -310,7 +326,22 @@ class _MemoryToolCore:
         except Exception as e:
             log.warning("Recall update failed for %s: %s", path, e)
 
-        return f"The file {path} has been edited successfully."
+        replace_start = new_content.find(command.new_str)
+        all_lines = new_content.split("\n")
+        char_count = 0
+        snippet_start = 1
+        for i, line in enumerate(all_lines):
+            if char_count + len(line) >= replace_start:
+                snippet_start = i + 1
+                break
+            char_count += len(line) + 1
+
+        ctx = 3
+        s = max(1, snippet_start - ctx)
+        e = min(len(all_lines), snippet_start + ctx + 1)
+        snippet = _numbered_lines("\n".join(all_lines[s - 1:e]), start=s)
+
+        return f"The memory file has been edited.\n{snippet}\n"
 
     def do_insert(self, command: Any) -> str:
         self._ensure_initialized()
@@ -326,7 +357,10 @@ class _MemoryToolCore:
         if insert_line < 0 or insert_line > len(lines):
             raise Exception(f"insert_line {insert_line} is out of range [0, {len(lines)}].")
 
-        new_lines = command.insert_text.split("\n")
+        text = command.insert_text
+        if text.endswith("\n"):
+            text = text[:-1]
+        new_lines = text.split("\n")
         lines[insert_line:insert_line] = new_lines
         new_content = "\n".join(lines)
         self._cache.set(path, new_content)
@@ -336,7 +370,7 @@ class _MemoryToolCore:
         except Exception as e:
             log.warning("Recall update failed for %s: %s", path, e)
 
-        return f"The file {path} has been edited successfully."
+        return f"The file {path} has been edited."
 
     def do_delete(self, command: Any) -> str:
         self._ensure_initialized()
@@ -361,7 +395,7 @@ class _MemoryToolCore:
         except Exception as e:
             log.warning("Recall retract failed for %s: %s", path, e)
 
-        return f"File '{path}' has been deleted."
+        return f"Successfully deleted {path}"
 
     def do_rename(self, command: Any) -> str:
         self._ensure_initialized()
@@ -382,7 +416,7 @@ class _MemoryToolCore:
         except Exception as e:
             log.warning("Recall rename failed: %s", e)
 
-        return f"Renamed '{old_path}' to '{new_path}'."
+        return f"Successfully renamed {old_path} to {new_path}"
 
     def do_clear_all(self) -> str:
         self._cache.clear()
@@ -414,17 +448,33 @@ if BetaAbstractMemoryTool is not None:
             super().__init__(cache_control=cache_control)
             self._core = _MemoryToolCore(project_root=project_root)
 
+        def _schedule_enrichment(self, path: str, content: str) -> None:
+            pass
+
         def view(self, command: BetaMemoryTool20250818ViewCommand) -> BetaFunctionToolResultType:
             return self._core.do_view(command)
 
         def create(self, command: BetaMemoryTool20250818CreateCommand) -> BetaFunctionToolResultType:
-            return self._core.do_create(command)
+            result = self._core.do_create(command)
+            path = _normalize_path(command.path)
+            self._schedule_enrichment(path, command.file_text)
+            return result
 
         def str_replace(self, command: BetaMemoryTool20250818StrReplaceCommand) -> BetaFunctionToolResultType:
-            return self._core.do_str_replace(command)
+            result = self._core.do_str_replace(command)
+            path = _normalize_path(command.path)
+            content = self._core._cache.get(path)
+            if content is not None:
+                self._schedule_enrichment(path, content)
+            return result
 
         def insert(self, command: BetaMemoryTool20250818InsertCommand) -> BetaFunctionToolResultType:
-            return self._core.do_insert(command)
+            result = self._core.do_insert(command)
+            path = _normalize_path(command.path)
+            content = self._core._cache.get(path)
+            if content is not None:
+                self._schedule_enrichment(path, content)
+            return result
 
         def delete(self, command: BetaMemoryTool20250818DeleteCommand) -> BetaFunctionToolResultType:
             return self._core.do_delete(command)
@@ -469,17 +519,33 @@ if BetaAsyncAbstractMemoryTool is not None:
             super().__init__(cache_control=cache_control)
             self._core = _MemoryToolCore(project_root=project_root)
 
+        def _schedule_enrichment(self, path: str, content: str) -> None:
+            pass
+
         async def view(self, command: BetaMemoryTool20250818ViewCommand) -> BetaFunctionToolResultType:
             return self._core.do_view(command)
 
         async def create(self, command: BetaMemoryTool20250818CreateCommand) -> BetaFunctionToolResultType:
-            return self._core.do_create(command)
+            result = self._core.do_create(command)
+            path = _normalize_path(command.path)
+            self._schedule_enrichment(path, command.file_text)
+            return result
 
         async def str_replace(self, command: BetaMemoryTool20250818StrReplaceCommand) -> BetaFunctionToolResultType:
-            return self._core.do_str_replace(command)
+            result = self._core.do_str_replace(command)
+            path = _normalize_path(command.path)
+            content = self._core._cache.get(path)
+            if content is not None:
+                self._schedule_enrichment(path, content)
+            return result
 
         async def insert(self, command: BetaMemoryTool20250818InsertCommand) -> BetaFunctionToolResultType:
-            return self._core.do_insert(command)
+            result = self._core.do_insert(command)
+            path = _normalize_path(command.path)
+            content = self._core._cache.get(path)
+            if content is not None:
+                self._schedule_enrichment(path, content)
+            return result
 
         async def delete(self, command: BetaMemoryTool20250818DeleteCommand) -> BetaFunctionToolResultType:
             return self._core.do_delete(command)

@@ -199,3 +199,39 @@ class TestRecallIntegration:
 
     def test_save_to_recall_method_exists(self, history):
         assert callable(history.save_to_recall)
+
+    def test_search_delegates_to_recall_search(self, history, monkeypatch):
+        def fake_search(*, query, max_chunks, max_tokens):
+            assert query == "deployment config"
+            assert max_chunks == 7
+            assert max_tokens == 900
+            return "chunk: deployment config"
+
+        monkeypatch.setattr("synapt.recall.server.recall_search", fake_search)
+
+        result = history.search(
+            "deployment config",
+            max_chunks=7,
+            max_tokens=900,
+        )
+
+        assert result == "chunk: deployment config"
+
+    def test_save_to_recall_delegates_to_recall_save(self, history, monkeypatch):
+        def fake_save(*, content, category, confidence, tags):
+            assert content == "Always use UTC timestamps"
+            assert category == "convention"
+            assert confidence == 0.9
+            assert tags == ["time", "ops"]
+            return "saved-node-id"
+
+        monkeypatch.setattr("synapt.recall.server.recall_save", fake_save)
+
+        result = history.save_to_recall(
+            "Always use UTC timestamps",
+            category="convention",
+            confidence=0.9,
+            tags=["time", "ops"],
+        )
+
+        assert result == "saved-node-id"

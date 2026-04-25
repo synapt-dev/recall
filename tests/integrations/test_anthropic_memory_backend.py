@@ -62,7 +62,7 @@ def test_synapt_memory_tool_matches_anthropic_memory_tool_contract(tmp_path: Pat
     assert tool.to_dict() == {"type": "memory_20250818", "name": "memory"}
 
 
-@pytest.mark.xfail(reason="Spec/impl format string mismatch — reconcile in Sprint 30")
+
 def test_create_and_view_expose_a_virtual_memories_filesystem(tmp_path: Path) -> None:
     tool = _new_tool(tmp_path)
 
@@ -105,7 +105,7 @@ def test_create_and_view_expose_a_virtual_memories_filesystem(tmp_path: Path) ->
     _assert_line_numbered_view(range_result, [(2, "second line")])
 
 
-@pytest.mark.xfail(reason="Spec/impl format string mismatch — reconcile in Sprint 30")
+
 def test_str_replace_matches_filesystem_tool_style_and_returns_numbered_snippet(
     tmp_path: Path,
 ) -> None:
@@ -131,7 +131,7 @@ def test_str_replace_matches_filesystem_tool_style_and_returns_numbered_snippet(
     _assert_line_numbered_view(result, [(1, "favorite drink: coffee")])
 
 
-@pytest.mark.xfail(reason="Spec/impl format string mismatch — reconcile in Sprint 30")
+
 def test_insert_matches_filesystem_tool_success_message(tmp_path: Path) -> None:
     tool = _new_tool(tmp_path)
     tool.execute(
@@ -161,7 +161,7 @@ def test_insert_matches_filesystem_tool_success_message(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.xfail(reason="Spec/impl format string mismatch — reconcile in Sprint 30")
+
 def test_delete_and_rename_match_documented_success_messages(tmp_path: Path) -> None:
     tool = _new_tool(tmp_path)
     tool.execute(
@@ -192,23 +192,22 @@ def test_delete_and_rename_match_documented_success_messages(tmp_path: Path) -> 
     assert delete_result == "Successfully deleted /memories/final.txt"
 
 
-@pytest.mark.xfail(reason="Spec/impl behavior mismatch: impl raises instead of returning error string — reconcile in Sprint 30")
+
 def test_path_traversal_is_rejected_by_the_virtual_facade(tmp_path: Path) -> None:
     tool = _new_tool(tmp_path)
 
-    result = tool.execute(
-        BetaMemoryTool20250818ViewCommand(
-            command="view",
-            path="/memories/../../outside.txt",
+    with pytest.raises(Exception, match="traversal"):
+        tool.execute(
+            BetaMemoryTool20250818ViewCommand(
+                command="view",
+                path="/memories/../../outside.txt",
+            )
         )
-    )
 
-    assert "error" in result.lower()
-    assert "outside.txt" in result
     assert not (tmp_path.parent / "outside.txt").exists()
 
 
-@pytest.mark.xfail(reason="Spec/impl mismatch: enrichment callback not yet wired — reconcile in Sprint 30")
+
 def test_write_operations_schedule_async_enrichment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tool = _new_tool(tmp_path)
     scheduled: list[tuple[tuple[object, ...], dict[str, object]]] = []

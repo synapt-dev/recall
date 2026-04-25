@@ -2296,30 +2296,30 @@ def cmd_setup(args: argparse.Namespace) -> None:
         if archive_count:
             print(f"  Found {archive_count} archived transcript(s)")
 
-    if not transcript_dir and codex_count == 0 and not (archive_dir.exists() and any(archive_dir.glob("*.jsonl"))):
-        print(f"  No transcripts found for this project.", file=sys.stderr)
-        print(f"  Start a Claude Code or Codex session in this project first,", file=sys.stderr)
-        print(f"  or use --sync to pull from HuggingFace.", file=sys.stderr)
-        sys.exit(1)
+    has_transcripts = bool(transcript_dir) or codex_count > 0 or (archive_dir.exists() and any(archive_dir.glob("*.jsonl")))
+    stats = None
 
-    use_emb = not args.no_embeddings
-    if use_emb:
-        print("  Computing embeddings ...")
+    if not has_transcripts:
+        print(f"  No transcripts found yet. Skipping index build.")
+        print(f"  Start a Claude Code or Codex session, then run 'synapt init' again to index.")
+    else:
+        use_emb = not args.no_embeddings
+        if use_emb:
+            print("  Computing embeddings ...")
 
-    final_index = _archive_and_build(
-        project,
-        use_embeddings=use_emb,
-    )
+        final_index = _archive_and_build(
+            project,
+            use_embeddings=use_emb,
+        )
 
-    if not final_index or not final_index.chunks:
-        print("  No chunks parsed from transcripts.", file=sys.stderr)
-        sys.exit(1)
-
-    stats = final_index.stats()
-    print(f"  Index saved: {stats['chunk_count']} chunks, {stats['session_count']} sessions")
-    if stats.get("date_range"):
-        dr = stats["date_range"]
-        print(f"  Date range: {dr['earliest'][:10]} to {dr['latest'][:10]}")
+        if final_index and final_index.chunks:
+            stats = final_index.stats()
+            print(f"  Index saved: {stats['chunk_count']} chunks, {stats['session_count']} sessions")
+            if stats.get("date_range"):
+                dr = stats["date_range"]
+                print(f"  Date range: {dr['earliest'][:10]} to {dr['latest'][:10]}")
+        else:
+            print(f"  No chunks parsed from transcripts. Index not built.")
     print()
 
     # --- 2. Register MCP server ---
@@ -2390,14 +2390,16 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print()
 
     # --- Summary ---
-    index_dir = project_index_dir(project)
-    total_size = sum(fp.stat().st_size for fp in index_dir.iterdir() if fp.is_file())
-
     print("=" * 50)
     print("  synapt setup complete!")
-    print(f"  Index:    {index_dir} ({format_size(total_size)})")
-    print(f"  Chunks:   {stats['chunk_count']}")
-    print(f"  Sessions: {stats['session_count']}")
+    index_dir = project_index_dir(project)
+    if stats:
+        total_size = sum(fp.stat().st_size for fp in index_dir.iterdir() if fp.is_file())
+        print(f"  Index:    {index_dir} ({format_size(total_size)})")
+        print(f"  Chunks:   {stats['chunk_count']}")
+        print(f"  Sessions: {stats['session_count']}")
+    else:
+        print(f"  Index:    not yet built (no transcripts)")
     print(f"  MCP:      registered (scope: {scope})")
     if not args.no_hook:
         print(f"  Hook:     installed")

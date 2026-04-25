@@ -561,17 +561,16 @@ def recall_setup(no_hook: bool = False) -> str:
     finally:
         _invalidate_cache()
 
-    if not final_index or not final_index.chunks:
-        return (
-            "No Claude Code or Codex transcripts found for this project. "
-            "Start a Claude Code or Codex session first, then run recall_setup again."
+    if final_index and final_index.chunks:
+        stats = final_index.stats()
+        steps.append(
+            f"Index built: {stats['chunk_count']} chunks from "
+            f"{stats['session_count']} sessions"
         )
-
-    stats = final_index.stats()
-    steps.append(
-        f"Index built: {stats['chunk_count']} chunks from "
-        f"{stats['session_count']} sessions"
-    )
+    else:
+        steps.append(
+            "No transcripts found yet. Start a session, then run recall_setup again to index."
+        )
 
     # 2. Install global hooks (user-level ~/.claude/settings.json)
     if not no_hook:
@@ -589,8 +588,9 @@ def recall_setup(no_hook: bool = False) -> str:
 
     # Summary
     index_dir = project_index_dir(project)
-    total_size = sum(fp.stat().st_size for fp in index_dir.iterdir() if fp.is_file())
-    steps.append(f"Index size: {format_size(total_size)}")
+    if index_dir.exists() and any(index_dir.iterdir()):
+        total_size = sum(fp.stat().st_size for fp in index_dir.iterdir() if fp.is_file())
+        steps.append(f"Index size: {format_size(total_size)}")
 
     return "Setup complete.\n" + "\n".join(f"  - {s}" for s in steps)
 
