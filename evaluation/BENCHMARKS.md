@@ -26,6 +26,24 @@ claims to have run at a specific ref.
 
 **CodeMemo v0.6.2 (local 3B, no cloud) — J-Score: 90.51%** (158 questions, 3 projects) — beats Mem0 (cloud OpenAI) by +14.51pp on coding memory.
 
+### BEAM Adapter Status (preliminary, 2026-04-24)
+
+We now have a first-pass evaluator for [BEAM](https://huggingface.co/datasets/Mohammadta/BEAM) in `evaluation/beam_eval.py`, adapted from the LOCOMO pipeline.
+
+Current compatibility notes:
+
+- Public BEAM release currently exposes `100K`, `500K`, and `1M` splits on Hugging Face.
+- The paper reports a `10M` setting, but that split is not present in the current public dataset repo.
+- BEAM probe rows do not include LOCOMO-style evidence turn IDs, so the current adapter evaluates answer quality (`gpt-4o-mini` judge + token F1), not retrieval recall.
+
+First smoke result (not a benchmark claim):
+
+| Benchmark | Slice | Questions | J-Score | F1 | Notes |
+|-----------|-------|-----------|---------|----|-------|
+| BEAM | `100K`, 1 conversation | 20 | 60.0 | 20.88 | End-to-end smoke run only; validates dataset adapter + judge loop |
+
+Do not compare this directly to published BEAM leaderboard numbers. A real benchmark claim requires a full split run with stable methodology and explicit handling of the missing public `10M` split.
+
 ### Judge model drift (2026-03-26)
 
 The original v0.6.1 LOCOMO score of 76.04% was obtained with gpt-4o-mini in March 2026. When re-evaluated with the same code at the same commit, all three versions score ~72.4%:

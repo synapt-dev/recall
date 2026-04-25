@@ -1,0 +1,174 @@
+  b001c1.jsonl: 26 turns
+  b002c1.jsonl: 26 turns
+  b003c1.jsonl: 25 turns
+[synapt] Total: 77 chunks from 3 files
+  b001c2.jsonl: 26 turns
+  b002c2.jsonl: 26 turns
+  b003c2.jsonl: 26 turns
+[synapt] Total: 78 chunks from 3 files
+  b001c3.jsonl: 26 turns
+  b002c3.jsonl: 26 turns
+  b003c3.jsonl: 25 turns
+[synapt] Total: 77 chunks from 3 files
+  b001c4.jsonl: 27 turns
+  b002c4.jsonl: 27 turns
+  b003c4.jsonl: 28 turns
+[synapt] Total: 82 chunks from 3 files
+  b001c5.jsonl: 28 turns
+  b002c5.jsonl: 28 turns
+  b003c5.jsonl: 28 turns
+[synapt] Total: 84 chunks from 3 files
+  b001c6.jsonl: 23 turns
+  b002c6.jsonl: 23 turns
+  b003c6.jsonl: 23 turns
+  b004c6.jsonl: 23 turns
+  b005c6.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c7.jsonl: 23 turns
+  b002c7.jsonl: 23 turns
+  b003c7.jsonl: 23 turns
+  b004c7.jsonl: 23 turns
+  b005c7.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c8.jsonl: 23 turns
+  b002c8.jsonl: 23 turns
+  b003c8.jsonl: 23 turns
+  b004c8.jsonl: 23 turns
+  b005c8.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c9.jsonl: 23 turns
+  b002c9.jsonl: 23 turns
+  b003c9.jsonl: 20 turns
+  b004c9.jsonl: 23 turns
+  b005c9.jsonl: 23 turns
+[synapt] Total: 112 chunks from 5 files
+  b001c10.jsonl: 23 turns
+  b002c10.jsonl: 23 turns
+  b003c10.jsonl: 23 turns
+  b004c10.jsonl: 23 turns
+  b005c10.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c11.jsonl: 23 turns
+  b002c11.jsonl: 23 turns
+  b003c11.jsonl: 23 turns
+  b004c11.jsonl: 23 turns
+  b005c11.jsonl: 22 turns
+[synapt] Total: 114 chunks from 5 files
+  b001c12.jsonl: 23 turns
+  b002c12.jsonl: 23 turns
+  b003c12.jsonl: 23 turns
+  b004c12.jsonl: 23 turns
+  b005c12.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c13.jsonl: 23 turns
+  b002c13.jsonl: 23 turns
+  b003c13.jsonl: 23 turns
+  b004c13.jsonl: 23 turns
+  b005c13.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c14.jsonl: 23 turns
+  b002c14.jsonl: 23 turns
+  b003c14.jsonl: 23 turns
+  b004c14.jsonl: 23 turns
+  b005c14.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c15.jsonl: 23 turns
+  b002c15.jsonl: 23 turns
+  b003c15.jsonl: 23 turns
+  b004c15.jsonl: 23 turns
+  b005c15.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c16.jsonl: 23 turns
+  b002c16.jsonl: 23 turns
+  b003c16.jsonl: 23 turns
+  b004c16.jsonl: 23 turns
+  b005c16.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c17.jsonl: 23 turns
+  b002c17.jsonl: 23 turns
+  b003c17.jsonl: 23 turns
+  b004c17.jsonl: 23 turns
+  b005c17.jsonl: 21 turns
+[synapt] Total: 113 chunks from 5 files
+  b001c18.jsonl: 23 turns
+  b002c18.jsonl: 23 turns
+  b003c18.jsonl: 23 turns
+  b004c18.jsonl: 23 turns
+  b005c18.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+  b001c19.jsonl: 23 turns
+  b002c19.jsonl: 23 turns
+  b003c19.jsonl: 23 turns
+  b004c19.jsonl: 23 turns
+  b005c19.jsonl: 21 turns
+[synapt] Total: 113 chunks from 5 files
+  b001c20.jsonl: 23 turns
+  b002c20.jsonl: 23 turns
+  b003c20.jsonl: 23 turns
+  b004c20.jsonl: 23 turns
+  b005c20.jsonl: 23 turns
+[synapt] Total: 115 chunks from 5 files
+{
+  "benchmark": "BEAM",
+  "split": "100K",
+  "conversations": 20,
+  "questions_evaluated": 400,
+  "retrieval_only": false,
+  "started_at": "2026-04-25T00:01:13.691183+00:00",
+  "finished_at": "2026-04-25T01:48:22.450843+00:00",
+  "elapsed_seconds": 6428.8,
+  "methodology": {
+    "dataset": "Mohammadta/BEAM",
+    "public_split_availability": [
+      "100K",
+      "500K",
+      "1M"
+    ],
+    "missing_public_split": "10M",
+    "retrieval": "synapt hybrid recall search via transcript adapter",
+    "answer_model": "gpt-4o-mini",
+    "judge_model": "gpt-4o-mini",
+    "judge_method": "LOCOMO-style LLM-as-judge reuse",
+    "max_chunks": 5,
+    "max_tokens": 2000,
+    "notes": [
+      "BEAM probe rows do not expose LOCOMO-style evidence turn IDs.",
+      "This evaluator reports answer quality metrics but not retrieval recall.",
+      "The public dataset currently exposes 100K, 500K, and 1M only."
+    ]
+  },
+  "avg_retrieve_ms": 6.0,
+  "j_score_overall": 52.5,
+  "f1_overall": 22.01,
+  "avg_generate_ms": 12354.4,
+  "avg_judge_ms": 3675.4,
+  "j_score_abstention": 20.0,
+  "f1_abstention": 24.47,
+  "j_score_contradiction_resolution": 92.5,
+  "f1_contradiction_resolution": 27.0,
+  "j_score_event_ordering": 0.0,
+  "f1_event_ordering": 24.52,
+  "j_score_information_extraction": 57.5,
+  "f1_information_extraction": 35.88,
+  "j_score_instruction_following": 67.5,
+  "f1_instruction_following": 8.3,
+  "j_score_knowledge_update": 40.0,
+  "f1_knowledge_update": 17.85,
+  "j_score_multi_session_reasoning": 47.5,
+  "f1_multi_session_reasoning": 19.85,
+  "j_score_preference_following": 85.0,
+  "f1_preference_following": 11.65,
+  "j_score_summarization": 72.5,
+  "f1_summarization": 18.59,
+  "j_score_temporal_reasoning": 42.5,
+  "f1_temporal_reasoning": 31.99,
+  "token_usage": {
+    "prompt_tokens": 855070,
+    "completion_tokens": 35618,
+    "cached_tokens": 0,
+    "uncached_tokens": 855070,
+    "cache_hit_rate": 0.0,
+    "api_calls": 800,
+    "estimated_cost_usd": 0.1496
+  }
+}
