@@ -95,6 +95,48 @@ Then initialize the project:
 synapt init
 ```
 
+### Cursor
+
+Add to project-local `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "synapt": {
+      "command": "synapt",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+Then run:
+
+```bash
+synapt init
+```
+
+### Windsurf
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "synapt": {
+      "command": "synapt",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+Then run:
+
+```bash
+synapt init
+```
+
 ### OpenCode
 
 Add to `~/.config/opencode/opencode.json`:
