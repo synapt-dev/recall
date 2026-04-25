@@ -15,9 +15,9 @@ from evaluation.locomo_eval import (
     MULTIHOP_ANSWER_PROMPT,
     TEMPORAL_ANSWER_PROMPT,
     _resolve_work_dir,
+    _token_tracker,
     attach_search_summary,
     build_synapt_index,
-    generate_answer,
     judge_answer,
     retrieve_context,
     token_f1,
@@ -244,6 +244,8 @@ def run_evaluation(
     max_tokens: int = 2000,
     output_path: Path | None = None,
 ) -> dict[str, Any]:
+    start_wall = time.time()
+    start_ts = datetime.now(timezone.utc).isoformat()
     data = load_beam_split(split)
     if max_conversations is not None:
         data = data.select(range(min(max_conversations, len(data))))
@@ -256,6 +258,7 @@ def run_evaluation(
             client = OpenAI()
         except Exception:
             retrieval_only = True
+    _token_tracker.reset()
 
     work_dir = _resolve_work_dir(output_path)
     results: list[dict[str, Any]] = []
@@ -344,12 +347,32 @@ def run_evaluation(
     finally:
         pass
 
+    elapsed_s = time.time() - start_wall
     summary: dict[str, Any] = {
         "benchmark": "BEAM",
         "split": split,
         "conversations": len(data),
         "questions_evaluated": len(results),
         "retrieval_only": retrieval_only,
+        "started_at": start_ts,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_seconds": round(elapsed_s, 1),
+        "methodology": {
+            "dataset": "Mohammadta/BEAM",
+            "public_split_availability": list(AVAILABLE_SPLITS),
+            "missing_public_split": "10M",
+            "retrieval": "synapt hybrid recall search via transcript adapter",
+            "answer_model": None if retrieval_only else "gpt-4o-mini",
+            "judge_model": None if retrieval_only else "gpt-4o-mini",
+            "judge_method": None if retrieval_only else "LOCOMO-style LLM-as-judge reuse",
+            "max_chunks": max_chunks,
+            "max_tokens": max_tokens,
+            "notes": [
+                "BEAM probe rows do not expose LOCOMO-style evidence turn IDs.",
+                "This evaluator reports answer quality metrics but not retrieval recall.",
+                "The public dataset currently exposes 100K, 500K, and 1M only.",
+            ],
+        },
         "avg_retrieve_ms": round(
             total_retrieve_time / len(results) * 1000, 1
         ) if results else 0.0,
@@ -374,6 +397,7 @@ def run_evaluation(
                 sum(category_f1[category_name]) / len(category_f1[category_name]) * 100,
                 2,
             )
+        summary["token_usage"] = _token_tracker.summary()
 
     if output_path:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -383,6 +407,46 @@ def run_evaluation(
         )
         (output_path / "beam_detailed.json").write_text(
             json.dumps(results, indent=2),
+            encoding="utf-8",
+        )
+        (output_path / "beam_methodology.md").write_text(
+            "\n".join(
+                [
+                    "# BEAM Eval Methodology",
+                    "",
+                    f"- Dataset: `Mohammadta/BEAM`",
+                    f"- Split: `{split}`",
+                    f"- Conversations evaluated: `{len(data)}`",
+                    f"- Retrieval: `synapt` transcript-adapter + hybrid recall search",
+                    f"- Answer model: `{'none (retrieval-only)' if retrieval_only else 'gpt-4o-mini'}`",
+                    f"- Judge model: `{'none (retrieval-only)' if retrieval_only else 'gpt-4o-mini'}`",
+                    f"- Max chunks: `{max_chunks}`",
+                    f"- Max tokens: `{max_tokens}`",
+                    "- Public BEAM splits currently available: `100K`, `500K`, `1M`",
+                    "- Public `10M` split is not present in the current Hugging Face release",
+                    "- Retrieval recall is not reported because BEAM does not expose LOCOMO-style evidence turn IDs",
+                    "",
+                    f"- Started at: `{summary['started_at']}`",
+                    f"- Finished at: `{summary['finished_at']}`",
+                    f"- Elapsed seconds: `{summary['elapsed_seconds']}`",
+                    "",
+                    f"- Average retrieve ms: `{summary['avg_retrieve_ms']}`",
+                    f"- Questions evaluated: `{len(results)}`",
+                ]
+                + (
+                    [
+                        f"- J-score overall: `{summary['j_score_overall']}`",
+                        f"- F1 overall: `{summary['f1_overall']}`",
+                        f"- Average generate ms: `{summary['avg_generate_ms']}`",
+                        f"- Average judge ms: `{summary['avg_judge_ms']}`",
+                        f"- Estimated cost USD: `{summary['token_usage']['estimated_cost_usd']}`",
+                        f"- Prompt tokens: `{summary['token_usage']['prompt_tokens']}`",
+                        f"- Completion tokens: `{summary['token_usage']['completion_tokens']}`",
+                    ]
+                    if not retrieval_only and results
+                    else []
+                )
+            ),
             encoding="utf-8",
         )
 
