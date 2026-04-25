@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import venv
+import shutil
 from pathlib import Path
 
 
@@ -22,6 +23,19 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProc
     )
 
 
+def _rebuild_dist(target: Path) -> Path:
+    dist_dir = target / "dist"
+    shutil.rmtree(dist_dir, ignore_errors=True)
+    _run([sys.executable, "-m", "build", str(target)])
+    wheels = sorted(
+        dist_dir.glob("*.whl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    assert wheels, f"expected wheel build output in {dist_dir}"
+    return wheels[0]
+
+
 def test_langchain_synapt_package_has_required_files() -> None:
     assert (PACKAGE_DIR / "pyproject.toml").exists()
     assert (PACKAGE_DIR / "README.md").exists()
@@ -29,18 +43,13 @@ def test_langchain_synapt_package_has_required_files() -> None:
 
 
 def test_langchain_synapt_builds_wheel() -> None:
-    _run([sys.executable, "-m", "build", str(PACKAGE_DIR)])
-    dist_dir = PACKAGE_DIR / "dist"
-    wheels = list(dist_dir.glob("langchain_synapt-*.whl"))
-    assert wheels, "expected standalone langchain-synapt wheel to be built"
+    wheel = _rebuild_dist(PACKAGE_DIR)
+    assert wheel.name.startswith("langchain_synapt-")
 
 
 def test_langchain_synapt_installs_and_exports_history_class(tmp_path: Path) -> None:
-    _run([sys.executable, "-m", "build", str(REPO_ROOT)])
-    _run([sys.executable, "-m", "build", str(PACKAGE_DIR)])
-
-    synapt_wheel = next((REPO_ROOT / "dist").glob("synapt-*.whl"))
-    langchain_wheel = next((PACKAGE_DIR / "dist").glob("langchain_synapt-*.whl"))
+    synapt_wheel = _rebuild_dist(REPO_ROOT)
+    langchain_wheel = _rebuild_dist(PACKAGE_DIR)
 
     venv_dir = tmp_path / "venv"
     venv.create(venv_dir, with_pip=True)
