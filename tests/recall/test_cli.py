@@ -314,6 +314,60 @@ def test_cmd_setup_with_codex_only_transcripts(tmp_path):
     assert (tmp_path / ".codex" / "skills" / "dev-loop" / "SKILL.md").exists()
 
 
+def test_cmd_setup_no_transcripts_still_registers_mcp(tmp_path):
+    """setup with zero transcripts skips indexing but still registers MCP, hooks, gitignore."""
+    project_dir = tmp_path / "freshproject"
+    project_dir.mkdir()
+
+    mock_run = MagicMock()
+    mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+    with patch.dict("os.environ", {"CODEX_HOME": str(tmp_path / ".codex")}), \
+         patch("synapt.recall.core.Path.home", return_value=tmp_path), \
+         patch("synapt.recall.core.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.cli.Path.cwd", return_value=project_dir), \
+         patch("synapt.recall.cli.subprocess.run", mock_run), \
+         patch("synapt.recall.cli.shutil.which", return_value="/usr/bin/claude"):
+        from synapt.recall.cli import cmd_setup
+        args = argparse.Namespace(
+            no_embeddings=True,
+            no_hook=False,
+            global_scope=False,
+            sync=None,
+        )
+        cmd_setup(args)
+
+    # No index should exist (nothing to index)
+    index_dir = project_index_dir(project_dir)
+    assert not (index_dir / "recall.db").exists()
+
+    # MCP registration was still called
+    mcp_calls = [c for c in mock_run.call_args_list if "claude" in c[0][0]]
+    assert len(mcp_calls) == 1
+    call_args = mcp_calls[0][0][0]
+    assert "mcp" in call_args
+
+    # Global hooks were still registered
+    global_settings = tmp_path / ".claude" / "settings.json"
+    assert global_settings.exists()
+    settings = json.loads(global_settings.read_text())
+    hook_cmds = []
+    for event_hooks in settings.get("hooks", {}).values():
+        for matcher in event_hooks:
+            for h in matcher.get("hooks", []):
+                hook_cmds.append(h.get("command", ""))
+    assert "synapt recall hook session-start" in hook_cmds
+
+    # .gitignore was still created
+    gitignore = project_dir / ".gitignore"
+    assert gitignore.exists()
+    assert ".synapt/" in gitignore.read_text()
+
+    # Codex skill was still deployed
+    skill_path = tmp_path / ".codex" / "skills" / "dev-loop" / "SKILL.md"
+    assert skill_path.exists()
+
+
 def test_ensure_gitignore_creates_file(tmp_path):
     """_ensure_gitignore creates .gitignore with .synapt/ entry if missing."""
     _ensure_gitignore(tmp_path)
@@ -534,7 +588,7 @@ def test_recall_setup_no_hook(tmp_path):
 
 
 def test_recall_setup_no_transcripts(tmp_path):
-    """recall_setup returns helpful message when no transcripts exist."""
+    """recall_setup still completes hooks and gitignore when no transcripts exist."""
     from synapt.recall.server import recall_setup
 
     project_dir = tmp_path / "myproject"
@@ -545,7 +599,16 @@ def test_recall_setup_no_transcripts(tmp_path):
          patch("synapt.recall.cli.Path.cwd", return_value=project_dir):
         result = recall_setup()
 
-    assert "No Claude Code or Codex transcripts found" in result
+    assert "Setup complete" in result
+    assert "No transcripts found yet" in result
+    assert ".gitignore" in result
+
+    global_settings = tmp_path / ".claude" / "settings.json"
+    assert global_settings.exists()
+
+    gitignore = project_dir / ".gitignore"
+    assert gitignore.exists()
+    assert ".synapt/" in gitignore.read_text()
 
 
 def test_recall_setup_mcp_tool_with_codex_only_transcripts(tmp_path):
