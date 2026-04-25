@@ -470,5 +470,66 @@ class TestEndToEnd(unittest.TestCase):
         pytest.skip("Integration test: requires real tmux + agent process")
 
 
+@pytest.mark.skipif(not DASHBOARD_AVAILABLE, reason="Dashboard not importable")
+class TestXSSProtection:
+    """XSS vector tests for _render_message HTML sanitization (#756)."""
+
+    def _render(self, body: str) -> str:
+        from synapt.dashboard.app import _render_message
+
+        msg = {
+            "timestamp": "2026-04-24T10:00:00Z",
+            "from_display": "attacker",
+            "body": body,
+            "type": "message",
+        }
+        return _render_message(msg)
+
+    def test_script_tag_stripped(self):
+        html = self._render("<script>alert('xss')</script>hello")
+        assert "<script>" not in html
+        assert "alert" not in html
+        assert "hello" in html
+
+    def test_img_onerror_stripped(self):
+        html = self._render('<img src=x onerror=alert(1)>')
+        assert "onerror" not in html
+
+    def test_iframe_stripped(self):
+        html = self._render('<iframe src="evil.com"></iframe>')
+        assert "<iframe" not in html
+        assert "evil.com" not in html
+
+    def test_event_handler_attributes_stripped(self):
+        html = self._render('<div onclick="alert(1)">click me</div>')
+        assert "onclick" not in html
+        assert "click me" in html
+
+    def test_javascript_url_stripped(self):
+        html = self._render('<a href="javascript:alert(1)">click</a>')
+        assert "javascript:" not in html
+
+    def test_legitimate_markdown_preserved(self):
+        html = self._render("**bold** and `code` and [link](https://example.com)")
+        assert "<strong>bold</strong>" in html
+        assert "<code>code</code>" in html
+        assert 'href="https://example.com"' in html
+
+    def test_fenced_code_block_preserved(self):
+        html = self._render("```python\nprint('hello')\n```")
+        assert "<code" in html
+        assert "print" in html
+
+    def test_table_preserved(self):
+        html = self._render("| A | B |\n|---|---|\n| 1 | 2 |")
+        assert "<table>" in html
+        assert "<td>" in html
+
+    def test_mention_styling_preserved(self):
+        html = self._render("hello @Apollo")
+        assert "style=" in html
+        assert "@Apollo" in html
+
+
 if __name__ == "__main__":
     unittest.main()
