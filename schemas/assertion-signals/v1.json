@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapt.dev/schemas/assertion-signals/v1.json",
+  "title": "SynaptAssertionSignals",
+  "description": "Raw linguistic signals for uncertainty handling.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "1",
+      "description": "Sub-schema version."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Extraction confidence: how sure is the LLM it correctly extracted this? (0.0-1.0)"
+    },
+    "negated": {
+      "type": "boolean",
+      "description": "The statement is negated (\"not\", \"no longer\", \"don't want\")."
+    },
+    "hedged": {
+      "type": "boolean",
+      "description": "Hedging language present (\"might\", \"maybe\", \"I think\", \"possibly\")."
+    },
+    "condition": {
+      "type": "string",
+      "description": "Conditional on something. Value is the condition text (\"if we get funding\")."
+    }
+  },
+  "required": ["version"],
+  "additionalProperties": false
+}

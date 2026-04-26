@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapt.dev/schemas/source-ref/v1.json",
+  "title": "SynaptSourceRef",
+  "description": "Evidence anchor linking an extracted item back to the source text.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "1",
+      "description": "Sub-schema version."
+    },
+    "snippet": {
+      "type": "string",
+      "description": "Verbatim or near-verbatim text from the source."
+    },
+    "offset_start": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Character offset of the start of the evidence span (reserved for future use)."
+    },
+    "offset_end": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Character offset of the end of the evidence span (reserved for future use)."
+    },
+    "sentence_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sentence index within the source text (reserved for future use)."
+    }
+  },
+  "required": ["version"],
+  "additionalProperties": false
+}

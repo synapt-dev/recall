@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapt.dev/schemas/embedding/v1.json",
+  "title": "SynaptEmbedding",
+  "description": "Pre-computed embedding vector with provenance metadata.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "1",
+      "description": "Sub-schema version."
+    },
+    "vector": {
+      "type": "array",
+      "items": { "type": "number" },
+      "description": "The embedding vector."
+    },
+    "model": {
+      "type": "string",
+      "description": "Model that produced this vector (URI format: \"provider://model-name\")."
+    },
+    "input": {
+      "type": "string",
+      "description": "What was embedded: \"source\", \"summary\", \"entities\", or custom string."
+    },
+    "dimensions": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Vector dimensionality (for validation without reading the full array)."
+    },
+    "space": {
+      "type": "string",
+      "description": "Semantic space identifier. Vectors are only comparable when they share a space."
+    },
+    "computed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this embedding was computed (ISO 8601)."
+    }
+  },
+  "required": ["version", "vector", "model", "input", "dimensions"],
+  "additionalProperties": false
+}

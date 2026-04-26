@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapt.dev/schemas/temporal-ref/v1.json",
+  "title": "SynaptTemporalRef",
+  "description": "Temporal reference with optional resolution.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "1",
+      "description": "Sub-schema version."
+    },
+    "raw": {
+      "type": "string",
+      "description": "The temporal expression as it appeared in the source text."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["point", "range", "duration", "unresolved"],
+      "description": "Value class. Not all temporal expressions resolve to a single timestamp."
+    },
+    "resolved": {
+      "type": "string",
+      "description": "Resolved value (ISO 8601 for point/range, ISO 8601 duration for duration, omit for unresolved)."
+    },
+    "resolved_end": {
+      "type": "string",
+      "description": "End of range, if type is \"range\"."
+    },
+    "context": {
+      "type": "string",
+      "description": "Additional context for temporal resolution."
+    }
+  },
+  "required": ["version", "raw"],
+  "additionalProperties": false
+}
