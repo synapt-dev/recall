@@ -11,3 +11,4 @@ build/
 *.jsonl
 .synapt/
 .claude/
+history.db*
