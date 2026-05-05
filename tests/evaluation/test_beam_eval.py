@@ -6,7 +6,10 @@ from pathlib import Path
 
 
 def _load_beam_eval():
+    import sys
     repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
     module_path = repo_root / "evaluation" / "beam_eval.py"
     spec = importlib.util.spec_from_file_location("tests_beam_eval_module", module_path)
     assert spec and spec.loader
