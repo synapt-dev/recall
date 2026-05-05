@@ -1,0 +1,34 @@
+[
+  {
+    "id": "temporal-001",
+    "category": "temporal_queries",
+    "description": "Relative temporal lookup: this week",
+    "query": "What did I pray about this week?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-007", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-008", "rank": 2, "relevance": "high"},
+        {"prayer_id": "sk-009", "rank": 3, "relevance": "high"},
+        {"prayer_id": "sk-010", "rank": 4, "relevance": "high"},
+        {"prayer_id": "sk-012", "rank": 5, "relevance": "high"}
+      ],
+      "expect_empty": false
+    }
+  },
+  {
+    "id": "temporal-002",
+    "category": "temporal_queries",
+    "description": "Relative temporal lookup: end of April",
+    "query": "What was I praying about at the end of April?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-004", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-005", "rank": 2, "relevance": "high"},
+        {"prayer_id": "sk-006", "rank": 3, "relevance": "high"}
+      ],
+      "expect_empty": false
+    }
+  }
+]

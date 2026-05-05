@@ -1,0 +1,25 @@
+{
+  "name": "v0-skeleton",
+  "version": "0.1.0",
+  "description": "Skeleton suite with hand-rolled placeholder fixtures for harness verification. Not production eval data.",
+  "methodology_version": "0.2",
+  "categories": [
+    "direct_lookup",
+    "thematic_recall",
+    "crisis_distinction",
+    "negative_case",
+    "temporal_queries",
+    "pattern_recognition",
+    "action_followup"
+  ],
+  "shared_prayer_history": "prayer_history.json",
+  "fixture_files": {
+    "direct_lookup": "direct_lookup.json",
+    "thematic_recall": "thematic_recall.json",
+    "crisis_distinction": "crisis_distinction.json",
+    "negative_case": "negative_case.json",
+    "temporal_queries": "temporal_queries.json",
+    "pattern_recognition": "pattern_recognition.json",
+    "action_followup": "action_followup.json"
+  }
+}

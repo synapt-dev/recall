@@ -1,0 +1,42 @@
+[
+  {
+    "id": "direct-001",
+    "category": "direct_lookup",
+    "description": "Exact entity lookup for Mom's chemo",
+    "query": "What did I pray about Mom's chemo?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-004", "rank": 1, "relevance": "high"}
+      ],
+      "expect_empty": false
+    }
+  },
+  {
+    "id": "direct-002",
+    "category": "direct_lookup",
+    "description": "Exact entity lookup for Lena",
+    "query": "Show me my prayer about Lena",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-006", "rank": 1, "relevance": "high"}
+      ],
+      "expect_empty": false
+    }
+  },
+  {
+    "id": "direct-003",
+    "category": "direct_lookup",
+    "description": "Entity lookup with multiple matches across prayers",
+    "query": "What did I pray about the recruiter?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-010", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-009", "rank": 2, "relevance": "medium"}
+      ],
+      "expect_empty": false
+    }
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "thematic-001",
+    "category": "thematic_recall",
+    "description": "Theme-based recall for gratitude/thanksgiving prayers",
+    "query": "Show me prayers about gratitude",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-001", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-009", "rank": 2, "relevance": "high"},
+        {"prayer_id": "sk-002", "rank": 3, "relevance": "medium"}
+      ],
+      "expect_empty": false
+    }
+  },
+  {
+    "id": "thematic-002",
+    "category": "thematic_recall",
+    "description": "Theme-based recall for intercession prayers",
+    "query": "When have I prayed for other people?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-004", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-008", "rank": 2, "relevance": "high"},
+        {"prayer_id": "sk-012", "rank": 3, "relevance": "medium"}
+      ],
+      "expect_empty": false
+    }
+  }
+]
