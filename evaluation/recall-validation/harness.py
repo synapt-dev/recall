@@ -1,11 +1,13 @@
 """Recall-validation harness.
 
-Loads fixtures, runs retrieval (placeholder or real backend), scores results,
-and produces three-way diff reports.
+Three validation surfaces: recall-with-oracle (only recall tested),
+routing-with-oracle (only routing tested), end-to-end (actual recall
+feeds actual routing).
 
 Usage:
-    python -m evaluation.recall-validation.harness --suite v0-skeleton
-    python evaluation/recall-validation/harness.py --suite v0-skeleton
+    python -m evaluation.recall-validation --suite v0-skeleton --surface end-to-end
+    python -m evaluation.recall-validation --suite v0-skeleton --surface recall-with-oracle
+    python -m evaluation.recall-validation --suite v0-skeleton --surface routing-with-oracle
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from .models import (
     FixtureResult,
     Prayer,
     RetrievalResult,
+    Surface,
     SuiteResult,
     fixture_from_dict,
 )
@@ -70,9 +73,18 @@ def load_suite(suite_name: str) -> tuple[dict, list[Prayer], list[Fixture]]:
     return suite_meta, prayer_history, fixtures
 
 
+def _oracle_retrieved(fixture: Fixture) -> list[RetrievalResult]:
+    """Build oracle-perfect retrieval from expected matches."""
+    return [
+        RetrievalResult(prayer_id=m.prayer_id, score=1.0 - (m.rank - 1) * 0.1)
+        for m in sorted(fixture.expected.matches, key=lambda m: m.rank)
+    ]
+
+
 def run_suite(
     suite_name: str,
     fixtures: list[Fixture],
+    surface: Surface = Surface.END_TO_END,
     baseline_path: Path | None = None,
 ) -> SuiteResult:
     backend = KeywordOverlapRetrieval()
@@ -87,15 +99,27 @@ def run_suite(
     fixture_diffs = []
 
     for fixture in fixtures:
-        retrieved = backend.retrieve(
-            fixture.query, fixture.prayer_history, k=10,
-        )
+        if surface == Surface.ROUTING_WITH_ORACLE:
+            retrieved = _oracle_retrieved(fixture)
+        else:
+            retrieved = backend.retrieve(
+                fixture.query, fixture.prayer_history, k=10,
+            )
 
         routing = None
         if fixture.expected.response_routing is not None:
-            routing = backend.classify_routing(
-                fixture.query, fixture.prayer_history,
-            )
+            if surface == Surface.RECALL_WITH_ORACLE:
+                pass
+            elif surface == Surface.END_TO_END:
+                routing = backend.classify_routing(
+                    fixture.query, fixture.prayer_history,
+                    retrieved_context=retrieved,
+                )
+            else:
+                routing = backend.classify_routing(
+                    fixture.query, fixture.prayer_history,
+                    retrieved_context=_oracle_retrieved(fixture),
+                )
 
         result = score_fixture(
             retrieved=retrieved,
@@ -104,6 +128,12 @@ def run_suite(
             fixture_id=fixture.id,
             category=fixture.category,
         )
+
+        if surface == Surface.RECALL_WITH_ORACLE:
+            result.safety_correct = None
+        elif surface == Surface.ROUTING_WITH_ORACLE:
+            result.rank_correlation = None
+
         fixture_results.append(result)
 
         baseline_fr = None
@@ -127,7 +157,7 @@ def run_suite(
     overall_scores = compute_overall_scores(category_scores)
 
     suite_result = SuiteResult(
-        suite_name=suite_name,
+        suite_name=f"{suite_name} [{surface.value}]",
         timestamp=datetime.now(timezone.utc).isoformat(),
         fixture_results=fixture_results,
         category_scores=category_scores,
@@ -178,19 +208,28 @@ def main() -> None:
         help="Name of the fixture suite directory (e.g., v0-skeleton)",
     )
     parser.add_argument(
+        "--surface",
+        choices=[s.value for s in Surface],
+        default=Surface.END_TO_END.value,
+        help="Validation surface: recall-with-oracle, routing-with-oracle, or end-to-end (default)",
+    )
+    parser.add_argument(
         "--baseline", default=None,
         help="Path to a baseline JSON report for three-way diff comparison",
     )
     args = parser.parse_args()
 
+    surface = Surface(args.surface)
+
     print(f"Loading suite: {args.suite}")
     suite_meta, prayer_history, fixtures = load_suite(args.suite)
     print(f"Loaded {len(fixtures)} fixtures across {len(suite_meta['categories'])} categories")
     print(f"Prayer history: {len(prayer_history)} prayers")
+    print(f"Surface: {surface.value}")
 
     baseline_path = Path(args.baseline) if args.baseline else None
 
-    suite_result, report_path = run_suite(args.suite, fixtures, baseline_path)
+    suite_result, report_path = run_suite(args.suite, fixtures, surface, baseline_path)
     print_summary(suite_result, report_path)
 
 

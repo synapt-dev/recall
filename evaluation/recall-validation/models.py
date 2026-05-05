@@ -1,13 +1,19 @@
 """Data models for recall-validation harness.
 
-Defines fixture, scoring, and result structures for set-based recall
-validation with two-surface scoring (recall correctness + response routing).
+Defines fixture, scoring, and result structures for three-surface recall
+validation: recall-with-oracle, routing-with-oracle, and end-to-end.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+
+
+class Surface(str, Enum):
+    RECALL_WITH_ORACLE = "recall-with-oracle"
+    ROUTING_WITH_ORACLE = "routing-with-oracle"
+    END_TO_END = "end-to-end"
 
 
 class Category(str, Enum):

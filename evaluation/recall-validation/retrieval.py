@@ -22,7 +22,12 @@ class RetrievalBackend(Protocol):
     def retrieve(self, query: str, prayer_history: list[Prayer], k: int) -> list[RetrievalResult]:
         ...
 
-    def classify_routing(self, query: str, prayer_history: list[Prayer]) -> RoutingResult:
+    def classify_routing(
+        self,
+        query: str,
+        prayer_history: list[Prayer],
+        retrieved_context: list[RetrievalResult] | None = None,
+    ) -> RoutingResult:
         ...
 
 
@@ -94,7 +99,10 @@ class KeywordOverlapRetrieval:
         return [RetrievalResult(prayer_id=pid, score=s) for pid, s in scored[:k]]
 
     def classify_routing(
-        self, query: str, prayer_history: list[Prayer],
+        self,
+        query: str,
+        prayer_history: list[Prayer],
+        retrieved_context: list[RetrievalResult] | None = None,
     ) -> RoutingResult:
         query_lower = query.lower()
 
