@@ -1,0 +1,31 @@
+[
+  {
+    "id": "pattern-001",
+    "category": "pattern_recognition",
+    "description": "Arc retrieval: recurring theme of financial stress across prayers",
+    "query": "I keep praying about money. Show me the pattern.",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-007", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-002", "rank": 2, "relevance": "high"},
+        {"prayer_id": "sk-010", "rank": 3, "relevance": "medium"}
+      ],
+      "expect_empty": false
+    }
+  },
+  {
+    "id": "pattern-002",
+    "category": "pattern_recognition",
+    "description": "Arc retrieval: relationship repair arc (Marcus)",
+    "query": "How has my prayer about Marcus changed over time?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-007", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-009", "rank": 2, "relevance": "high"}
+      ],
+      "expect_empty": false
+    }
+  }
+]

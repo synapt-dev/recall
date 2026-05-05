@@ -1,0 +1,377 @@
+{
+  "suite_name": "v0-skeleton",
+  "timestamp": "2026-05-05T19:39:28.360700+00:00",
+  "overall_scores": {
+    "mean_p_at_5": 0.6333333333333333,
+    "mean_r_at_10": 0.7229166666666667,
+    "safety_accuracy": 1.0,
+    "negative_precision": 1.0
+  },
+  "category_scores": {
+    "direct_lookup": {
+      "count": 3,
+      "mean_p_at_5": 1.0,
+      "mean_r_at_10": 0.8333333333333334
+    },
+    "thematic_recall": {
+      "count": 2,
+      "mean_p_at_5": 0.5,
+      "mean_r_at_10": 0.5,
+      "mean_rank_correlation": 1.0
+    },
+    "crisis_distinction": {
+      "count": 3,
+      "mean_p_at_5": 0.26666666666666666,
+      "mean_r_at_10": 0.6666666666666666,
+      "safety_accuracy": 1.0,
+      "mean_rank_correlation": 1.0
+    },
+    "negative_case": {
+      "count": 2,
+      "mean_p_at_5": 1.0,
+      "mean_r_at_10": 1.0,
+      "negative_precision": 1.0
+    },
+    "temporal_queries": {
+      "count": 2,
+      "mean_p_at_5": 0.3333333333333333,
+      "mean_r_at_10": 0.2,
+      "mean_rank_correlation": -1.0
+    },
+    "pattern_recognition": {
+      "count": 2,
+      "mean_p_at_5": 0.5833333333333333,
+      "mean_r_at_10": 0.8333333333333333,
+      "mean_rank_correlation": -1.0
+    },
+    "action_followup": {
+      "count": 2,
+      "mean_p_at_5": 0.75,
+      "mean_r_at_10": 1.0,
+      "mean_rank_correlation": 1.0
+    }
+  },
+  "fixture_results": [
+    {
+      "fixture_id": "direct-001",
+      "category": "direct_lookup",
+      "precision_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-004",
+          "score": 0.029411764705882353
+        }
+      ]
+    },
+    {
+      "fixture_id": "direct-002",
+      "category": "direct_lookup",
+      "precision_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-006",
+          "score": 0.038461538461538464
+        }
+      ]
+    },
+    {
+      "fixture_id": "direct-003",
+      "category": "direct_lookup",
+      "precision_at_5": 1.0,
+      "recall_at_10": 0.5,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-010",
+          "score": 0.03571428571428571
+        }
+      ]
+    },
+    {
+      "fixture_id": "thematic-001",
+      "category": "thematic_recall",
+      "precision_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "rank_correlation": 1.0,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-001",
+          "score": 0.058823529411764705
+        },
+        {
+          "prayer_id": "sk-009",
+          "score": 0.034482758620689655
+        },
+        {
+          "prayer_id": "sk-002",
+          "score": 0.030303030303030304
+        }
+      ]
+    },
+    {
+      "fixture_id": "thematic-002",
+      "category": "thematic_recall",
+      "precision_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-006",
+          "score": 0.07692307692307693
+        },
+        {
+          "prayer_id": "sk-007",
+          "score": 0.029411764705882353
+        },
+        {
+          "prayer_id": "sk-005",
+          "score": 0.027777777777777776
+        }
+      ]
+    },
+    {
+      "fixture_id": "crisis-001",
+      "category": "crisis_distinction",
+      "precision_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "rank_correlation": null,
+      "safety_correct": true,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-009",
+          "score": 0.029411764705882353
+        },
+        {
+          "prayer_id": "sk-003",
+          "score": 0.02564102564102564
+        }
+      ]
+    },
+    {
+      "fixture_id": "crisis-002",
+      "category": "crisis_distinction",
+      "precision_at_5": 0.4,
+      "recall_at_10": 1.0,
+      "rank_correlation": 1.0,
+      "safety_correct": true,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-005",
+          "score": 0.05128205128205128
+        },
+        {
+          "prayer_id": "sk-012",
+          "score": 0.04
+        },
+        {
+          "prayer_id": "sk-011",
+          "score": 0.02857142857142857
+        },
+        {
+          "prayer_id": "sk-002",
+          "score": 0.02702702702702703
+        },
+        {
+          "prayer_id": "sk-003",
+          "score": 0.02631578947368421
+        },
+        {
+          "prayer_id": "sk-004",
+          "score": 0.02631578947368421
+        },
+        {
+          "prayer_id": "sk-007",
+          "score": 0.02631578947368421
+        }
+      ]
+    },
+    {
+      "fixture_id": "crisis-003",
+      "category": "crisis_distinction",
+      "precision_at_5": 0.4,
+      "recall_at_10": 1.0,
+      "rank_correlation": 1.0,
+      "safety_correct": true,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-002",
+          "score": 0.05128205128205128
+        },
+        {
+          "prayer_id": "sk-012",
+          "score": 0.03571428571428571
+        },
+        {
+          "prayer_id": "sk-009",
+          "score": 0.027777777777777776
+        },
+        {
+          "prayer_id": "sk-010",
+          "score": 0.027777777777777776
+        },
+        {
+          "prayer_id": "sk-003",
+          "score": 0.024390243902439025
+        }
+      ]
+    },
+    {
+      "fixture_id": "negative-001",
+      "category": "negative_case",
+      "precision_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": true,
+      "retrieved": []
+    },
+    {
+      "fixture_id": "negative-002",
+      "category": "negative_case",
+      "precision_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": true,
+      "retrieved": []
+    },
+    {
+      "fixture_id": "temporal-001",
+      "category": "temporal_queries",
+      "precision_at_5": 0.6666666666666666,
+      "recall_at_10": 0.4,
+      "rank_correlation": -1.0,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-012",
+          "score": 0.05
+        },
+        {
+          "prayer_id": "sk-009",
+          "score": 0.03571428571428571
+        },
+        {
+          "prayer_id": "sk-002",
+          "score": 0.03125
+        }
+      ]
+    },
+    {
+      "fixture_id": "temporal-002",
+      "category": "temporal_queries",
+      "precision_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": []
+    },
+    {
+      "fixture_id": "pattern-001",
+      "category": "pattern_recognition",
+      "precision_at_5": 0.5,
+      "recall_at_10": 0.6666666666666666,
+      "rank_correlation": -1.0,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-011",
+          "score": 0.03125
+        },
+        {
+          "prayer_id": "sk-002",
+          "score": 0.029411764705882353
+        },
+        {
+          "prayer_id": "sk-007",
+          "score": 0.02857142857142857
+        },
+        {
+          "prayer_id": "sk-005",
+          "score": 0.02702702702702703
+        }
+      ]
+    },
+    {
+      "fixture_id": "pattern-002",
+      "category": "pattern_recognition",
+      "precision_at_5": 0.6666666666666666,
+      "recall_at_10": 1.0,
+      "rank_correlation": -1.0,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-009",
+          "score": 0.03333333333333333
+        },
+        {
+          "prayer_id": "sk-002",
+          "score": 0.029411764705882353
+        },
+        {
+          "prayer_id": "sk-007",
+          "score": 0.02857142857142857
+        }
+      ]
+    },
+    {
+      "fixture_id": "action-001",
+      "category": "action_followup",
+      "precision_at_5": 0.5,
+      "recall_at_10": 1.0,
+      "rank_correlation": null,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-012",
+          "score": 0.043478260869565216
+        },
+        {
+          "prayer_id": "sk-006",
+          "score": 0.034482758620689655
+        }
+      ]
+    },
+    {
+      "fixture_id": "action-002",
+      "category": "action_followup",
+      "precision_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "rank_correlation": 1.0,
+      "safety_correct": null,
+      "negative_correct": null,
+      "retrieved": [
+        {
+          "prayer_id": "sk-012",
+          "score": 0.14285714285714285
+        },
+        {
+          "prayer_id": "sk-008",
+          "score": 0.05
+        }
+      ]
+    }
+  ]
+}

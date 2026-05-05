@@ -1,0 +1,4 @@
+# Ignore generated reports except the committed baseline
+*
+!.gitignore
+!baseline-*.json

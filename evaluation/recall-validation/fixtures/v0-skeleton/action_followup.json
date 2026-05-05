@@ -1,0 +1,29 @@
+[
+  {
+    "id": "action-001",
+    "category": "action_followup",
+    "description": "Follow-up on stated commitment to call Lena",
+    "query": "Did I ever follow through on calling Lena?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-006", "rank": 1, "relevance": "high"}
+      ],
+      "expect_empty": false
+    }
+  },
+  {
+    "id": "action-002",
+    "category": "action_followup",
+    "description": "Follow-up on commitment to check in on Joel weekly",
+    "query": "How am I doing with my commitment to check on Joel?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [
+        {"prayer_id": "sk-012", "rank": 1, "relevance": "high"},
+        {"prayer_id": "sk-008", "rank": 2, "relevance": "medium"}
+      ],
+      "expect_empty": false
+    }
+  }
+]

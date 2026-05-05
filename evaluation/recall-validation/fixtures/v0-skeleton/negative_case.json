@@ -1,0 +1,24 @@
+[
+  {
+    "id": "negative-001",
+    "category": "negative_case",
+    "description": "Query about topic never prayed about (cousin's wedding)",
+    "query": "What did I pray about my cousin's wedding?",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [],
+      "expect_empty": true
+    }
+  },
+  {
+    "id": "negative-002",
+    "category": "negative_case",
+    "description": "Query about career in medicine (user prays about jobs but not medicine)",
+    "query": "Show me prayers about my career in medicine",
+    "query_date": "2026-05-05",
+    "expected": {
+      "matches": [],
+      "expect_empty": true
+    }
+  }
+]
