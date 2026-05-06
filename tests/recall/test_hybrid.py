@@ -446,6 +446,22 @@ class TestTemporalExtraction:
         assert after == "2025-02-28"
         assert before == "2025-03-01"
 
+    def test_month_day_and_day_year(self):
+        after, before = extract_temporal_range(
+            "what did I pray for on May 8 and 9, 2023?",
+            now=self.NOW,
+        )
+        assert after == "2023-05-08"
+        assert before == "2023-05-10"
+
+    def test_month_day_and_day_without_year_defaults_current_year(self):
+        after, before = extract_temporal_range(
+            "what happened on March 28 and 29?",
+            now=self.NOW,
+        )
+        assert after == "2026-03-28"
+        assert before == "2026-03-30"
+
     def test_iso_date(self):
         after, before = extract_temporal_range("changes from 2026-03-01", now=self.NOW)
         assert after == "2026-03-01"
