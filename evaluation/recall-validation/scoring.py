@@ -100,6 +100,7 @@ def score_fixture(
         result.negative_correct = negative_case_correct(retrieved)
         result.precision_at_5 = 1.0 if not retrieved else 0.0
         result.recall_at_10 = 1.0
+        result.passed = result.negative_correct
         return result
 
     result.precision_at_5 = precision_at_k(retrieved, expected_ids, 5)
@@ -111,7 +112,26 @@ def score_fixture(
             routing, expected.response_routing.classification
         )
 
+    result.passed = evaluate_thresholds(result, expected)
     return result
+
+
+def evaluate_thresholds(result: FixtureResult, expected: Expected) -> bool | None:
+    """Check if fixture result meets its min thresholds. None if no thresholds set."""
+    if expected.expect_empty:
+        return result.negative_correct
+
+    has_threshold = False
+    if expected.min_precision_at_5 is not None:
+        has_threshold = True
+        if result.precision_at_5 < expected.min_precision_at_5:
+            return False
+    if expected.min_recall_at_10 is not None:
+        has_threshold = True
+        if result.recall_at_10 < expected.min_recall_at_10:
+            return False
+
+    return True if has_threshold else None
 
 
 def aggregate_category_scores(results: list[FixtureResult]) -> dict[str, dict[str, float]]:
@@ -145,6 +165,10 @@ def aggregate_category_scores(results: list[FixtureResult]) -> dict[str, dict[st
         rank_vals = [r.rank_correlation for r in cat_results if r.rank_correlation is not None]
         if rank_vals:
             scores["mean_rank_correlation"] = sum(rank_vals) / len(rank_vals)
+
+        passed_vals = [r.passed for r in cat_results if r.passed is not None]
+        scores["passed_count"] = sum(passed_vals) if passed_vals else 0
+        scores["failed_count"] = (len(passed_vals) - sum(passed_vals)) if passed_vals else 0
 
         category_scores[cat] = scores
 

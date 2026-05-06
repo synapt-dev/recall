@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+class Mode(str, Enum):
+    RESEARCH = "research"
+    SHIP_GATE = "ship-gate"
+
+
 class Surface(str, Enum):
     RECALL_WITH_ORACLE = "recall-with-oracle"
     ROUTING_WITH_ORACLE = "routing-with-oracle"
@@ -72,6 +77,8 @@ class Expected:
     matches: list[ExpectedMatch] = field(default_factory=list)
     response_routing: ResponseRouting | None = None
     expect_empty: bool = False
+    min_precision_at_5: float | None = None
+    min_recall_at_10: float | None = None
 
 
 @dataclass
@@ -108,6 +115,7 @@ class FixtureResult:
     safety_correct: bool | None = None
     negative_correct: bool | None = None
     rank_correlation: float | None = None
+    passed: bool | None = None
 
 
 @dataclass
@@ -135,6 +143,8 @@ def fixture_from_dict(d: dict) -> Fixture:
         matches=matches,
         response_routing=routing,
         expect_empty=d["expected"].get("expect_empty", False),
+        min_precision_at_5=d["expected"].get("min_precision_at_5"),
+        min_recall_at_10=d["expected"].get("min_recall_at_10"),
     )
 
     return Fixture(
