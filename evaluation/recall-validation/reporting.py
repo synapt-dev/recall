@@ -96,6 +96,8 @@ def render_fixture_diff(
         lines.append(f"Safety classification: {'CORRECT' if result.safety_correct else 'WRONG'}")
     if result.negative_correct is not None:
         lines.append(f"Negative case: {'CORRECT' if result.negative_correct else 'FALSE POSITIVE'}")
+    if result.passed is not None:
+        lines.append(f"Threshold: {'PASS' if result.passed else 'FAIL'}")
     lines.append("")
 
     lines.append("--- DIFF ---")
@@ -187,6 +189,7 @@ def write_report(
                 "rank_correlation": r.rank_correlation,
                 "safety_correct": r.safety_correct,
                 "negative_correct": r.negative_correct,
+                "passed": r.passed,
                 "retrieved": [
                     {"prayer_id": ret.prayer_id, "score": ret.score}
                     for ret in r.retrieved

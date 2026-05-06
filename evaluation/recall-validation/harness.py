@@ -23,6 +23,7 @@ from .models import (
     CATEGORY_LABELS,
     Fixture,
     FixtureResult,
+    Mode,
     Prayer,
     RetrievalResult,
     Surface,
@@ -194,9 +195,31 @@ def print_summary(suite_result: SuiteResult, report_path: Path) -> None:
             extra += f"  safety={scores['safety_accuracy']:.3f}"
         if "negative_precision" in scores:
             extra += f"  neg_prec={scores['negative_precision']:.3f}"
+        if "passed_count" in scores:
+            pc = int(scores["passed_count"])
+            fc = int(scores["failed_count"])
+            extra += f"  pass={pc}/{pc + fc}"
         print(f"  {label} (n={n}): P@5={p5:.3f}  R@10={r10:.3f}{extra}")
 
     print(f"\nReport written to: {report_path}")
+
+
+def check_ship_gate(
+    suite_result: SuiteResult,
+    ship_gate_categories: set[str],
+) -> list[str]:
+    """Return list of failure reasons if any ship-gating category is sub-threshold."""
+    failures = []
+    for cat_key, scores in suite_result.category_scores.items():
+        if cat_key not in ship_gate_categories:
+            continue
+        fc = int(scores.get("failed_count", 0))
+        if fc > 0:
+            label = CATEGORY_LABELS.get(cat_key, cat_key)
+            failures.append(
+                f"{label}: {fc} fixture(s) below threshold"
+            )
+    return failures
 
 
 def main() -> None:
@@ -214,23 +237,51 @@ def main() -> None:
         help="Validation surface: recall-with-oracle, routing-with-oracle, or end-to-end (default)",
     )
     parser.add_argument(
+        "--mode",
+        choices=[m.value for m in Mode],
+        default=Mode.RESEARCH.value,
+        help="research (report only, exit 0) or ship-gate (exit non-zero on threshold failure)",
+    )
+    parser.add_argument(
+        "--ship-gate-categories",
+        default=None,
+        help="Comma-separated category names that trigger non-zero exit in ship-gate mode",
+    )
+    parser.add_argument(
         "--baseline", default=None,
         help="Path to a baseline JSON report for three-way diff comparison",
     )
     args = parser.parse_args()
 
     surface = Surface(args.surface)
+    mode = Mode(args.mode)
 
     print(f"Loading suite: {args.suite}")
     suite_meta, prayer_history, fixtures = load_suite(args.suite)
     print(f"Loaded {len(fixtures)} fixtures across {len(suite_meta['categories'])} categories")
     print(f"Prayer history: {len(prayer_history)} prayers")
     print(f"Surface: {surface.value}")
+    print(f"Mode: {mode.value}")
 
     baseline_path = Path(args.baseline) if args.baseline else None
 
     suite_result, report_path = run_suite(args.suite, fixtures, surface, baseline_path)
     print_summary(suite_result, report_path)
+
+    if mode == Mode.SHIP_GATE:
+        if args.ship_gate_categories:
+            gate_cats = {c.strip() for c in args.ship_gate_categories.split(",")}
+        else:
+            gate_cats = set(suite_result.category_scores.keys())
+
+        failures = check_ship_gate(suite_result, gate_cats)
+        if failures:
+            print("\nSHIP-GATE FAILED:")
+            for f in failures:
+                print(f"  - {f}")
+            sys.exit(1)
+        else:
+            print("\nSHIP-GATE PASSED: all gated categories within threshold")
 
 
 if __name__ == "__main__":
