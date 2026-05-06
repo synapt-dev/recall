@@ -167,9 +167,8 @@ def aggregate_category_scores(results: list[FixtureResult]) -> dict[str, dict[st
             scores["mean_rank_correlation"] = sum(rank_vals) / len(rank_vals)
 
         passed_vals = [r.passed for r in cat_results if r.passed is not None]
-        if passed_vals:
-            scores["passed_count"] = sum(passed_vals)
-            scores["failed_count"] = len(passed_vals) - sum(passed_vals)
+        scores["passed_count"] = sum(passed_vals) if passed_vals else 0
+        scores["failed_count"] = (len(passed_vals) - sum(passed_vals)) if passed_vals else 0
 
         category_scores[cat] = scores
 

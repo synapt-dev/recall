@@ -157,7 +157,7 @@ class TestAggregatePassFail:
         assert scores["direct_lookup"]["passed_count"] == 2
         assert scores["direct_lookup"]["failed_count"] == 1
 
-    def test_no_passed_field_when_no_thresholds(self):
+    def test_zero_counts_when_no_thresholds(self):
         results = [
             FixtureResult(
                 fixture_id="t-1", category=Category.DIRECT_LOOKUP,
@@ -165,7 +165,8 @@ class TestAggregatePassFail:
             ),
         ]
         scores = aggregate_category_scores(results)
-        assert "passed_count" not in scores["direct_lookup"]
+        assert scores["direct_lookup"]["passed_count"] == 0
+        assert scores["direct_lookup"]["failed_count"] == 0
 
 
 class TestShipGate:
