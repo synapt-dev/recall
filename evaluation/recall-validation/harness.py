@@ -44,6 +44,14 @@ FIXTURES_DIR = HARNESS_DIR / "fixtures"
 RESULTS_DIR = HARNESS_DIR / "results"
 
 
+def _load_fixture_file(path: Path) -> list[dict]:
+    """Load fixtures from JSON array or JSONL file."""
+    text = path.read_text().strip()
+    if path.suffix == ".jsonl":
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    return json.loads(text)
+
+
 def load_suite(suite_name: str) -> tuple[dict, list[Prayer], list[Fixture]]:
     suite_dir = FIXTURES_DIR / suite_name
     if not suite_dir.is_dir():
@@ -57,8 +65,11 @@ def load_suite(suite_name: str) -> tuple[dict, list[Prayer], list[Fixture]]:
 
     suite_meta = json.loads(suite_meta_path.read_text())
 
-    prayer_history_path = suite_dir / suite_meta["shared_prayer_history"]
-    prayer_history = [Prayer(**p) for p in json.loads(prayer_history_path.read_text())]
+    shared_history_file = suite_meta.get("shared_prayer_history")
+    prayer_history: list[Prayer] = []
+    if shared_history_file:
+        prayer_history_path = suite_dir / shared_history_file
+        prayer_history = [Prayer(**p) for p in json.loads(prayer_history_path.read_text())]
 
     fixtures: list[Fixture] = []
     for category, filename in suite_meta["fixture_files"].items():
@@ -66,9 +77,11 @@ def load_suite(suite_name: str) -> tuple[dict, list[Prayer], list[Fixture]]:
         if not fixture_path.exists():
             print(f"WARNING: fixture file missing: {fixture_path}", file=sys.stderr)
             continue
-        raw_fixtures = json.loads(fixture_path.read_text())
+        raw_fixtures = _load_fixture_file(fixture_path)
         for raw in raw_fixtures:
-            raw["prayer_history"] = [vars(p) for p in prayer_history]
+            has_own_history = "user_history" in raw or "prayer_history" in raw
+            if not has_own_history and prayer_history:
+                raw["prayer_history"] = [vars(p) for p in prayer_history]
             fixtures.append(fixture_from_dict(raw))
 
     return suite_meta, prayer_history, fixtures
