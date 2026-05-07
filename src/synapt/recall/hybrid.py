@@ -756,6 +756,11 @@ _MONTH_DAY_PATTERN = re.compile(
     r"(?:\s*,?\s*(\d{4}))?\b",
     re.I,
 )
+_MONTH_DAY_AND_DAY_PATTERN = re.compile(
+    r"\b(" + "|".join(_MONTH_NAMES.keys()) + r")\s+(\d{1,2})(?:st|nd|rd|th)?"
+    r"\s+and\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b",
+    re.I,
+)
 _ISO_DATE_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _MONTH_ONLY_PATTERN = re.compile(
     r"\b(?:in|during)\s+(" + "|".join(_MONTH_NAMES.keys()) + r")"
@@ -837,6 +842,23 @@ def extract_temporal_range(
         months = int(match.group(1))
         start = _add_months(now, -months)
         return (start.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
+
+    # Check "Month Day and Day[, Year]" before the single-day pattern so the
+    # trailing year applies to the whole range, not only the second day.
+    match = _MONTH_DAY_AND_DAY_PATTERN.search(query)
+    if match:
+        month_name = match.group(1).lower()
+        start_day = int(match.group(2))
+        end_day = int(match.group(3))
+        year = int(match.group(4)) if match.group(4) else now.year
+        month = _MONTH_NAMES.get(month_name)
+        if month and 1 <= start_day <= 31 and start_day <= end_day <= 31:
+            try:
+                start = datetime(year, month, start_day, tzinfo=timezone.utc)
+                end = datetime(year, month, end_day, tzinfo=timezone.utc) + timedelta(days=1)
+                return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+            except ValueError:
+                pass
 
     # Check "Month Day[, Year]" pattern
     match = _MONTH_DAY_PATTERN.search(query)

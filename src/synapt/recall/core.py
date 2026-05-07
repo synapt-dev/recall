@@ -1845,7 +1845,7 @@ class TranscriptIndex:
                 and before is None
                 and not _env_flag("SYNAPT_DISABLE_TEMPORAL_EXTRACTION")
             ):
-                extracted_after, extracted_before = extract_temporal_range(query)
+                extracted_after, extracted_before = extract_temporal_range(query, now=now)
                 if extracted_after is not None:
                     after = extracted_after
                     before = extracted_before
