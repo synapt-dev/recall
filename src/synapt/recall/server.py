@@ -1387,6 +1387,7 @@ def recall_journal(
             auto_extract_entry,
             format_entry_full,
             format_for_session_start,
+            format_write_confirmation,
             latest_transcript_path,
             merge_carried_forward_next_steps,
             pending_next_steps,
@@ -1428,8 +1429,10 @@ def recall_journal(
                 entry.done = [d.strip() for d in done.split(";")]
             if decisions:
                 entry.decisions = [d.strip() for d in decisions.split(";")]
+            explicit_next_steps = list(entry.next_steps)
             if next_steps:
                 entry.next_steps = [n.strip() for n in next_steps.split(";")]
+                explicit_next_steps = list(entry.next_steps)
             entry.next_steps = merge_carried_forward_next_steps(
                 entry.next_steps,
                 entry.done,
@@ -1447,7 +1450,10 @@ def recall_journal(
                 return "No content to journal (no files modified, no fields provided)."
 
             append_entry(entry)
-            return f"Journal entry written.\n\n{format_entry_full(entry)}"
+            return (
+                "Journal entry written.\n\n"
+                f"{format_write_confirmation(entry, explicit_next_steps)}"
+            )
 
         return f"Unknown action: {action}. Use 'read', 'write', 'list', or 'pending'."
     except Exception as exc:

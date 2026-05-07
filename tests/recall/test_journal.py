@@ -475,6 +475,68 @@ class TestNextStepCarryForward(unittest.TestCase):
         self.assertEqual(merged, ["write tests", "close loop", "follow up with team"])
 
 
+class TestJournalWriteResponse(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.path = Path(self.tmpdir) / "journal.jsonl"
+        self.project = Path(self.tmpdir) / "project"
+        self.project.mkdir()
+
+    def test_write_response_separates_explicit_next_steps_from_carried_forward(self):
+        """MCP write response must not present prior pending work as caller-written."""
+        from synapt.recall.server import recall_journal
+
+        append_entry(
+            JournalEntry(
+                timestamp="2026-05-06T10:00:00+00:00",
+                session_id="prior-session",
+                focus="prior work",
+                next_steps=[
+                    "retrieve the missing design docs",
+                    "estimate effort for prompt profiles",
+                ],
+            ),
+            self.path,
+        )
+
+        with patch("synapt.recall.journal._journal_path", return_value=self.path), \
+             patch("synapt.recall.server.Path.cwd", return_value=self.project), \
+             patch("synapt.recall.journal.latest_transcript_path", return_value=None), \
+             patch("synapt.recall.journal.auto_extract_entry", return_value=JournalEntry(
+                 timestamp="2026-05-07T10:00:00+00:00",
+                 session_id="current-session",
+             )):
+            response = recall_journal(
+                action="write",
+                focus="current work",
+                next_steps="write the crisis eval; update the B3 row",
+            )
+
+        next_section = response.split("### Next", 1)[1].split(
+            "### Carried Forward Next Steps",
+            1,
+        )[0]
+        self.assertIn("write the crisis eval", next_section)
+        self.assertIn("update the B3 row", next_section)
+        self.assertNotIn("retrieve the missing design docs", next_section)
+        self.assertNotIn("estimate effort for prompt profiles", next_section)
+        self.assertIn("### Carried Forward Next Steps", response)
+        self.assertIn("retrieve the missing design docs", response)
+        self.assertIn("estimate effort for prompt profiles", response)
+
+        latest = read_latest(self.path)
+        self.assertIsNotNone(latest)
+        self.assertEqual(
+            latest.next_steps,
+            [
+                "write the crisis eval",
+                "update the B3 row",
+                "retrieve the missing design docs",
+                "estimate effort for prompt profiles",
+            ],
+        )
+
+
 class TestPendingNextSteps(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
