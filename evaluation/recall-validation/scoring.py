@@ -98,7 +98,8 @@ def score_fixture(
 
     if expected.expect_empty:
         result.negative_correct = negative_case_correct(retrieved)
-        result.precision_at_5 = 1.0 if not retrieved else 0.0
+        confident = [r for r in retrieved if r.score >= 0.5]
+        result.precision_at_5 = 1.0 if not confident else 0.0
         result.recall_at_10 = 1.0
         result.passed = result.negative_correct
         return result

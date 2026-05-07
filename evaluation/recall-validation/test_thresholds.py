@@ -136,6 +136,28 @@ class TestScoreFixturePassField:
         )
         assert result.passed is True
 
+    def test_score_fixture_negative_case_low_scores_p5_correct(self):
+        expected = Expected(expect_empty=True)
+        low_score_results = _make_retrieved(["x", "y", "z"], base_score=0.3)
+        result = score_fixture(
+            retrieved=low_score_results, routing=None,
+            expected=expected, fixture_id="t-1",
+            category=Category.NEGATIVE_CASE,
+        )
+        assert result.precision_at_5 == 1.0
+        assert result.negative_correct is True
+
+    def test_score_fixture_negative_case_high_scores_p5_zero(self):
+        expected = Expected(expect_empty=True)
+        high_score_results = _make_retrieved(["x", "y", "z"], base_score=0.9)
+        result = score_fixture(
+            retrieved=high_score_results, routing=None,
+            expected=expected, fixture_id="t-1",
+            category=Category.NEGATIVE_CASE,
+        )
+        assert result.precision_at_5 == 0.0
+        assert result.negative_correct is False
+
 
 class TestAggregatePassFail:
     def test_category_scores_include_pass_fail_counts(self):
