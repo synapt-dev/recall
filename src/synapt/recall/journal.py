@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -334,6 +334,45 @@ def format_entry_full(entry: JournalEntry) -> str:
         for c in entry.git_log:
             lines.append(f"- {c}")
     return "\n".join(lines)
+
+
+def format_write_confirmation(
+    entry: JournalEntry,
+    explicit_next_steps: list[str] | None = None,
+) -> str:
+    """Format a write response without conflating carried-forward work.
+
+    Journal storage keeps unresolved prior next steps on the new entry so they
+    remain visible next session.  The write response needs a clearer UX: steps
+    supplied by the caller stay under ``Next``; unresolved prior steps are
+    rendered under a separate carry-forward heading.
+    """
+    explicit_steps = [
+        step.strip()
+        for step in (explicit_next_steps or [])
+        if step and step.strip()
+    ]
+    explicit_keys = {_step_key(step) for step in explicit_steps}
+    if not explicit_keys:
+        display_next: list[str] = []
+        carried = [step for step in entry.next_steps if step and step.strip()]
+    else:
+        display_next = []
+        carried = []
+        for step in entry.next_steps:
+            if not step or not step.strip():
+                continue
+            if _step_key(step) in explicit_keys:
+                display_next.append(step)
+            else:
+                carried.append(step)
+
+    text = format_entry_full(replace(entry, next_steps=display_next))
+    if carried:
+        parts = [text, "\n### Carried Forward Next Steps"]
+        parts.extend(f"- {step}" for step in carried)
+        return "\n".join(part for part in parts if part)
+    return text
 
 
 def _step_key(step: str) -> str:

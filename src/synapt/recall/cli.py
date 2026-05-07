@@ -1337,6 +1337,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         auto_extract_entry,
         format_entry_full,
         format_for_session_start,
+        format_write_confirmation,
         latest_transcript_path,
         merge_carried_forward_next_steps,
         read_entries,
@@ -1397,8 +1398,10 @@ def cmd_journal(args: argparse.Namespace) -> None:
         entry.done = [d.strip() for d in args.done.split(";")]
     if args.decisions:
         entry.decisions = [d.strip() for d in args.decisions.split(";")]
+    explicit_next_steps = list(entry.next_steps)
     if args.next:
         entry.next_steps = [n.strip() for n in args.next.split(";")]
+        explicit_next_steps = list(entry.next_steps)
     entry.next_steps = merge_carried_forward_next_steps(
         entry.next_steps,
         entry.done,
@@ -1426,7 +1429,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
 
     path = append_entry(entry)
     print(f"Journal entry written to {path}", file=sys.stderr)
-    print(format_entry_full(entry))
+    print(format_write_confirmation(entry, explicit_next_steps))
 
 
 def cmd_enrich(args: argparse.Namespace) -> None:
