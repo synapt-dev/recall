@@ -224,7 +224,7 @@ def send_message(
         raise ValueError("to_agent is required")
     if not body or not body.strip():
         raise ValueError("message body is required")
-    if len(body) > MAX_BODY_SIZE:
+    if len(body.encode("utf-8")) > MAX_BODY_SIZE:
         raise ValueError(f"message body exceeds {MAX_BODY_SIZE} byte limit")
     if priority not in _VALID_PRIORITIES:
         raise ValueError(

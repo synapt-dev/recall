@@ -259,6 +259,15 @@ class TestValidation:
                 body="x" * (MAX_BODY_SIZE + 1),
             )
 
+    def test_body_size_cap_counts_bytes_not_chars(self) -> None:
+        emoji_count = MAX_BODY_SIZE // 4 + 1
+        with pytest.raises(ValueError, match="byte limit"):
+            send_message(
+                from_agent="apollo-001",
+                to_agent="opus-001",
+                body="\U0001f525" * emoji_count,
+            )
+
     def test_invalid_priority_rejected(self) -> None:
         with pytest.raises(ValueError, match="invalid priority"):
             send_message(
