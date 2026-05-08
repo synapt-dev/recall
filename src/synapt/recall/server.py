@@ -2144,6 +2144,8 @@ def register_tools(mcp) -> None:
     mcp.tool()(_with_directive_check(recall_context))
     mcp.tool()(_with_directive_check(recall_timeline))
     mcp.tool()(_with_directive_check(recall_channel))
+    from synapt.recall.direct import speak_to_agent
+    mcp.tool()(speak_to_agent)
     mcp.tool()(recall_reload)
 
 
