@@ -58,6 +58,7 @@ x = ["tweepy>=4.14"]
 dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.20", "sse-starlette>=1.0", "markdown>=3.4", "nh3>=0.2.14"]
 dev = ["watchfiles>=0.20"]
 test = [
+    "build>=1.0",
     "pytest>=7.0",
     "numpy",
     "pytest-benchmark>=4.0",
