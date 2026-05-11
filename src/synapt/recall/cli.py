@@ -1971,6 +1971,103 @@ def generate_startup_context(project: Path) -> list[str]:
     return lines
 
 
+def _gripspace_root(project: Path) -> Path:
+    """Return the configured or nearest gripspace root, or project."""
+    env_root = os.environ.get("GRIPSPACE_ROOT")
+    if env_root:
+        root = Path(env_root).expanduser()
+        if (root / ".gitgrip").is_dir():
+            return root
+
+    root = project
+    while root != root.parent:
+        if (root / ".gitgrip").is_dir():
+            return root
+        root = root.parent
+    return project
+
+
+def _agent_startup_config(project: Path, agent_name: str) -> dict[str, object]:
+    """Load the current agent's startup config from .gitgrip/agents.toml."""
+    if not agent_name:
+        return {}
+
+    agents_toml = _gripspace_root(project) / ".gitgrip" / "agents.toml"
+    if not agents_toml.exists():
+        return {}
+
+    try:
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        with open(agents_toml, "rb") as f:
+            cfg = tomllib.load(f)
+    except Exception:
+        return {}
+
+    agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+    spawn_cfg = cfg.get("spawn", {})
+    if not isinstance(agent_cfg, dict):
+        return {}
+
+    merged: dict[str, object] = {}
+    if isinstance(spawn_cfg, dict):
+        merged["channel"] = spawn_cfg.get("channel")
+    merged.update(agent_cfg)
+    return merged
+
+
+def _detect_startup_tool(agent_cfg: dict[str, object]) -> str:
+    """Detect whether startup text is being read by Codex or Claude."""
+    explicit = os.environ.get("SYNAPT_TOOL") or os.environ.get("AGENT_TOOL")
+    if explicit:
+        return explicit.strip().lower()
+
+    if os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_CI"):
+        return "codex"
+
+    configured = agent_cfg.get("tool")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip().lower()
+
+    return "claude"
+
+
+def _dev_loop_activation_prompt(project: Path) -> str | None:
+    """Return a runtime-appropriate session-start prompt."""
+    agent_name = os.environ.get("AGENT_NAME", "")
+    if not agent_name:
+        return None
+
+    agent_cfg = _agent_startup_config(project, agent_name)
+    channel = (
+        os.environ.get("SYNAPT_CHANNELS", "").split(",", 1)[0].strip()
+        or str(agent_cfg.get("channel") or "dev")
+    )
+    tool = _detect_startup_tool(agent_cfg)
+
+    if tool == "codex":
+        return (
+            f"SessionStart:startup context loaded: Agent {agent_name} — join #{channel} "
+            f"once with recall_channel if channel context is needed. The dev-loop is "
+            f"deprecated for Codex because Codex has no CronCreate or async self-wake; "
+            f"do not emulate a monitoring loop with sleeps or periodic self-polling. "
+            f"Use the startup context to choose the next concrete task."
+        )
+
+    interval = (
+        os.environ.get("SYNAPT_LOOP_INTERVAL")
+        or str(agent_cfg.get("loop_interval") or "2m")
+    )
+    return (
+        f"SessionStart:resume hook success: Agent {agent_name} — join #{channel} "
+        f"and start monitoring loop at {interval} interval. Use recall_channel to "
+        f"join, CronCreate for the loop. Use show_pins=false and detail=medium for "
+        f"polling. Prefer doing needed work over reporting that work exists."
+    )
+
+
 def cmd_startup(args: argparse.Namespace) -> None:
     """Generate startup context for any tool (Codex, Claude, etc.).
 
@@ -2087,35 +2184,9 @@ def cmd_hook(args: argparse.Namespace) -> None:
         #     unreliable skill auto-activation (~20%). The agent reads this
         #     system reminder and follows the instructions to start monitoring.
         try:
-            import os
-            agent_name = os.environ.get("AGENT_NAME", "")
-            if agent_name:
-                # Multi-agent mode: agent has a name from gr spawn.
-                # Resolve gripspace root by walking up from cwd to find
-                # .gitgrip/ — griptrees don't have their own .gitgrip/.
-                gripspace_root = project
-                while gripspace_root != gripspace_root.parent:
-                    if (gripspace_root / ".gitgrip").is_dir():
-                        break
-                    gripspace_root = gripspace_root.parent
-                agents_toml = gripspace_root / ".gitgrip" / "agents.toml"
-                interval = "2m"
-                channel = "dev"
-                if agents_toml.exists():
-                    try:
-                        import tomllib
-                    except ImportError:
-                        import tomli as tomllib  # type: ignore[no-redef]
-                    with open(agents_toml, "rb") as f:
-                        cfg = tomllib.load(f)
-                    agent_cfg = cfg.get("agents", {}).get(agent_name, {})
-                    interval = agent_cfg.get("loop_interval", interval)
-                    channel = agent_cfg.get("channel", cfg.get("spawn", {}).get("channel", channel))
-                print(f"\nSessionStart:resume hook success: "
-                      f"Agent {agent_name} — join #{channel} and start monitoring loop at {interval} interval. "
-                      f"Use recall_channel to join, CronCreate for the loop. "
-                      f"Use show_pins=false and detail=medium for polling. "
-                      f"Prefer doing needed work over reporting that work exists.")
+            prompt = _dev_loop_activation_prompt(project)
+            if prompt:
+                print(f"\n{prompt}")
         except Exception:
             pass  # Loop activation is non-critical
 
