@@ -9,13 +9,18 @@ Verifies that:
 
 import argparse
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from synapt.recall.cli import generate_startup_context, cmd_startup
+from synapt.recall.cli import (
+    _dev_loop_activation_prompt,
+    cmd_startup,
+    generate_startup_context,
+)
 
 
 class TestGenerateStartupContext:
@@ -164,6 +169,99 @@ class TestCmdStartup:
                 cmd_startup(args)
         out = capsys.readouterr().out.strip()
         assert out == "{}"
+
+
+class TestDevLoopActivationPrompt:
+    """Test runtime-specific session-start loop instructions."""
+
+    def test_codex_prompt_deprecates_dev_loop(self, tmp_path):
+        """Codex agents must not receive loop-monitoring instructions."""
+        project = tmp_path / "worktree"
+        project.mkdir()
+        gitgrip = tmp_path / ".gitgrip"
+        gitgrip.mkdir()
+        (gitgrip / "agents.toml").write_text(
+            """
+[spawn]
+channel = "dev"
+
+[agents.opus]
+tool = "codex"
+loop_interval = "1m"
+""",
+            encoding="utf-8",
+        )
+
+        env = {
+            "AGENT_NAME": "opus",
+            "CODEX_THREAD_ID": "thread-test",
+            "SYNAPT_AGENT_ID": "opus-001",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            prompt = _dev_loop_activation_prompt(project)
+
+        assert prompt is not None
+        assert "Codex has no CronCreate" in prompt
+        assert "CronCreate for the loop" not in prompt
+        assert "dev-loop is deprecated for Codex" in prompt
+        assert "do not emulate a monitoring loop" in prompt
+        assert "sleep" in prompt
+        assert "1m cadence" not in prompt
+
+    def test_gripspace_root_env_resolves_sibling_griptree_config(self, tmp_path):
+        """Spawned sibling griptrees use GRIPSPACE_ROOT to find agents.toml."""
+        gripspace = tmp_path / "gripspace"
+        gitgrip = gripspace / ".gitgrip"
+        gitgrip.mkdir(parents=True)
+        (gitgrip / "agents.toml").write_text(
+            """
+[spawn]
+channel = "dev"
+
+[agents.opus]
+tool = "codex"
+loop_interval = "1m"
+""",
+            encoding="utf-8",
+        )
+        project = tmp_path / "sibling-griptree"
+        project.mkdir()
+
+        env = {
+            "AGENT_NAME": "opus",
+            "GRIPSPACE_ROOT": str(gripspace),
+        }
+        with patch.dict(os.environ, env, clear=True):
+            prompt = _dev_loop_activation_prompt(project)
+
+        assert prompt is not None
+        assert "deprecated for Codex" in prompt
+        assert "CronCreate for the loop" not in prompt
+
+    def test_claude_prompt_keeps_croncreate_instruction(self, tmp_path):
+        """Claude agents keep the existing cron-backed monitoring instruction."""
+        project = tmp_path / "worktree"
+        project.mkdir()
+        gitgrip = tmp_path / ".gitgrip"
+        gitgrip.mkdir()
+        (gitgrip / "agents.toml").write_text(
+            """
+[spawn]
+channel = "dev"
+
+[agents.apollo]
+tool = "claude"
+loop_interval = "5m"
+""",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"AGENT_NAME": "apollo"}, clear=True):
+            prompt = _dev_loop_activation_prompt(project)
+
+        assert prompt is not None
+        assert "CronCreate for the loop" in prompt
+        assert "5m interval" in prompt
 
 
 class TestStartupSubcommand:
