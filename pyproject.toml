@@ -65,6 +65,7 @@ test = [
     "uvicorn[standard]>=0.20",
     "sse-starlette>=1.0",
     "markdown>=3.4",
+    "nh3>=0.2.14",
 ]
 
 [project.scripts]
