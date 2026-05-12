@@ -109,7 +109,7 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
         use_embeddings: If False, skip embedding model loading for faster
             startup. Use for recall_quick which only needs BM25/knowledge.
     """
-    global _cached_index, _cached_mtime, _cached_dir
+    global _cached_index, _cached_mtime, _cached_dir, _cached_has_embeddings
     index_dir = project_index_dir()
 
     # Prefer recall.db, fall back to legacy chunks.jsonl
@@ -2096,17 +2096,16 @@ def recall_reload() -> str:
 
     Replaces the current process with a fresh one via os.execv().
     The MCP client (Claude Code) will reconnect automatically.
-    Only needed when you see a stale version warning.
     """
     import os
     import sys
 
     stale = _check_version_stale()
-    if not stale:
-        return f"Server is already running the latest version ({_STARTUP_VERSION}). No reload needed."
-
-    # Log the reload to stderr so it's visible
-    logging.getLogger("synapt.recall").info("Reloading MCP server (v%s -> installed)", _STARTUP_VERSION)
+    log = logging.getLogger("synapt.recall")
+    if stale:
+        log.info("Reloading MCP server (v%s -> installed)", _STARTUP_VERSION)
+    else:
+        log.info("Reloading MCP server (v%s)", _STARTUP_VERSION)
 
     # Flush any pending DB writes
     _invalidate_cache()
