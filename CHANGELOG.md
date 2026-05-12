@@ -2,6 +2,16 @@
 
 All notable changes to synapt are documented here.
 
+## [0.15.1] — 2026-05-12
+
+### Fixed
+- Fixed `recall_search` falsely reporting a missing index after the cached
+  embedding-enabled index was loaded. `_get_index()` now correctly updates the
+  embedding-cache flag instead of swallowing an `UnboundLocalError` and
+  returning `None`.
+- Fixed `recall_reload()` for editable installs so it restarts the MCP server
+  even when the package version string has not changed.
+
 ## [0.11.0] — 2026-04-09
 
 ### Added
