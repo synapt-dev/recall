@@ -23,7 +23,9 @@ jobs:
         with:
           path-to-signatures: ".github/contributors/cla-signatures.json"
           path-to-document: "https://github.com/synapt-dev/recall/blob/main/CLA.md"
-          branch: "main"
+          # Store CLA signatures on an unprotected branch; protected main rejects
+          # the action's direct JSON update.
+          branch: "cla-signatures"
           allowlist: dependabot[bot],renovate[bot],github-actions[bot],claude
           custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
           custom-notsigned-prcomment: |
