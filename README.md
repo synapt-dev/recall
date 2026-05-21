@@ -470,7 +470,7 @@ Use synapt as the memory and coordination substrate beneath higher-level agent o
 
 LOCOMO evaluates long conversational memory over 10 conversations and 1540 QA pairs.
 
-*Selected published LOCOMO results as of 2026-05-21. Methodologies vary across systems including judge model, benchmark harness, and conversation count. This table does not present a comparable leaderboard. synapt's 72.4 is the March 2026 audited reproducible run under the gpt-4o-mini judge methodology matching the Mem0 paper. Rows marked `[methodology-caveat]` use different judge models or harnesses and are not directly comparable to synapt's audited run. Rows marked `[historical]` reflect each system's score as published in the source paper noted, which may have been superseded by newer releases.*
+*Selected published LOCOMO results as of 2026-05-21. Methodologies vary across systems including judge model, benchmark harness, and conversation count. This table does not present a comparable leaderboard. synapt's 72.4 is the March 2026 audited reproducible run under the gpt-4o-mini judge methodology matching the Mem0 paper. Rows marked `[methodology-caveat]` use different judge models or harnesses and are not directly comparable to synapt's audited run. Rows marked `[historical: ENGRAM paper]` reflect each system's score as published in the ENGRAM paper Table 1 with the shared gpt-4o-mini backbone, which may have been superseded by newer releases from those systems under different methodologies.*
 
 | System | LOCOMO J-score | Multi-Hop | Temporal | Methodology / Source |
 |--------|---------------:|----------:|---------:|----------------------|
