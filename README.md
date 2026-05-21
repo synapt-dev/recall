@@ -470,34 +470,43 @@ Use synapt as the memory and coordination substrate beneath higher-level agent o
 
 LOCOMO evaluates long conversational memory over 10 conversations and 1540 QA pairs.
 
-All systems use gpt-4o-mini as the shared generation + judge backbone for fair comparison. Competitor data comes from the [Engram paper](https://arxiv.org/abs/2511.12960) and [Mem0 paper](https://arxiv.org/abs/2504.19413).
+*Selected published LOCOMO results as of 2026-05-21. Methodologies vary across systems including judge model, benchmark harness, and conversation count. This table does not present a comparable leaderboard. synapt's 72.4 is the March 2026 audited reproducible run under the gpt-4o-mini judge methodology matching the Mem0 paper. Rows marked `[methodology-caveat]` use different judge models or harnesses and are not directly comparable to synapt's audited run. Rows marked `[historical: ENGRAM paper]` reflect each system's score as published in the ENGRAM paper Table 1 with the shared gpt-4o-mini backbone, which may have been superseded by newer releases from those systems under different methodologies.*
 
-| System | **Overall** | Multi-Hop | Temporal | Infra |
-|--------|-------------|-----------|----------|-------|
-| Engram | 77.55 ± 0.13 | — | — | cloud (BM25+ColBERT+KG) |
-| Memobase | 75.78 | 46.88 | **85.05** | cloud |
-| memOS | 72.99 ± 0.14 | — | — | cloud |
-| Full-Context | 72.90 | — | — | upper bound |
-| **synapt (audited)** | **72.4** | **70.92** | 59.19 | Ministral 8B cloud enrich |
-| **synapt local-first** | **72.4** | 67.02 | 61.06 | **local 3B on M2 Air** |
-| Mem0 | 64.73 ± 0.17 | 51.15 | 55.51 | cloud GPT-4 |
-| Zep | 42.29 ± 0.18 | — | — | cloud |
+| System | LOCOMO J-score | Multi-Hop | Temporal | Methodology / Source |
+|--------|---------------:|----------:|---------:|----------------------|
+| EverCore `[methodology-caveat]` | 93.05 | — | — | EverOS repo + EverMemOS paper ([arXiv:2601.02163](https://arxiv.org/abs/2601.02163)); judge/harness pending verification |
+| Hindsight `[methodology-caveat]` | 92.0 (AMB) / 89.61 (paper) | — | — | Hindsight AMB benchmark page + paper ([arXiv:2512.12818](https://arxiv.org/abs/2512.12818)) |
+| MemMachine `[methodology-caveat]` | 91.69 | — | — | [arXiv:2604.04853](https://arxiv.org/abs/2604.04853) + Apache-2.0 repo; gpt-4.1-mini agent mode |
+| Mem0 managed `[methodology-caveat]` | 91.8 / 90.2 | — | — | Mem0 docs May 2026; managed-platform optimizations not in OSS SDK |
+| Engram `[historical: ENGRAM paper]` | 77.55 ± 0.13 | 79.79 | 70.79 | ENGRAM paper Table 1 ([arXiv:2511.12960](https://arxiv.org/abs/2511.12960)); shared gpt-4o-mini backbone |
+| Zep\* (Memobase-team corrected) `[methodology-caveat]` | 75.14 | 66.04 | 79.79 | Memobase LOCOMO docs; supersedes the ENGRAM Zep row |
+| Memobase v0.0.37 `[methodology-caveat]` | 75.78 | 46.88 | **85.05** | Memobase LOCOMO docs; judge may be gpt-4o not gpt-4o-mini |
+| memOS `[historical: ENGRAM paper]` | 72.99 ± 0.14 | 63.70 | 72.68 | ENGRAM paper Table 1 |
+| Full-Context `[historical: ENGRAM paper]` | 72.60 ± 0.07 | — | — | ENGRAM paper Table 1; upper-bound control |
+| **synapt (audited)** | **72.4** | **70.92** | 59.19 | March 2026 audited rerun; gpt-4o-mini judge; Ministral 8B cloud enrich |
+| **synapt local-first** | **72.4** | 67.02 | 61.06 | March 2026 audited rerun; gpt-4o-mini judge; **local 3B on M2 Air** |
+| Mem0 `[historical: ENGRAM paper]` | 64.73 ± 0.17 | 57.85 | 53.34 | ENGRAM paper Table 1; Mem0's newer releases use different methodologies (see Mem0 managed row) |
+| Zep `[historical: ENGRAM paper]` | 42.29 ± 0.18 | 42.10 | 19.47 | ENGRAM paper Table 1; see Zep\* row for the Memobase-team corrected number |
 
 What matters for the pitch:
-- synapt is competitive with the best published systems
-- the local-first path remains strong on commodity hardware
-- the system is explicit about benchmark methodology, retrieval tradeoffs, and judge-model drift
-- the 72.4 LOCOMO score is the audited, reproducible number to cite
+- synapt's 72.4 is reproducible end-to-end against published methodology including the gpt-4o-mini judge, 1540 questions, and 10 conversations from the Mem0 paper
+- the local-first 3B path achieves the same audited overall score on commodity hardware
+- LOCOMO rankings shift with judge model, harness version, and OSS-versus-managed-platform scope. This table does not assert a leaderboard position
 
 Sources:
-- [LOCOMO](https://snap-research.github.io/locomo/)
+- [LOCOMO benchmark](https://snap-research.github.io/locomo/)
 - [Mem0 paper](https://arxiv.org/abs/2504.19413)
-- [Engram paper](https://arxiv.org/abs/2511.12960)
-- [Memobase benchmark](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md)
+- [ENGRAM paper](https://arxiv.org/abs/2511.12960)
+- [Hindsight paper](https://arxiv.org/abs/2512.12818)
+- [MemMachine paper](https://arxiv.org/abs/2604.04853)
+- [EverMemOS paper](https://arxiv.org/abs/2601.02163)
+- [Memobase LOCOMO benchmark](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md)
 
 ### CodeMemo
 
 CodeMemo evaluates coding-memory tasks across factual recall, debugging context, architecture, temporal ordering, conventions, and cross-session continuity.
+
+*Comparison as of 2026-05-21. Single-evaluation snapshot under matched methodology.*
 
 | System | Overall |
 |--------|---------|
