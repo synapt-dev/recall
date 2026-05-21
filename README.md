@@ -470,7 +470,7 @@ Use synapt as the memory and coordination substrate beneath higher-level agent o
 
 LOCOMO evaluates long conversational memory over 10 conversations and 1540 QA pairs.
 
-All systems use gpt-4o-mini as the shared generation + judge backbone for fair comparison. Competitor data comes from the [Engram paper](https://arxiv.org/abs/2511.12960) and [Mem0 paper](https://arxiv.org/abs/2504.19413).
+*Comparison as of 2026-05-21. All systems use gpt-4o-mini as the shared generation + judge backbone for fair comparison; rows reflect each system's published evaluation under matched methodology, sourced from the [Engram paper](https://arxiv.org/abs/2511.12960) and [Mem0 paper](https://arxiv.org/abs/2504.19413). Newer post-paper releases from some systems use different judge models or prompt configurations that aren't directly comparable; those are noted inline where applicable.*
 
 | System | **Overall** | Multi-Hop | Temporal | Infra |
 |--------|-------------|-----------|----------|-------|
@@ -498,6 +498,8 @@ Sources:
 ### CodeMemo
 
 CodeMemo evaluates coding-memory tasks across factual recall, debugging context, architecture, temporal ordering, conventions, and cross-session continuity.
+
+*Comparison as of 2026-05-21. Single-evaluation snapshot under matched methodology.*
 
 | System | Overall |
 |--------|---------|
