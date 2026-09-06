@@ -188,6 +188,53 @@ def _strip_harness_preamble(text: str) -> str:
     return _HARNESS_PREAMBLE_RE.sub(" ", text)
 
 
+# A pasted screenshot/image arrives as "[Image: source: <filesystem path>]",
+# and on macOS that path routes through the per-USER, per-BOOT temp
+# directory (/var/folders/xx/<~30-char hash>/T/TemporaryItems/
+# NSIRD_screencaptureui_<id>/Screenshot ....png) -- structural metadata
+# about HOW the image reached the transcript, identical in shape across any
+# two screenshots pasted on the same host regardless of what either image
+# actually shows. Hand-read finding, a live stratified false-merge sample:
+# two chunks whose only real connection was "both
+# pasted a macOS screenshot" cleared containment AND the distinctiveness
+# floor on shared tokens like the temp-folder hash and "screencaptureui",
+# because those tokens are genuinely rare across CLUSTER signatures (few
+# clusters are screenshot-paste clusters) without being topically
+# meaningful. Stripped unconditionally, before any statistical guard --
+# same reasoning as ``_HARNESS_PREAMBLE_RE``, known exact shape beats
+# probabilistic.
+_IMAGE_PASTE_RE = _re.compile(r"\[Image:\s*source:[^\]]*\]", _re.IGNORECASE)
+
+# Backstop for path-fragment tokens that survive OUTSIDE a clean
+# "[Image: source: ...]" bracket (a raw path pasted without the wrapper, or
+# a bracket shape this regex does not cover): a real hex run (git sha,
+# content hash), a screenshot/image filename, or a long token mixing
+# letters and digits with no word shape -- measured, the macOS temp-folder
+# hash itself ("b5xdrsh50mlfkm0t_rbb8d5w0000gn", 30 chars) is not pure hex
+# but is exactly this shape.
+_LONG_HEX_RUN_RE = _re.compile(r"^[0-9a-f]{12,}$")
+_IMAGE_FILENAME_RE = _re.compile(r"\.(png|jpe?g|gif|bmp|tiff?|webp)$")
+
+
+def _is_path_fragment_token(token: str) -> bool:
+    """True for a token shaped like a filesystem-path component rather than
+    conversational content. See ``_IMAGE_PASTE_RE`` for why this matters:
+    the bracket strip catches the common case structurally; this is the
+    token-level backstop for whatever slips past it."""
+    if _LONG_HEX_RUN_RE.match(token):
+        return True
+    if _IMAGE_FILENAME_RE.search(token):
+        return True
+    return len(token) >= 20 and any(c.isdigit() for c in token) and any(
+        c.isalpha() for c in token
+    )
+
+
+def _strip_image_paste_boilerplate(text: str) -> str:
+    """Remove KNOWN image-paste path metadata before tokenizing."""
+    return _IMAGE_PASTE_RE.sub(" ", text)
+
+
 # recall's OWN synthetic restatement, not the harness's. core.py
 # gives every sub-chunk PAST THE FIRST of a long assistant reply this string
 # as its ENTIRE user_text (see core.py's chunk-splitting loop and resume.py's
@@ -235,12 +282,16 @@ def _chunk_tokens(
     Drops recall's own synthetic context-echo user_text FIRST (see
     ``_CONTEXT_ECHO_PREFIX`` -- it is not the turn's content, so a
     comparison that can see it compares the echo, not the chunk), then
-    strips known harness preamble blocks (structural, unconditional, see
-    ``_HARNESS_PREAMBLE_TAGS``), then applies ``extra_stopwords`` -- a
+    strips known harness preamble blocks and image-paste path metadata
+    (structural, unconditional -- see ``_HARNESS_PREAMBLE_TAGS`` and
+    ``_IMAGE_PASTE_RE``), then applies ``extra_stopwords`` -- a
     DATA-DERIVED, per-caller stoplist (see ``compute_boilerplate_stoplist``)
-    for whatever boilerplate the two structural strips above do not have
+    for whatever boilerplate the structural strips above do not have
     an exact shape for -- and finally drops any token with no letters at
-    all (see ``_has_letter``): a run of digits can be pervasive between two
+    all (see ``_has_letter``) or shaped like a filesystem-path fragment
+    (see ``_is_path_fragment_token``, the backstop for image-paste
+    metadata that survives outside a clean bracket): a run of digits, or a
+    long hex/screenshot-filename token, can be pervasive between two
     otherwise-unrelated chunks by pure coincidence in a way an English or
     code word essentially cannot. Default empty: every existing caller is
     unaffected until it opts in.
@@ -250,11 +301,12 @@ def _chunk_tokens(
         else chunk.user_text
     )
     text = _strip_harness_preamble(f"{user_text} {chunk.assistant_text}")
+    text = _strip_image_paste_boilerplate(text)
     tokens = _tokenize(text)
     return {
         t for t in tokens
         if t not in _STOP_TOKENS and t not in extra_stopwords and len(t) > 2
-        and _has_letter(t)
+        and _has_letter(t) and not _is_path_fragment_token(t)
     }
 
 
@@ -412,6 +464,42 @@ def compute_boilerplate_stoplist(
             (tok, count / total)
             for tok, count in document_frequency.items()
             if count / total > min_fraction
+        ),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+
+
+def compute_generic_token_stoplist(
+    signature_df: "Counter[str]", total_clusters: int, min_fraction: float = 0.20,
+) -> list[tuple[str, float]]:
+    """A STORE-WIDE data-derived stoplist: tokens present in more than
+    ``min_fraction`` of ALL cluster signatures (``signature_df`` /
+    ``total_clusters``), sorted by fraction descending.
+
+    Different from ``compute_boilerplate_stoplist`` in POPULATION SCOPE,
+    not mechanism: that function's docstring records a signature-derived
+    BATCH stoplist tried and rejected for candidate-side stripping, on two
+    grounds -- population mismatch (fresh batch boilerplate is
+    under-represented in older signatures) and real-signal loss (this
+    corpus's top signature tokens are the team's own process vocabulary --
+    "gate", "ratify", "merge" -- which legitimately distinguishes real
+    clusters). Neither ground disqualifies THIS use by construction: this
+    is not a proxy for batch composition (a candidate evaluated alone, one
+    at a time, outside any batch, still needs it -- see the batch-15
+    stratified-sample false-merge rows this was built to fix), and the
+    real-signal risk is a CLAIM ABOUT THIS SPECIFIC CORPUS's token
+    distribution, not a general property of any signature-derived stoplist
+    -- verify empirically what min_fraction=0.20 actually drops before
+    trusting it, same as any other data-derived guard in this module.
+    """
+    if total_clusters == 0:
+        return []
+    return sorted(
+        (
+            (tok, count / total_clusters)
+            for tok, count in signature_df.items()
+            if count / total_clusters > min_fraction
         ),
         key=lambda pair: pair[1],
         reverse=True,
@@ -1194,14 +1282,6 @@ DEFAULT_RECLUSTER_BATCH = 2000
 DEFAULT_RECLUSTER_REFUSE_ABOVE = 50_000
 DEFAULT_SIGNATURE_BACKFILL_BATCH = 500
 
-# Below this many chunks, "present in >20% of the batch" is not
-# a meaningful pervasiveness signal -- at 2 chunks, ONE occurrence is
-# already 50%, so the guard would strip the entire batch's vocabulary on
-# any shared token at all (caught by the e2e test's small fixture batch).
-# The real-store batch this guard was built for is thousands of chunks;
-# this floor only matters for small batches, tests included.
-MIN_BATCH_FOR_BOILERPLATE_GUARD = 20
-
 # Three rounds of "read the actual merged pairs before trusting
 # the aggregate count" each needed an ad-hoc script to reconstruct which
 # chunk merged into which cluster, because the receipt only ever carried a
@@ -1560,29 +1640,64 @@ def recluster_stale_chunks(
     # does not take a run_id; a full rebuild replaces them wholesale).
     merge_run_id = uuid.uuid4().hex[:12] if merge_into_existing else None
     if merge_into_existing and batch_chunks:
-        # Data-derived guard computed from THIS BATCH, not cluster
-        # signatures: a stoplist built from signatures (older, already-
-        # clustered content) measured under 2% for the exact tokens that
-        # were 23.9% of a real stale batch -- signatures and the incoming
-        # stale queue are different populations with different composition,
-        # so the guard has to look at the population actually being
-        # compared. Structural stripping already ran inside _chunk_tokens
-        # (see _HARNESS_PREAMBLE_TAGS); this catches whatever that does not
-        # have an exact tag for. With the structural strip in place this
-        # should be short -- a long list here is itself a finding.
+        # Structural stripping already ran inside _chunk_tokens (see
+        # _HARNESS_PREAMBLE_TAGS, _IMAGE_PASTE_RE); extra_stopwords here is
+        # the data-derived catch for whatever those do not have an exact
+        # shape for.
         raw_batch_tokens = {
             c.id: _chunk_tokens(c, boilerplate_stopwords) for c in batch_chunks
         }
-        if len(batch_chunks) >= MIN_BATCH_FOR_BOILERPLATE_GUARD:
-            batch_boilerplate_dropped = compute_boilerplate_stoplist(
-                raw_batch_tokens, min_fraction=0.20,
-            )
-            effective_stopwords = boilerplate_stopwords | frozenset(
-                tok for tok, _frac in batch_boilerplate_dropped
-            )
 
         cluster_token_sets = db.load_cluster_token_signatures()
-        # Computed ONCE per batch from data already loaded above, not per
+        # STORE-WIDE generic-token suppression, replacing the per-batch 20%
+        # rule for this call site: a token common across the CORPUS (recall
+        # a candidate is sometimes evaluated one at a time, outside any
+        # batch at all -- a per-batch fraction has nothing to divide by
+        # there) is exactly as generic whether or not it happens to clear
+        # 20% within one particular batch draw. Computed on the cluster
+        # signatures already loaded above -- this is the SAME population a
+        # prior candidate-side batch-stoplist was rejected against (see
+        # compute_boilerplate_stoplist's docstring: signature-population
+        # top tokens skew toward this team's real process vocabulary, not
+        # noise) -- so this list is inspected at the witness step, not
+        # trusted blind; a long list here is itself a finding.
+        #
+        # Gated behind MIN_CLUSTERS_FOR_DISTINCTIVENESS -- the SAME small-
+        # population floor _match_existing_cluster's own distinctiveness
+        # check already uses, and for the identical reason. Measured the
+        # hard way: at total_clusters=1, a signature's own real topic
+        # vocabulary has document frequency 1/1 = 100% BY CONSTRUCTION (it
+        # is the only signature that exists), so an ungated 20% floor
+        # stripped every token of a genuine, single-cluster fixture's
+        # signature -- from BOTH sides, since a stripped token is also
+        # removed from a matching candidate's own tokens -- and every
+        # legitimate merge in that fixture silently stopped happening
+        # (four pre-existing tests broke this way before this gate).
+        # Below the floor, every token trivially looks "common" (it IS one
+        # of the only handful of known signatures), an artifact of
+        # population size, not evidence about the token.
+        if len(cluster_token_sets) >= MIN_CLUSTERS_FOR_DISTINCTIVENESS:
+            raw_signature_df = _signature_cross_cluster_df(cluster_token_sets)
+            batch_boilerplate_dropped = compute_generic_token_stoplist(
+                raw_signature_df, len(cluster_token_sets), min_fraction=0.20,
+            )
+        else:
+            batch_boilerplate_dropped = []
+        generic_tokens = frozenset(tok for tok, _frac in batch_boilerplate_dropped)
+        effective_stopwords = boilerplate_stopwords | generic_tokens
+        # Both sides of the containment ratio lose the same tokens: a
+        # signature still carrying a generic token (nearly all will, since
+        # these are by construction the MOST pervasive tokens) leaves the
+        # ratio's denominator unshrunk and the candidate-side strip alone
+        # does nothing. Filters the IN-MEMORY copy used for this batch's
+        # comparisons only -- persisted signature rows are untouched.
+        if generic_tokens:
+            cluster_token_sets = {
+                cid: sig - generic_tokens for cid, sig in cluster_token_sets.items()
+            }
+        # Computed ONCE per batch from data already loaded above (on the
+        # FILTERED signatures, so distinctiveness math stays consistent
+        # with what candidates are actually compared against), not per
         # chunk in the loop below (see _signature_cross_cluster_df).
         signature_df = _signature_cross_cluster_df(cluster_token_sets)
         now = datetime.now(timezone.utc).isoformat()
