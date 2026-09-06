@@ -1838,6 +1838,44 @@ def test_chunk_tokens_strips_image_paste_boilerplate_and_path_fragments():
     assert "wrong" in tokens, tokens
 
 
+def test_chunk_tokens_drops_a_bare_path_fragment_token_outside_any_image_bracket():
+    """Mutation witness for the BACKSTOP CLAUSE specifically (`and not
+    _is_path_fragment_token(t)` at the _chunk_tokens filter site), as
+    distinct from the bracket-level strip covered above. Stromus's R2
+    (2026-09-06): removing that clause left all existing tests green,
+    because every path-shaped token in this file's other fixtures sits
+    INSIDE a "[Image: source: ...]" span, so _strip_image_paste_boilerplate
+    already eats it before the backstop ever needs to fire -- the backstop
+    itself was never independently exercised. This chunk has no bracket at
+    all: a bare 28-char hex run appears in plain prose, the shape
+    _is_path_fragment_token's own direct unit test already proves it
+    catches, but never before proven to be wired into _chunk_tokens for
+    text the bracket regex has nothing to match."""
+    from synapt.recall.clustering import _chunk_tokens
+    from synapt.recall.core import TranscriptChunk
+
+    chunk = TranscriptChunk(
+        id="barehexoutsidebracket:t1", session_id="barehexoutsidebracket-session",
+        timestamp="2026-09-06T12:00:00Z", turn_index=1,
+        user_text="",
+        assistant_text=(
+            "the crash trace lives at deadbeefcafe0123456789abcdef on disk, "
+            "unrelated to any screenshot paste"
+        ),
+    )
+    tokens = _chunk_tokens(chunk)
+    assert "[Image" not in chunk.assistant_text, (
+        "fixture assumption: no bracket at all, so only the backstop clause "
+        "can be what removes the hex run"
+    )
+    assert "deadbeefcafe0123456789abcdef" not in tokens, tokens
+    # Real content words on the same line must still survive -- the
+    # backstop drops the SHAPE, not the sentence.
+    assert "crash" in tokens, tokens
+    assert "trace" in tokens, tokens
+    assert "disk" in tokens, tokens
+
+
 def test_compute_generic_token_stoplist_finds_tokens_pervasive_across_all_clusters():
     """Same contract as compute_boilerplate_stoplist, over a DIFFERENT
     population: signature_df / total_clusters (how many DISTINCT cluster
