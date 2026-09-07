@@ -1510,7 +1510,7 @@ class RecallDB:
         from synapt.recall.core import TranscriptChunk
 
         rows = self._conn.execute(
-            "SELECT id, session_id, timestamp, turn_index "
+            "SELECT id, session_id, timestamp, turn_index, date_text "
             "FROM chunks ORDER BY rowid"
         ).fetchall()
 
@@ -1525,6 +1525,7 @@ class RecallDB:
                 tools_used=[],
                 files_touched=[],
                 tool_content="",
+                date_text=r["date_text"] or "",
                 transcript_path="",
                 byte_offset=-1,
                 byte_length=0,
