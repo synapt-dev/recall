@@ -2286,9 +2286,26 @@ def recall_correct(
         # Step 3: Sync to DB so the node is immediately searchable
         try:
             from synapt.recall.consolidate import _sync_knowledge_to_db
-            from synapt.recall.core import project_data_dir
-            project_dir = project_data_dir()
-            _sync_knowledge_to_db(project_dir, kn_path)
+            from synapt.recall.core import project_index_dir
+            from synapt.recall.sharding import live_store_path
+            # None => resolve via SYNAPT_RECALL_ROOT / GRIPSPACE_ROOT + inference,
+            # the same pattern recall_save uses (project_data_dir's own docstring).
+            # Passing project_data_dir()'s OWN return value here was the bug: that
+            # value is already the resolved DATA dir (<root>/.synapt/recall), and
+            # _sync_knowledge_to_db's project_index_dir(project_dir) applies
+            # project_data_dir() to it a SECOND time, doubling the suffix onto a
+            # path that never exists -- silently no-opping the sync while this
+            # function still reported success (tracked privately, no number here).
+            db_path = live_store_path(project_index_dir(None))
+            if not db_path.exists():
+                # Not an assert: assert is stripped under python -O, which would
+                # silently drop this refusal and let the false success message
+                # through on an optimized interpreter (Stromus R2, v1).
+                raise FileNotFoundError(
+                    f"no recall index at {db_path}; refusing to claim a sync "
+                    "that cannot happen"
+                )
+            _sync_knowledge_to_db(None, kn_path)
             synced = "  Synced to search index."
         except Exception:
             synced = "  (Will sync on next consolidation.)"
