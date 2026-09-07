@@ -4617,8 +4617,14 @@ def _set_last_consolidation_ts(project_dir: Path) -> None:
         pass
 
 
-def _sync_knowledge_to_db(project_dir: Path, kn_path: Path) -> None:
-    """Sync knowledge.jsonl nodes into SQLite for FTS search."""
+def _sync_knowledge_to_db(project_dir: Path | None, kn_path: Path) -> None:
+    """Sync knowledge.jsonl nodes into SQLite for FTS search.
+
+    ``project_dir=None`` resolves via env/cwd inference (project_index_dir's
+    own default) -- the type hint previously said ``Path``, but the function
+    always worked correctly with ``None`` at runtime since it does nothing
+    but forward the argument to project_index_dir; widened to match.
+    """
     from synapt.recall.sharding import live_store_path
     index_dir = project_index_dir(project_dir)
     db_path = live_store_path(index_dir)
