@@ -212,6 +212,48 @@ MIN_DISTINCTIVE_SHARED_TOKENS = 8  # same floor VALUE as
 # distinctiveness.
 MIN_CLUSTERS_FOR_DISTINCTIVENESS = 20
 
+# RARE_TOKEN_DF_DIVISOR's ceiling SCALES with total_clusters (total_clusters
+# // 10), which is exactly right for judging whether a token counts as
+# evidence toward CONTAINMENT (more clusters exist, so a proportionally
+# larger df still means "unusually concentrated"). It is the WRONG ceiling
+# for a different question: is there ANY token shared with this candidate
+# that a person would call topically rare, in an absolute sense, regardless
+# of how large the corpus has grown? At the real store's scale (24,071
+# persisted signatures measured 2026-09-07), the proportional ceiling
+# reaches into the thousands -- a token present in 2,000 different
+# clusters' signatures still counts as "distinctive" there, which is not
+# what the word means to a human reading the two chunks side by side.
+#
+# This is the gap a batch-36 acceptance sample (tracked privately) found
+# directly: six false merges, none refused by the containment floors, the
+# distinctiveness check, or the reference-core check (every one either had
+# no citation on one or both sides, or a candidate citing something the
+# cluster's core never did -- see _reference_check_has_nothing_to_compare).
+# Read against the same twelve-row sample's four correct merges: every
+# WRONG row's shared tokens had a MINIMUM cross-cluster document frequency
+# of 12 or higher; every CORRECT row's minimum sat at 18 or below, with one
+# exact tie at 18 (row 8 correct, row 10 wrong -- a tie a static threshold
+# cannot separate, so it is deliberately placed on the refusing side of
+# both). RARE_ANCHOR_MAX_CROSS_CLUSTER_DF sits at 6: comfortably below
+# every wrong row's minimum (12-312) and below the tie, leaving margin for
+# the one-sided measurement error below.
+#
+# The measurement is ASYMMETRIC, and the threshold's safety depends on
+# knowing which way: df is counted over however many signatures are
+# PERSISTED at merge time (db.load_cluster_token_signatures(), the same
+# population _signature_cross_cluster_df already reads), not over every
+# cluster that exists. A cluster whose signature has not been (re)computed
+# or persisted yet is invisible to this count -- so a token's TRUE
+# cross-cluster df can only be UNDER-counted here, never over-counted,
+# which makes a token look RARER than it really is. A rarer-looking token
+# is MORE likely to clear the <= 6 floor, which ALLOWS the merge -- so
+# incomplete signature coverage errs toward MERGING, never toward
+# refusing. The threshold is conservative (correctly refusing) only where
+# coverage is complete; a fresh sample after this ships is the true
+# out-of-sample test of both the threshold and this coverage gap together,
+# not just the threshold alone.
+RARE_ANCHOR_MAX_CROSS_CLUSTER_DF = 6
+
 # A cluster whose members are mostly one recurring HARNESS/CRON/RITUAL
 # prompt (measured: 42.7% of 300 sampled signed real-store clusters had
 # >=80% of members share byte-identical user_text) gets that prompt's own
@@ -686,6 +728,47 @@ def _signature_cross_cluster_df(cluster_signatures: dict[str, set[str]]) -> Coun
     for signature in cluster_signatures.values():
         df.update(set(signature))
     return df
+
+
+def _reference_check_has_nothing_to_compare(
+    candidate_refs: frozenset[str], prior_refs: frozenset[str],
+) -> bool:
+    """True when the reference-number check (``REFERENCE_NUMBER_RE``,
+    ``_reference_core``) had nothing decisive to compare -- either side
+    citing no number at all. The reference-core disjoint check only ever
+    FIRES when BOTH sides cite something (see the ``if prior_refs and
+    candidate_refs.isdisjoint(prior_refs)`` guard at its call site); when
+    either side is empty, that check is silently skipped, and this is the
+    only signal telling the caller such a chunk NEEDS a different check
+    (the rare-anchor floor, see ``RARE_ANCHOR_MAX_CROSS_CLUSTER_DF``)
+    rather than having already passed one.
+
+    A candidate citing a number the cluster's core does not mention is
+    included here (``prior_refs`` empty) -- the reference check answered
+    nothing about it either, the same as a candidate citing nothing at
+    all. Only when BOTH sides cite something does the reference check
+    become the decisive signal on its own, whichever way it decides.
+    """
+    return not candidate_refs or not prior_refs
+
+
+def _rare_anchor_cross_cluster_min_df(
+    candidate_tokens: set[str],
+    target_signature: set[str],
+    signature_df: Counter[str],
+) -> int | None:
+    """The minimum cross-cluster document frequency (see
+    ``_signature_cross_cluster_df``) among the tokens a candidate actually
+    SHARES with its winning cluster's signature -- ``None`` if nothing is
+    shared. A LOW value means at least one shared token is genuinely rare
+    across the corpus: a real topical anchor. A HIGH value means every
+    shared token is common across many clusters' signatures -- the
+    false-merge shape ``RARE_ANCHOR_MAX_CROSS_CLUSTER_DF`` exists to catch.
+    """
+    shared = candidate_tokens & target_signature
+    if not shared:
+        return None
+    return min(signature_df.get(t, 0) for t in shared)
 
 
 def _match_existing_cluster(
@@ -1781,6 +1864,7 @@ def recluster_stale_chunks(
             "merged_into_existing": 0,
             "floor_refused": 0,
             "ref_disjoint_refused": 0,
+            "rare_anchor_refused": 0,
             "batch_boilerplate_dropped": [],
             "merge_samples": [],
             "merge_run_id": None,
@@ -1801,6 +1885,7 @@ def recluster_stale_chunks(
             "merged_into_existing": 0,
             "floor_refused": 0,
             "ref_disjoint_refused": 0,
+            "rare_anchor_refused": 0,
             "batch_boilerplate_dropped": [],
             "merge_samples": [],
             "merge_run_id": None,
@@ -1816,6 +1901,7 @@ def recluster_stale_chunks(
     merged_count = 0
     floor_refused_count = 0
     ref_disjoint_refused_count = 0
+    rare_anchor_refused_count = 0
     batch_boilerplate_dropped: list[tuple[str, float]] = []
     merge_samples: list[dict] = []
     effective_stopwords = boilerplate_stopwords
@@ -1921,10 +2007,12 @@ def recluster_stale_chunks(
             # different subject); refusal fires only when BOTH sides cite
             # something and share nothing (see REFERENCE_NUMBER_RE).
             ref_disjoint = False
+            rare_anchor_needs_check = False
             if target is not None:
                 candidate_refs = _extract_reference_numbers(
                     (chunk.user_text or "") + " " + (chunk.assistant_text or "")
                 )
+                prior_refs: frozenset[str] = frozenset()
                 if candidate_refs:
                     # Earliest-member-first (load_cluster_member_chunk_ids'
                     # own ordering) -- required so the core's fallback
@@ -1955,6 +2043,36 @@ def recluster_stale_chunks(
                         ref_disjoint = True
                         ref_disjoint_refused_count += 1
                         target = None
+                # Scoped to "the reference check had nothing decisive to
+                # compare" (candidate_refs empty, OR the cluster's own core
+                # empty), never to numberless candidates alone: a NUMBERED
+                # candidate matching a NUMBERLESS cluster's core hits the
+                # identical false-merge shape (see
+                # _reference_check_has_nothing_to_compare's docstring). A
+                # candidate and cluster that both cite something stay
+                # governed by the reference-core check alone, whichever way
+                # it just decided above.
+                rare_anchor_needs_check = not ref_disjoint and (
+                    _reference_check_has_nothing_to_compare(candidate_refs, prior_refs)
+                )
+            rare_anchor_refused = False
+            if (
+                target is not None
+                and rare_anchor_needs_check
+                # SAME small-population floor _match_existing_cluster's own
+                # distinctiveness check and the batch boilerplate stoplist
+                # already use, and for the identical reason: cross-cluster
+                # df cannot separate rare from common with too few
+                # persisted signatures to compare against.
+                and len(cluster_token_sets) >= MIN_CLUSTERS_FOR_DISTINCTIVENESS
+            ):
+                min_df = _rare_anchor_cross_cluster_min_df(
+                    tokens, cluster_token_sets.get(target, set()), signature_df,
+                )
+                if min_df is not None and min_df > RARE_ANCHOR_MAX_CROSS_CLUSTER_DF:
+                    rare_anchor_refused = True
+                    rare_anchor_refused_count += 1
+                    target = None
             if target is not None:
                 merges_by_cluster.setdefault(target, []).append(chunk)
             else:
@@ -1968,15 +2086,19 @@ def recluster_stale_chunks(
                 # ordinary still-stale count, is what makes the floor's
                 # actual bite on a real batch visible without re-deriving it
                 # from a hand read every time (see MIN_CANDIDATE_CONTAINMENT).
-                # Skipped when ref_disjoint already fired: that chunk WOULD
-                # have matched under floor=0.0 too (the floor was never the
-                # reason), and double-counting one refusal under both
-                # counters would make the two receipt fields overlap instead
-                # of partitioning the refusals by cause.
-                if not ref_disjoint and has_enough_tokens and _match_existing_cluster(
-                    tokens, cluster_token_sets, signature_df,
-                    min_candidate_containment=0.0,
-                ) is not None:
+                # Skipped when ref_disjoint or rare_anchor_refused already
+                # fired: that chunk WOULD have matched under floor=0.0 too
+                # (the floor was never the reason), and double-counting one
+                # refusal under multiple counters would make the receipt
+                # fields overlap instead of partitioning the refusals by
+                # cause.
+                if (
+                    not ref_disjoint and not rare_anchor_refused
+                    and has_enough_tokens and _match_existing_cluster(
+                        tokens, cluster_token_sets, signature_df,
+                        min_candidate_containment=0.0,
+                    ) is not None
+                ):
                     floor_refused_count += 1
         # Signatures are a snapshot from the top of this batch: two batch
         # members that both match the SAME existing cluster both merge into
@@ -2048,6 +2170,7 @@ def recluster_stale_chunks(
         "merged_into_existing": merged_count,
         "floor_refused": floor_refused_count,
         "ref_disjoint_refused": ref_disjoint_refused_count,
+        "rare_anchor_refused": rare_anchor_refused_count,
         "batch_boilerplate_dropped": batch_boilerplate_dropped,
         "merge_samples": merge_samples,
         "merge_run_id": merge_run_id if (merged_count and not dry_run) else None,
