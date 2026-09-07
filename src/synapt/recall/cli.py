@@ -4216,7 +4216,8 @@ def cmd_maintain(args: argparse.Namespace) -> None:
                 f"{r['fresh_in_batch']} fresh + {r['fallback_in_batch']} fallback "
                 f"in the batch, {r['chunks_clustered']} chunk(s) clustered this run "
                 f"({r.get('merged_into_existing', 0)} merged into existing clusters, "
-                f"{r.get('floor_refused', 0)} refused below the candidate-overlap floor), "
+                f"{r.get('floor_refused', 0)} refused below the candidate-overlap floor, "
+                f"{r.get('ref_disjoint_refused', 0)} refused on disjoint issue/PR citations), "
                 f"{r['still_stale']} still stale"
                 + (f". {r['drain_command']}" if r["drain_command"] else ".")
             )

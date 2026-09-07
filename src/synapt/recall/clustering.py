@@ -126,6 +126,27 @@ MIN_SHARED_SIGNATURE_TOKENS = 8  # absolute floor: ratio alone lets a tiny
 # merge is not, without a gated live-store write to undo it).
 MIN_CANDIDATE_CONTAINMENT = 0.153
 
+# Neither containment floor above reads the TEXT, only the token overlap --
+# so a candidate and a target cluster can clear both while explicitly
+# citing DIFFERENT issue/PR numbers, the shape a batch-30 audit measured
+# directly: read-only, by number, 30 of 182 real merges had overlapping
+# candidate/prior-member citations, 41 had both sides non-empty and
+# DISJOINT (a candidate citing #754 merged into a cluster whose only prior
+# citation was #842; see REFERENCE_NUMBER_RE's own docstring for four more).
+# Coordination-genre text (a verdict posted, a gate cleared, a PR pushed)
+# reads as topically similar under any token-overlap metric regardless of
+# WHICH specific item is being verdicted, gated, or pushed -- the numbers
+# are the one signal a shared-vocabulary metric structurally cannot see.
+# This is a REFUSAL gate, not a containment threshold: either side having
+# zero citations is silent (most chunks cite nothing, and absence of a
+# number is not evidence of a different subject), but two non-empty,
+# non-overlapping sets is checked directly against the specific numbers
+# involved, not against a token count or a ratio.
+REFERENCE_NUMBER_RE = _re.compile(
+    r"(?:\b[a-z][a-z0-9_.-]*#|#|\bPR\s*#?\s*|\bissue\s*#?\s*)(\d{2,5})\b",
+    _re.IGNORECASE,
+)
+
 # A raw shared-token COUNT rewards a match dominated by common, recurring
 # vocabulary (a harness prompt's own words, a status update's "quiet",
 # "standing by") exactly as readily as one dominated by rare, topical
@@ -304,6 +325,24 @@ def _has_letter(token: str) -> bool:
     letter) is what actually needs to hold, not a shape-specific strip.
     """
     return any(c.isalpha() for c in token)
+
+
+def _extract_reference_numbers(text: str) -> frozenset[str]:
+    """Every issue/PR number ``text`` cites, per ``REFERENCE_NUMBER_RE``.
+
+    Numbers only, repo prefix discarded: comparing (repo, number) pairs
+    would be more precise (a coincidental cross-repo number collision, e.g.
+    recall#919 vs a hypothetical grip#919, would then correctly read as
+    disjoint rather than overlapping) but this team's own citation habit is
+    inconsistent about the prefix -- "grip#846", bare "#846", and "PR #846"
+    all name the same thing in this corpus depending on who typed it and
+    whether the repo was already established by context -- so requiring a
+    repo match would silently treat same-repo citations typed two different
+    ways as disjoint. Flat numbers is the coarser, safer comparison for a
+    REFUSAL gate: it can only under-flag (miss a genuine cross-repo
+    coincidence), never over-flag a same-subject citation as different.
+    """
+    return frozenset(REFERENCE_NUMBER_RE.findall(text))
 
 
 def _chunk_tokens(
@@ -1648,6 +1687,7 @@ def recluster_stale_chunks(
             "fallback_in_batch": 0,
             "merged_into_existing": 0,
             "floor_refused": 0,
+            "ref_disjoint_refused": 0,
             "batch_boilerplate_dropped": [],
             "merge_samples": [],
             "merge_run_id": None,
@@ -1667,6 +1707,7 @@ def recluster_stale_chunks(
             "fallback_in_batch": 0,
             "merged_into_existing": 0,
             "floor_refused": 0,
+            "ref_disjoint_refused": 0,
             "batch_boilerplate_dropped": [],
             "merge_samples": [],
             "merge_run_id": None,
@@ -1681,6 +1722,7 @@ def recluster_stale_chunks(
 
     merged_count = 0
     floor_refused_count = 0
+    ref_disjoint_refused_count = 0
     batch_boilerplate_dropped: list[tuple[str, float]] = []
     merge_samples: list[dict] = []
     effective_stopwords = boilerplate_stopwords
@@ -1774,6 +1816,39 @@ def recluster_stale_chunks(
                 if has_enough_tokens
                 else None
             )
+            # Subject-consistency check: only runs on a WINNING target (the
+            # containment floors already ruled this a token-level match),
+            # and only compares against that cluster's PRIOR members --
+            # nothing in this batch has been written yet (writes happen in
+            # the merges_by_cluster loop below), so a live query here always
+            # reflects the true pre-batch membership, the same snapshot-from-
+            # the-top-of-the-batch semantics the signature comparison above
+            # already has. Either side citing nothing is silent (most chunks
+            # cite no issue/PR number, and absence is not evidence of a
+            # different subject); refusal fires only when BOTH sides cite
+            # something and share nothing (see REFERENCE_NUMBER_RE).
+            ref_disjoint = False
+            if target is not None:
+                candidate_refs = _extract_reference_numbers(
+                    (chunk.user_text or "") + " " + (chunk.assistant_text or "")
+                )
+                if candidate_refs:
+                    prior_ids = db.load_cluster_member_chunk_ids([target]).get(target, [])
+                    prior_refs: frozenset[str] = frozenset()
+                    if prior_ids:
+                        prior_rowids = [
+                            id_rowid_map[cid] for cid in prior_ids if cid in id_rowid_map
+                        ]
+                        for prior_chunk in db.load_chunks_by_rowids(prior_rowids).values():
+                            prior_refs |= _extract_reference_numbers(
+                                (prior_chunk.user_text or "")
+                                + " "
+                                + (prior_chunk.assistant_text or "")
+                            )
+                    if prior_refs and candidate_refs.isdisjoint(prior_refs):
+                        ref_disjoint = True
+                        ref_disjoint_refused_count += 1
+                        target = None
             if target is not None:
                 merges_by_cluster.setdefault(target, []).append(chunk)
             else:
@@ -1787,7 +1862,12 @@ def recluster_stale_chunks(
                 # ordinary still-stale count, is what makes the floor's
                 # actual bite on a real batch visible without re-deriving it
                 # from a hand read every time (see MIN_CANDIDATE_CONTAINMENT).
-                if has_enough_tokens and _match_existing_cluster(
+                # Skipped when ref_disjoint already fired: that chunk WOULD
+                # have matched under floor=0.0 too (the floor was never the
+                # reason), and double-counting one refusal under both
+                # counters would make the two receipt fields overlap instead
+                # of partitioning the refusals by cause.
+                if not ref_disjoint and has_enough_tokens and _match_existing_cluster(
                     tokens, cluster_token_sets, signature_df,
                     min_candidate_containment=0.0,
                 ) is not None:
@@ -1861,6 +1941,7 @@ def recluster_stale_chunks(
         "fallback_in_batch": fallback_count,
         "merged_into_existing": merged_count,
         "floor_refused": floor_refused_count,
+        "ref_disjoint_refused": ref_disjoint_refused_count,
         "batch_boilerplate_dropped": batch_boilerplate_dropped,
         "merge_samples": merge_samples,
         "merge_run_id": merge_run_id if (merged_count and not dry_run) else None,
