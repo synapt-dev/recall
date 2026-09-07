@@ -2486,3 +2486,158 @@ def test_recluster_merge_into_existing_refuses_a_diluted_candidate_end_to_end(tm
         )
     finally:
         db.close()
+
+
+# ref_disjoint_refused: neither containment floor above reads the TEXT, only
+# the token overlap, so a candidate and a target cluster can clear both
+# while explicitly citing DIFFERENT issue/PR numbers -- measured directly on
+# a live batch (batch 30, run 8fda059a865e): 30 of 182 real merges had
+# overlapping candidate/prior-member citations, 41 had both sides non-empty
+# and disjoint. See REFERENCE_NUMBER_RE and _extract_reference_numbers.
+
+def test_extract_reference_numbers_matches_every_stated_prefix_form():
+    """Unit-level: repo-prefixed, bare, PR-prefixed, and issue-prefixed forms
+    all resolve to the same flat number set; a number embedded in a longer
+    digit run (no word boundary) is not falsely captured."""
+    from synapt.recall.clustering import _extract_reference_numbers
+
+    text = (
+        "grip#846 landed, see also #703 and PR #1161 plus issue#199. "
+        "Not a match: v20261 and 8461234 and #1"
+    )
+    refs = _extract_reference_numbers(text)
+    assert refs == {"846", "703", "1161", "199"}, refs
+
+
+def test_extract_reference_numbers_empty_text_is_empty_not_a_crash():
+    from synapt.recall.clustering import _extract_reference_numbers
+
+    assert _extract_reference_numbers("") == frozenset()
+    assert _extract_reference_numbers("no numbers cited here at all") == frozenset()
+
+
+def test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_to_end(tmp_path):
+    """End-to-end through the real ``recluster_stale_chunks`` call site: a
+    candidate with genuine topical/token overlap (would clear BOTH
+    containment floors) but citing a DIFFERENT issue number than every prior
+    member of the target cluster is refused and counted separately from
+    ``floor_refused``, while a companion candidate citing the SAME number
+    still merges in the SAME batch -- proving the check discriminates on
+    citation identity, not topic, and that the two refusal counters
+    partition rather than overlap."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import (
+        _chunk_tokens,
+        _match_existing_cluster,
+        _normalize_signature_tokens,
+        recluster_stale_chunks,
+        stale_transcript_chunk_ids,
+    )
+
+    thin_words = [f"refcheck{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    # Existing cluster: every member cites grip#846.
+    entries = []
+    for i in range(8):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i) % 3 != 0)
+        entries.append(user_text_entry(
+            f"question about {w} re grip#846", uuid=f"refthin-u{i}",
+            ts=f"2026-03-02T10:{i:02d}:00Z",
+        ))
+        entries.append(assistant_entry(
+            text=f"answer about {w} tracked in grip#846", uuid=f"refthin-a{i}",
+            ts=f"2026-03-02T10:{i:02d}:30Z",
+        ))
+    write_jsonl(source / "topic.jsonl", entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+    finally:
+        db.close()
+
+    # Disjoint candidate: same topic words (genuine overlap), cites a
+    # DIFFERENT issue number never mentioned by any prior member.
+    write_jsonl(source / "disjoint_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re #754",
+                         uuid="disjoint-u", ts="2026-03-02T11:00:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} filed as #754",
+                         uuid="disjoint-a", ts="2026-03-02T11:00:30Z"),
+    ])
+    # Same-number candidate: same topic words, cites grip#846 too -- must merge.
+    write_jsonl(source / "sameref_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re grip#846",
+                         uuid="sameref-u", ts="2026-03-02T11:01:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} also grip#846",
+                         uuid="sameref-a", ts="2026-03-02T11:01:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        # Verify by fruit: the disjoint candidate must actually CLEAR both
+        # containment floors on token grounds alone, or its refusal proves
+        # nothing about the new check specifically.
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        disjoint_id = next(cid for cid in stale_before if "disjoint" in cid)
+        disjoint_chunk = db.load_chunks_by_rowids(
+            [id_rowid_map[disjoint_id]]
+        )[id_rowid_map[disjoint_id]]
+        cluster_token_sets = db.load_cluster_token_signatures()
+        from synapt.recall.clustering import _signature_cross_cluster_df
+        signature_df = _signature_cross_cluster_df(cluster_token_sets)
+        disjoint_tokens = _normalize_signature_tokens(_chunk_tokens(disjoint_chunk))
+        would_match = _match_existing_cluster(disjoint_tokens, cluster_token_sets, signature_df)
+        assert would_match == existing_cluster_id, (
+            f"fixture assumption: the disjoint candidate must clear both "
+            f"containment floors on token grounds alone, so its refusal is "
+            f"attributable to the reference check, not the floors: "
+            f"got {would_match!r}, expected {existing_cluster_id!r}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the same-number candidate must merge: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 1, (
+            f"the disjoint-citation candidate's refusal must be counted "
+            f"separately from the containment floor: {receipt}"
+        )
+        assert receipt["floor_refused"] == 0, (
+            f"the disjoint candidate would have cleared the containment "
+            f"floor -- it must not ALSO be double-counted there: {receipt}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        assert len(stale_after) == 1, (
+            "the disjoint candidate stays stale (safe direction, same as "
+            "the containment floor's own refusal)"
+        )
+        merged_chunk_id = (stale_before - stale_after).pop()
+        assert "sameref" in merged_chunk_id, (
+            f"the SAME-number candidate must be the one that merged: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert not any("disjoint" in cid for cid in member_ids), (
+            f"the disjoint-citation candidate must never have joined: {member_ids}"
+        )
+    finally:
+        db.close()
