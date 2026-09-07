@@ -2233,3 +2233,256 @@ def test_recluster_merge_into_existing_strips_store_wide_generic_vocabulary_thro
         )
     finally:
         db.close()
+
+
+# MIN_CANDIDATE_CONTAINMENT: CONTAINMENT_THRESHOLD alone is signature-side only, so
+# a SMALL signature reads high containment on a coincidental handful of
+# shared tokens regardless of how large or unrelated the candidate is.
+# Hand-read finding (batch-25, five real false merges, tracked privately):
+# candidates 173-558 tokens, signatures 12-31 tokens, 8-11 shared -- every
+# one cleared CONTAINMENT_THRESHOLD and MIN_SHARED_SIGNATURE_TOKENS, none
+# shared more than 6.4% of their OWN tokens. The fixtures below reproduce
+# that shape directly rather than replaying the live hand-read sample
+# (which lives in the private tracker, not this public repo).
+
+def test_thin_signature_large_candidate_is_refused_by_the_candidate_floor():
+    """Direct reproduction of the row-8 false-merge shape: a 15-token
+    signature, a candidate carrying 10 of those 15 tokens plus 150 tokens
+    of unrelated filler. Signature-side containment is 10/15 = 0.667 (clears
+    CONTAINMENT_THRESHOLD easily); candidate-side containment is
+    10/160 = 0.0625 (well below MIN_CANDIDATE_CONTAINMENT's 0.153). Must
+    not match."""
+    from synapt.recall.clustering import (
+        MIN_CANDIDATE_CONTAINMENT,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(15))
+    shared_words = frozenset(sorted(signature)[:10])
+    filler = frozenset(f"filler{i}" for i in range(150))
+    candidate_tokens = shared_words | filler
+    assert len(candidate_tokens) == 160, "fixture assumption: 10 shared + 150 filler"
+
+    signature_containment = len(shared_words) / len(signature)
+    candidate_containment = len(shared_words) / len(candidate_tokens)
+    assert signature_containment == 10 / 15
+    assert candidate_containment == 10 / 160
+    assert candidate_containment < MIN_CANDIDATE_CONTAINMENT, (
+        "fixture assumption: candidate-side ratio must sit below the floor"
+    )
+
+    cluster_signatures = {"clust-thin": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) is None, (
+        "high signature-side containment on a small signature must not "
+        "override a low candidate-side containment -- this is exactly the "
+        "row-8 false-merge shape"
+    )
+
+
+def test_thin_signature_large_candidate_would_have_matched_without_the_floor():
+    """Mutation witness, same fixture as the test above: with
+    ``min_candidate_containment=0.0`` (the pre-fix behavior --
+    CONTAINMENT_THRESHOLD alone), the identical inputs DO match. This is
+    the concrete proof that MIN_CANDIDATE_CONTAINMENT is the thing doing
+    the work, not some other floor already in the function -- removing
+    just this one check (as a real mutation would) makes the false merge
+    happen again."""
+    from synapt.recall.clustering import (
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(15))
+    shared_words = frozenset(sorted(signature)[:10])
+    filler = frozenset(f"filler{i}" for i in range(150))
+    candidate_tokens = shared_words | filler
+
+    cluster_signatures = {"clust-thin": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+        min_candidate_containment=0.0,
+    ) == "clust-thin", (
+        "with the candidate floor disabled, the same inputs that the test "
+        "above correctly refuses must merge -- proving the floor, not some "
+        "other check, is what blocks the false merge"
+    )
+
+
+def test_large_candidate_with_real_proportional_overlap_still_matches():
+    """The floor's other half: a candidate that is ALSO large but shares a
+    proportionally large fraction of its own tokens (not just a coincidental
+    handful) must still match. The floor targets DILUTION, not candidate
+    SIZE -- a long chunk that is genuinely mostly about the cluster's topic
+    is not the false-merge shape this exists to catch."""
+    from synapt.recall.clustering import (
+        MIN_CANDIDATE_CONTAINMENT,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(30))
+    shared_words = signature  # shares the WHOLE signature
+    filler = frozenset(f"onlocaltext{i}" for i in range(60))
+    candidate_tokens = shared_words | filler
+    assert len(candidate_tokens) == 90
+
+    candidate_containment = len(shared_words) / len(candidate_tokens)
+    assert candidate_containment == 30 / 90
+    assert candidate_containment >= MIN_CANDIDATE_CONTAINMENT, (
+        "fixture assumption: candidate-side ratio must clear the floor"
+    )
+
+    cluster_signatures = {"clust-real": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) == "clust-real", (
+        "a large candidate with genuine proportional overlap must still "
+        "match -- the floor must not penalize candidate length by itself"
+    )
+
+
+def _thin_signature_topic_transcript(path: Path, *, words: list[str], turns: int = 8) -> Path:
+    """Same shape as ``_topic_transcript`` but with a caller-chosen, SHORT
+    word list, so the resulting persisted signature stays small (the
+    real-store shape MIN_CANDIDATE_CONTAINMENT is measured against:
+    signatures 12-31 tokens, not TOP_SIGNATURE_TOKENS' 64-token cap)."""
+    entries = []
+    for i in range(turns):
+        w = " ".join(v for j, v in enumerate(words) if (j + i) % 3 != 0)
+        entries.append(
+            user_text_entry(f"question about {w}", uuid=f"thin-u{i}",
+                             ts=f"2026-03-01T10:{i:02d}:00Z")
+        )
+        entries.append(
+            assistant_entry(text=f"answer about {w}", uuid=f"thin-a{i}",
+                             ts=f"2026-03-01T10:{i:02d}:30Z")
+        )
+    write_jsonl(path, entries)
+    return path
+
+
+def test_recluster_merge_into_existing_refuses_a_diluted_candidate_end_to_end(tmp_path):
+    """End-to-end through the real ``recluster_stale_chunks`` call site, not
+    just the unit-level ``_match_existing_cluster``: a diluted candidate
+    (row-8 shape) stays stale and is counted in the receipt's
+    ``floor_refused``, while a companion candidate that genuinely overlaps
+    the same cluster's topic still merges in the SAME batch -- proving the
+    floor discriminates within one batch, not just in isolation."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    thin_words = [f"nichetopic{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _thin_signature_topic_transcript(source / "topic.jsonl", words=thin_words, turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert len(real_signature) < 20, (
+            f"fixture assumption: a genuinely THIN signature, in the "
+            f"12-31-token measured range, not the 64-token cap: {sorted(real_signature)}"
+        )
+    finally:
+        db.close()
+
+    # Diluted candidate: shares real topic words but they are drowned in
+    # ~250 tokens of unrelated filler -- high signature-side containment,
+    # low candidate-side containment. Same shape as the unit tests above,
+    # built through the real ingestion/tokenization pipeline this time.
+    # Filler goes in ASSISTANT text, not user text: core.py truncates
+    # user_text at 1500 chars but assistant_text at 5000, measured while
+    # writing this fixture -- 150 filler words in user_text silently lost
+    # more than half of them, pushing the candidate-side ratio back ABOVE
+    # the floor and defeating the fixture's own purpose without any test
+    # failing to explain why.
+    diluted_filler = " ".join(f"unrelatedfiller{i}" for i in range(250))
+    write_jsonl(source / "diluted_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)}",
+                         uuid="diluted-u", ts="2026-03-01T11:00:00Z"),
+        assistant_entry(text=diluted_filler, uuid="diluted-a", ts="2026-03-01T11:00:30Z"),
+    ])
+    # Genuine candidate: the same thin topic words, no dilution -- must
+    # still merge, proving the floor is not blocking the whole cluster.
+    write_jsonl(source / "genuine_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)}",
+                         uuid="genuine-u", ts="2026-03-01T11:01:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)}",
+                         uuid="genuine-a", ts="2026-03-01T11:01:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        # Verify by fruit, not by construction: check the ACTUAL persisted
+        # chunk's tokens and ratio against the real signature before running
+        # the op, so a future truncation/tokenization change that silently
+        # shifts this fixture back above the floor fails HERE with a clear
+        # message, not three asserts later as an unexplained merge count.
+        from synapt.recall.clustering import MIN_CANDIDATE_CONTAINMENT, _chunk_tokens
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        diluted_id = next(cid for cid in stale_before if "diluted" in cid)
+        diluted_chunk = db.load_chunks_by_rowids([id_rowid_map[diluted_id]])[id_rowid_map[diluted_id]]
+        diluted_tokens = _chunk_tokens(diluted_chunk)
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        diluted_shared = real_signature & diluted_tokens
+        diluted_ratio = len(diluted_shared) / len(diluted_tokens) if diluted_tokens else 0.0
+        assert diluted_ratio < MIN_CANDIDATE_CONTAINMENT, (
+            f"fixture assumption: the diluted candidate's real candidate-side "
+            f"ratio must sit below the floor -- tokens={len(diluted_tokens)}, "
+            f"shared={len(diluted_shared)}, ratio={diluted_ratio:.4f}, "
+            f"floor={MIN_CANDIDATE_CONTAINMENT}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the genuine candidate must merge, not the diluted one: {receipt}"
+        )
+        assert receipt["floor_refused"] == 1, (
+            f"the diluted candidate's refusal must be counted as a floor "
+            f"refusal, not silently folded into ordinary still-stale: {receipt}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        assert len(stale_after) == 1, (
+            "the diluted candidate stays stale (safe direction: recoverable "
+            "next batch, never a wrong merge that needs a gated live-store "
+            "write to undo)"
+        )
+        merged_chunk_id = (stale_before - stale_after).pop()
+        assert "genuine" in merged_chunk_id, (
+            f"the GENUINE candidate must be the one that merged: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert not any("diluted" in cid for cid in member_ids), (
+            f"the diluted candidate must never have joined: {member_ids}"
+        )
+    finally:
+        db.close()
