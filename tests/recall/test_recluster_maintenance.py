@@ -3048,6 +3048,240 @@ def test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_t
         db.close()
 
 
+def test_reference_check_has_nothing_to_compare_matches_the_scoped_cases():
+    """Unit test for the exact scope Stromus specified: the rare-anchor
+    check applies whenever the reference check itself had nothing decisive
+    to compare -- candidate_refs empty, OR the cluster's own reference core
+    empty -- and never when both sides cite something, whether that shares
+    a number (merges) or is disjoint (the reference-core check already
+    refuses it on its own, before this is even consulted)."""
+    from synapt.recall.clustering import _reference_check_has_nothing_to_compare
+
+    assert _reference_check_has_nothing_to_compare(frozenset(), frozenset())
+    assert _reference_check_has_nothing_to_compare(frozenset(), frozenset({"846"}))
+    assert _reference_check_has_nothing_to_compare(frozenset({"754"}), frozenset())
+    assert not _reference_check_has_nothing_to_compare(frozenset({"754"}), frozenset({"846"}))
+    assert not _reference_check_has_nothing_to_compare(frozenset({"846"}), frozenset({"846"}))
+
+
+def test_rare_anchor_cross_cluster_min_df_returns_min_of_shared_tokens_only():
+    """Unit test: the minimum is taken over tokens the candidate and the
+    signature actually SHARE, not over either side alone -- a token
+    present on only one side never enters the comparison, and no overlap
+    at all reports None rather than a misleading 0."""
+    from collections import Counter
+
+    from synapt.recall.clustering import _rare_anchor_cross_cluster_min_df
+
+    signature_df = Counter({"common": 40, "rare": 2, "onlysig": 5, "onlycand": 1})
+    candidate_tokens = {"common", "rare", "onlycand"}
+    signature = {"common", "rare", "onlysig"}
+    assert _rare_anchor_cross_cluster_min_df(candidate_tokens, signature, signature_df) == 2
+
+    assert _rare_anchor_cross_cluster_min_df(set(), signature, signature_df) is None
+    assert _rare_anchor_cross_cluster_min_df(candidate_tokens, set(), signature_df) is None
+
+
+def test_recluster_merge_into_existing_refuses_when_no_shared_token_is_a_rare_anchor_end_to_end(tmp_path):
+    """RED-first witness for the false-merge shape a batch-36 acceptance
+    sample found (tracked privately): a candidate can clear BOTH
+    containment floors and the EXISTING per-token distinctiveness check
+    (whose rarity ceiling is total_clusters // RARE_TOKEN_DF_DIVISOR --
+    permissive at real-corpus scale, where 24,071 persisted signatures
+    makes even df=2000 count as "distinctive") while sharing NOTHING with
+    the target cluster that is genuinely rare in an absolute sense.
+    Measured on the real store: six false merges from one 15-row sample,
+    every shared token's cross-cluster document frequency at or above 12,
+    against zero shared-token minimums above 18 among the correct merges
+    in the same sample (one exact tie at 18 -- see
+    RARE_ANCHOR_MAX_CROSS_CLUSTER_DF's module comment for which side of
+    that tie the threshold sits on and why).
+
+    Scoped to "the reference check had nothing decisive to compare"
+    (Stromus, 2026-09-07), not to numberless candidates alone: a NUMBERED
+    candidate matching a cluster whose reference core is empty hits the
+    identical false-merge shape (row 10 of the same sample) and must be
+    caught the same way, while a candidate and cluster that both cite
+    numbers stay governed by the reference-core check alone (see
+    test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_to_end
+    and test_recluster_merge_into_existing_refuses_via_reference_core_not_raw_union_end_to_end,
+    both unaffected by this addition).
+
+    Built at exactly the boundary the existing distinctiveness check
+    cannot see past: 70 total persisted signatures (the real cluster + 69
+    decoys), so RARE_TOKEN_DF_DIVISOR's ceiling is 70 // 10 = 7. The
+    shared-token group's cross-cluster df is engineered to exactly 7 (the
+    real cluster plus 6 decoys carry it) -- clears the OLD check (7 <= 7)
+    while failing the NEW absolute one (7 > 6), proving the old check
+    alone is not sufficient at this scale, not merely restating that it
+    fails at a scale it was never meant to cover.
+
+    Three candidates land in the same batch against the same real cluster:
+      - ``silentnoanchor``: shares only the df=7 group, cites no
+        number -- must be refused (no rare anchor).
+      - ``citednoanchor``: shares the same df=7 group, but ALSO
+        cites a number the cluster's core never mentions -- the cluster's
+        own core is empty, so the reference check has nothing decisive
+        either; must be refused via the SAME rare-anchor path (row 10's
+        shape), not waved through for citing something.
+      - ``controlanchor``: shares the df=7 group AND two tokens
+        that exist ONLY in the real cluster's own signature (df=1) --
+        must still merge, proving the check does not over-refuse a
+        candidate that actually carries a topical anchor.
+    """
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    shared_group = [f"anchorshared{i}" for i in range(10)]
+    rare_group = ["onlyrealclustera", "onlyrealclusterb"]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # The real cluster: every turn carries the full shared_group +
+    # rare_group, numberless (no member cites any issue/PR/task number --
+    # its reference core is empty, the row-10 half of the scope).
+    # No English "question about"/"answer about" framing words -- those
+    # would land in the real signature too (df=1 across this synthetic
+    # 70-signature population, since no decoy uses them), accidentally
+    # supplying every candidate a free rare anchor regardless of whether
+    # it shares anything else. Every turn is the token groups alone.
+    entries = []
+    for i in range(8):
+        words = " ".join(shared_group + rare_group)
+        entries.append(user_text_entry(words, uuid=f"anchortopic-u{i}",
+                                        ts=f"2026-03-03T10:{i:02d}:00Z"))
+        entries.append(assistant_entry(text=words, uuid=f"anchortopic-a{i}",
+                                        ts=f"2026-03-03T10:{i:02d}:30Z"))
+    write_jsonl(source / "anchortopic.jsonl", entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert set(shared_group) <= real_signature, (
+            f"fixture assumption: the full shared group must land in the "
+            f"real signature: {sorted(real_signature)}"
+        )
+        assert set(rare_group) <= real_signature, (
+            f"fixture assumption: the full rare group must land in the "
+            f"real signature too: {sorted(real_signature)}"
+        )
+
+        now = "2026-03-03T12:00:00Z"
+        # 6 decoys carrying shared_group -- with the real cluster, df=7,
+        # exactly RARE_TOKEN_DF_DIVISOR's ceiling at 70 total clusters.
+        # Padded with 100 unique filler tokens each so a decoy's OWN
+        # containment (10/110) stays well under CONTAINMENT_THRESHOLD --
+        # never a competing match target.
+        for i in range(6):
+            decoy_signature = list(shared_group) + [f"dfdecoyfiller{i}_{j}" for j in range(100)]
+            db.save_cluster_token_signature(f"df-decoy-{i}", decoy_signature, now)
+        # 63 unrelated filler decoys, purely to reach the 70-cluster floor.
+        for i in range(63):
+            filler_signature = [f"unrelatedfiller{i}_{j}" for j in range(10)]
+            db.save_cluster_token_signature(f"filler-decoy-{i}", filler_signature, now)
+
+        total_clusters = len(db.load_cluster_token_signatures())
+        assert total_clusters == 70, (
+            f"fixture assumption: 1 real + 6 df-decoys + 63 filler-decoys "
+            f"= 70, engineered so RARE_TOKEN_DF_DIVISOR's ceiling (70 // 10 "
+            f"= 7) exactly matches shared_group's df: {total_clusters}"
+        )
+
+        # Same "no accidental English framing words" discipline as the
+        # real cluster's own transcript above -- these candidates must
+        # share ONLY the token groups named in each docstring bullet,
+        # nothing else, or a stray shared word supplies an unintended
+        # rare anchor and the witness proves nothing.
+        write_jsonl(source / "silentnoanchor.jsonl", [
+            user_text_entry(" ".join(shared_group),
+                             uuid="silentnoanchor-u", ts="2026-03-03T11:00:00Z"),
+            assistant_entry(text=" ".join(shared_group),
+                             uuid="silentnoanchor-a", ts="2026-03-03T11:00:30Z"),
+        ])
+        write_jsonl(source / "citednoanchor.jsonl", [
+            user_text_entry(" ".join(shared_group) + " issue #999",
+                             uuid="citednoanchor-u", ts="2026-03-03T11:01:00Z"),
+            assistant_entry(text=" ".join(shared_group) + " issue #999",
+                             uuid="citednoanchor-a", ts="2026-03-03T11:01:30Z"),
+        ])
+        write_jsonl(source / "controlanchor.jsonl", [
+            user_text_entry(" ".join(shared_group + rare_group),
+                             uuid="controlanchor-u", ts="2026-03-03T11:02:00Z"),
+            assistant_entry(text=" ".join(shared_group + rare_group),
+                             uuid="controlanchor-a", ts="2026-03-03T11:02:30Z"),
+        ])
+        _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                            incremental=True, skip_clustering=True)
+    finally:
+        db.close()
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 3, f"exactly the three new candidates should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"only the control candidate (genuine rare anchor) may merge: {receipt}"
+        )
+        assert receipt.get("rare_anchor_refused") == 2, (
+            f"both no-anchor candidates -- numberless and numbered alike -- "
+            f"must be refused via the SAME counter: {receipt}"
+        )
+        assert receipt["floor_refused"] == 0, (
+            f"all three candidates clear both containment floors on token "
+            f"grounds alone -- nothing here is a floor refusal: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 0, (
+            f"the real cluster's reference core is empty, so the "
+            f"disjoint-citation check never has anything decisive to "
+            f"compare against -- its own counter must stay at zero: {receipt}"
+        )
+
+        # Not asserted via the stale-set delta: the two refused candidates
+        # still share shared_group WITH EACH OTHER, so the ordinary
+        # self-batch clustering pass over "remaining_chunks" forms them
+        # into a NEW topic cluster of their own -- correct behavior (a
+        # refusal from one existing cluster is not exile from every
+        # cluster), and unrelated to what this test is checking. The
+        # receipt's own merge_samples names exactly which chunk merged
+        # into WHICH cluster, which is the precise claim under test.
+        merge_sample_chunk_ids = {s["chunk_id"] for s in receipt["merge_samples"]}
+        assert len(merge_sample_chunk_ids) == 1, (
+            f"exactly one merge into an EXISTING cluster this run: {receipt['merge_samples']}"
+        )
+        merged_chunk_id = merge_sample_chunk_ids.pop()
+        assert "controlanchor" in merged_chunk_id, (
+            f"the control candidate must be the one that merged: {merged_chunk_id}"
+        )
+        assert all(
+            s["cluster_id"] == existing_cluster_id for s in receipt["merge_samples"]
+        ), (
+            f"and it must merge into the REAL cluster, not somewhere else: "
+            f"{receipt['merge_samples']}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert not any("silentnoanchor" in cid or "citednoanchor" in cid for cid in member_ids), (
+            f"neither no-anchor candidate may ever join: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
 # The compaction-continuation preamble and command-args wrapper markers
 # (tracked privately) are structural harness artifacts, byte-identical across unrelated
 # sessions, that dominate token overlap the same way the tags in
