@@ -1747,3 +1747,489 @@ def test_cluster_signature_tiebreak_is_stable_across_process_hash_seeds():
     assert len(sig_seed0) == 64, sig_seed0
     # The 34 unambiguous high-count tokens must always be present.
     assert all(f"hi{i}" in sig_seed0 for i in range(34)), sig_seed0
+
+
+# A follow-on to the recluster candidate-matching false-merge work
+# (2026-09-06): two more false-merge classes found
+# in a live batch-15 stratified sample. (a) A pasted macOS screenshot's
+# "[Image: source: /var/folders/.../TemporaryItems/.../Screenshot ...png]"
+# line is filesystem-path METADATA about how the image arrived, not content
+# -- identical in SHAPE across any two unrelated screenshots on the same
+# host, so two chunks whose only real connection is "both pasted a
+# screenshot" cleared containment on the temp-folder hash and path
+# fragments. (b) A candidate compared ONE AT A TIME (a stratified sample
+# probe, not a full batch) never runs the per-batch 20%-of-batch
+# compute_boilerplate_stoplist check at all -- there is no batch population
+# to compute a fraction over -- so recurring team/process vocabulary
+# ("session", "task", "entry") that is common across the STORE but never
+# clears a single-candidate's own non-existent batch fraction still counted
+# toward containment and the distinctiveness floor.
+
+def test_strip_image_paste_boilerplate_removes_the_bracketed_source_line():
+    from synapt.recall.clustering import _strip_image_paste_boilerplate
+
+    text = (
+        "Here's the bug [Image: source: /var/folders/44/"
+        "b5xdrsh50mlfkm0t_rbb8d5w0000gn/T/TemporaryItems/"
+        "NSIRD_screencaptureui_ABC123/Screenshot 2026-09-06 at 8.14.02 AM.png] "
+        "the who-output is wrong"
+    )
+    stripped = _strip_image_paste_boilerplate(text)
+    assert "[Image" not in stripped, stripped
+    assert "b5xdrsh50mlfkm0t_rbb8d5w0000gn" not in stripped, stripped
+    assert "the who-output is wrong" in stripped, (
+        "real content on the same line, outside the bracket, must survive"
+    )
+
+
+def test_is_path_fragment_token_catches_hex_runs_and_filenames_not_real_words():
+    from synapt.recall.clustering import _is_path_fragment_token
+
+    assert _is_path_fragment_token("b5xdrsh50mlfkm0t_rbb8d5w0000gn"), (
+        "the macOS temp-folder hash shape (long, mixed letters+digits) "
+        "must be caught as the backstop for whatever the bracket strip "
+        "does not have an exact shape for"
+    )
+    assert _is_path_fragment_token("deadbeefcafe1234"), "a long hex run is a hash, not a word"
+    assert _is_path_fragment_token("screenshot.png"), "an image filename is path metadata"
+    for real_word in ("session", "screenshot", "entry", "foundation", "gate"):
+        assert not _is_path_fragment_token(real_word), (
+            f"a real English/process word must never be flagged as a path "
+            f"fragment: {real_word!r}"
+        )
+
+
+def test_chunk_tokens_strips_image_paste_boilerplate_and_path_fragments():
+    """Both structural strips run on BOTH sides of a comparison because
+    they live inside _chunk_tokens itself, which backfill/redrive's
+    signature-building path and recluster's candidate-matching path both
+    call -- this test only needs to prove _chunk_tokens does it once."""
+    from synapt.recall.clustering import _chunk_tokens
+    from synapt.recall.core import TranscriptChunk
+
+    chunk = TranscriptChunk(
+        id="imgpaste:t1", session_id="imgpaste-session",
+        timestamp="2026-09-06T12:00:00Z", turn_index=1,
+        user_text=(
+            "(here's what I see) [Image: source: /var/folders/44/"
+            "b5xdrsh50mlfkm0t_rbb8d5w0000gn/T/TemporaryItems/"
+            "NSIRD_screencaptureui_XYZ789/Screenshot 2026-09-06 at 3.10.00 PM.png]"
+        ),
+        assistant_text="the who output looks completely wrong in this screenshot",
+    )
+    tokens = _chunk_tokens(chunk)
+    assert "b5xdrsh50mlfkm0t_rbb8d5w0000gn" not in tokens, tokens
+    assert not any(t.endswith("png") for t in tokens), tokens
+    # "temporaryitem" (_tokenize stems the plural "TemporaryItems" to this
+    # singular form -- verified directly, not assumed) is the mutation
+    # witness for the BRACKET-LEVEL strip specifically, not the per-token
+    # backstop: it is short (13 chars, under the backstop's 20-char floor),
+    # pure-alpha (no digit, so _is_path_fragment_token's mixed-alnum rule
+    # never fires on it), and not an image filename -- if the bracket
+    # strip were disabled, nothing else in this function would remove it,
+    # so its absence is proof the bracket itself was stripped, not just
+    # its shape-suspicious contents.
+    assert "temporaryitem" not in tokens, tokens
+    # "screenshot" and "wrong" are ordinary content words, not curated
+    # stopwords (unlike "output"/"this" in this coding-transcript corpus's
+    # own _STOP_TOKENS) -- real, non-path-shaped content must survive
+    # alongside the metadata strip.
+    assert "screenshot" in tokens, tokens
+    assert "wrong" in tokens, tokens
+
+
+def test_chunk_tokens_drops_a_bare_path_fragment_token_outside_any_image_bracket():
+    """Mutation witness for the BACKSTOP CLAUSE specifically (`and not
+    _is_path_fragment_token(t)` at the _chunk_tokens filter site), as
+    distinct from the bracket-level strip covered above. Stromus's R2
+    (2026-09-06): removing that clause left all existing tests green,
+    because every path-shaped token in this file's other fixtures sits
+    INSIDE a "[Image: source: ...]" span, so _strip_image_paste_boilerplate
+    already eats it before the backstop ever needs to fire -- the backstop
+    itself was never independently exercised. This chunk has no bracket at
+    all: a bare 28-char hex run appears in plain prose, the shape
+    _is_path_fragment_token's own direct unit test already proves it
+    catches, but never before proven to be wired into _chunk_tokens for
+    text the bracket regex has nothing to match."""
+    from synapt.recall.clustering import _chunk_tokens
+    from synapt.recall.core import TranscriptChunk
+
+    chunk = TranscriptChunk(
+        id="barehexoutsidebracket:t1", session_id="barehexoutsidebracket-session",
+        timestamp="2026-09-06T12:00:00Z", turn_index=1,
+        user_text="",
+        assistant_text=(
+            "the crash trace lives at deadbeefcafe0123456789abcdef on disk, "
+            "unrelated to any screenshot paste"
+        ),
+    )
+    tokens = _chunk_tokens(chunk)
+    assert "[Image" not in chunk.assistant_text, (
+        "fixture assumption: no bracket at all, so only the backstop clause "
+        "can be what removes the hex run"
+    )
+    assert "deadbeefcafe0123456789abcdef" not in tokens, tokens
+    # Real content words on the same line must still survive -- the
+    # backstop drops the SHAPE, not the sentence.
+    assert "crash" in tokens, tokens
+    assert "trace" in tokens, tokens
+    assert "disk" in tokens, tokens
+
+
+def test_compute_generic_token_stoplist_finds_tokens_pervasive_across_all_clusters():
+    """Same contract as compute_boilerplate_stoplist, over a DIFFERENT
+    population: signature_df / total_clusters (how many DISTINCT cluster
+    signatures carry a token, out of every cluster in the store) rather
+    than a per-batch document frequency. 12 of 20 clusters carry
+    'pervasive' (60%, clears 20%); 3 of 20 carry 'occasional' (15%, does
+    not)."""
+    from collections import Counter
+
+    from synapt.recall.clustering import compute_generic_token_stoplist
+
+    signature_df = Counter({"pervasive": 12, "occasional": 3, "unique": 1})
+    stoplist = compute_generic_token_stoplist(signature_df, total_clusters=20, min_fraction=0.20)
+
+    tokens = {tok for tok, _frac in stoplist}
+    assert tokens == {"pervasive"}, f"only the token above 20% of 20 clusters should appear: {stoplist}"
+    frac = dict(stoplist)["pervasive"]
+    assert abs(frac - 0.60) < 1e-9, frac
+
+
+def test_compute_generic_token_stoplist_empty_is_empty_not_a_crash():
+    from collections import Counter
+
+    from synapt.recall.clustering import compute_generic_token_stoplist
+
+    assert compute_generic_token_stoplist(Counter(), total_clusters=0) == []
+
+
+def test_generic_store_wide_vocabulary_stripped_from_both_sides_blocks_a_false_merge():
+    """Direct reproduction of row 8/row 9's shape: a candidate that shares
+    ONLY store-wide-common process vocabulary with a target signature must
+    not merge on that vocabulary alone, and stripping it must come off
+    BOTH the candidate tokens and the signature (see recluster_stale_chunks'
+    merge_into_existing block) -- stripping only one side leaves the other
+    side's copy of the token still inflating the containment ratio's
+    denominator or numerator."""
+    from synapt.recall.clustering import (
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+        compute_generic_token_stoplist,
+    )
+
+    from synapt.recall.clustering import MIN_CLUSTERS_FOR_DISTINCTIVENESS
+
+    generic = frozenset(f"processword{i}" for i in range(10))
+    assert len(generic) >= MIN_SHARED_SIGNATURE_TOKENS
+    target_signature = generic
+
+    # 'generic' recurs in the target plus 9 other clusters (10 total, 100%
+    # pervasive) -- deliberately BELOW MIN_CLUSTERS_FOR_DISTINCTIVENESS (20),
+    # where the EXISTING per-token rarity check is skipped outright (see
+    # _match_existing_cluster's docstring: too few clusters to compare
+    # against makes every token trivially look "common"). That isolates
+    # this test to what the NEW store-wide stoplist adds: at this
+    # population size the old distinctiveness floor cannot block a
+    # pervasive-token-only match at all, so if this fixture's "before"
+    # assertion below did NOT hold, the mechanism under test would be
+    # proven to add nothing a bigger population's existing check doesn't
+    # already cover. Each other cluster also carries disjoint filler so
+    # the fixture is realistic, not literal duplicate signatures.
+    other_clusters = {
+        f"clust-other-{i}": generic | frozenset(f"filler{i}_{j}" for j in range(10))
+        for i in range(9)
+    }
+    cluster_signatures_raw = {"clust-target": target_signature, **other_clusters}
+    assert len(cluster_signatures_raw) < MIN_CLUSTERS_FOR_DISTINCTIVENESS, (
+        "fixture assumption: below the activation floor, so the existing "
+        "distinctiveness check is skipped and cannot be what blocks the match"
+    )
+
+    raw_signature_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    stoplist = compute_generic_token_stoplist(
+        raw_signature_df, len(cluster_signatures_raw), min_fraction=0.20,
+    )
+    generic_tokens = frozenset(tok for tok, _frac in stoplist)
+    assert generic_tokens == generic, f"the fixture's own generic vocabulary must be the whole stoplist: {stoplist}"
+
+    candidate_tokens = generic | {"unrelated_a", "unrelated_b"}
+
+    # WITHOUT stripping: raw containment on the whole shared signature.
+    unfiltered_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures_raw, unfiltered_df,
+    ) == "clust-target", (
+        "fixture assumption: without the strip this is exactly the "
+        "false-merge shape -- shared count and containment both clear on "
+        "generic vocabulary alone"
+    )
+
+    # WITH stripping applied to BOTH sides (the real call site's shape).
+    stripped_candidate = candidate_tokens - generic_tokens
+    stripped_signatures = {
+        cid: sig - generic_tokens for cid, sig in cluster_signatures_raw.items()
+    }
+    stripped_df = _signature_cross_cluster_df(stripped_signatures)
+    assert _match_existing_cluster(
+        stripped_candidate, stripped_signatures, stripped_df,
+    ) is None, (
+        "once store-wide-generic vocabulary is stripped from both the "
+        "candidate and every signature, nothing distinctive remains to "
+        "merge on"
+    )
+
+
+def test_signature_side_generic_strip_prevents_dilution_not_false_merges():
+    """Mutation witness for the SIGNATURE-side half of the generic strip
+    specifically (the candidate-side strip alone does not exercise this):
+    once a generic token is gone from the CANDIDATE's own tokens (always
+    true here -- both branches below apply the candidate-side strip
+    identically), it can never land in the shared intersection regardless
+    of what the signature carries, so stripping the signature too changes
+    NOTHING about which tokens are shared -- only the containment ratio's
+    DENOMINATOR, which can only raise or hold the ratio, never lower it.
+    So this property is the OPPOSITE of a false-merge guard: a signature
+    padded with generic bulk (44 tokens: 10 generic + 8 real topic words
+    the candidate genuinely shares + 26 other real topic words it does not)
+    dilutes a genuine 8-shared-token match to 8/44=0.182, BELOW
+    CONTAINMENT_THRESHOLD, even though 8 clears MIN_SHARED_SIGNATURE_TOKENS
+    outright -- stripping the generic bulk from the signature too raises it
+    to 8/34=0.235, above threshold. Without this half, a real match can be
+    wrongly missed; it does not, on its own, block anything the
+    candidate-side strip did not already block."""
+    from synapt.recall.clustering import (
+        CONTAINMENT_THRESHOLD,
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+        compute_generic_token_stoplist,
+    )
+
+    generic = frozenset(f"genericword{i}" for i in range(10))
+    rare_shared = frozenset(f"realtopicword{i}" for i in range(8))
+    assert len(rare_shared) == MIN_SHARED_SIGNATURE_TOKENS, (
+        "fixture assumption: exactly at the absolute shared-count floor, "
+        "so only the RATIO determines the outcome"
+    )
+    rare_unshared = frozenset(f"othertopicword{i}" for i in range(26))
+    target_signature = generic | rare_shared | rare_unshared
+    assert len(target_signature) == 44
+
+    generic_decoys = {
+        f"clust-genericdecoy-{i}": generic | frozenset(f"gfiller{i}_{j}" for j in range(10))
+        for i in range(10)
+    }
+    plain_decoys = {
+        f"clust-plaindecoy-{i}": frozenset(f"pfiller{i}_{j}" for j in range(20))
+        for i in range(39)
+    }
+    cluster_signatures_raw = {"clust-target": target_signature, **generic_decoys, **plain_decoys}
+    assert len(cluster_signatures_raw) == 50
+
+    raw_signature_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    stoplist = compute_generic_token_stoplist(raw_signature_df, 50, min_fraction=0.20)
+    generic_tokens = frozenset(tok for tok, _frac in stoplist)
+    assert generic_tokens == generic, (
+        f"fixture assumption: 'generic' sits at 11/50=22%, above the 20% "
+        f"floor, and nothing else does: {stoplist}"
+    )
+
+    candidate_tokens = (generic | rare_shared | {"unrelated_a"}) - generic_tokens
+    assert candidate_tokens == rare_shared | {"unrelated_a"}, (
+        "candidate-side strip applied identically in both branches below"
+    )
+
+    unstripped_shared = candidate_tokens & target_signature
+    assert len(unstripped_shared) == MIN_SHARED_SIGNATURE_TOKENS, (
+        f"fixture assumption: shared count clears the absolute floor either way: {unstripped_shared}"
+    )
+    unstripped_containment = len(unstripped_shared) / len(target_signature)
+    assert unstripped_containment < CONTAINMENT_THRESHOLD, (
+        f"fixture assumption: 8/44={unstripped_containment:.3f} must sit BELOW threshold"
+    )
+
+    unstripped_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures_raw, unstripped_df,
+    ) is None, (
+        "WITHOUT the signature-side strip, generic bulk still padding the "
+        "signature's denominator must dilute this genuine match below "
+        "threshold -- the real merge is missed, not a false merge blocked"
+    )
+
+    stripped_signatures = {
+        cid: sig - generic_tokens for cid, sig in cluster_signatures_raw.items()
+    }
+    stripped_target = stripped_signatures["clust-target"]
+    assert stripped_target == rare_shared | rare_unshared and len(stripped_target) == 34
+    stripped_containment = len(candidate_tokens & stripped_target) / len(stripped_target)
+    assert stripped_containment >= CONTAINMENT_THRESHOLD, (
+        f"fixture assumption: 8/34={stripped_containment:.3f} must sit AT OR ABOVE threshold"
+    )
+
+    stripped_df = _signature_cross_cluster_df(stripped_signatures)
+    assert _match_existing_cluster(
+        candidate_tokens, stripped_signatures, stripped_df,
+    ) == "clust-target", (
+        "WITH the signature-side strip, the same 8 genuinely-shared topic "
+        "words are no longer diluted by generic bulk in the denominator, "
+        "and the real match is recovered"
+    )
+
+
+def test_generic_stoplist_leaves_genuinely_distinctive_topic_vocabulary_alone():
+    """Control for the mechanism above: a candidate sharing a cluster's
+    genuinely topic-specific vocabulary (present in no other cluster, so
+    nowhere near the 20% store-wide floor) must still merge -- the
+    store-wide stoplist only removes tokens that actually clear the
+    pervasiveness bar, not everything a candidate happens to share."""
+    from synapt.recall.clustering import (
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+        compute_generic_token_stoplist,
+    )
+
+    distinctive = frozenset(_TOPIC_WORDS)
+    target_signature = distinctive
+    decoys = _decoy_signatures(30)
+    cluster_signatures = {"clust-target": target_signature, **decoys}
+
+    raw_signature_df = _signature_cross_cluster_df(cluster_signatures)
+    stoplist = compute_generic_token_stoplist(
+        raw_signature_df, len(cluster_signatures), min_fraction=0.20,
+    )
+    assert not (set(distinctive) & {tok for tok, _f in stoplist}), (
+        f"topic-specific vocabulary present in only ONE of 31 signatures "
+        f"(3%) must never clear a 20% store-wide floor: {stoplist}"
+    )
+
+    candidate_tokens = distinctive | {"chunk_only_word"}
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, raw_signature_df,
+    ) == "clust-target", "a genuine topical match must survive the store-wide strip untouched"
+
+
+def test_recluster_merge_into_existing_strips_store_wide_generic_vocabulary_through_the_real_call_site(tmp_path):
+    """The call-site wiring test: recluster_stale_chunks(merge_into_existing=True)
+    must compute the generic stoplist from the REAL loaded cluster
+    signatures and apply it to both the candidate and its in-memory copy of
+    every signature -- not just have the two halves work correctly in
+    isolation (the direct unit tests above). Population held at exactly
+    MIN_CLUSTERS_FOR_DISTINCTIVENESS (20, "the activation boundary," same
+    convention as test_recluster_merge_into_existing_distinctiveness_through_the_real_call_site)
+    deliberately: the call site gates the WHOLE store-wide stoplist
+    computation behind that same floor (a fixture with too few real
+    clusters made every token of a genuine signature read as "100%
+    pervasive" by construction and wiped real matches -- see the comment
+    at the call site), so a population below it would prove nothing about
+    this mechanism specifically."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    generic_group = [f"genericprocessword{i}" for i in range(10)]
+
+    def _topic_transcript_with_generic_group(path: Path, *, turns: int = 8) -> Path:
+        entries = []
+        generic = " ".join(generic_group)
+        for i in range(turns):
+            rare = " ".join(w for j, w in enumerate(_TOPIC_WORDS) if (j + i) % 3 != 0)
+            entries.append(
+                user_text_entry(f"question about {rare} {generic}", uuid=f"gtopic-u{i}",
+                                 ts=f"2026-03-01T10:{i:02d}:00Z")
+            )
+            entries.append(
+                assistant_entry(text=f"answer about {rare} {generic}", uuid=f"gtopic-a{i}",
+                                 ts=f"2026-03-01T10:{i:02d}:30Z")
+            )
+        write_jsonl(path, entries)
+        return path
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript_with_generic_group(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert set(_TOPIC_WORDS) & real_signature, (
+            f"fixture assumption: the rare/topic group must be in the real signature: {sorted(real_signature)}"
+        )
+        assert set(generic_group) & real_signature, (
+            f"fixture assumption: the generic group must be in the real signature too: {sorted(real_signature)}"
+        )
+
+        # 19 purely synthetic decoys ALSO carry generic_group -- 20 total
+        # signatures (1 real + 19 decoys, the population-gate boundary)
+        # all carrying it, i.e. 100%, comfortably above the 20% fraction
+        # floor. _TOPIC_WORDS appears in no decoy.
+        now = "2026-03-01T12:00:00Z"
+        for i in range(19):
+            decoy_signature = list(generic_group) + [f"decoyfiller{i}_{j}" for j in range(50)]
+            db.save_cluster_token_signature(f"decoy-{i}", decoy_signature, now)
+
+        total_clusters = len(db.load_cluster_token_signatures())
+        assert total_clusters == 20, f"fixture assumption: 1 real + 19 decoys, at the population-gate boundary: {total_clusters}"
+
+        write_jsonl(source / "rare_candidate.jsonl", [
+            user_text_entry("question about " + " ".join(_TOPIC_WORDS), uuid="grare-u",
+                             ts="2026-03-01T11:00:00Z"),
+            assistant_entry(text="answer about " + " ".join(_TOPIC_WORDS), uuid="grare-a",
+                             ts="2026-03-01T11:00:30Z"),
+        ])
+        write_jsonl(source / "generic_candidate.jsonl", [
+            user_text_entry("question about " + " ".join(generic_group), uuid="ggeneric-u",
+                             ts="2026-03-01T11:01:00Z"),
+            assistant_entry(text="answer about " + " ".join(generic_group), uuid="ggeneric-a",
+                             ts="2026-03-01T11:01:30Z"),
+        ])
+        _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                            incremental=True, skip_clustering=True)
+    finally:
+        db.close()
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the rare (topic-word) candidate must merge, not the "
+            f"generic-vocabulary-only one: {receipt}"
+        )
+        dropped = {tok for tok, _frac in receipt["batch_boilerplate_dropped"]}
+        assert set(generic_group) <= dropped, (
+            f"the generic group must appear in the run's own reported "
+            f"stoplist, not just work by coincidence: {receipt['batch_boilerplate_dropped']}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        merged_chunk_id = (stale_before - stale_after).pop()
+        # chunk_id derives from the source FILENAME ("rare_candidate.jsonl"
+        # / "generic_candidate.jsonl"), not the uuid field set above -- see
+        # the sibling distinctiveness call-site test's identical convention.
+        assert "rare" in merged_chunk_id, (
+            f"the RARE (topic-word) candidate must be the one that merged: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids, f"the merged chunk must be a real member: {member_ids}"
+        assert not any("generic" in cid for cid in member_ids), (
+            f"the generic-vocabulary-only candidate must never have joined: {member_ids}"
+        )
+    finally:
+        db.close()
