@@ -2516,6 +2516,411 @@ def test_extract_reference_numbers_empty_text_is_empty_not_a_crash():
     assert _extract_reference_numbers("no numbers cited here at all") == frozenset()
 
 
+def test_extract_reference_numbers_matches_task_prefix_form():
+    """A batch-35 sample row cited "recall task 155" and got refs={} under
+    the original three prefix forms -- the whole ref-disjoint check was a
+    silent no-op for that candidate, not because the check judged the
+    number ambiguous, but because the idiom was never recognized."""
+    from synapt.recall.clustering import _extract_reference_numbers
+
+    assert _extract_reference_numbers("recall task 155 v5 needs a re-read") == {"155"}
+    assert _extract_reference_numbers("task#42 is done") == {"42"}
+    # Still below the two-digit floor, same as every other prefix form.
+    assert _extract_reference_numbers("task 5 is tiny") == frozenset()
+
+
+def test_reference_core_returns_numbers_cited_by_at_least_two_members():
+    from synapt.recall.clustering import _reference_core
+
+    core = _reference_core([
+        frozenset({"100"}),
+        frozenset({"100", "200"}),
+        frozenset({"300"}),
+    ])
+    assert core == frozenset({"100"}), core
+
+
+def test_reference_core_falls_back_to_earliest_member_when_no_number_reaches_two_citations():
+    """The row-5 shape directly: five members each citing a DIFFERENT
+    number (no majority anywhere), earliest-first order given exactly as
+    load_cluster_member_chunk_ids now returns it. The core must fall back
+    to the FIRST list entry, not an arbitrary member and not the union."""
+    from synapt.recall.clustering import _reference_core
+
+    core = _reference_core([
+        frozenset({"874"}),   # earliest
+        frozenset({"911"}),
+        frozenset({"990"}),
+        frozenset({"912"}),
+        frozenset({"994"}),   # most recent
+    ])
+    assert core == frozenset({"874"}), core
+
+
+def test_reference_core_empty_members_list_is_empty_not_a_crash():
+    from synapt.recall.clustering import _reference_core
+
+    assert _reference_core([]) == frozenset()
+    assert _reference_core([frozenset(), frozenset()]) == frozenset()
+
+
+def test_recluster_merge_into_existing_refuses_via_reference_core_not_raw_union_end_to_end(tmp_path):
+    """End-to-end reproduction of the batch-35 sample's row 5: an existing
+    cluster whose five prior members each cite a DIFFERENT issue/PR number
+    (no majority anywhere -- 874, 911, 990, 912, 994, in join order), and a
+    candidate citing #994 -- the LAST-joined member's number, present in
+    the raw UNION of all five members' citations. Under the original
+    union-based check this candidate merges (the real, observed
+    false-merge shape). Under the reference-core check it must be
+    refused: the core falls back to the fallback rule's chosen member's
+    own citation (#874) when no number reaches two independent
+    citations, and #994 is disjoint from {874}.
+
+    All five members share the SAME added_at here -- self-batch
+    clustering (``append_clusters``) stamps every row formed in one
+    build call with that build's own wall-clock moment, regardless of
+    per-message ``ts`` (measured directly while building the companion
+    test below; an earlier version of THIS docstring described this
+    fixture as ordered by "added_at," which was not actually true). So
+    within this fixture the fallback is decided entirely by the
+    ``chunk_id`` secondary key (``ORDER BY added_at, chunk_id`` -- tied
+    on the first column, so the second breaks the tie), not by any
+    genuine temporal signal; the companion test below builds a fixture
+    where added_at genuinely varies, specifically to exercise the
+    PRIMARY sort key this one cannot.
+
+    Citing the LAST-joined member deliberately, not an arbitrary one
+    (Stromus's R2 catch on v1, which cited the middle member's #990): a
+    candidate matching any non-fallback single member is refused whether
+    the fallback correctly picks the RULE's member OR incorrectly picks
+    some other single member -- so #990 could not tell "picked the RIGHT
+    one" from "picked A wrong one" and stayed green under a reversed
+    member order (join order [874,911,990,912,994] reversed puts 994
+    first, not 990). #994 is the one number for which "reversed order
+    wins" and "correct order wins" produce opposite verdicts."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import (
+        _chunk_tokens,
+        _match_existing_cluster,
+        _normalize_signature_tokens,
+        recluster_stale_chunks,
+        stale_transcript_chunk_ids,
+    )
+
+    thin_words = [f"corecheck{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # Existing cluster: five members, each citing a DIFFERENT number,
+    # added in this exact order (timestamps ascending -- membership order
+    # follows added_at, which follows archive/build order here).
+    member_numbers = ["874", "911", "990", "912", "994"]
+    entries = []
+    for i, num in enumerate(member_numbers):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i) % 3 != 0)
+        entries.append(user_text_entry(
+            f"question about {w} re #{num}", uuid=f"corering-u{i}",
+            ts=f"2026-03-05T10:{i:02d}:00Z",
+        ))
+        entries.append(assistant_entry(
+            text=f"answer about {w} tracked in #{num}", uuid=f"corering-a{i}",
+            ts=f"2026-03-05T10:{i:02d}:30Z",
+        ))
+    write_jsonl(source / "topic.jsonl", entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+    finally:
+        db.close()
+
+    # Candidate cites #994 -- the LAST-joined member's number, present in
+    # the raw union, absent from the core (no number reaches two
+    # citations, so the core falls back to member 1's #874, the earliest).
+    write_jsonl(source / "unioncore_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re #994",
+                         uuid="unioncore-u", ts="2026-03-05T11:00:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} filed as #994",
+                         uuid="unioncore-a", ts="2026-03-05T11:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 1, f"exactly the one new candidate should be stale: {stale_before}"
+
+        # Verify by fruit: the candidate must actually CLEAR both
+        # containment floors on token grounds alone, or its refusal proves
+        # nothing about the reference-core check specifically.
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        candidate_id = next(iter(stale_before))
+        candidate_chunk = db.load_chunks_by_rowids(
+            [id_rowid_map[candidate_id]]
+        )[id_rowid_map[candidate_id]]
+        cluster_token_sets = db.load_cluster_token_signatures()
+        from synapt.recall.clustering import _signature_cross_cluster_df
+        signature_df = _signature_cross_cluster_df(cluster_token_sets)
+        candidate_tokens = _normalize_signature_tokens(_chunk_tokens(candidate_chunk))
+        would_match = _match_existing_cluster(candidate_tokens, cluster_token_sets, signature_df)
+        assert would_match == existing_cluster_id, (
+            f"fixture assumption: the candidate must clear both containment "
+            f"floors on token grounds alone, so its refusal is attributable "
+            f"to the reference-core check, not the floors: "
+            f"got {would_match!r}, expected {existing_cluster_id!r}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 0, (
+            f"the #994 candidate shares a number only with the raw union, "
+            f"not with the core (which falls back to the chunk_id-tiebreak "
+            f"member's #874, since added_at is tied across this fixture) "
+            f"-- it must be refused, not merged: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 1, (
+            f"the refusal must be attributed to the reference check: {receipt}"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_merge_into_existing_reference_core_earliest_member_by_added_at_not_insertion_order_end_to_end(tmp_path):
+    """Companion to the test above, catching a DIFFERENT mutation: a
+    cluster whose ``chunk_id`` values (and therefore the order SQLite
+    returns rows in when no ORDER BY is given -- measured directly, not
+    assumed; see below) diverge from its ``added_at`` chronological
+    order.
+
+    Two gaps found empirically while building this fixture, both
+    corrected here rather than assumed:
+
+    (1) Self-batch clustering cannot build an added_at divergence at
+    all: ``append_clusters`` stamps every row formed in ONE build call
+    with the SAME ``added_at`` (the build's own wall-clock moment),
+    regardless of the per-message ``ts`` values in the source transcript
+    -- an earlier version of this fixture varied only ``ts`` and its own
+    "storage order is descending" assumption check passed VACUOUSLY
+    (every added_at was identical, so any ordering of identical values
+    trivially "is" descending) while the real behavior downstream was
+    silently untested. Fixed here by attaching members directly via
+    ``db.merge_chunks_into_cluster``, which takes an EXPLICIT
+    ``added_at`` argument the caller controls -- #990 (2020, oldest),
+    #912 (2021), #994 (2022) -- decoupled entirely from when the call
+    happens or what the source transcript's ``ts`` fields say.
+
+    (2) Dropping ORDER BY does NOT return rows in rowid/insertion order
+    on this table -- measured directly (``ORDER BY rowid`` gives one
+    order, a bare query with no ORDER BY gives a DIFFERENT one). The
+    table's only index is ``idx_cluster_chunks_chunk`` on ``chunk_id``,
+    and empirically SQLite's plan for a bare
+    ``WHERE cluster_id IN (...)`` returns rows in chunk_id-ASCENDING
+    order via that index, not insertion order. So the fixture's source
+    filenames are chosen so chunk_id order (``aaa_seed:t0/t1`` before
+    ``zzz_later_members:t0/t1/t2``, since chunk_id is derived from the
+    filename) puts the SEED members first -- the opposite of added_at
+    order, which puts #990 (2020) first. The two orderings now
+    genuinely disagree about which member is "first."
+
+    With the real ``ORDER BY added_at, chunk_id``, the core correctly
+    falls back to #990 (added_at-earliest) and a candidate citing #990
+    merges. Drop the ORDER BY and the query falls back to chunk_id
+    order, naming a SEED member (#874) instead -- the #990 candidate
+    would be wrongly refused."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import (
+        _chunk_tokens,
+        _match_existing_cluster,
+        _normalize_signature_tokens,
+        backfill_cluster_signatures,
+        recluster_stale_chunks,
+        stale_transcript_chunk_ids,
+    )
+
+    thin_words = [f"storageordercheck{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # Seed: two members via ONE self-batch build, both cite a number that
+    # is NOT the candidate's number, so the fixture only proves something
+    # if the true added_at-earliest member (#990, attached below) is what
+    # the candidate is checked against.
+    seed_numbers = ["874", "911"]
+    seed_entries = []
+    for i, num in enumerate(seed_numbers):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i) % 3 != 0)
+        seed_entries.append(user_text_entry(
+            f"question about {w} re #{num}", uuid=f"storageorder-seed-u{i}",
+            ts=f"2026-03-06T10:{i:02d}:00Z",
+        ))
+        seed_entries.append(assistant_entry(
+            text=f"answer about {w} tracked in #{num}", uuid=f"storageorder-seed-a{i}",
+            ts=f"2026-03-06T10:{i:02d}:30Z",
+        ))
+    # Filename chosen to sort BEFORE the later-attached file below, so
+    # chunk_id order (derived from filename) puts the seed first --
+    # confirmed the divergence this fixture needs (see docstring).
+    write_jsonl(source / "aaa_seed.jsonl", seed_entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    # Three more members, built as fresh/unclustered content first (same
+    # topic vocabulary, different numbers), attached to the seed cluster
+    # DIRECTLY via merge_chunks_into_cluster with explicit, hand-picked
+    # added_at values -- decoupled entirely from filename/chunk_id order,
+    # which sorts these AFTER the seed (filename chosen to sort after
+    # "aaa_seed"), the opposite of added_at order.
+    later_numbers = ["990", "912", "994"]
+    later_entries = []
+    for i, num in enumerate(later_numbers):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i + 2) % 3 != 0)
+        later_entries.append(user_text_entry(
+            f"question about {w} re #{num}", uuid=f"storageorder-later-u{i}",
+            ts=f"2026-03-06T10:{i + 2:02d}:00Z",
+        ))
+        later_entries.append(assistant_entry(
+            text=f"answer about {w} tracked in #{num}", uuid=f"storageorder-later-a{i}",
+            ts=f"2026-03-06T10:{i + 2:02d}:30Z",
+        ))
+    write_jsonl(source / "zzz_later_members.jsonl", later_entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        seed_added_ats = {
+            r[0] for r in db._conn.execute(
+                "SELECT added_at FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert len(seed_added_ats) == 1, (
+            f"fixture assumption: self-batch formation stamps every row "
+            f"with the SAME added_at (the build moment), regardless of "
+            f"per-message ts -- confirmed empirically: {seed_added_ats}"
+        )
+        seed_added_at, = seed_added_ats
+
+        # Matched by CONTENT, not by chunk_id string shape (chunk_id is
+        # derived from the source filename + turn index, e.g.
+        # "later_members:t0" -- not from the uuid passed to
+        # user_text_entry, which names the JSONL message, not the chunk).
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        later_ids_by_number: dict[str, str | None] = {num: None for num in later_numbers}
+        for cid, rowid in id_rowid_map.items():
+            chunk = db.load_chunks_by_rowids([rowid])[rowid]
+            for num in later_numbers:
+                if f"#{num}" in (chunk.user_text or ""):
+                    later_ids_by_number[num] = cid
+        assert all(later_ids_by_number.values()), later_ids_by_number
+
+        # Call order: 990 (added_at 2020, oldest), 912 (2021), 994
+        # (2022) -- earliest added_at value attached THIRD, not first.
+        for num, added_at in (
+            ("990", "2020-01-01T00:00:00+00:00"),
+            ("912", "2021-01-01T00:00:00+00:00"),
+            ("994", "2022-01-01T00:00:00+00:00"),
+        ):
+            db.merge_chunks_into_cluster(
+                existing_cluster_id, [later_ids_by_number[num]],
+                appended_text=f"answer tracked in #{num}", added_at=added_at,
+            )
+
+        # Fixture assumption check: run the EXACT query shape M1 (drop
+        # ORDER BY) produces, not a proxy for it -- an earlier version of
+        # this check asserted about ORDER BY rowid, which is NOT what a
+        # bare query returns on this table (measured directly: this
+        # table's only index is on chunk_id, and SQLite's plan for a
+        # bare ``WHERE cluster_id IN (...)`` returns chunk_id-ascending
+        # order via that index, not rowid/insertion order). The fixture
+        # only proves something if THAT query's first row is a seed
+        # member, not the added_at-earliest one.
+        no_order_by_rows = db._conn.execute(
+            "SELECT chunk_id, added_at FROM cluster_chunks WHERE cluster_id = ?",
+            (existing_cluster_id,),
+        ).fetchall()
+        no_order_by_added_ats = [r["added_at"] for r in no_order_by_rows]
+        assert no_order_by_added_ats[0] == seed_added_at, (
+            f"fixture assumption: a bare (no ORDER BY) query's first row "
+            f"must be a seed member (added_at={seed_added_at!r}), not the "
+            f"added_at-earliest member, or M1 cannot be distinguished "
+            f"from the real fix: {no_order_by_added_ats}"
+        )
+        assert min(no_order_by_added_ats) != seed_added_at, (
+            f"fixture assumption: the added_at-EARLIEST value must belong "
+            f"to a member attached AFTER the seed, not the seed itself: "
+            f"{no_order_by_added_ats}"
+        )
+
+        backfill_cluster_signatures(db, batch_size=500)
+    finally:
+        db.close()
+
+    # Candidate cites #990 -- the added_at-EARLIEST member's number.
+    # Merges under correct added_at ordering; would be wrongly refused
+    # if the query fell back to chunk_id order (which picks a seed
+    # member's #874 first, per the fixture assumption check above).
+    write_jsonl(source / "storageorder_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re #990",
+                         uuid="storageorder-cand-u", ts="2026-03-06T11:00:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} filed as #990",
+                         uuid="storageorder-cand-a", ts="2026-03-06T11:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 1, f"exactly the one new candidate should be stale: {stale_before}"
+
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        candidate_id = next(iter(stale_before))
+        candidate_chunk = db.load_chunks_by_rowids(
+            [id_rowid_map[candidate_id]]
+        )[id_rowid_map[candidate_id]]
+        cluster_token_sets = db.load_cluster_token_signatures()
+        from synapt.recall.clustering import _signature_cross_cluster_df
+        signature_df = _signature_cross_cluster_df(cluster_token_sets)
+        candidate_tokens = _normalize_signature_tokens(_chunk_tokens(candidate_chunk))
+        would_match = _match_existing_cluster(candidate_tokens, cluster_token_sets, signature_df)
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        assert would_match == existing_cluster_id, (
+            f"fixture assumption: the candidate must clear both containment "
+            f"floors on token grounds alone, so its verdict is attributable "
+            f"to the reference-core check, not the floors: "
+            f"got {would_match!r}, expected {existing_cluster_id!r}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"the #990 candidate matches the added_at-EARLIEST member "
+            f"(attached third, not first) -- it must merge under a "
+            f"correct added_at ordering, not one that silently follows "
+            f"storage/rowid order instead: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 0, (
+            f"a merge that succeeds must not also be counted as a refusal: {receipt}"
+        )
+    finally:
+        db.close()
+
+
 def test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_to_end(tmp_path):
     """End-to-end through the real ``recluster_stale_chunks`` call site: a
     candidate with genuine topical/token overlap (would clear BOTH
