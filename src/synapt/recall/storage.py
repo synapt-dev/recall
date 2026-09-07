@@ -2681,15 +2681,27 @@ class RecallDB:
 
     def load_cluster_member_chunk_ids(self, cluster_ids: list[str]) -> dict[str, list[str]]:
         """Member chunk ids for each of the given clusters, keyed by
-        ``cluster_id``. Bounded by the caller's own cluster batch, not the
-        corpus -- used to compute a signature from ACTUAL current members."""
+        ``cluster_id``, EARLIEST membership first. Bounded by the caller's
+        own cluster batch, not the corpus -- used to compute a signature
+        from ACTUAL current members, and (ordering now load-bearing there)
+        by ``recluster_stale_chunks``'s reference-core check to identify
+        the founding member when no number is cited by a majority.
+
+        Ordered by ``added_at, chunk_id``, not ``added_at`` alone: on the
+        real store, 104,992 of 121,688 cluster_chunks rows -- most of the
+        corpus -- share a single ``added_at`` value from the first build,
+        so ``added_at`` alone leaves "earliest member" a tie SQLite breaks
+        however its query plan happens to return rows for that tie, not a
+        stable rule. ``chunk_id`` as a secondary key makes the order a
+        deterministic total order regardless of how many rows tie on
+        ``added_at``."""
         if not cluster_ids:
             return {}
         placeholders = ",".join("?" * len(cluster_ids))
         result: dict[str, list[str]] = {cid: [] for cid in cluster_ids}
         for cluster_id, chunk_id in self._conn.execute(
             f"SELECT cluster_id, chunk_id FROM cluster_chunks "
-            f"WHERE cluster_id IN ({placeholders})",
+            f"WHERE cluster_id IN ({placeholders}) ORDER BY added_at, chunk_id",
             cluster_ids,
         ).fetchall():
             result[cluster_id].append(chunk_id)

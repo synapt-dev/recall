@@ -142,8 +142,13 @@ MIN_CANDIDATE_CONTAINMENT = 0.153
 # number is not evidence of a different subject), but two non-empty,
 # non-overlapping sets is checked directly against the specific numbers
 # involved, not against a token count or a ratio.
+#
+# ``task`` added after a batch-35 sample row (tracked privately): a
+# candidate citing "recall task 155" had refs={} under the original three
+# forms, so the whole check was a no-op for it -- not because the number
+# was ambiguous, but because the idiom wasn't recognized at all.
 REFERENCE_NUMBER_RE = _re.compile(
-    r"(?:\b[a-z][a-z0-9_.-]*#|#|\bPR\s*#?\s*|\bissue\s*#?\s*)(\d{2,5})\b",
+    r"(?:\b[a-z][a-z0-9_.-]*#|#|\bPR\s*#?\s*|\bissue\s*#?\s*|\btask\s*#?\s*)(\d{2,5})\b",
     _re.IGNORECASE,
 )
 
@@ -390,6 +395,44 @@ def _extract_reference_numbers(text: str) -> frozenset[str]:
     coincidence), never over-flag a same-subject citation as different.
     """
     return frozenset(REFERENCE_NUMBER_RE.findall(text))
+
+
+def _reference_core(member_ref_sets: list[frozenset[str]]) -> frozenset[str]:
+    """The cluster's reference IDENTITY from its prior members' citations,
+    given in the order they joined the cluster (earliest first): the
+    numbers cited by at least two DISTINCT members, or -- when no number
+    reaches that bar -- the earliest member's own citations alone.
+
+    Replaces a flat union of every prior member's citations (recall PR
+    #1162's original form, tracked privately as the row-5 gap): a union
+    grows monotonically with every accepted merge, so a chain of
+    pairwise-overlapping merges can walk a cluster arbitrarily far from
+    its founding subject -- each individual step defensible (some member
+    shares SOME number with the candidate), the chain as a whole not.
+    Measured on a live sample: a cluster whose full membership spans 9+
+    distinct issue/PR numbers, no two non-adjacent members sharing any,
+    held together only by successive one-number overlaps and generic
+    coordination-genre vocabulary.
+
+    A CORE stays anchored instead: a number counts as the cluster's
+    identity only once independent members agree on it, and absent that
+    agreement, the founding member -- not whichever member joined most
+    recently -- is what a new candidate gets checked against. A cluster
+    with exactly one prior member (the common case) is unaffected: no
+    number can reach two citations, so the fallback returns that member's
+    own set, identical to the old union of one.
+    """
+    counts: dict[str, int] = {}
+    for refs in member_ref_sets:
+        for ref in refs:
+            counts[ref] = counts.get(ref, 0) + 1
+    core = frozenset(ref for ref, n in counts.items() if n >= 2)
+    if core:
+        return core
+    for refs in member_ref_sets:
+        if refs:
+            return refs
+    return frozenset()
 
 
 def _chunk_tokens(
@@ -1883,18 +1926,31 @@ def recluster_stale_chunks(
                     (chunk.user_text or "") + " " + (chunk.assistant_text or "")
                 )
                 if candidate_refs:
+                    # Earliest-member-first (load_cluster_member_chunk_ids'
+                    # own ordering) -- required so the core's fallback
+                    # branch (below) picks the FOUNDING member, not an
+                    # arbitrary one. load_chunks_by_rowids' return dict is
+                    # NOT re-ordered by its own rowid-list argument (its
+                    # query has no ORDER BY, so iterating .values() would
+                    # silently hand back DB storage order instead); the
+                    # loop below re-applies prior_ids' order explicitly.
                     prior_ids = db.load_cluster_member_chunk_ids([target]).get(target, [])
-                    prior_refs: frozenset[str] = frozenset()
+                    prior_ref_sets: list[frozenset[str]] = []
                     if prior_ids:
                         prior_rowids = [
                             id_rowid_map[cid] for cid in prior_ids if cid in id_rowid_map
                         ]
-                        for prior_chunk in db.load_chunks_by_rowids(prior_rowids).values():
-                            prior_refs |= _extract_reference_numbers(
+                        loaded_by_rowid = db.load_chunks_by_rowids(prior_rowids)
+                        for rowid in prior_rowids:
+                            prior_chunk = loaded_by_rowid.get(rowid)
+                            if prior_chunk is None:
+                                continue
+                            prior_ref_sets.append(_extract_reference_numbers(
                                 (prior_chunk.user_text or "")
                                 + " "
                                 + (prior_chunk.assistant_text or "")
-                            )
+                            ))
+                    prior_refs = _reference_core(prior_ref_sets)
                     if prior_refs and candidate_refs.isdisjoint(prior_refs):
                         ref_disjoint = True
                         ref_disjoint_refused_count += 1
