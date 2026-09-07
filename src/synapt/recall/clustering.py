@@ -94,6 +94,38 @@ CONTAINMENT_THRESHOLD = 0.20     # fraction of the signature that must be presen
 MIN_SHARED_SIGNATURE_TOKENS = 8  # absolute floor: ratio alone lets a tiny
                                   # signature "match" on a handful of coincidental tokens
 
+# CONTAINMENT_THRESHOLD is asymmetric BY DESIGN (signature-side only, see
+# _match_existing_cluster's docstring) -- and that asymmetry has its own
+# false-merge shape, the mirror image of the one CONTAINMENT_THRESHOLD
+# exists to catch. A SMALL, generic signature (few tokens, TOP_SIGNATURE_TOKENS'
+# cap rarely reached) needs only a handful of shared tokens to read a HIGH
+# signature-side containment, regardless of how large or unrelated the
+# candidate chunk actually is: a 558-token candidate sharing 9 incidental
+# words with a 12-token signature reads containment 9/12 = 0.75 (clears
+# CONTAINMENT_THRESHOLD easily) while sharing only 1.6% of its OWN content.
+# Measured hand-read, five false merges in one live batch (candidates
+# 173-558 tokens, signatures 12-31 tokens, 8-11 shared): every one
+# cleared the signature-side ratio
+# and the absolute floor, none shared more than 6.4% of their own tokens.
+# MIN_CANDIDATE_CONTAINMENT is the mirror floor: shared / len(candidate
+# tokens), independent of and in addition to CONTAINMENT_THRESHOLD -- a
+# match must cover a meaningful fraction of BOTH sides, not just the
+# (possibly tiny) signature. Value is the midpoint of the empirical
+# separation margin measured on 18 correct / 8 incorrect real merges (26
+# rows, batch-15 + batch-25 combined): negatives' ceiling 0.1379, next
+# positive 0.1690, margin 0.0311 wide -- 0.153 sits centered in it. No
+# single-column or alternative two-column rule (shared_tok alone,
+# shared/signature alone, shared/signature vs shared/candidate jointly)
+# beat this on the same 26 rows; shared/signature was measured actively
+# misleading, since a THIN signature inflates it the same way a thin
+# signature inflates plain containment. Trades 4 of 18 correct merges
+# (22%) for zero false positives on this sample -- a real precision/recall
+# choice, not a free win; a candidate below the floor is left stale, the
+# safe direction (the revert-vs-refuse asymmetry, tracked privately: a
+# refused correct merge stays recoverable next batch, a passed wrong
+# merge is not, without a gated live-store write to undo it).
+MIN_CANDIDATE_CONTAINMENT = 0.153
+
 # A raw shared-token COUNT rewards a match dominated by common, recurring
 # vocabulary (a harness prompt's own words, a status update's "quiet",
 # "standing by") exactly as readily as one dominated by rare, topical
@@ -534,6 +566,7 @@ def _match_existing_cluster(
     rare_token_df_divisor: int = RARE_TOKEN_DF_DIVISOR,
     min_distinctive_shared_tokens: int = MIN_DISTINCTIVE_SHARED_TOKENS,
     min_clusters_for_distinctiveness: int = MIN_CLUSTERS_FOR_DISTINCTIVENESS,
+    min_candidate_containment: float = MIN_CANDIDATE_CONTAINMENT,
 ) -> str | None:
     """Best-matching existing cluster id for one chunk's tokens, or None.
 
@@ -590,6 +623,17 @@ def _match_existing_cluster(
     numbered-code chunks in the meantime, rather than relying only on the
     fact that a freshly-tokenized chunk can no longer contribute matching
     digits to ``shared``.
+
+    ``min_candidate_containment`` is a SECOND, independent containment
+    floor -- ``|shared| / |chunk_tokens|``, the CANDIDATE'S side, not the
+    signature's -- required in addition to ``min_containment``. The two
+    are not interchangeable: ``min_containment`` alone lets a small
+    signature match on a coincidental handful of shared tokens regardless
+    of how large or unrelated the candidate is (measured: a 558-token
+    candidate sharing 9 words with a 12-token signature clears
+    ``min_containment`` at 0.75 while sharing only 1.6% of its own
+    content). See ``MIN_CANDIDATE_CONTAINMENT``'s module-level comment for
+    the empirical margin this value is centered in.
     """
     total_clusters = len(cluster_signatures)
     check_distinctiveness = total_clusters >= min_clusters_for_distinctiveness
@@ -612,7 +656,12 @@ def _match_existing_cluster(
             if distinctive_shared < min_distinctive_shared_tokens:
                 continue
         containment = len(shared) / len(signature)
-        if containment >= min_containment and containment > best_score:
+        if containment < min_containment:
+            continue
+        candidate_containment = len(shared) / len(chunk_tokens) if chunk_tokens else 0.0
+        if candidate_containment < min_candidate_containment:
+            continue
+        if containment > best_score:
             best_score = containment
             best_id = cluster_id
     return best_id
@@ -1598,6 +1647,7 @@ def recluster_stale_chunks(
             "fresh_in_batch": 0,
             "fallback_in_batch": 0,
             "merged_into_existing": 0,
+            "floor_refused": 0,
             "batch_boilerplate_dropped": [],
             "merge_samples": [],
             "merge_run_id": None,
@@ -1616,6 +1666,7 @@ def recluster_stale_chunks(
             "fresh_in_batch": 0,
             "fallback_in_batch": 0,
             "merged_into_existing": 0,
+            "floor_refused": 0,
             "batch_boilerplate_dropped": [],
             "merge_samples": [],
             "merge_run_id": None,
@@ -1629,6 +1680,7 @@ def recluster_stale_chunks(
     batch_chunks = [chunk_map[r] for r in rowids if r in chunk_map]
 
     merged_count = 0
+    floor_refused_count = 0
     batch_boilerplate_dropped: list[tuple[str, float]] = []
     merge_samples: list[dict] = []
     effective_stopwords = boilerplate_stopwords
@@ -1716,15 +1768,30 @@ def recluster_stale_chunks(
             # Same noise filter self-batch clustering applies -- a chunk too
             # short to ever form its own cluster is too short to match an
             # existing one meaningfully either.
+            has_enough_tokens = len(tokens) >= MIN_TOKENS
             target = (
                 _match_existing_cluster(tokens, cluster_token_sets, signature_df)
-                if len(tokens) >= MIN_TOKENS
+                if has_enough_tokens
                 else None
             )
             if target is not None:
                 merges_by_cluster.setdefault(target, []).append(chunk)
             else:
                 remaining_chunks.append(chunk)
+                # A second, cheap pass ONLY for chunks that already failed
+                # to match: was there a cluster that would have matched
+                # under CONTAINMENT_THRESHOLD alone (min_candidate_containment
+                # disabled)? If so, this chunk's refusal is specifically the
+                # new candidate-side floor, not "no real overlap anywhere" --
+                # the receipt's floor_refused count, distinct from the
+                # ordinary still-stale count, is what makes the floor's
+                # actual bite on a real batch visible without re-deriving it
+                # from a hand read every time (see MIN_CANDIDATE_CONTAINMENT).
+                if has_enough_tokens and _match_existing_cluster(
+                    tokens, cluster_token_sets, signature_df,
+                    min_candidate_containment=0.0,
+                ) is not None:
+                    floor_refused_count += 1
         # Signatures are a snapshot from the top of this batch: two batch
         # members that both match the SAME existing cluster both merge into
         # it correctly (chunk_count is recomputed, not incremented), but a
@@ -1793,6 +1860,7 @@ def recluster_stale_chunks(
         "fresh_in_batch": fresh_count,
         "fallback_in_batch": fallback_count,
         "merged_into_existing": merged_count,
+        "floor_refused": floor_refused_count,
         "batch_boilerplate_dropped": batch_boilerplate_dropped,
         "merge_samples": merge_samples,
         "merge_run_id": merge_run_id if (merged_count and not dry_run) else None,
