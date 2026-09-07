@@ -3372,3 +3372,120 @@ def test_three_unrelated_compaction_summaries_stay_separate_clusters(tmp_path):
         )
     finally:
         db.close()
+
+
+def test_ordinary_second_build_does_not_silently_erase_a_same_session_incremental_merge(tmp_path):
+    """`recluster_stale_chunks(merge_into_existing=True)`'s
+    additive, run_id-tagged membership row is not durable against a normal
+    build. `save_clusters` (called from every build with the default
+    `skip_clustering=False`, which is what actually runs at session start --
+    `_run_build_job` passes no override) is documented "Replace all clusters
+    and memberships (full rebuild)": its first statement deletes every
+    `cluster_chunks` row belonging to ANY topic-type cluster, unscoped by
+    run_id and unscoped to whether that cluster is even present in the
+    build's freshly-computed set. `transcript_only` (cli.py) is the FULL
+    known transcript corpus, not merely new content, so this fires on every
+    ordinary incremental build, not only a first/full one.
+
+    This witness needs no concurrent process and no live-store timing --
+    the defect reproduces from one session alone: build (forms a cluster),
+    merge a stale chunk into it (additive, real run_id), build again with
+    the default clustering-enabled path (no new source content at all).
+    The merged membership must survive; today it does not."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchall()
+        assert len(existing) == 1, f"fixture must produce exactly one existing cluster: {existing}"
+        existing_cluster_id = existing[0][0]
+    finally:
+        db.close()
+
+    _similar_to_cluster_singleton(source / "similar.jsonl")
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = stale_transcript_chunk_ids(db)
+        assert len(stale_before) == 1, f"exactly the one new chunk should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+        assert receipt["merged_into_existing"] == 1, receipt
+        merge_run_id = receipt["merge_run_id"]
+        assert merge_run_id, "a real merge_into_existing run must stamp a run_id"
+
+        merged_chunk_id = stale_before[0]
+        member_ids_before = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids_before, (
+            "sanity: the merge must have actually landed before testing "
+            f"whether a rebuild preserves it: {member_ids_before}"
+        )
+    finally:
+        db.close()
+
+    # The ordinary path: an incremental build with clustering ENABLED (the
+    # default -- no skip_clustering override), same as `_run_build_job`
+    # actually calls it. A trivial unrelated turn is added so the build's
+    # own no-op short-circuit (`is_noop` against the manifest signature)
+    # does not skip the whole pipeline outright -- a real session-start
+    # build almost always has SOME new input (the restarting session's own
+    # live activity, if nothing else); transcript_only is the full known
+    # corpus regardless of how little is new (cli.py), so the clustering
+    # step runs in full once triggered.
+    write_jsonl(source / "unrelated.jsonl", [
+        user_text_entry("completely unrelated filler turn", uuid="fill-u",
+                         ts="2026-03-01T12:00:00Z"),
+        assistant_entry(text="completely unrelated filler answer", uuid="fill-a",
+                         ts="2026-03-01T12:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        # This chunk gets PLACED by the fresh self-batch pass (it groups
+        # right back in with its 8 former cluster-mates) -- per R2's
+        # correction, a placed chunk's row is the BUILD's, not the merge's,
+        # and is left with no run_id stamped (see save_clusters). The
+        # invariant this scenario actually demonstrates is membership
+        # survival despite the id changing underneath it, not run_id
+        # survival -- that guarantee belongs to a chunk the fresh pass does
+        # NOT place (test_r2_probe_711.py's probe A).
+        run_id_rows_after = db._conn.execute(
+            "SELECT COUNT(*) FROM cluster_chunks WHERE run_id = ?", (merge_run_id,)
+        ).fetchone()[0]
+        assert run_id_rows_after == 0, (
+            f"a chunk the fresh pass PLACES should carry no run_id -- that "
+            f"row is the build's, not the merge's; found {run_id_rows_after} "
+            f"row(s) for run_id {merge_run_id}"
+        )
+
+        member_ids_after = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks cc "
+                "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+                "WHERE cl.cluster_type = 'topic'"
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids_after, (
+            f"the merged chunk must still be a member of SOME topic cluster "
+            f"after an ordinary later build: {member_ids_after}"
+        )
+    finally:
+        db.close()

@@ -2458,6 +2458,61 @@ class RecallDB:
         """
         cur = self._conn.cursor()
 
+        # A full rebuild re-derives clusters from the WHOLE known corpus
+        # every time (recall#435's own "full-corpus, O(store size)" design)
+        # with no notion of recluster_stale_chunks(merge_into_existing=True)'s
+        # additive, run_id-tagged rows -- so the DELETE below, unqualified,
+        # silently discarded every incremental maintenance batch's
+        # provenance, and for a chunk the fresh self-batch grouping does not
+        # place anywhere, its membership outright (measured against the live
+        # production store and reproduced in
+        # test_ordinary_second_build_does_not_silently_erase_a_same_session_incremental_merge).
+        #
+        # An earlier version of this fix re-anchored by matching the
+        # preserved chunk_id against the fresh INSERT alone. That misses the
+        # case that matters most on the live store: a chunk merge_into_
+        # existing placed BECAUSE the self-batch grouping never would (that
+        # IS what "stale" means for most of these chunks -- MIN_CLUSTER_SIZE
+        # excludes a chunk with no peer). Such a chunk is placed by NEITHER
+        # pass, so chunk_id-only re-anchoring silently does nothing and the
+        # row is lost exactly as before (R2 probe A). The same version also
+        # stamped a preserved run_id onto ANY fresh row sharing that chunk_id
+        # -- including one the FRESH BUILD itself just wrote in an unrelated
+        # cluster -- corrupting run_id's contract that a bad run can be
+        # undone by exactly its own rows (R2 probe B: revert-by-run_id would
+        # then delete the build's own membership).
+        #
+        # Fixed shape: snapshot each preserved row's OLD cluster_id and
+        # added_at too, plus every OTHER member (preserved or not) that OLD
+        # cluster had. After the fresh insert: a chunk the fresh pass placed
+        # is left alone, full stop -- its row is the BUILD's, not the
+        # merge's, and nothing is stamped onto it (probe B). A chunk the
+        # fresh pass did NOT place is re-inserted under its OWN preserved
+        # (chunk_id, added_at, run_id), into whichever fresh cluster now
+        # holds the LARGEST share of its old cluster's other members --
+        # never the old cluster_id itself, which a merge's changed true
+        # membership means essentially never survives a rebuild unchanged
+        # (see clustering._cluster_id: a deterministic sha1 of sorted
+        # founding chunk_ids, computed once and never recomputed by
+        # merge_chunks_into_cluster). If none of the old cluster's other
+        # members were placed anywhere either (the whole grouping
+        # dissolved), the chunk is left stale -- it re-enters
+        # stale_transcript_chunk_ids and is caught by the ordinary
+        # maintenance pass next time, same as any other stale chunk.
+        preserved_rows = cur.execute(
+            "SELECT cluster_id, chunk_id, added_at, run_id FROM cluster_chunks "
+            "WHERE run_id IS NOT NULL"
+        ).fetchall()
+        old_cluster_ids = sorted({r[0] for r in preserved_rows})
+        old_cluster_members: dict[str, set[str]] = {}
+        if old_cluster_ids:
+            qmarks = ",".join("?" * len(old_cluster_ids))
+            for cid, chunk_id in cur.execute(
+                f"SELECT cluster_id, chunk_id FROM cluster_chunks "
+                f"WHERE cluster_id IN ({qmarks})", old_cluster_ids,
+            ).fetchall():
+                old_cluster_members.setdefault(cid, set()).add(chunk_id)
+
         # Clear topic-derived cluster data (preserve access-promoted singletons)
         cur.execute(
             "DELETE FROM cluster_chunks WHERE cluster_id IN "
@@ -2519,6 +2574,49 @@ class RecallDB:
                 "INSERT OR IGNORE INTO cluster_chunks "
                 "(cluster_id, chunk_id, added_at) VALUES (?, ?, ?)",
                 (cluster_id, chunk_id, added_at),
+            )
+
+        # Re-home preserved rows the fresh pass did NOT place (see the
+        # snapshot comment above). fresh_location is built from
+        # chunk_memberships directly -- the exact set just inserted above,
+        # never re-queried, so it cannot see a chunk that landed in the
+        # fresh set for some OTHER unrelated reason after this point.
+        fresh_location: dict[str, str] = {
+            chunk_id: cluster_id for cluster_id, chunk_id, _added_at in chunk_memberships
+        }
+        reinserted_clusters: set[str] = set()
+        for old_cluster_id, chunk_id, added_at, run_id in preserved_rows:
+            if chunk_id in fresh_location:
+                # Placed by the fresh pass: that row is the BUILD's, not the
+                # merge's. Leave it exactly as inserted -- run_id stays NULL.
+                continue
+            # Not placed: home it with whichever fresh cluster now holds the
+            # LARGEST share of its old cluster's OTHER members (siblings
+            # that a merge or the original self-batch pass put beside it).
+            votes: dict[str, int] = {}
+            for sibling in old_cluster_members.get(old_cluster_id, ()):
+                target = fresh_location.get(sibling)
+                if target is not None:
+                    votes[target] = votes.get(target, 0) + 1
+            if not votes:
+                # The old cluster fully dissolved: nothing to home this
+                # chunk against. Leave it stale for the ordinary maintenance
+                # pass to re-home from scratch next time.
+                continue
+            target_cluster_id = max(votes, key=lambda cid: (votes[cid], cid))
+            cur.execute(
+                "INSERT OR IGNORE INTO cluster_chunks "
+                "(cluster_id, chunk_id, added_at, run_id) VALUES (?, ?, ?, ?)",
+                (target_cluster_id, chunk_id, added_at, run_id),
+            )
+            reinserted_clusters.add(target_cluster_id)
+
+        for cluster_id in reinserted_clusters:
+            cur.execute(
+                "UPDATE clusters SET chunk_count = "
+                "(SELECT COUNT(*) FROM cluster_chunks WHERE cluster_chunks.cluster_id = clusters.cluster_id) "
+                "WHERE cluster_id = ?",
+                (cluster_id,),
             )
 
         for c in clusters:
