@@ -230,7 +230,14 @@ MIN_DUPLICATE_USER_TEXT_FRACTION = 0.5
 # on the same batch), evidently truncated upstream before the closing tag
 # -- left to the per-batch data-derived guard in recluster_stale_chunks,
 # which does not need a clean tag pair to work.
-_HARNESS_PREAMBLE_TAGS = ("skill", "command-message", "local-command-stdout")
+_HARNESS_PREAMBLE_TAGS = (
+    "skill", "command-message", "local-command-stdout",
+    # command-name added after a batch-31 hand-read (tracked privately):
+    # its content is always a short command word ("/loop"), the same
+    # shape as command-message, but was not part of the original three
+    # tags' verified open/close count above -- not re-verified at that scale.
+    "command-name",
+)
 _HARNESS_PREAMBLE_RE = _re.compile(
     r"<(" + "|".join(_HARNESS_PREAMBLE_TAGS) + r")>.*?</\1>", _re.DOTALL,
 )
@@ -286,6 +293,46 @@ def _is_path_fragment_token(token: str) -> bool:
 def _strip_image_paste_boilerplate(text: str) -> str:
     """Remove KNOWN image-paste path metadata before tokenizing."""
     return _IMAGE_PASTE_RE.sub(" ", text)
+
+
+# Two more structural harness artifacts (tracked privately), found via a
+# batch-31 acceptance-sample hand-read (2 of 15 rows), not verified against a large
+# batch the way _HARNESS_PREAMBLE_TAGS' three tags above were -- scoped
+# honestly rather than folded into that comment's measured claim.
+#
+# The compaction-continuation preamble is Claude Code's own fixed sentence,
+# byte-identical across every compacted session regardless of what the
+# session was actually about ("This session is being continued from a
+# previous conversation..."). A candidate and two prior members from THREE
+# unrelated sessions all opened with it and merged on that shared sentence
+# alone, not shared topic. Stripped as a fixed substring, not the whole
+# field: unlike _CONTEXT_ECHO_PREFIX, real per-session summary CONTENT
+# follows this sentence and is worth keeping for topic comparison -- only
+# the preamble sentence itself is boilerplate.
+_COMPACTION_PREAMBLE_RE = _re.compile(
+    r"This session is being continued from a previous conversation that ran "
+    r"out of context\. The summary below covers the earlier portion of the "
+    r"conversation\.",
+)
+
+# A slash command's <command-args> wraps the CALLER's own text (genuine,
+# differing content -- kept), but the wrapper TAG NAMES themselves ("command
+# args") are literal shared vocabulary across every invocation of the same
+# command regardless of argument content, the same shape as the tags in
+# _HARNESS_PREAMBLE_TAGS above. Unlike those tags, the block is NOT dropped
+# wholesale here (that would also drop the caller's real argument text) --
+# only the bare marker text is removed. <command-name> is added to the
+# wholesale-strip list below since its content really is always a short
+# command word ("/loop"), the same shape as <command-message>.
+_COMMAND_ARGS_WRAPPER_RE = _re.compile(r"</?command-args>", _re.IGNORECASE)
+
+
+def _strip_compaction_and_command_boilerplate(text: str) -> str:
+    """Remove the compaction-preamble sentence and command-args wrapper
+    markers (not their content) before tokenizing."""
+    text = _COMPACTION_PREAMBLE_RE.sub(" ", text)
+    text = _COMMAND_ARGS_WRAPPER_RE.sub(" ", text)
+    return text
 
 
 # recall's OWN synthetic restatement, not the harness's. core.py
@@ -353,9 +400,11 @@ def _chunk_tokens(
     Drops recall's own synthetic context-echo user_text FIRST (see
     ``_CONTEXT_ECHO_PREFIX`` -- it is not the turn's content, so a
     comparison that can see it compares the echo, not the chunk), then
-    strips known harness preamble blocks and image-paste path metadata
-    (structural, unconditional -- see ``_HARNESS_PREAMBLE_TAGS`` and
-    ``_IMAGE_PASTE_RE``), then applies ``extra_stopwords`` -- a
+    strips known harness preamble blocks, image-paste path metadata, the
+    compaction-continuation preamble, and command-args wrapper markers
+    (structural, unconditional -- see ``_HARNESS_PREAMBLE_TAGS``,
+    ``_IMAGE_PASTE_RE``, and ``_strip_compaction_and_command_boilerplate``),
+    then applies ``extra_stopwords`` -- a
     DATA-DERIVED, per-caller stoplist (see ``compute_boilerplate_stoplist``)
     for whatever boilerplate the structural strips above do not have
     an exact shape for -- and finally drops any token with no letters at
@@ -373,6 +422,7 @@ def _chunk_tokens(
     )
     text = _strip_harness_preamble(f"{user_text} {chunk.assistant_text}")
     text = _strip_image_paste_boilerplate(text)
+    text = _strip_compaction_and_command_boilerplate(text)
     tokens = _tokenize(text)
     return {
         t for t in tokens

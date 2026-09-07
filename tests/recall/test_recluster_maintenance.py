@@ -2641,3 +2641,95 @@ def test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_t
         )
     finally:
         db.close()
+
+
+# The compaction-continuation preamble and command-args wrapper markers
+# (tracked privately) are structural harness artifacts, byte-identical across unrelated
+# sessions, that dominate token overlap the same way the tags in
+# _HARNESS_PREAMBLE_TAGS already do -- found via a batch-31 acceptance
+# sample (2 of 15 rows), not a synthetic scenario.
+
+def test_strip_compaction_and_command_boilerplate_removes_markers_keeps_content():
+    """Unit-level: the preamble sentence and command-args tag markers are
+    removed; genuine surrounding content (including real summary text and
+    the caller's own command argument) survives untouched."""
+    from synapt.recall.clustering import _strip_compaction_and_command_boilerplate
+
+    text = (
+        "This session is being continued from a previous conversation that "
+        "ran out of context. The summary below covers the earlier portion "
+        "of the conversation. Summary: billing dashboard work continues. "
+        "<command-args>schedule the deploy for Friday</command-args>"
+    )
+    stripped = _strip_compaction_and_command_boilerplate(text)
+    assert "This session is being continued" not in stripped
+    assert "<command-args>" not in stripped
+    assert "</command-args>" not in stripped
+    assert "billing dashboard work continues" in stripped
+    assert "schedule the deploy for Friday" in stripped
+
+
+def test_command_name_tag_is_stripped_wholesale():
+    from synapt.recall.clustering import _strip_harness_preamble
+
+    text = "<command-name>/loop</command-name> the actual argument text"
+    stripped = _strip_harness_preamble(text)
+    assert "/loop" not in stripped
+    assert "the actual argument text" in stripped
+
+
+def test_three_unrelated_compaction_summaries_stay_separate_clusters(tmp_path):
+    """End-to-end through the real self-batch clustering path
+    (``cluster_chunks``, the same function ``recluster_stale_chunks`` falls
+    back to): three chunks that share ONLY the compaction preamble, each
+    with a genuinely distinct, distinctive topic, must NOT collapse into one
+    cluster. Mirrors the real batch-31 false-merge shape (three unrelated
+    sessions merged on the preamble alone)."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import cluster_chunks
+
+    preamble = (
+        "This session is being continued from a previous conversation that "
+        "ran out of context. The summary below covers the earlier portion "
+        "of the conversation."
+    )
+    topics = [
+        ("billingfeature123", "billingfeature123 dashboard enterprise customers billing"),
+        ("webhookrace456", "webhookrace456 payment webhook handler race condition"),
+        ("transcodeleak789", "transcodeleak789 video transcoder pipeline memory leak"),
+    ]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    # Two chunks per topic (MIN_CLUSTER_SIZE=2 -- a singleton never forms an
+    # observable cluster at all, so a single chunk per topic can't show the
+    # separation this test is checking for).
+    for i, (slug, topic_words) in enumerate(topics):
+        write_jsonl(source / f"{slug}.jsonl", [
+            user_text_entry(f"{preamble} Summary: {topic_words} {topic_words}",
+                             uuid=f"{slug}-u1", ts=f"2026-03-03T{10+i:02d}:00:00Z"),
+            assistant_entry(text=f"{topic_words} {topic_words} continuing work",
+                             uuid=f"{slug}-a1", ts=f"2026-03-03T{10+i:02d}:00:30Z"),
+            user_text_entry(f"{preamble} Summary: {topic_words} status update",
+                             uuid=f"{slug}-u2", ts=f"2026-03-03T{10+i:02d}:01:00Z"),
+            assistant_entry(text=f"{topic_words} {topic_words} progress noted",
+                             uuid=f"{slug}-a2", ts=f"2026-03-03T{10+i:02d}:01:30Z"),
+        ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        cluster_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT DISTINCT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+            ).fetchall()
+        }
+        assert len(cluster_ids) == 3, (
+            f"three genuinely distinct topics sharing only the boilerplate "
+            f"preamble must form three separate clusters, not merge on the "
+            f"preamble: got {len(cluster_ids)} cluster(s)"
+        )
+    finally:
+        db.close()
