@@ -205,8 +205,8 @@ class ShardedRecallDB:
     def pending_contradiction_count(self) -> int:
         return self._index.pending_contradiction_count()
 
-    def save_clusters(self, clusters: list[dict], memberships: list[tuple]) -> None:
-        self._index.save_clusters(clusters, memberships)
+    def save_clusters(self, clusters: list[dict], memberships: list[tuple]) -> dict:
+        return self._index.save_clusters(clusters, memberships)
 
     def append_clusters(self, clusters: list[dict], memberships: list[tuple]) -> None:
         self._index.append_clusters(clusters, memberships)
