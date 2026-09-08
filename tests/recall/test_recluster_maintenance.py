@@ -3466,7 +3466,7 @@ def test_ordinary_second_build_does_not_silently_erase_a_same_session_incrementa
         # invariant this scenario actually demonstrates is membership
         # survival despite the id changing underneath it, not run_id
         # survival -- that guarantee belongs to a chunk the fresh pass does
-        # NOT place (test_r2_probe_711.py's probe A).
+        # NOT place (test_save_clusters_dangling_row_probes.py's probe A).
         run_id_rows_after = db._conn.execute(
             "SELECT COUNT(*) FROM cluster_chunks WHERE run_id = ?", (merge_run_id,)
         ).fetchone()[0]
