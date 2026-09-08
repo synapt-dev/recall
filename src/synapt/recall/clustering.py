@@ -1902,6 +1902,7 @@ def recluster_stale_chunks(
     floor_refused_count = 0
     ref_disjoint_refused_count = 0
     rare_anchor_refused_count = 0
+    merge_cluster_vanished_count = 0
     batch_boilerplate_dropped: list[tuple[str, float]] = []
     merge_samples: list[dict] = []
     effective_stopwords = boilerplate_stopwords
@@ -2114,10 +2115,39 @@ def recluster_stale_chunks(
                 if part
             )
             if not dry_run:
-                db.merge_chunks_into_cluster(
-                    cluster_id, [c.id for c in chunks_to_merge], appended_text, now,
-                    run_id=merge_run_id,
-                )
+                # A concurrent full rebuild can remove `cluster_id` between
+                # this loop's lookup (above, against a signature snapshot
+                # from the top of the batch) and this write -- the storage
+                # layer now refuses that write outright (ValueError) rather
+                # than manufacture a dangling row. Refusing per CLUSTER here,
+                # not per batch, is what makes that correct storage-layer
+                # refusal safe to call from a loop: without this, one vanished
+                # cluster raises out of recluster_stale_chunks with every
+                # EARLIER cluster in this same loop already merged and
+                # committed -- a partial batch with no record of what
+                # finished and what did not. These chunks are not lost: they
+                # never got a row, so they remain in stale_transcript_chunk_
+                # ids exactly as if this cluster had never matched, ready
+                # for the next batch to re-resolve a live target.
+                try:
+                    db.merge_chunks_into_cluster(
+                        cluster_id, [c.id for c in chunks_to_merge], appended_text, now,
+                        run_id=merge_run_id,
+                    )
+                except ValueError:
+                    merge_cluster_vanished_count += len(chunks_to_merge)
+                    # This refusal is the FIRST authoritative confirmation
+                    # that `cluster_id` is gone -- so any OTHER cluster_chunks
+                    # row still naming it (this cluster's pre-existing
+                    # members, not just the chunks THIS call tried to add)
+                    # is dangling too, for exactly the same reason a
+                    # `save_clusters` full rebuild dissolves one: the same
+                    # principle applied at the moment of discovery, not
+                    # deferred to whenever the next full rebuild happens to
+                    # run. Left alone, those rows would sit as permanent
+                    # dangling references until then.
+                    db.dissolve_cluster_chunks_for_vanished_cluster(cluster_id)
+                    continue
             merged_count += len(chunks_to_merge)
             for c in chunks_to_merge:
                 if len(merge_samples) < MERGE_SAMPLE_SIZE:
@@ -2171,6 +2201,7 @@ def recluster_stale_chunks(
         "floor_refused": floor_refused_count,
         "ref_disjoint_refused": ref_disjoint_refused_count,
         "rare_anchor_refused": rare_anchor_refused_count,
+        "merge_cluster_vanished": merge_cluster_vanished_count,
         "batch_boilerplate_dropped": batch_boilerplate_dropped,
         "merge_samples": merge_samples,
         "merge_run_id": merge_run_id if (merged_count and not dry_run) else None,

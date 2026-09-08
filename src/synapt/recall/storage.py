@@ -2961,6 +2961,27 @@ class RecallDB:
         )
         self._conn.commit()
 
+    def dissolve_cluster_chunks_for_vanished_cluster(self, cluster_id: str) -> int:
+        """Remove every ``cluster_chunks`` row still naming ``cluster_id``.
+
+        For the caller that just had ``merge_chunks_into_cluster`` refuse
+        this exact ``cluster_id`` (it is confirmed absent from ``clusters``
+        at this instant) -- not only the row that refusal would have
+        written, but any OTHER row a cluster's earlier membership already
+        left behind. Those rows are otherwise invisible to ``save_clusters``'s
+        own cleanup until its next full rebuild happens to run; this call
+        applies the identical "a dangling reference dissolves, it does not
+        linger" rule the moment the absence is discovered, rather than
+        deferring it.
+
+        Returns the number of rows removed.
+        """
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM cluster_chunks WHERE cluster_id = ?", (cluster_id,))
+        removed = cur.rowcount
+        self._conn.commit()
+        return removed
+
     def load_clusters(self, status: str = "active") -> list[dict]:
         """Load clusters filtered by status."""
         rows = self._conn.execute(
