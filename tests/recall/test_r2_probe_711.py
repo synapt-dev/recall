@@ -53,6 +53,90 @@ def test_probe_a_membership_of_a_chunk_the_fresh_pass_does_not_place_survives_an
         db.close()
 
 
+def test_probe_c_a_row_whose_cluster_is_already_absent_does_not_survive_a_build_as_a_permanent_dangling_row(tmp_path):
+    """Live-store class: a run_id-tagged batch on the production store
+    carried several `cluster_chunks` rows whose `cluster_id`s were absent
+    from `clusters` -- most with NO other row for that chunk_id anywhere,
+    completely unclustered, with the stale reference never cleaned up.
+
+    The thinnest reproduction needs no concurrent process: `merge_chunks_into_
+    cluster` (storage.py:2860) has no existence check on `cluster_id`, so any
+    caller can stamp a run_id-tagged row onto a `cluster_id` that is not (or
+    is no longer) in `clusters` at all -- a concurrent `save_clusters`
+    rebuild racing an unlocked maintenance/recluster path that never takes
+    the build lock is one live-store way to get there; calling it directly
+    against a `cluster_id` that never existed is the thinnest.
+
+    An earlier version of this fixture manufactured the precondition by
+    merging into the REAL cluster and then deleting that cluster row. That
+    version passed even before any fix existed -- `cluster_id` is a
+    deterministic sha1 of the sorted founding chunk_ids (clustering.
+    _cluster_id), so with the founding membership unchanged, the very next
+    build's fresh pass recomputed the identical id and silently "healed" the
+    reference by coincidence, hiding the bug instead of demonstrating it.
+    Pointing at a cluster_id no real content can ever hash to removes that
+    coincidence entirely.
+
+    save_clusters's cleanup (storage.py:2518) is scoped to `cluster_id IN
+    (SELECT cluster_id FROM clusters WHERE cluster_type='topic')`, evaluated
+    fresh each call -- a cluster_id that was never present is invisible to
+    that DELETE on this call and every one after it. Today: the dangling row
+    survives an ordinary build untouched -- not re-homed (nothing votes for
+    it: `old_cluster_members` finds no OTHER row referencing the same fake
+    cluster_id) and not deleted (the delete never sees it). The fix must
+    make this row either re-homed (fresh valid cluster_id) or removed --
+    never a silent survivor pointing at a cluster that does not exist."""
+    project, source, cid, lone = _setup(tmp_path)
+
+    db = m._open_db(project)
+    try:
+        # Manufacture the live-store precondition directly, with no delete
+        # step and no risk of a coincidental id collision: a run_id-tagged
+        # row pointing at a cluster_id that never existed in `clusters` at
+        # all. merge_chunks_into_cluster's own UPDATE (storage.py:2864) is a
+        # silent no-op against a nonexistent cluster_id, which is itself
+        # part of what makes the missing existence check load-bearing.
+        fake_cluster_id = "clust-0000deadbeef"
+        assert db._conn.execute(
+            "SELECT 1 FROM clusters WHERE cluster_id = ?", (fake_cluster_id,)
+        ).fetchone() is None, "fixture's cluster_id must never have existed"
+        db.merge_chunks_into_cluster(
+            fake_cluster_id, [lone], "appended", "2026-03-01T12:30:00Z",
+            run_id="probe-run-dangling",
+        )
+        db._conn.commit()
+        dangling_before = [
+            r[0] for r in db._conn.execute(
+                "SELECT cluster_id FROM cluster_chunks WHERE run_id='probe-run-dangling'"
+            ).fetchall()
+        ]
+        assert dangling_before == [fake_cluster_id], (
+            f"fixture must produce exactly one dangling row pointing at "
+            f"the never-existed cluster: {dangling_before}")
+    finally:
+        db.close()
+
+    write_jsonl(source / "unrelated.jsonl", [
+        user_text_entry("completely unrelated filler turn", uuid="fill-u", ts="2026-03-02T12:00:00Z"),
+        assistant_entry(text="completely unrelated filler answer", uuid="fill-a", ts="2026-03-02T12:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = m._open_db(project)
+    try:
+        surviving_dangling = db._conn.execute(
+            "SELECT cc.chunk_id, cc.cluster_id, cc.run_id FROM cluster_chunks cc "
+            "LEFT JOIN clusters c ON c.cluster_id = cc.cluster_id "
+            "WHERE c.cluster_id IS NULL"
+        ).fetchall()
+        assert surviving_dangling == [], (
+            f"a row whose cluster was already absent survived an ordinary "
+            f"build as a permanent dangling reference, never re-homed and "
+            f"never removed: {surviving_dangling}")
+    finally:
+        db.close()
+
+
 def test_probe_b_run_id_is_never_stamped_onto_a_row_the_run_did_not_write(tmp_path):
     """Author's own scenario (a chunk the fresh pass DOES place): after the
     rebuild, the run_id must not label a membership the BUILD created in a
