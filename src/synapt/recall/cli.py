@@ -1100,7 +1100,7 @@ def _archive_and_build_locked(
                     joined = joined[:4000].rsplit(" ", 1)[0]
                 cl["search_text"] = joined
 
-            db.save_clusters(clusters, memberships)
+            clusters_receipt = db.save_clusters(clusters, memberships)
             # Pre-generate concat summaries at build time (read path stays pure).
             # Skip clusters that already have LLM summaries (preserved across rebuilds).
             llm_cluster_ids = {
@@ -1117,7 +1117,11 @@ def _archive_and_build_locked(
                     summary = generate_concat_summary(member_chunks, max_tokens=200)
                     if summary:
                         db.save_cluster_summary(cl["cluster_id"], summary)
-            print(f"  Clusters: {len(clusters)} topic clusters from {sum(c['chunk_count'] for c in clusters)} chunks")
+            clusters_line = f"  Clusters: {len(clusters)} topic clusters from {sum(c['chunk_count'] for c in clusters)} chunks"
+            dangling_removed = clusters_receipt.get("dangling_removed", 0)
+            if dangling_removed:
+                clusters_line += f" ({dangling_removed} dangling row(s) removed)"
+            print(clusters_line)
         else:
             print("  Clusters: none (chunks may not be related enough)")
 
@@ -4217,7 +4221,9 @@ def cmd_maintain(args: argparse.Namespace) -> None:
                 f"in the batch, {r['chunks_clustered']} chunk(s) clustered this run "
                 f"({r.get('merged_into_existing', 0)} merged into existing clusters, "
                 f"{r.get('floor_refused', 0)} refused below the candidate-overlap floor, "
-                f"{r.get('ref_disjoint_refused', 0)} refused on disjoint issue/PR citations), "
+                f"{r.get('ref_disjoint_refused', 0)} refused on disjoint issue/PR citations, "
+                f"{r.get('merge_cluster_vanished', 0)} refused on a cluster a concurrent "
+                f"rebuild removed), "
                 f"{r['still_stale']} still stale"
                 + (f". {r['drain_command']}" if r["drain_command"] else ".")
             )

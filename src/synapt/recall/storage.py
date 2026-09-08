@@ -2447,7 +2447,7 @@ class RecallDB:
         self,
         clusters: list[dict],
         chunk_memberships: list[tuple[str, str, str]],
-    ) -> None:
+    ) -> dict:
         """Replace all clusters and memberships (full rebuild).
 
         Args:
@@ -2455,6 +2455,14 @@ class RecallDB:
                 cluster_type, session_ids, branch, date_start, date_end,
                 chunk_count, status, created_at, updated_at.
             chunk_memberships: List of (cluster_id, chunk_id, added_at) tuples.
+
+        Returns:
+            A receipt dict with ``dangling_removed``: the count of
+            ``cluster_chunks`` rows deleted because their ``cluster_id``
+            matched no row in ``clusters`` at all, regardless of cluster_type
+            -- a state that used to be permanently invisible to this
+            method's own cleanup and would otherwise survive every future
+            call unreported.
         """
         cur = self._conn.cursor()
 
@@ -2499,12 +2507,34 @@ class RecallDB:
         # dissolved), the chunk is left stale -- it re-enters
         # stale_transcript_chunk_ids and is caught by the ordinary
         # maintenance pass next time, same as any other stale chunk.
+        #
+        # A second, distinct case: a preserved row whose old cluster_id
+        # matches NO cluster at all, even before this call started (not "the
+        # grouping dissolved during this rebuild" -- "this reference was
+        # already broken"). That is never a real grouping to vote among, so
+        # it is dissolved unconditionally rather than searched for siblings.
+        # The row itself is removed by the widened DELETE below in the same
+        # statement as an ordinary topic-cluster wipe, and the count is
+        # returned so a corrupted store cleaning up is visible, not silent.
         preserved_rows = cur.execute(
             "SELECT cluster_id, chunk_id, added_at, run_id FROM cluster_chunks "
             "WHERE run_id IS NOT NULL"
         ).fetchall()
         old_cluster_ids = sorted({r[0] for r in preserved_rows})
         old_cluster_members: dict[str, set[str]] = {}
+        # A preserved row's old_cluster_id may already be absent from
+        # clusters BEFORE this call does anything -- a row this permissive
+        # about its own cluster_id (merge_chunks_into_cluster used to write
+        # one with no existence check at all) can outlive the cluster it
+        # names if something else removes that cluster without also
+        # touching cluster_chunks. Snapshotting which old_cluster_ids are
+        # actually live right now, before any delete, is what lets the
+        # reinsertion loop below tell "this cluster is dissolving as PART OF
+        # this rebuild" (real siblings, worth voting among) apart from "this
+        # cluster was already gone before this call started" (nothing to
+        # vote among -- the row is corrupted state, not a live grouping,
+        # and must dissolve rather than be treated as having siblings).
+        existing_old_cluster_ids: set[str] = set()
         if old_cluster_ids:
             qmarks = ",".join("?" * len(old_cluster_ids))
             for cid, chunk_id in cur.execute(
@@ -2512,11 +2542,35 @@ class RecallDB:
                 f"WHERE cluster_id IN ({qmarks})", old_cluster_ids,
             ).fetchall():
                 old_cluster_members.setdefault(cid, set()).add(chunk_id)
+            existing_old_cluster_ids = {
+                r[0] for r in cur.execute(
+                    f"SELECT cluster_id FROM clusters WHERE cluster_id IN ({qmarks})",
+                    old_cluster_ids,
+                ).fetchall()
+            }
 
-        # Clear topic-derived cluster data (preserve access-promoted singletons)
+        # Count dangling rows (referencing no cluster at all, regardless of
+        # cluster_type) before removing them -- the receipt line below is
+        # the only record that this ever happens, so a corrupted store
+        # cleaning up silently would look identical to one that was never
+        # corrupted.
+        dangling_removed = cur.execute(
+            "SELECT COUNT(*) FROM cluster_chunks WHERE cluster_id NOT IN "
+            "(SELECT cluster_id FROM clusters)"
+        ).fetchone()[0]
+
+        # Clear topic-derived cluster data (preserve access-promoted
+        # singletons), AND any row whose cluster_id matches no cluster at
+        # all -- a dangling reference is not a topic-cluster membership, so
+        # the topic-only scope above never saw it and never will on any
+        # LATER call either (this same query, re-run next time, still
+        # excludes a cluster_id that stays absent forever). Stale means
+        # stale: the chunk re-enters stale_transcript_chunk_ids exactly as
+        # if its membership had simply never been written.
         cur.execute(
             "DELETE FROM cluster_chunks WHERE cluster_id IN "
-            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic')"
+            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic') "
+            "OR cluster_id NOT IN (SELECT cluster_id FROM clusters)"
         )
         # Preserve LLM-generated summaries — they're expensive to regenerate
         # and remain valid when cluster_id is unchanged (deterministic ID).
@@ -2590,6 +2644,14 @@ class RecallDB:
                 # Placed by the fresh pass: that row is the BUILD's, not the
                 # merge's. Leave it exactly as inserted -- run_id stays NULL.
                 continue
+            if old_cluster_id not in existing_old_cluster_ids:
+                # This row's cluster was already gone before this call
+                # started -- not a real grouping that dissolved just now,
+                # so there is nothing to vote among. The DELETE above already
+                # removed the row itself; dissolve it outright rather than
+                # searching old_cluster_members for "siblings" that share
+                # nothing but a dead cluster_id.
+                continue
             # Not placed: home it with whichever fresh cluster now holds the
             # LARGEST share of its old cluster's OTHER members (siblings
             # that a merge or the original self-batch pass put beside it).
@@ -2642,6 +2704,7 @@ class RecallDB:
         # Rebuild FTS from all clusters (topic + preserved access singletons)
         cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
         self._conn.commit()
+        return {"dangling_removed": dangling_removed}
 
     def append_clusters(
         self,
@@ -2852,10 +2915,33 @@ class RecallDB:
         members the cluster no longer has in the shape it was signed. The
         delete re-enters the cluster into the backfill queue (a cluster with
         no signature row) rather than leaving a stale one silently drifting.
+
+        Refuses (raises ``ValueError``) if ``cluster_id`` is not currently in
+        ``clusters``. This call used to write the membership row regardless
+        -- correct as long as the caller's lookup of ``cluster_id`` was still
+        true at write time, but nothing enforced that, and a full rebuild
+        (``save_clusters``) removing the cluster between the caller's lookup
+        and this write left a run_id-tagged row permanently pointing at
+        nothing: invisible to every future rebuild's own cleanup, since that
+        cleanup can only ever see cluster_ids clusters still has. The caller
+        must re-resolve a live cluster_id (or accept the chunk as unclustered
+        for now) rather than have this method write a reference it cannot
+        stand behind.
         """
         if not chunk_ids:
             return
         cur = self._conn.cursor()
+        exists = cur.execute(
+            "SELECT 1 FROM clusters WHERE cluster_id = ?", (cluster_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(
+                f"merge_chunks_into_cluster refused: cluster_id {cluster_id!r} "
+                "is not in clusters. It may have been removed by a concurrent "
+                "full rebuild between the caller's lookup and this call; "
+                "re-resolve a live cluster_id rather than writing a reference "
+                "this call cannot stand behind."
+            )
         cur.executemany(
             "INSERT OR IGNORE INTO cluster_chunks (cluster_id, chunk_id, added_at, run_id) "
             "VALUES (?, ?, ?, ?)",
