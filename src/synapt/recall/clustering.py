@@ -2136,17 +2136,6 @@ def recluster_stale_chunks(
                     )
                 except ValueError:
                     merge_cluster_vanished_count += len(chunks_to_merge)
-                    # This refusal is the FIRST authoritative confirmation
-                    # that `cluster_id` is gone -- so any OTHER cluster_chunks
-                    # row still naming it (this cluster's pre-existing
-                    # members, not just the chunks THIS call tried to add)
-                    # is dangling too, for exactly the same reason a
-                    # `save_clusters` full rebuild dissolves one: the same
-                    # principle applied at the moment of discovery, not
-                    # deferred to whenever the next full rebuild happens to
-                    # run. Left alone, those rows would sit as permanent
-                    # dangling references until then.
-                    db.dissolve_cluster_chunks_for_vanished_cluster(cluster_id)
                     continue
             merged_count += len(chunks_to_merge)
             for c in chunks_to_merge:

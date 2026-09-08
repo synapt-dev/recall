@@ -54,7 +54,14 @@ def test_probe_f_control_clean_store_prints_no_dangling_note(tmp_path, capsys):
 def test_probe_g_maintenance_merge_into_a_vanished_cluster_does_not_abort_the_batch(tmp_path, monkeypatch):
     """A concurrent rebuild removes the cluster between the maintenance pass's
     lookup and its merge write: the pass must refuse that one chunk and finish
-    the batch, not raise out of it with a partial batch committed."""
+    the batch, not raise out of it with a partial batch committed.
+
+    The race is staged as a real save_clusters-shaped removal: the cluster
+    row AND its cluster_chunks rows go together, in the same delete, exactly
+    as save_clusters's own cleanup does it -- a real concurrent rebuild never
+    leaves a cluster's other members dangling on their own; only removing
+    the cluster row alone (an earlier draft of this probe) manufactures a
+    state no real rebuild produces."""
     project, source = _build_once(tmp_path)
     m._similar_to_cluster_singleton(source / "similar.jsonl")
     _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True, skip_clustering=True)
@@ -62,7 +69,9 @@ def test_probe_g_maintenance_merge_into_a_vanished_cluster_does_not_abort_the_ba
     try:
         real = db.merge_chunks_into_cluster
         def racing(cluster_id, chunk_ids, appended_text, added_at, run_id=None):
+            db._conn.execute("DELETE FROM cluster_chunks WHERE cluster_id = ?", (cluster_id,))
             db._conn.execute("DELETE FROM clusters WHERE cluster_id = ?", (cluster_id,))
+            db._conn.commit()
             return real(cluster_id, chunk_ids, appended_text, added_at, run_id)
         monkeypatch.setattr(db, "merge_chunks_into_cluster", racing)
         receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
