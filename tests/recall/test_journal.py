@@ -247,6 +247,34 @@ class TestReadLatestMeaningful(unittest.TestCase):
         self.assertIsNotNone(result, "Should find meaningful entry under 25 empty ones")
         self.assertEqual(result.focus, "deep work")
 
+    def test_auto_stub_with_only_focus_does_not_shadow_manual_entry(self):
+        """An auto-extracted stub with only `focus` set is not a bridge (recall#937).
+
+        `auto_extract_entry` derives `focus` from every session's first user
+        message unconditionally -- including a `/clear` command's own harness
+        markup, or a coordinator's dispatch text captured as if it were the
+        agent's own intent. So `focus` alone on an `auto=True` entry carries
+        no signal: it is universally present and says nothing about whether
+        anyone wrote anything down. A hand-written entry with real next_steps,
+        superseded in the file by a newer auto stub, must still be what
+        `read_latest(meaningful=True)` returns.
+        """
+        append_entry(JournalEntry(
+            timestamp="2026-09-09T10:02:03",
+            focus="R3.1 continuity work",
+            next_steps=["fix recall#937", "re-check the checkpoint shape"],
+        ), self.path)
+        append_entry(JournalEntry(
+            timestamp="2026-09-09T10:04:17",
+            focus="<command-name>/clear</command-name><command-message>clear</command-message>",
+            auto=True,
+        ), self.path)
+
+        result = read_latest(self.path, meaningful=True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.timestamp, "2026-09-09T10:02:03")
+        self.assertEqual(result.next_steps, ["fix recall#937", "re-check the checkpoint shape"])
+
 
 class TestHasContent(unittest.TestCase):
     def test_empty_entry_has_no_content(self):
@@ -546,6 +574,28 @@ class TestNextStepCarryForward(unittest.TestCase):
             session_id="current",
             focus="current session",
             next_steps=["new task"],
+        ), self.path)
+
+        previous = read_previous_meaningful("current", self.path)
+        self.assertIsNotNone(previous)
+        self.assertEqual(previous.session_id, "prior")
+
+    def test_read_previous_meaningful_skips_foreign_auto_focus_only_stub(self):
+        """recall#937 v2 (Stromus R2 probe A): the carry-forward path has the
+        same shadowing bug as read_latest -- a foreign session's auto stub
+        with only `focus` set (no next_steps) must not be treated as the
+        previous session's real handoff."""
+        append_entry(JournalEntry(
+            timestamp="2026-03-01T10:00:00",
+            session_id="prior",
+            focus="prior session",
+            next_steps=["follow up"],
+        ), self.path)
+        append_entry(JournalEntry(
+            timestamp="2026-03-02T09:00:00",
+            session_id="foreign-stub",
+            focus="MORNING SPARK dispatch text captured as focus",
+            auto=True,
         ), self.path)
 
         previous = read_previous_meaningful("current", self.path)

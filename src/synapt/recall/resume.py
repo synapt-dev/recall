@@ -701,9 +701,19 @@ def _carries_intent(entry: JournalEntry) -> bool:
       session's first user message as the focus, and after a ``/clear`` that
       message is the runtime's own control block. The same residue rule used to
       filter harness turns applies here, so the two stay consistent.
+    * **Any focus on an auto-extracted entry (recall#937).** ``focus`` is
+      derived from every session's first user message unconditionally, so its
+      presence alone says nothing — it is there whether the first message was
+      a real question or a coordinator's dispatch text or a runtime control
+      block. The harness-residue check above only catches the third case; a
+      dispatch message reads as ordinary prose and would slip through it. So
+      an auto entry needs done/decisions/next_steps to carry intent; a
+      focus-only auto entry never does, regardless of what the text is.
     """
     if entry.done or entry.decisions or entry.next_steps:
         return True
+    if entry.auto:
+        return False
     focus = (entry.focus or "").strip()
     if not focus:
         return False
