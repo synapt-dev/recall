@@ -121,9 +121,82 @@ def _identifier_tokens(query: str) -> list[str]:
     return [c for c in candidates if len(c) >= 3]
 
 
+# Directory basenames that conventionally hold vendored, reference, or
+# third-party code rather than the project's own production sources --
+# industry-standard names (vendor/, node_modules/, third_party/) plus this
+# gripspace's own read-only comparison and research conventions
+# (reference/, research/, documented in the gripspace's own CLAUDE.md).
+# Matched against ANY path component so a nested checkout (reference/
+# hindsight/...) is caught, not only a first-level one.
+_FOREIGN_DIR_NAMES = frozenset(
+    {
+        "reference",
+        "research",
+        "vendor",
+        "vendored",
+        "third_party",
+        "thirdparty",
+        "node_modules",
+    }
+)
+
+
+def _git_top(path) -> "Path | None":
+    """Walk up from ``path`` to the nearest ancestor containing ``.git``, or
+    None if no ancestor has one. Bounded so a bad path can't spin forever."""
+    from pathlib import Path
+
+    current = Path(path).resolve()
+    for _ in range(64):
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+    return None
+
+
+def _has_foreign_component(rel_path: str) -> bool:
+    """A named-convention check that works regardless of ``repo_root``'s own
+    git identity: any directory component matching a known vendored/
+    reference/research name flags the whole path foreign."""
+    parts = rel_path.replace("\\", "/").split("/")[:-1]
+    return any(p.lower() in _FOREIGN_DIR_NAMES for p in parts)
+
+
+def _is_foreign_path(repo_root, rel_path: str, home_git_top, cache: dict) -> bool:
+    """A hit is foreign when EITHER (a) its path carries a known vendored/
+    reference/research directory component -- the signal that actually
+    fires when ``repo_root`` is an ungoverned directory sitting above
+    several sibling projects, which is the shape that produced 8 of
+    stranger-run-2's 9 wrong answers -- or (b) it lives inside a DIFFERENT
+    git repository than the one ``repo_root`` itself belongs to, catching a
+    genuine vendored submodule embedded within an otherwise well-scoped
+    project. When ``repo_root`` has no git identity of its own, (b)
+    degenerates to no signal (every candidate would look equally foreign);
+    (a) is what carries the fixture's actual measured improvement."""
+    if _has_foreign_component(rel_path):
+        return True
+    if home_git_top is None:
+        return False
+    from pathlib import Path
+
+    hit_dir = (Path(repo_root) / rel_path).parent
+    if hit_dir in cache:
+        return cache[hit_dir]
+    result = _git_top(hit_dir) != home_git_top
+    cache[hit_dir] = result
+    return result
+
+
 def _is_test_path(path: str) -> bool:
     """A test file is a legitimate hit but never the definition a reader is
-    looking for first; it ranks after production paths at equal coverage."""
+    looking for first; it ranks before foreign paths only, ahead of raw
+    coverage -- promoted from a coverage tie-break to an absolute
+    production-before-test preference alongside path affinity above, so a
+    test symbol matching an extra incidental word (e.g. the repo's own name
+    in a fixture's docstring) no longer outranks a production symbol."""
     parts = path.replace("\\", "/").split("/")
     base = parts[-1]
     return (
@@ -213,15 +286,21 @@ def recall_code(
                 kept["matched_token"] = token
                 kept["match_kind"] = kind
     candidates = list(by_key.values())
+    home_git_top = _git_top(repo_root)
+    git_top_cache: dict = {}
     for hit in candidates:
         lowered = hit["name"].lower()
         hit["token_coverage"] = sum(1 for w in query_words if w in lowered)
         hit["is_test"] = _is_test_path(hit["path"])
+        hit["is_foreign"] = _is_foreign_path(
+            repo_root, hit["path"], home_git_top, git_top_cache
+        )
     candidates.sort(
         key=lambda h: (
+            h["is_foreign"],
+            h["is_test"],
             -h["token_coverage"],
             _MATCH_KIND_RANK[h["match_kind"]],
-            h["is_test"],
             h["name"],
         )
     )
