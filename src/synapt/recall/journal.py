@@ -302,13 +302,24 @@ def read_latest(path: Path | None = None, meaningful: bool = False) -> JournalEn
 
     If *meaningful* is True, skip auto-extracted entries that have no
     focus/done/decisions/next — these are noise from the SessionEnd hook.
+
+    A *focus* alone does not qualify an ``auto=True`` entry (recall#937):
+    ``auto_extract_entry`` derives focus from every session's first user
+    message unconditionally, including a ``/clear``'s own harness markup or
+    a coordinator's dispatch text captured as if it were the agent's own
+    intent. Universal-presence fields carry no signal. A hand-written entry
+    can still be "just a focus" and count — a human choosing to write only
+    that down is a real, if thin, bridge; an auto-extractor doing the same
+    on every session is not.
     """
     if not meaningful:
         entries = read_entries(path, n=1)
         return entries[0] if entries else None
     # Already deduped+sorted newest-first, so first with rich content wins
     for entry in read_entries(path, n=50):
-        if entry.focus or entry.done or entry.decisions or entry.next_steps:
+        if entry.done or entry.decisions or entry.next_steps:
+            return entry
+        if entry.focus and not entry.auto:
             return entry
     return None
 
