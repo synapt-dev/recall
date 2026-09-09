@@ -341,6 +341,64 @@ CREATE TABLE IF NOT EXISTS query_tail_cursors (
 );
 """
 
+# R3.1: caches ShardedRecallDB.session_overview()'s per-shard result, keyed on
+# the immutable generation identity (generations.py: shards are never mutated
+# in place once a generation is published) plus a schema_version constant so
+# a session_overview() shape change can never read an older blob as current.
+# No (size, mtime) fallback -- Stromus's ruling 2026-09-09: a store with no
+# generation identity (the legacy flat layout) is not cached at all and pays
+# the uncached cost, same as before this existed.
+_SHARD_OVERVIEW_CACHE_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS shard_overview_cache (
+    generation_name TEXT NOT NULL,
+    shard_name TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    overview_json TEXT NOT NULL,
+    PRIMARY KEY (generation_name, shard_name, schema_version)
+);
+"""
+
+# Bump whenever session_overview()'s returned per-session dict gains, drops,
+# or renames a field -- an old cached blob under a stale version is never
+# read as current (the schema_version column is part of the cache key).
+SHARD_OVERVIEW_CACHE_SCHEMA_VERSION = 1
+
+
+def _serialize_shard_overview(overview: dict[str, dict]) -> str:
+    """JSON-encode session_overview()'s return shape for the cache.
+
+    ``activity`` is a real ``(int, str)`` tuple (compared with plain
+    ``max()`` by callers) and ``agent_ids`` a ``frozenset`` — neither is
+    JSON-native, so both are converted here and restored by
+    ``_deserialize_shard_overview`` on the way back, keeping the
+    round-tripped value type-identical to the uncached result, not merely
+    JSON-identical.
+    """
+    return json.dumps(
+        {
+            session_id: {
+                **{k: v for k, v in entry.items() if k not in ("activity", "agent_ids")},
+                "activity": list(entry["activity"]),
+                "agent_ids": sorted(entry["agent_ids"]),
+            }
+            for session_id, entry in overview.items()
+        },
+        sort_keys=True,
+    )
+
+
+def _deserialize_shard_overview(blob: str) -> dict[str, dict]:
+    raw = json.loads(blob)
+    return {
+        session_id: {
+            **{k: v for k, v in entry.items() if k not in ("activity", "agent_ids")},
+            "activity": tuple(entry["activity"]),
+            "agent_ids": frozenset(entry["agent_ids"]),
+        }
+        for session_id, entry in raw.items()
+    }
+
+
 _QUERY_TAIL_FTS_TABLE_SQL = """\
 CREATE VIRTUAL TABLE query_tail_fts USING fts5(
     user_text, assistant_text, tools_used, files_touched, tool_content, date_text,
@@ -593,6 +651,7 @@ class RecallDB:
     def _ensure_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.executescript(_QUERY_TAIL_SCHEMA_SQL)
+        self._conn.executescript(_SHARD_OVERVIEW_CACHE_SCHEMA_SQL)
         # Migrate existing tables: add columns that may be missing
         query_tail_cursor_columns = {
             row[1]
@@ -1677,6 +1736,76 @@ class RecallDB:
                 ),
             }
         return result
+
+    def get_cached_shard_overview(
+        self, generation_name: str, shard_name: str, schema_version: int
+    ) -> dict[str, dict] | None:
+        """Return a cached ``session_overview()`` result for one shard, or
+        None on a cache miss.
+
+        Never raises: a database that has never been through
+        ``_ensure_schema()`` (a read-only-opened index.db older than this
+        cache) has no ``shard_overview_cache`` table at all, and a
+        corrupt/unreadable entry is possible if a write was interrupted
+        mid-commit — both degrade to a miss rather than an error, the same
+        courtesy-not-dependency shape as the Codex-session-cwd cache
+        (``codex.py``'s ``_cwd_cache``).
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT overview_json FROM shard_overview_cache "
+                "WHERE generation_name = ? AND shard_name = ? AND schema_version = ?",
+                (generation_name, shard_name, schema_version),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        try:
+            return _deserialize_shard_overview(row["overview_json"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+
+    def set_cached_shard_overview(
+        self,
+        generation_name: str,
+        shard_name: str,
+        schema_version: int,
+        overview: dict[str, dict],
+    ) -> None:
+        """Best-effort cache write, on its OWN short-lived connection —
+        never the connection ``session_overview()`` was called through.
+
+        That connection may be read-only (``RecallDB.open_readonly``,
+        resume's cold path opens index.db this way) or contending with an
+        active build's write lock on index.db; this cache is a courtesy,
+        never a dependency (same rule as ``flush_cwd_cache``'s docstring),
+        so a bounded, short ``busy_timeout`` and a swallowed
+        ``OperationalError`` mean a busy or read-only index.db just skips
+        the write and the next call recomputes uncached — never blocks or
+        fails the caller.
+        """
+        try:
+            conn = sqlite3.connect(str(self._path), timeout=0.5)
+            try:
+                conn.execute("PRAGMA busy_timeout=500")
+                conn.executescript(_SHARD_OVERVIEW_CACHE_SCHEMA_SQL)
+                conn.execute(
+                    "INSERT OR REPLACE INTO shard_overview_cache "
+                    "(generation_name, shard_name, schema_version, overview_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        generation_name,
+                        shard_name,
+                        schema_version,
+                        _serialize_shard_overview(overview),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            pass
 
     def session_activity(self) -> dict[str, tuple[int, str]]:
         """Return each session's newest activity without materializing chunks."""

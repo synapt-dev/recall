@@ -444,6 +444,47 @@ class TestListCodexTranscripts(unittest.TestCase):
         found = list_codex_transcripts(Path(tmpdir), project_dir=project_root)
         self.assertEqual(found, [matching])
 
+    def test_project_roots_computed_once_regardless_of_candidate_count(self):
+        """R3.1: _project_roots is a pure function of project_dir, so
+        list_codex_transcripts must compute it ONCE and reuse it across
+        every candidate file, not once per candidate. Before the fix this
+        was called once per file (measured: 360 calls scanning 360 real
+        transcripts on the live team store, costing over 0.7s of a ~2.8s
+        cold `synapt resume`). Five candidates here, all matching, so a
+        regression back to per-file recomputation would call it 5 times
+        instead of 1 -- this fails loud on that regression, not just slow.
+        """
+        tmpdir = tempfile.mkdtemp()
+        sessions = Path(tmpdir) / "2026" / "03" / "01"
+        sessions.mkdir(parents=True)
+
+        project_root = Path(tmpdir) / "project"
+        project_root.mkdir()
+
+        expected = [
+            _write_codex_transcript(
+                str(sessions),
+                [{"type": "session_meta", "payload": {"id": f"s{i}", "cwd": str(project_root)}}],
+                name=f"rollout-{i}.jsonl",
+            )
+            for i in range(5)
+        ]
+
+        with mock.patch(
+            "synapt.recall.codex._project_roots",
+            wraps=__import__("synapt.recall.codex", fromlist=["_project_roots"])._project_roots,
+        ) as spy:
+            found = list_codex_transcripts(Path(tmpdir), project_dir=project_root)
+
+        self.assertEqual(sorted(found), sorted(expected))
+        self.assertEqual(
+            spy.call_count,
+            1,
+            f"_project_roots must be computed once for one list_codex_transcripts "
+            f"call regardless of candidate count, got {spy.call_count} calls for "
+            f"{len(expected)} candidates",
+        )
+
     def test_archive_codex_transcripts_filters_to_project(self):
         tmpdir = tempfile.mkdtemp()
         sessions = Path(tmpdir) / "2026" / "03" / "01"

@@ -270,13 +270,27 @@ def is_codex_transcript(path: Path) -> bool:
     return False
 
 
-def _matches_project(path: Path, project_dir: Path | None = None) -> bool:
-    """True when the Codex transcript belongs to the current project scope."""
+def _matches_project(
+    path: Path,
+    project_dir: Path | None = None,
+    *,
+    roots: list[Path] | None = None,
+) -> bool:
+    """True when the Codex transcript belongs to the current project scope.
+
+    ``roots`` lets a caller iterating many paths against the SAME
+    ``project_dir`` pass ``_project_roots(project_dir)`` once instead of
+    recomputing it per call (R3.1 cold-start measurement: 360 calls from
+    ``list_codex_transcripts`` each re-walked the gripspace tree for an
+    identical answer, costing over a second of a ~2.8s cold `synapt
+    resume`). Recomputed here when omitted so any other caller's contract
+    is unchanged.
+    """
     session_cwd = _session_cwd(path)
     if session_cwd is None:
         return False
 
-    for root in _project_roots(project_dir):
+    for root in roots if roots is not None else _project_roots(project_dir):
         if session_cwd == root or root in session_cwd.parents:
             return True
     return False
@@ -300,7 +314,8 @@ def list_codex_transcripts(
     files = sorted(sessions_dir.rglob("rollout-*.jsonl"))
     if project_dir is None:
         return files
-    return [path for path in files if _matches_project(path, project_dir)]
+    roots = _project_roots(project_dir)
+    return [path for path in files if _matches_project(path, project_dir, roots=roots)]
 
 
 def _has_buildable_transcripts(
