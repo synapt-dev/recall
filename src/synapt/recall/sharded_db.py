@@ -328,12 +328,45 @@ class ShardedRecallDB:
             if rowid < 0 or chunk.session_id not in suppressed
         }
 
+    def _shard_overview(
+        self, db: RecallDB, generation_name: str | None, schema_version: int
+    ) -> dict[str, dict]:
+        """One shard's ``session_overview()``, cached when a generation
+        identity exists (``generation_name`` is not None); uncached
+        otherwise (no legacy-flat-layout fallback, ruled 2026-09-09).
+        """
+        if generation_name is None:
+            return db.session_overview()
+        shard_name = db.path.name
+        cached = self._index.get_cached_shard_overview(generation_name, shard_name, schema_version)
+        if cached is not None:
+            return cached
+        overview = db.session_overview()
+        self._index.set_cached_shard_overview(generation_name, shard_name, schema_version, overview)
+        return overview
+
     def session_overview(self) -> dict[str, dict]:
-        """Return merged session metadata across all chunk shards."""
+        """Return merged session metadata across all chunk shards.
+
+        R3.1: each shard's own ``session_overview()`` is cached, keyed on
+        the CURRENT generation's name (shards are immutable once a
+        generation is published — see ``generations.py``) plus a schema
+        version, so a shape change to the cached dict can never be read as
+        current. No fallback for a store with no generation identity yet
+        (the legacy flat layout): it pays the uncached cost every call,
+        same as it always has, per the 2026-09-09 ruling.
+        """
+        from synapt.recall.generations import read_current_generation
+        from synapt.recall.storage import SHARD_OVERVIEW_CACHE_SCHEMA_VERSION
+
         result: dict[str, dict] = {}
         suppressed = self._suppressed_base_sessions()
+        generation_name = read_current_generation(self._index.path.parent)
         for _, db in self._iter_data_shards():
-            for session_id, overview in db.session_overview().items():
+            shard_overview = self._shard_overview(
+                db, generation_name, SHARD_OVERVIEW_CACHE_SCHEMA_VERSION
+            )
+            for session_id, overview in shard_overview.items():
                 if session_id in suppressed:
                     continue
                 current = result.get(session_id)
