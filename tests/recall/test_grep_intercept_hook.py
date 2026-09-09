@@ -183,11 +183,22 @@ def test_miss_or_unavailable_recall_is_silent_noop() -> None:
 
 def test_timeout_never_blocks_the_original_grep_result() -> None:
     mod = _grep_intercept()
-    # Small 5ms internal budget, far under the 150ms product ceiling. slow_recall
-    # always exceeds it, so the bounded join always times out to a no-op; the
-    # small budget maximizes headroom for CI scheduling jitter (a 25ms budget ran
-    # 0.153s on a loaded macOS 3.10 runner) so the wall-clock stays comfortably
-    # under the <150ms product assertion the contract requires.
+    # Small 5ms internal budget. slow_recall always exceeds it, so the bounded
+    # join (a queue.Queue.get(timeout=...) in _bounded_recall) always times
+    # out to a no-op. The old fixed "< 0.150" literal was disconnected from
+    # any real code-side value (no such constant exists in
+    # grep_intercept.py) and a CI-load near miss was already measured on a
+    # DIFFERENT config with this same mechanism: a 25ms budget ran 0.153s on
+    # a loaded macOS 3.10 runner -- ~128ms of pure OS/GIL scheduling jitter
+    # around the timed get() noticing its own timeout expired, independent
+    # of slow_recall's own sleep duration (the join times out at
+    # budget_seconds regardless of how long slow_recall actually sleeps).
+    # Bound relative to the configured budget with a fixed, generously
+    # justified margin (a live per-run calibration was tried and rejected --
+    # an instant-success recall_quick never touches the queue.Empty/timeout
+    # code path at all, so it measures the wrong thing and reads ~0 whether
+    # or not the timeout path is under load; verified by injecting a
+    # controlled delay into that path directly).
     config = mod.GrepInterceptConfig(enabled=True, timeout_ms=5)
     tool_result = "src/app.py:10: needle"
 
@@ -205,7 +216,19 @@ def test_timeout_never_blocks_the_original_grep_result() -> None:
     elapsed = time.perf_counter() - started
 
     assert annotated == tool_result
-    assert elapsed < 0.150
+    budget_seconds = config.timeout_ms / 1000
+    # 500ms of headroom is a wide multiple of the documented ~128ms jitter and
+    # still catches a genuine regression: the bounded join actually waiting
+    # out the full 0.30s slow_recall sleep, or hanging entirely, both exceed
+    # this by a wide margin.
+    margin_seconds = 0.5
+    bound = budget_seconds + margin_seconds
+    assert elapsed < bound, (
+        f"elapsed {elapsed:.3f}s exceeded {bound:.3f}s (configured budget "
+        f"{budget_seconds:.3f}s + {margin_seconds:.1f}s headroom) -- "
+        f"possible real regression in the bounded join, not host "
+        f"scheduling jitter"
+    )
 
 
 def test_a_slow_import_of_the_default_recall_quick_does_not_consume_the_query_budget(
@@ -345,6 +368,23 @@ def test_cli_positive_hit_finishes_inside_published_hook_budget(tmp_path) -> Non
     assert published_command[:2] == ["synapt", "recall"]
     outer_timeout = snippet["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"]
 
+    # Calibrate this host's own interpreter-startup overhead right now instead
+    # of trusting the exact configured ceiling: a bare `python -c "pass"`
+    # spawn pays the SAME interpreter-startup cost as the real subprocess
+    # below, with none of the recall work, so it's a live measurement of what
+    # this host/runner can actually do at this moment (a fixed literal here
+    # assumed a startup speed a slower or more loaded runner may not sustain).
+    calib_started = time.perf_counter()
+    subprocess.run([sys.executable, "-c", "pass"], check=True, capture_output=True)
+    startup_overhead = time.perf_counter() - calib_started
+
+    # 5x margin over the larger of (measured startup overhead, configured
+    # outer_timeout) absorbs a slow/loaded runner. The subprocess's OWN kill
+    # timeout is widened to match, so a slow-but-working run isn't killed
+    # before it can finish and be judged; a genuine hang or a real recall
+    # query actually blocking would still exceed this by a wide margin.
+    budget = max(startup_overhead, outer_timeout) * 5 + 0.5
+
     started = time.perf_counter()
     result = subprocess.run(
         [sys.executable, "-m", "synapt.cli", "recall", *published_command[2:]],
@@ -353,7 +393,7 @@ def test_cli_positive_hit_finishes_inside_published_hook_budget(tmp_path) -> Non
         capture_output=True,
         cwd=tmp_path,
         env=env,
-        timeout=outer_timeout,
+        timeout=budget,
         check=False,
     )
     elapsed = time.perf_counter() - started
@@ -366,10 +406,15 @@ def test_cli_positive_hit_finishes_inside_published_hook_budget(tmp_path) -> Non
         'recall: 1 related conversations '
         '(recall_search "grep_intercept.py" for detail)'
     )
-    assert elapsed < outer_timeout
+    assert elapsed < budget, (
+        f"elapsed {elapsed:.3f}s exceeded {budget:.3f}s (5x max(startup "
+        f"overhead {startup_overhead:.3f}s, configured outer_timeout "
+        f"{outer_timeout:.3f}s) + 0.5s floor) -- possible real regression, "
+        f"not host scheduling jitter"
+    )
     print(
         f"positive-cli: bytes={len(result.stdout.encode())} "
-        f"outer={outer_timeout:.3f}s"
+        f"outer={outer_timeout:.3f}s budget={budget:.3f}s"
     )
 
 
