@@ -480,6 +480,23 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
     index_dir.mkdir()
     data_dir = index_dir.parent
 
+    # Calibrate this host's own lock-cycle rate before running the real
+    # scenario: 50 raw acquire/release round trips on the exact primitive
+    # the indexer's tight release-then-reacquire loop uses, timed directly.
+    # A fixed "< 3.0s" literal here measured Windows' 3.078s for real
+    # (recall CI run 34385340671, windows-latest 3.12) -- Windows file-lock
+    # syscalls are measurably slower than macOS/Linux for this exact
+    # primitive, so the promptness bound below must scale with what THIS
+    # host can actually do, the same way the wall_cap fix's throughput
+    # calibration does, not assume a fixed rate.
+    calib_lock_dir = tmp_path / "calib-lock"
+    calib_lock_dir.mkdir()
+    calib_started = time_module.monotonic()
+    for _ in range(50):
+        calib_fd = _acquire_build_lock(calib_lock_dir, timeout=0)
+        _release_build_lock(calib_fd)
+    per_cycle_seconds = (time_module.monotonic() - calib_started) / 50
+
     policy = QueryFreshnessPolicy(
         age_threshold_seconds=0,
         byte_trigger=0,
@@ -574,9 +591,19 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
     if result.reason == "build_lock_yield":
         assert result.state is QueryFreshnessState.PARTIAL
         assert result.remaining_bytes and result.remaining_bytes > 0
-        assert indexer_result["elapsed"] < 3.0, (
+        # Promptness bound scaled to this host's own calibrated lock-cycle
+        # rate: a generous upper bound on how many cycles could run before
+        # noticing the waiter and yielding (6000, well past the ~5800
+        # chunks the whole 20,000-turn fixture produces), times a 10x
+        # safety margin over the calibrated per-cycle cost, floored at the
+        # original 3.0s so a normal (non-Windows) host keeps its existing
+        # bound.
+        promptness_bound = max(3.0, per_cycle_seconds * 6000 * 10)
+        assert indexer_result["elapsed"] < promptness_bound, (
             f"indexer took {indexer_result['elapsed']:.2f}s to yield -- "
-            f"too slow to count as noticing the waiter promptly"
+            f"too slow to count as noticing the waiter promptly (bound "
+            f"{promptness_bound:.2f}s = max(3.0s, 10x 6000 cycles at "
+            f"{per_cycle_seconds * 1000:.3f}ms/cycle calibrated on this host))"
         )
     elif result.reason == "build_lock":
         assert result.state is QueryFreshnessState.PARTIAL
