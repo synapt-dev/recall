@@ -128,6 +128,13 @@ def _identifier_tokens(query: str) -> list[str]:
 # (reference/, research/, documented in the gripspace's own CLAUDE.md).
 # Matched against ANY path component so a nested checkout (reference/
 # hindsight/...) is caught, not only a first-level one.
+#
+# Known tradeoff, accepted: this also demotes a PRODUCTION path that merely
+# happens to have a directory component of the same name (a docs/reference/
+# tree inside someone's own project, say). Acceptable for symbol ranking --
+# a rare false demotion inside home code is a much smaller cost than the
+# common case this exists for (a real vendored/reference sibling routinely
+# outranking home code), and the caller still SEES the hit, just later.
 _FOREIGN_DIR_NAMES = frozenset(
     {
         "reference",
@@ -169,8 +176,8 @@ def _is_foreign_path(repo_root, rel_path: str, home_git_top, cache: dict) -> boo
     """A hit is foreign when EITHER (a) its path carries a known vendored/
     reference/research directory component -- the signal that actually
     fires when ``repo_root`` is an ungoverned directory sitting above
-    several sibling projects, which is the shape that produced 8 of
-    stranger-run-2's 9 wrong answers -- or (b) it lives inside a DIFFERENT
+    several sibling projects, which is the shape behind most of a
+    nine-question replay's wrong answers -- or (b) it lives inside a DIFFERENT
     git repository than the one ``repo_root`` itself belongs to, catching a
     genuine vendored submodule embedded within an otherwise well-scoped
     project. When ``repo_root`` has no git identity of its own, (b)
