@@ -185,26 +185,38 @@ def test_timeout_never_blocks_the_original_grep_result() -> None:
     mod = _grep_intercept()
     # Small 5ms internal budget. slow_recall always exceeds it, so the bounded
     # join (a queue.Queue.get(timeout=...) in _bounded_recall) always times
-    # out to a no-op. The old fixed "< 0.150" literal was disconnected from
-    # any real code-side value (no such constant exists in
-    # grep_intercept.py) and a CI-load near miss was already measured on a
-    # DIFFERENT config with this same mechanism: a 25ms budget ran 0.153s on
-    # a loaded macOS 3.10 runner -- ~128ms of pure OS/GIL scheduling jitter
-    # around the timed get() noticing its own timeout expired, independent
-    # of slow_recall's own sleep duration (the join times out at
-    # budget_seconds regardless of how long slow_recall actually sleeps).
-    # Bound relative to the configured budget with a fixed, generously
-    # justified margin (a live per-run calibration was tried and rejected --
-    # an instant-success recall_quick never touches the queue.Empty/timeout
-    # code path at all, so it measures the wrong thing and reads ~0 whether
-    # or not the timeout path is under load; verified by injecting a
-    # controlled delay into that path directly).
+    # out to a no-op.
+    #
+    # The guard here is the equality assert below, not the elapsed bound: a
+    # REAL hit block (count_related_conversations > 0, same shape as
+    # test_hit_discriminator_uses_real_recall_quick_block_shape), not a
+    # content-free stand-in. If the bounded join is broken and waits out
+    # slow_recall's sleep instead of timing out, this content WOULD get
+    # prepended, and `annotated == tool_result` would catch it. A prior
+    # version of this fixture returned a block with count 0
+    # ("Session: too-late", matching none of count_related_conversations'
+    # markers), which made that assert vacuous: annotate_tool_result only
+    # prepends when the recall_quick output counts as a hit, so a count-0
+    # result produces the SAME untouched tool_result whether or not the
+    # timeout actually fired. Found in review (Apollo): with the
+    # timeout deliberately regressed to a huge value (so the join waits out
+    # the full 0.30s sleep instead of timing out), BOTH the old widened
+    # elapsed bound AND the old count-0 equality assert passed -- the test
+    # was measuring nothing about whether the late result gets used.
     config = mod.GrepInterceptConfig(enabled=True, timeout_ms=5)
     tool_result = "src/app.py:10: needle"
 
     def slow_recall(_query: str) -> str:
         time.sleep(0.30)
-        return "Past session context:\nSession: too-late"
+        return "\n".join([
+            "Past session context:",
+            "--- [cluster: too-late triage] 2026-06-01, 4 chunks (clust-late) ---",
+            "Cluster summary.",
+            "--- [knowledge #99] debugging (high, today) ---",
+            "Knowledge content.",
+            "--- [2026-06-02 08:15 session toolate12] assistant turn ---",
+            "Raw chunk content.",
+        ])
 
     started = time.perf_counter()
     annotated = mod.annotate_tool_result(
@@ -215,19 +227,20 @@ def test_timeout_never_blocks_the_original_grep_result() -> None:
     )
     elapsed = time.perf_counter() - started
 
-    assert annotated == tool_result
+    assert annotated == tool_result, (
+        "the late, slow recall result -- which WOULD count as a real hit "
+        "if it were used -- must never be prepended; if this fails, the "
+        "bounded join waited out the timeout and used the late result"
+    )
+    # Loose elapsed bound: an anti-hang backstop only, not the guard (the
+    # equality assert above is the guard now, decoupled entirely from wall
+    # time). Wide enough that no legitimate loaded run trips it.
     budget_seconds = config.timeout_ms / 1000
-    # 500ms of headroom is a wide multiple of the documented ~128ms jitter and
-    # still catches a genuine regression: the bounded join actually waiting
-    # out the full 0.30s slow_recall sleep, or hanging entirely, both exceed
-    # this by a wide margin.
-    margin_seconds = 0.5
-    bound = budget_seconds + margin_seconds
-    assert elapsed < bound, (
-        f"elapsed {elapsed:.3f}s exceeded {bound:.3f}s (configured budget "
-        f"{budget_seconds:.3f}s + {margin_seconds:.1f}s headroom) -- "
-        f"possible real regression in the bounded join, not host "
-        f"scheduling jitter"
+    anti_hang_bound = budget_seconds + 2.0
+    assert elapsed < anti_hang_bound, (
+        f"elapsed {elapsed:.3f}s exceeded the anti-hang backstop "
+        f"{anti_hang_bound:.3f}s -- the bounded join may not be bounded "
+        f"at all"
     )
 
 
@@ -400,7 +413,25 @@ def test_cli_positive_hit_finishes_inside_published_hook_budget(tmp_path) -> Non
 
     assert result.returncode == 0
     assert result.stderr == ""
-    output = json.loads(result.stdout)
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        # A separate, non-timing flake (found in review by Apollo, hit under a
+        # gr2 counted-day review run): the CLI's own internal recall-query
+        # timeout (hardcapped at 500ms inside claude_pretooluse_settings_
+        # snippet's min(500, ...) clamp) can starve under exceptional
+        # concurrent load, producing empty/partial stdout -- out of scope
+        # for this timing-literal fix (a follow-on tightens that product
+        # timeout), but a bare JSONDecodeError here names the wrong thing.
+        # Name it explicitly with the raw bytes, so a real red points at
+        # the actual cause instead of a parse error.
+        raise AssertionError(
+            f"subprocess stdout was not valid JSON ({exc}) -- likely "
+            f"empty/partial output under heavy concurrent load (separate, "
+            f"known flake in the CLI's own internal recall-query timeout, "
+            f"not this test's timing bound): "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        ) from exc
     context = output["hookSpecificOutput"]["additionalContext"]
     assert context == (
         'recall: 1 related conversations '
