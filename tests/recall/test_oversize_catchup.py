@@ -4,6 +4,7 @@ indexing via the query_tail overlay, and the cmd_catchup wiring that drives it."
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from synapt.recall.core import parse_transcript
@@ -344,9 +345,45 @@ def test_catchup_path_completes_a_100mb_file_within_one_call(tmp_path):
     class-default 32 MiB byte_cap the way the original wiring silently
     was. A 100 MB file under a generous wall budget and the catchup
     path's own (lifted) default byte_cap must converge in the single
-    call catchup_oversize_transcripts makes."""
+    call catchup_oversize_transcripts makes.
+
+    The wall budget is DERIVED from this host's own measured throughput,
+    not a literal. A fixed 60.0s assumed >= ~1.95 MB/s and a slow CI
+    runner (measured: windows-latest 3.10, recall CI run 34377560689)
+    sustained ~1.81 MB/s -- state=PARTIAL, reason='wall_cap',
+    remaining=7918532 bytes after 60.34s, just short. Any literal picked
+    to beat that one runner is still a guess about every future runner;
+    calibrating against a small sample on THIS host, with a wide safety
+    margin, bounds the budget by what this host can actually do instead.
+    """
+    from unittest.mock import patch
+
     transcripts_dir = tmp_path / "transcripts"
     transcripts_dir.mkdir()
+
+    # Calibrate: index a small sample (same synthesis, same code path,
+    # same policy defaults) and measure real bytes/second on this host
+    # before sizing the wall budget for the full fixture below.
+    calib_dir = tmp_path / "calibration"
+    calib_dir.mkdir()
+    calib_size = _write_synthetic_transcript(calib_dir / "calibration.jsonl", turns=5_000)
+    calib_index_dir = tmp_path / "calibration-index"
+    calib_index_dir.mkdir()
+    with patch(
+        "synapt.recall.core.project_transcript_dirs",
+        return_value=[calib_dir],
+    ):
+        calib_started = time.monotonic()
+        calib_results = catchup_oversize_transcripts(
+            tmp_path, calib_index_dir, overall_wall_seconds=120.0, ceiling=1000,
+        )
+        calib_elapsed = time.monotonic() - calib_started
+    assert calib_results[0].state is QueryFreshnessState.REFRESHED, (
+        "the calibration sample itself must converge in one call, or the "
+        "throughput measured from it below is meaningless"
+    )
+    throughput_bytes_per_second = calib_size / calib_elapsed
+
     big = transcripts_dir / "session-big.jsonl"
     # ~100 MB: measured ~777 bytes/turn pair at filler_len=200 with JSON
     # framing; 150,000 turns clears 100 MB with margin.
@@ -354,10 +391,14 @@ def test_catchup_path_completes_a_100mb_file_within_one_call(tmp_path):
     size = big.stat().st_size
     assert size > 100 * 1024 * 1024, f"fixture too small: {size} bytes"
 
+    # 4x margin over the measured rate absorbs calibration-sample noise (a
+    # 5,000-turn sample is small enough that per-call fixed overhead can
+    # skew the reading) and any slowdown from indexing 20x more data in
+    # the real call; 30.0s floor keeps this sane on a very fast host.
+    wall_budget = max(30.0, (size / throughput_bytes_per_second) * 4.0)
+
     index_dir = tmp_path / "index"
     index_dir.mkdir()
-
-    from unittest.mock import patch
 
     with patch(
         "synapt.recall.core.project_transcript_dirs",
@@ -366,14 +407,16 @@ def test_catchup_path_completes_a_100mb_file_within_one_call(tmp_path):
         results = catchup_oversize_transcripts(
             tmp_path,
             index_dir,
-            overall_wall_seconds=60.0,
+            overall_wall_seconds=wall_budget,
             ceiling=1000,  # the fixture is real MB, not GB; lower the bar to exercise it
         )
 
     assert len(results) == 1
     result = results[0]
     assert result.state is QueryFreshnessState.REFRESHED, (
-        f"did not converge in one call: state={result.state.value} "
+        f"did not converge in one call within the measured-throughput budget "
+        f"({wall_budget:.1f}s at {throughput_bytes_per_second / 1024 / 1024:.2f} MB/s "
+        f"calibrated on this host): state={result.state.value} "
         f"reason={result.reason!r} remaining={result.remaining_bytes}"
     )
     assert result.observed_complete_offset == size
@@ -404,9 +447,25 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
     the full span. The waiter's bound (<2s) is what's asserted; how the
     indexer's own call ends (yielded early vs happened to finish) is
     asserted separately, from the indexer's own reported reason.
+
+    query_freshness.py's own comment on the yield check documents this as a
+    race, not a guarantee: releasing the lock and checking the waiting
+    marker are two separate steps, and a raw OS-level lock_exclusive_nb
+    from the waiter thread can land in the microsecond release-to-reacquire
+    gap before the indexer's own marker check runs. Locally this is rare
+    ("almost every time" the indexer wins the race and yields cleanly,
+    reason='build_lock_yield'); under CI scheduling load it is not --
+    reproduced locally (macOS, this host) by adding 4 CPU-spinning
+    processes and looping the test: 1 failure in 25 runs, reason='build_lock'
+    (the waiter winning the raw race directly), matching CI run 34377560689
+    (macos-latest 3.10 and 3.11) exactly. Both reasons mean the SAME thing
+    functionally -- the waiter got the lock via contention, not because the
+    indexer ran out of byte_cap or wall_cap -- so both are asserted as
+    correct; only byte_cap/wall_cap would indicate the fix isn't working.
     """
     import threading
     import time as time_module
+    from unittest.mock import patch
 
     from synapt.recall.cli import _acquire_build_lock, _release_build_lock
 
@@ -445,9 +504,36 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
         indexer_result["value"] = index_oversize_source(index_dir, _source(transcript), policy=policy)
         indexer_result["elapsed"] = time_module.monotonic() - started
 
-    indexer_thread = threading.Thread(target=_run_indexer)
-    indexer_thread.start()
-    time_module.sleep(0.15)  # let the indexer actually start cycling the lock
+    # Wait for real evidence the indexer has started its acquire/release
+    # cycle, rather than a blind sleep(0.15) assuming that's enough head
+    # start on any host. Wrap query_freshness's own reference to
+    # _acquire_build_lock (the module-global name it calls each loop
+    # iteration) so the FIRST successful acquire inside the indexer's own
+    # call signals an Event; a monotonic-bounded wait on that event
+    # replaces the literal.
+    import synapt.recall.query_freshness as _qf_module
+
+    lock_cycle_started = threading.Event()
+    _real_acquire_build_lock = _qf_module._acquire_build_lock
+
+    def _acquire_and_signal(*args, **kwargs):
+        fd = _real_acquire_build_lock(*args, **kwargs)
+        if fd is not None:
+            lock_cycle_started.set()
+        return fd
+
+    readiness_patch = patch.object(_qf_module, "_acquire_build_lock", _acquire_and_signal)
+    readiness_patch.start()
+    try:
+        indexer_thread = threading.Thread(target=_run_indexer)
+        indexer_thread.start()
+        if not lock_cycle_started.wait(timeout=10.0):
+            raise AssertionError(
+                "indexer never acquired the build lock within 10s of starting"
+            )
+    finally:
+        readiness_patch.stop()
+
     waiter_thread = threading.Thread(target=_waiter)
     waiter_thread.start()
     waiter_thread.join(timeout=17.0)
@@ -463,22 +549,41 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
         f"without the fix this is close to the full ~8s call duration)"
     )
 
+    # The indexer's own call can legitimately end three ways once the
+    # waiter is in the picture -- reproduced locally (macOS, this host,
+    # under added CPU contention) for all three:
+    #  - 'build_lock_yield': the graceful path -- it noticed the waiting
+    #    marker after a release and stopped itself promptly.
+    #  - 'build_lock': the waiter won the raw OS-level lock directly, in
+    #    the release-to-reacquire gap, before the marker check ran (CI run
+    #    34377560689, macos-latest 3.10 and 3.11 -- reproduced locally
+    #    with 4 added CPU-spinning processes, 1 failure in 25 runs before
+    #    this fix).
+    #  - REFRESHED with no lock-contention reason: under heavier
+    #    contention the waiter can win that same raw race so early, and
+    #    so cleanly (marker cleared before the indexer's next check), that
+    #    the indexer never notices anything happened and completes its
+    #    whole call on its own (reproduced locally with 8 added
+    #    CPU-spinning processes, and once at 4). This does not violate the
+    #    contract under test -- the waiter was still served in time.
+    # Only byte_cap/wall_cap firing (PARTIAL, but neither lock reason)
+    # would mean the fix under test isn't working; that shape still fails
+    # below by falling through to the REFRESHED-only assertion.
     result = indexer_result["value"]
     assert result.state in (QueryFreshnessState.PARTIAL, QueryFreshnessState.REFRESHED)
-    # A fixture this size, under an 8s-to-complete policy, stopping in well
-    # under 2s can only mean it yielded early -- completing naturally that
-    # fast would falsify the very setup this test relies on.
-    assert result.state is QueryFreshnessState.PARTIAL, (
-        f"expected the call to be cut short by the waiter, not complete "
-        f"naturally (indexed {result.indexed_now_chunks} chunks in "
-        f"{indexer_result['elapsed']:.2f}s)"
-    )
-    assert result.reason == "build_lock_yield", (
-        f"stopped for the wrong reason: {result.reason!r} "
-        f"(expected the waiter-detection yield, not byte_cap/wall_cap/build_lock)"
-    )
-    assert result.remaining_bytes and result.remaining_bytes > 0
-    assert indexer_result["elapsed"] < 3.0, (
-        f"indexer took {indexer_result['elapsed']:.2f}s to yield -- "
-        f"too slow to count as noticing the waiter promptly"
-    )
+    if result.reason == "build_lock_yield":
+        assert result.state is QueryFreshnessState.PARTIAL
+        assert result.remaining_bytes and result.remaining_bytes > 0
+        assert indexer_result["elapsed"] < 3.0, (
+            f"indexer took {indexer_result['elapsed']:.2f}s to yield -- "
+            f"too slow to count as noticing the waiter promptly"
+        )
+    elif result.reason == "build_lock":
+        assert result.state is QueryFreshnessState.PARTIAL
+    else:
+        assert result.state is QueryFreshnessState.REFRESHED, (
+            f"stopped for the wrong reason with no lock contention "
+            f"recorded: state={result.state.value} reason={result.reason!r} "
+            f"(expected build_lock_yield, build_lock, or a natural finish "
+            f"-- not byte_cap/wall_cap)"
+        )
