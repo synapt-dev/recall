@@ -629,6 +629,21 @@ def _generate_msg_id(timestamp: str, agent_id: str, body: str) -> str:
     seed = f"{timestamp}{agent_id}{body}"
     return "m_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
 
+def _render_ts(ts: str) -> str:
+    """Render a stored UTC timestamp for a reader on this host: local wall time plus the zone name.
+
+    Stored form is ``%Y-%m-%dT%H:%M:%S.%fZ`` (see ``_now_iso``). The old ``ts[:16]`` slice dropped
+    the ``Z`` and left an ISO-shaped value that read as local time, hours off. A value that does not
+    parse falls back to its first 16 characters so a malformed row still renders.
+    """
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return (ts or "")[:16]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
 
 def _now_iso() -> str:
     """Return current UTC time as ISO 8601 string with microsecond precision.
@@ -1646,7 +1661,7 @@ def channel_join(
             msg_ids = {r["message_id"] for r in rows}
             for m in _read_messages(_channel_path(channel, project_dir)):
                 if m.id in msg_ids:
-                    ts = m.timestamp[:16]
+                    ts = _render_ts(m.timestamp)
                     sender = m.from_display or m.from_agent
                     mention_lines.append(f"  {ts}  {sender}: {m.body}")
             if mention_lines:
@@ -1986,7 +2001,7 @@ def channel_read(
     if pins:
         lines.append(f"## Pinned in #{channel}")
         for pin in pins:
-            ts = pin["pinned_at"][:16]
+            ts = _render_ts(pin["pinned_at"])
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
             mid = f" [{pin['message_id']}]" if pin["message_id"] and _show_ids else ""
             lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
@@ -1997,7 +2012,7 @@ def channel_read(
         lines.append(f"## Status Board — #{channel}")
         for r in board_rows:
             bd = display_map.get(r["agent_id"], r["agent_id"])
-            bts = r["updated_at"][:16].replace("T", " ")
+            bts = _render_ts(r["updated_at"])
             lines.append(f"  {bd} ({bts}): {r['body']}")
         lines.append("")
 
@@ -2008,7 +2023,7 @@ def channel_read(
         self_names.add(own_display.casefold())
     truncated_messages: list[tuple[str, int]] = []
     for msg in messages:
-        ts = msg.timestamp[:16]
+        ts = _render_ts(msg.timestamp)
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
         mid = f" [{msg.id}]" if msg.id and _show_ids else ""
         inline_mid = mid
@@ -2565,7 +2580,7 @@ def channel_board(
         lines = [f"## Status Board — #{channel}"]
         for r in rows:
             display = display_map.get(r["agent_id"], r["agent_id"])
-            ts = r["updated_at"][:16].replace("T", " ")
+            ts = _render_ts(r["updated_at"])
             lines.append(f"  {display} ({ts}): {r['body']}")
         return "\n".join(lines)
     finally:
