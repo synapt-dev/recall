@@ -332,9 +332,16 @@ def read_previous_meaningful(
 
     If *current_session_id* is provided, entries from the same session are
     skipped so repeated writes do not carry forward their own next steps.
+
+    Same auto-focus-only exclusion as :func:`read_latest` (recall#937): this
+    checks it locally rather than tightening ``has_rich_content()`` itself,
+    which also gates the write path in ``cli.py``/``server.py`` and is left
+    unchanged pending a separate look at whether it needs the same rule.
     """
     for entry in read_entries(path, n=50):
         if not entry.has_rich_content():
+            continue
+        if entry.auto and not (entry.done or entry.decisions or entry.next_steps):
             continue
         if current_session_id and entry.session_id == current_session_id:
             continue

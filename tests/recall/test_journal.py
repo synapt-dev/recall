@@ -580,6 +580,28 @@ class TestNextStepCarryForward(unittest.TestCase):
         self.assertIsNotNone(previous)
         self.assertEqual(previous.session_id, "prior")
 
+    def test_read_previous_meaningful_skips_foreign_auto_focus_only_stub(self):
+        """recall#937 v2 (Stromus R2 probe A): the carry-forward path has the
+        same shadowing bug as read_latest -- a foreign session's auto stub
+        with only `focus` set (no next_steps) must not be treated as the
+        previous session's real handoff."""
+        append_entry(JournalEntry(
+            timestamp="2026-03-01T10:00:00",
+            session_id="prior",
+            focus="prior session",
+            next_steps=["follow up"],
+        ), self.path)
+        append_entry(JournalEntry(
+            timestamp="2026-03-02T09:00:00",
+            session_id="foreign-stub",
+            focus="MORNING SPARK dispatch text captured as focus",
+            auto=True,
+        ), self.path)
+
+        previous = read_previous_meaningful("current", self.path)
+        self.assertIsNotNone(previous)
+        self.assertEqual(previous.session_id, "prior")
+
     def test_merge_carries_forward_unresolved_prior_steps(self):
         previous = JournalEntry(
             timestamp="2026-03-01T10:00:00",
