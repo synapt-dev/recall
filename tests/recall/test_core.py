@@ -524,7 +524,36 @@ def test_lookup_max_tokens_ladder_is_monotone_and_bounded(monkeypatch):
 
 
 def test_lookup_max_chunks_ladder_control_is_unchanged(monkeypatch):
-    """The parameter control from #993 continues to move independently."""
+    """The parameter control from #993 continues to move independently.
+
+    The clock is pinned. ``_format_chunk_block`` (core.py) appends a
+    freshness label -- ", Nd ago" / ", Nw ago" -- computed from
+    ``datetime.now(timezone.utc)`` against each fixture chunk's fixed
+    2026-08 timestamp, and that label goes to the EMPTY STRING (no ``else``
+    branch) once a chunk turns 30 days old. This control counts BYTES, so
+    that label silently disappearing costs exactly 8 characters the moment
+    the oldest fixture chunk (2026-08-10) crosses the 30-day line -- which
+    it did on 2026-09-09, 12 days after this test was authored and merged
+    green (recall PR #1020, CI run 33216927311). No commit ever changed
+    this path; the code is correct and the freshness-relative-to-now
+    behavior is intentional production behavior -- the test itself was
+    the defect, asserting an exact byte count that implicitly depended on
+    real wall-clock time. Freezing "now" to the original authorship moment
+    is what makes the control actually control for one thing at a time; do
+    not unpin this as tidy-up, it will silently drift again in ~18 more
+    days (the next fixture chunk to cross 30) or at any 7-day boundary a
+    week-count digit width changes.
+    """
+    import synapt.recall.core as core
+    from datetime import datetime, timezone
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            frozen = datetime(2026, 8, 28, 22, 31, 0, tzinfo=timezone.utc)
+            return frozen.astimezone(tz) if tz else frozen
+
+    monkeypatch.setattr(core, "datetime", _FrozenDatetime)
     monkeypatch.setenv("SYNAPT_DISABLE_CLUSTERS", "1")
     monkeypatch.setenv("SYNAPT_DISABLE_DEDUP", "1")
     monkeypatch.setenv("SYNAPT_DISABLE_BOOSTS", "1")
