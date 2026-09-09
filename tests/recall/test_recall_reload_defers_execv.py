@@ -93,13 +93,29 @@ def test_zzz_padding_keeps_the_process_alive_past_the_timer_window():
     well under recall_reload's ~0.2s deferred-execv window -- even a
     non-daemon pending timer thread can lose that race if nothing keeps the
     process alive a little longer, which would silently hide a stray timer
-    rather than exercise it. This test does nothing but sleep past that
-    window, run alongside the target test in the SAME subprocess/session, so
-    a stray timer left pending by a buggy test has time to actually fire
-    while something still patches os.execv (a passing run) or does not (the
-    defect this file guards against).
+    rather than exercise it. This test runs alongside the target test in the
+    SAME subprocess/session, so a stray timer left pending by a buggy test
+    has time to actually fire while something still patches os.execv (a
+    passing run) or does not (the defect this file guards against).
+
+    A fixed sleep(0.3) here was only a ~50% margin over the exact 0.2s
+    interval recall_reload() schedules, and the mechanism under test IS a
+    timing race: any scheduler preemption of this sleeping process (a loaded
+    CI runner) eats directly into that margin. server.py exposes the actual
+    pending timer at module level for exactly this purpose (see
+    `_pending_reload_timer`'s docstring: "so a test... can cancel it rather
+    than let it fire against an unpatched/unexpected os.execv later") --
+    join() on it waits for the real completion signal (the timer thread
+    itself finishing), bounded by a real deadline, rather than guessing how
+    long "past the window" needs to be. If the preceding test already
+    consumed its own timer (the healthy case), the timer has already
+    finished and this returns immediately instead of always paying 0.3s.
     """
-    time.sleep(0.3)
+    from synapt.recall import server as server_module
+
+    timer = server_module._pending_reload_timer
+    if timer is not None:
+        timer.join(timeout=2.0)
 
 
 def _run_reload_test_alone(test_name: str) -> subprocess.CompletedProcess:

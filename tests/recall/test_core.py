@@ -1427,8 +1427,25 @@ def test_build_index_reparses_changed_files():
             }]
         }
 
-        # Ensure mtime changes (HFS+ has 1s granularity)
-        time.sleep(1.1)
+        # Ensure mtime changes: poll on a monotonic deadline for the
+        # filesystem to actually record a value different from the one
+        # captured above, instead of blindly sleeping a fixed 1.1s that
+        # assumed every filesystem's mtime granularity is <=1s (HFS+ is;
+        # some are coarser). os.utime bumps the mtime to "now" on each poll
+        # so a fine-grained filesystem (most of them) clears this near-
+        # instantly instead of always paying the fixed cost, while a
+        # coarser one still converges once real wall-clock time crosses its
+        # resolution boundary.
+        old_mtime = os.path.getmtime(transcript)
+        deadline = time.monotonic() + 5.0
+        while os.path.getmtime(transcript) == old_mtime:
+            assert time.monotonic() < deadline, (
+                f"filesystem mtime for {transcript} never advanced past "
+                f"{old_mtime} within 5s -- cannot exercise the incremental "
+                f"re-parse path on this filesystem"
+            )
+            time.sleep(0.05)
+            os.utime(transcript, None)
 
         # Append a third turn
         with open(transcript, "a", encoding="utf-8") as f:
