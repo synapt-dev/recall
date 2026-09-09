@@ -190,6 +190,41 @@ def _is_foreign_path(repo_root, rel_path: str, home_git_top, cache: dict) -> boo
     return result
 
 
+_KIND_RANK = {"class": 0, "function": 0, "method": 0}
+# A class/function/method is a definition the reader can read as an answer;
+# a bare constant rarely is. Unknown/unseen kinds default to 1 (with the
+# constants) rather than 0, so an unrecognized future kind doesn't silently
+# claim the definition-preference tier it hasn't earned.
+
+
+def _name_words(name: str) -> list[str]:
+    """Split a symbol name into lowercase word parts across snake_case and
+    camelCase boundaries, so ``ChannelMessage`` yields ["channel",
+    "message"] and ``recall_channel`` yields ["recall", "channel"] --
+    the same granularity _identifier_tokens already uses on the query
+    side, applied here to the SYMBOL side so the two can be compared."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    parts = re.split(r"[_\W]+", spaced)
+    return [p.lower() for p in parts if p]
+
+
+def _name_match_ratio(name: str, query_words: set) -> float:
+    """How much of the SYMBOL's own name is explained by the query, not how
+    much of the query the symbol happens to contain. ``channel_post``
+    against a query covering "channel"+"post" scores 1.0 (the whole name is
+    query content); ``test_recall_channel_uses_registry_dispatch`` against
+    the same two covered words scores ~0.29 (2 of 7) even though its RAW
+    token_coverage is the same. This is what lets a short, precise
+    production symbol outrank a long incidental match without touching
+    token_coverage's own well-justified role as the primary signal (design
+    history above: "coverage ranks first")."""
+    words = [_stem(w) for w in _name_words(name) if w not in _STOPWORDS]
+    if not words:
+        return 0.0
+    covered = sum(1 for w in words if w in query_words)
+    return covered / len(words)
+
+
 def _is_test_path(path: str) -> bool:
     """A test file is a legitimate hit but never the definition a reader is
     looking for first; it ranks before foreign paths only, ahead of raw
@@ -272,6 +307,18 @@ def recall_code(
             if t.lower() not in _STOPWORDS
         )
     )
+    # _name_words below splits a SYMBOL's name on '_'/camelCase into
+    # word-level parts (e.g. "target_symbol" -> ["target", "symbol"]), but
+    # query_words is compound-token granularity (regex-captured whole
+    # identifiers, e.g. "target_symbol" as ONE token) -- built for
+    # substring-based token_coverage, where that granularity is correct.
+    # Comparing the two directly makes a fully-relevant exact match score
+    # 0.0 (neither "target" nor "symbol" individually is in query_words),
+    # so name_match_ratio needs the QUERY split at the same word-level
+    # granularity as the symbol side.
+    query_words_set = {
+        _stem(w) for w in _name_words(query) if w not in _STOPWORDS
+    }
     by_key: dict[tuple[str, str, int], dict] = {}
     for token in _identifier_tokens(query):
         for hit in find_symbols(db_path, token, repo=repo, limit=_CANDIDATE_POOL_PER_TOKEN):
@@ -295,12 +342,15 @@ def recall_code(
         hit["is_foreign"] = _is_foreign_path(
             repo_root, hit["path"], home_git_top, git_top_cache
         )
+        hit["name_match_ratio"] = _name_match_ratio(hit["name"], query_words_set)
     candidates.sort(
         key=lambda h: (
             h["is_foreign"],
             h["is_test"],
             -h["token_coverage"],
+            -h["name_match_ratio"],
             _MATCH_KIND_RANK[h["match_kind"]],
+            _KIND_RANK.get(h.get("kind"), 1),
             h["name"],
         )
     )
