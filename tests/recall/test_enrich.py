@@ -2,7 +2,9 @@
 
 import json
 import os
+import signal
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +19,7 @@ from synapt.recall.enrich import (
     _build_transcript_summary,
     _dedup_facts,
     _detect_content_type,
+    _enrich_entry_bounded,
     _get_fact_limits,
     _has_conversation,
     _merge_enrichment_results,
@@ -495,6 +498,77 @@ class TestEnrichEntry(unittest.TestCase):
                 entry, Path("/tmp/fake"), client=mock_client,
             )
         self.assertIsNone(result)
+
+
+@unittest.skipUnless(hasattr(signal, "SIGALRM"), "SIGALRM is Unix-only")
+class TestEnrichEntryBounded(unittest.TestCase):
+    """Found in review: one entry's enrichment must not be able to starve the rest
+    of the batch. Reproduced directly against a real store: a slow/contended
+    local-MLX entry ran past the external 3600s cron cap while every later
+    entry never got a turn -- an unrelated "no transcript" warning earlier in
+    the log was coincidental, not the cause. _enrich_entry_bounded exists to
+    make that starvation impossible regardless of WHY one entry is slow.
+    """
+
+    def setUp(self):
+        # Isolate the module-level bound so this test controls it directly
+        # rather than depending on (or mutating) SYNAPT_ENRICH_ENTRY_TIMEOUT.
+        import synapt.recall.enrich as enrich_mod
+        self._enrich_mod = enrich_mod
+        self._orig_timeout = enrich_mod._ENRICH_ENTRY_TIMEOUT_SECONDS
+
+    def tearDown(self):
+        self._enrich_mod._ENRICH_ENTRY_TIMEOUT_SECONDS = self._orig_timeout
+        # A tripped alarm is always disarmed in the wrapper's finally, but a
+        # test failure mid-assertion should never leave a live alarm pending
+        # into the next test.
+        signal.alarm(0)
+
+    def test_a_stuck_entry_is_skipped_not_awaited(self):
+        """A single slow enrich_entry() call must not block past the bound."""
+        self._enrich_mod._ENRICH_ENTRY_TIMEOUT_SECONDS = 1
+        entry = _make_entry(session_id="stuck-sess")
+
+        def _slow_enrich(*args, **kwargs):
+            time.sleep(5)
+            return _make_entry(session_id="stuck-sess", enriched=True)
+
+        t0 = time.monotonic()
+        with patch.object(self._enrich_mod, "enrich_entry", side_effect=_slow_enrich):
+            with self.assertLogs("synapt.recall.enrich", level="WARNING") as cm:
+                result = _enrich_entry_bounded(entry, Path("/tmp/fake"))
+        elapsed = time.monotonic() - t0
+
+        self.assertIsNone(result)
+        self.assertLess(
+            elapsed, 4.0,
+            f"bounded call took {elapsed:.1f}s -- the 1s bound did not trip",
+        )
+        self.assertTrue(
+            any("SKIPPED" in line and "stuck-sess" in line for line in cm.output),
+            f"expected a SKIPPED stuck-sess log line, got: {cm.output}",
+        )
+
+    def test_a_fast_entry_is_unaffected(self):
+        """The bound must not change behavior for an entry that finishes in time."""
+        self._enrich_mod._ENRICH_ENTRY_TIMEOUT_SECONDS = 5
+        entry = _make_entry(session_id="fast-sess")
+        expected = _make_entry(session_id="fast-sess", enriched=True)
+
+        with patch.object(self._enrich_mod, "enrich_entry", return_value=expected) as mock_fn:
+            result = _enrich_entry_bounded(entry, Path("/tmp/fake"), "some-model", client="c")
+
+        self.assertIs(result, expected)
+        mock_fn.assert_called_once_with(entry, Path("/tmp/fake"), "some-model", client="c")
+
+    def test_alarm_is_disarmed_after_a_normal_return(self):
+        """A tripped-but-unused alarm from a prior call must never fire late."""
+        self._enrich_mod._ENRICH_ENTRY_TIMEOUT_SECONDS = 1
+        entry = _make_entry(session_id="fast-sess-2")
+        with patch.object(self._enrich_mod, "enrich_entry", return_value=None):
+            _enrich_entry_bounded(entry, Path("/tmp/fake"))
+        # If the alarm were left armed, this sleep would raise _EnrichEntryTimeout.
+        time.sleep(1.5)
 
 
 class TestAutoStubPersistence(unittest.TestCase):
