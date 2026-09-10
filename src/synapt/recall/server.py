@@ -1204,7 +1204,12 @@ def _run_build_job(project: Path, receipt: dict, incremental: bool) -> None:
         receipt["phase"] = phase
         if "started_at" not in receipt:
             receipt["started_at"] = datetime.now(timezone.utc).isoformat()
-        _write_build_receipt(project, receipt)
+        # Found in review: this write raced recall_build_status's locked read
+        # (and, on Windows, atomic_json_write's rename could collide with an
+        # open-for-read handle and raise PermissionError) because it was the
+        # only writer in this module not holding _BUILD_RECEIPT_LOCK.
+        with _BUILD_RECEIPT_LOCK:
+            _write_build_receipt(project, receipt)
 
     try:
         report("starting")
