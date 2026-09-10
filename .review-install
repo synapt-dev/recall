@@ -1,0 +1,17 @@
+# gr2 `review run` install hint: read when --install/--package are omitted.
+#
+# recall's importable package is `synapt.recall` (synapt/src/synapt/recall/), not the
+# bare `synapt` namespace -- `synapt` is a PEP 420 namespace package with no __file__,
+# so binding the install to it trips gr2's import_no_file refusal. synapt.recall is a
+# real subpackage with __version__ and a __file__ gr2 can assert resolves under the lane.
+#
+# Found in review: recall's repo root already carries pyproject.toml, so
+# unlike grip (whose package lives in a gr2/ subdir and needs {lane}/gr2[dev]) this hint
+# only needs the [dev,test] extras at the lane root, matching the Build & Test install
+# already documented for a normal recall checkout.
+#
+# {venv} = the lane venv's python; {lane} = the lane (repo root). The line is
+# shell-split first, then {venv}/{lane} substituted per token (so a lane path with a
+# space stays one token).
+install = {venv} -m pip install -e {lane}[dev,test]
+package = synapt.recall
