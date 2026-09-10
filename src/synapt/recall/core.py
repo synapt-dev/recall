@@ -5040,7 +5040,39 @@ def _gripspace_has_registered_repo(root: Path) -> bool:
 _INVERTED_MARKER_WARNED: set[str] = set()
 
 
-def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
+def _griptree_worktree_is_live(griptree_path: Path) -> bool:
+    """True when *griptree_path* has at least one sub-repo whose ``.git`` file
+    points at a linked worktree directory that STILL EXISTS.
+
+    ``_resolve_griptree_parent`` derives the parent by string-walking the
+    ``gitdir:`` path and never checks that the worktree it names is still
+    there, so a linked griptree whose worktree has been pruned (``git worktree
+    remove``) -- leaving ``griptree.json`` and the ``.git`` pointer behind --
+    still resolves a parent from a dead pointer. This confirms the pointer is
+    live, so the own-child guard rests on a real membership rather than a stale
+    one.
+    """
+    try:
+        children = list(griptree_path.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        git_path = child / ".git"
+        if git_path.is_file():
+            try:
+                content = git_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if content.startswith("gitdir:"):
+                gitdir = Path(content.split(":", 1)[1].strip())
+                if gitdir.exists():
+                    return True
+    return False
+
+
+def _marker_target_is_own_child(
+    marker_dir: Path, target: Path, *, require_live: bool = True
+) -> bool:
     """True when *target* is a LINKED griptree (``.gitgrip/griptree.json``)
     whose parent gripspace is *marker_dir* itself.
 
@@ -5051,7 +5083,27 @@ def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
     the sibling of ``_persist``'s unpopulated-root guard (recall#1124). Linked
     children correctly point UP at the parent (``self_root == resolved`` there,
     so ``_persist`` returns early and never writes); only a parent pointing
-    DOWN at a child is inverted. Neither write such a marker nor follow it.
+    DOWN at a child is inverted.
+
+    ``require_live`` splits the two call sites, because the safe direction is
+    opposite for each:
+
+    - The WRITE refusal (``require_live=True``, the default) must be NARROW: a
+      target whose worktree has been pruned (``.git`` pointer dangling) is no
+      longer a live child, so refusing a legitimate marker to it would
+      OVER-block a real write. Bias to "not own child" when membership cannot
+      be confirmed live.
+    - The READ "treat as stale" test (``require_live=False``) must be STRICT:
+      a recorded marker naming an own child by structure is inverted whether
+      or not the worktree still exists, and FOLLOWING it collapses the parent
+      onto that child's store. A pruned child still has its ``.grip`` /
+      ``.synapt/recall`` and is still the wrong store to resolve onto, so the
+      read must reject it regardless of liveness (the under-block a liveness-
+      gated read would allow).
+
+    Scoped to this predicate rather than ``_resolve_griptree_parent`` so
+    general gripspace resolution (``_find_gripspace_root``) is unchanged; only
+    the marker guard narrows, and only on the write side.
     """
     try:
         target = target.resolve()
@@ -5061,9 +5113,13 @@ def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
         return False
     parent = _resolve_griptree_parent(target)
     try:
-        return parent is not None and parent.resolve() == marker_dir.resolve()
+        if parent is None or parent.resolve() != marker_dir.resolve():
+            return False
     except OSError:
         return False
+    if require_live:
+        return _griptree_worktree_is_live(target)
+    return True
 
 
 def _warn_inverted_marker_once(marker_dir: Path, target: Path) -> None:
@@ -5187,7 +5243,12 @@ def _read_shared_gripspace_root_marker() -> tuple[Path | None, Path | None]:
     except OSError:
         return None, None
     if recorded.is_dir() and _is_gripspace_root_marker_dir(recorded):
-        if _marker_target_is_own_child(self_root, recorded):
+        # STRICT on read (require_live=False): an inverted marker naming an own
+        # child must not be followed whether or not the child's worktree is
+        # still live -- a pruned child keeps its .grip/.synapt store and is
+        # still the wrong coordinate to resolve onto. Liveness gates the WRITE
+        # refusal only.
+        if _marker_target_is_own_child(self_root, recorded, require_live=False):
             # An inverted parent->child marker: this gripspace root names one
             # of its own linked griptrees. Do not follow it (that collapses two
             # desks onto one store); report it stale so the resolver walks up,
