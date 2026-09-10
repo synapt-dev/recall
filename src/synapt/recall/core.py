@@ -4921,11 +4921,30 @@ def _worktree_name(project_dir: Path | None = None) -> str:
     # A gr2 workspace (`.grip` marker) is ONE per-worktree bucket: a constituent
     # repo's own `.git` must NOT mint a per-repo slice, or a session standing in
     # the repo and a session standing at the workspace root write to different
-    # buckets keyed on the cwd basename (recall#974 — measured live as a
-    # `synapt` bucket beside a `synapt-dev` bucket for one agent). The workspace
-    # boundary wins over any constituent `.git` below it. gr1 gripspaces (no
-    # `.grip`) keep their per-constituent-repo buckets via the walk below.
+    # buckets keyed on the cwd basename. The workspace boundary wins over any
+    # constituent `.git` below it. gr1 gripspaces (no `.grip`) keep their
+    # per-constituent-repo buckets via the walk below.
+    #
+    # THE BUCKET IS LOCALITY, NOT MEMBERSHIP (recall#974). `_find_gripspace_root`
+    # resolves a linked griptree (`.gitgrip/griptree.json`) to its PARENT gripspace
+    # by membership, so its index and knowledge cohere with the parent's store —
+    # correct for the STORE. But a linked griptree is a DISTINCT desk that shares
+    # the store while keeping its own history, so the per-worktree journal bucket
+    # must use the linked griptree's OWN name, not the parent's. Returning
+    # `grip_root.name` here (the membership-resolved parent) collapsed a linked
+    # griptree and its parent gr2 workspace into one bucket, and each read the
+    # other's entries (measured live: `synapt` and its linked griptree `synapt-dev`
+    # both landed in the `synapt` bucket). So when membership proves we are inside a
+    # gr2 workspace, take the NEAREST `.grip` by LOCALITY as the desk instead.
     if grip_root is not None and (grip_root / ".grip").is_dir():
+        home = Path.home().resolve()
+        candidate = current
+        while candidate != candidate.parent:
+            if (candidate / ".grip").is_dir():
+                return candidate.name
+            if candidate == home:
+                break
+            candidate = candidate.parent
         return grip_root.name
     candidate = current
     while candidate != candidate.parent:
