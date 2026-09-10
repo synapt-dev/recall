@@ -1774,3 +1774,30 @@ class TestDanglingWorktreeOwnChild:
         _persist_shared_gripspace_root(live.resolve(), "GRIPSPACE_ROOT")
         assert not (grip / _GRIPSPACE_ROOT_MARKER_RELPATH).exists()
         assert "own linked griptrees" in capsys.readouterr().err
+
+    # WITNESS (read stays STRICT): an inverted marker naming a PRUNED own child
+    # must still be treated stale on READ and NOT followed -- liveness gates the
+    # write refusal only, never the read. Following it would collapse the parent
+    # onto the pruned child's store (the child keeps its .gitgrip/.synapt).
+    def test_read_treats_a_pruned_own_child_marker_as_stale(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        pruned = _make_linked_griptree_dangling(tmp_path, grip)
+        # write-side view: NOT a live own-child, so a write would be allowed...
+        assert _marker_target_is_own_child(grip, pruned) is False
+        # ...but the read is strict: structurally an own child regardless of liveness
+        assert _marker_target_is_own_child(grip, pruned, require_live=False) is True
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{pruned.resolve()}\n")  # the inverted marker, pruned child
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        resolved, stale = _read_shared_gripspace_root_marker()
+        assert resolved is None
+        assert stale == pruned.resolve()
+        _gripspace_cache.clear()
+        root, source = _resolve_root_and_source()
+        assert root is None
+        assert source.startswith("walk-up")
+        assert "inverted gripspace-root marker" in capsys.readouterr().err

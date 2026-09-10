@@ -5070,10 +5070,11 @@ def _griptree_worktree_is_live(griptree_path: Path) -> bool:
     return False
 
 
-def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
+def _marker_target_is_own_child(
+    marker_dir: Path, target: Path, *, require_live: bool = True
+) -> bool:
     """True when *target* is a LINKED griptree (``.gitgrip/griptree.json``)
-    whose parent gripspace is *marker_dir* itself AND whose linked-worktree
-    pointer is still live.
+    whose parent gripspace is *marker_dir* itself.
 
     This is the one shape a shared-gripspace-root marker must never take: a
     gripspace ROOT recording a redirect to one of its OWN member griptrees.
@@ -5082,16 +5083,27 @@ def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
     the sibling of ``_persist``'s unpopulated-root guard (recall#1124). Linked
     children correctly point UP at the parent (``self_root == resolved`` there,
     so ``_persist`` returns early and never writes); only a parent pointing
-    DOWN at a child is inverted. Neither write such a marker nor follow it.
+    DOWN at a child is inverted.
 
-    The liveness check keeps the guard NARROW and safe-direction: a target
-    whose worktree has been pruned (``.git`` pointer dangling) is no longer a
-    live child, so refusing a legitimate marker to it would OVER-block a real
-    write. When membership cannot be confirmed live, bias to "not own child" --
-    the same asymmetry the rest of this resolution follows. Scoped to this
-    predicate rather than ``_resolve_griptree_parent`` so general gripspace
-    resolution (``_find_gripspace_root``) is unchanged; only the marker guard
-    narrows.
+    ``require_live`` splits the two call sites, because the safe direction is
+    opposite for each:
+
+    - The WRITE refusal (``require_live=True``, the default) must be NARROW: a
+      target whose worktree has been pruned (``.git`` pointer dangling) is no
+      longer a live child, so refusing a legitimate marker to it would
+      OVER-block a real write. Bias to "not own child" when membership cannot
+      be confirmed live.
+    - The READ "treat as stale" test (``require_live=False``) must be STRICT:
+      a recorded marker naming an own child by structure is inverted whether
+      or not the worktree still exists, and FOLLOWING it collapses the parent
+      onto that child's store. A pruned child still has its ``.grip`` /
+      ``.synapt/recall`` and is still the wrong store to resolve onto, so the
+      read must reject it regardless of liveness (the under-block a liveness-
+      gated read would allow).
+
+    Scoped to this predicate rather than ``_resolve_griptree_parent`` so
+    general gripspace resolution (``_find_gripspace_root``) is unchanged; only
+    the marker guard narrows, and only on the write side.
     """
     try:
         target = target.resolve()
@@ -5105,7 +5117,9 @@ def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
             return False
     except OSError:
         return False
-    return _griptree_worktree_is_live(target)
+    if require_live:
+        return _griptree_worktree_is_live(target)
+    return True
 
 
 def _warn_inverted_marker_once(marker_dir: Path, target: Path) -> None:
@@ -5229,7 +5243,12 @@ def _read_shared_gripspace_root_marker() -> tuple[Path | None, Path | None]:
     except OSError:
         return None, None
     if recorded.is_dir() and _is_gripspace_root_marker_dir(recorded):
-        if _marker_target_is_own_child(self_root, recorded):
+        # STRICT on read (require_live=False): an inverted marker naming an own
+        # child must not be followed whether or not the child's worktree is
+        # still live -- a pruned child keeps its .grip/.synapt store and is
+        # still the wrong coordinate to resolve onto. Liveness gates the WRITE
+        # refusal only.
+        if _marker_target_is_own_child(self_root, recorded, require_live=False):
             # An inverted parent->child marker: this gripspace root names one
             # of its own linked griptrees. Do not follow it (that collapses two
             # desks onto one store); report it stale so the resolver walks up,
