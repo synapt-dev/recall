@@ -588,6 +588,57 @@ def test_worktree_bucket_uses_a_linked_repo_file_as_its_root(tmp_path):
     assert root_bucket == grip / ".synapt" / "recall" / "worktrees" / "repo-a"
 
 
+def test_gr2_linked_griptree_keeps_its_own_bucket_not_the_parents(tmp_path):
+    """recall#974, the gr2-linked case (unwitnessed until now, measured live as
+    `synapt` and its linked griptree `synapt-dev` both landing in the `synapt`
+    bucket). A linked griptree resolves its STORE to the parent gr2 workspace by
+    membership, but its per-worktree journal BUCKET must stay its own name, or two
+    distinct desks that share one store collapse into one journal and each reads the
+    other's entries.
+
+    The parent is a gr2 gripspace (``.grip`` for the bucket branch AND
+    ``.gitgrip/griptrees.json`` so ``_resolve_griptree_parent`` can find it). The
+    linked griptree carries its own ``.grip`` and a sub-repo ``.git`` file pointing
+    back at the parent's worktree, exactly like a real ``gr tree`` desk.
+    """
+    parent = tmp_path / "parent"
+    (parent / ".grip").mkdir(parents=True)
+    (parent / ".gitgrip").mkdir()
+    (parent / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+    main_repo = _make_git_repo(parent, "repo-a")
+    worktree_dir = main_repo / ".git" / "worktrees" / "dev"
+    worktree_dir.mkdir(parents=True)
+
+    griptree = tmp_path / "dev-tree"
+    (griptree / ".grip").mkdir(parents=True)
+    (griptree / ".gitgrip").mkdir()
+    (griptree / ".gitgrip" / "griptree.json").write_text("{}")
+    linked_repo = griptree / "repo-a"
+    linked_repo.mkdir()
+    (linked_repo / ".git").write_text(f"gitdir: {worktree_dir}\n")
+    nested = griptree / "docs"
+    nested.mkdir()
+
+    # STORE-ROOT-UNCHANGED CONTROL: membership resolution is untouched by this fix
+    # — the griptree's store still resolves to the parent gripspace.
+    assert _find_gripspace_root(griptree) == parent
+
+    parent_bucket = project_worktree_dir(parent)
+    griptree_bucket = project_worktree_dir(griptree)
+    nested_bucket = project_worktree_dir(nested)
+
+    # Shared store root, distinct buckets — the whole point. Only the bucket LEAF
+    # differs; the worktrees/ store root is identical (store-root-unchanged control).
+    assert griptree_bucket.parent == parent_bucket.parent == (
+        parent / ".synapt" / "recall" / "worktrees"
+    )
+    assert parent_bucket == parent / ".synapt" / "recall" / "worktrees" / "parent"
+    assert griptree_bucket == parent / ".synapt" / "recall" / "worktrees" / "dev-tree"
+    assert griptree_bucket != parent_bucket
+    # a subdir of the griptree reads the griptree's bucket, not a slice
+    assert nested_bucket == griptree_bucket
+
+
 class TestProjectTranscriptDirsGripspace:
     """Tests for gripspace-aware transcript discovery."""
 
