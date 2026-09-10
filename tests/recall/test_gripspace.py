@@ -1567,3 +1567,130 @@ class TestRecallSaveHonorsGripspaceRootOverCwd:
         # The desk's own store must be untouched -- still the empty file
         # this test created it with, not a second copy of the save.
         assert desk_knowledge.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Inverted gripspace-root marker: a gripspace ROOT must never record a
+# shared-root marker pointing at one of its OWN linked griptrees. Following
+# that redirect collapses the parent's presence, cursors and per-desk buckets
+# onto a child desk (the "one directory, two identities" store collision). A
+# hand probe run from the parent desk with GRIPSPACE_ROOT naming a linked child
+# planted exactly such a marker; the parent then resolved onto the child store.
+# ---------------------------------------------------------------------------
+
+from synapt.recall.core import (  # noqa: E402
+    _persist_shared_gripspace_root,
+    _read_shared_gripspace_root_marker,
+    _resolve_root_and_source,
+    _marker_target_is_own_child,
+    _GRIPSPACE_ROOT_MARKER_RELPATH,
+    _INVERTED_MARKER_WARNED,
+)
+
+
+def _make_populated_gripspace(tmp_path: Path, name: str = "workspace") -> Path:
+    """A gripspace root with a registered member repo (so it counts as
+    POPULATED for the marker-persistence guard)."""
+    grip = tmp_path / name
+    (grip / ".gitgrip").mkdir(parents=True)
+    (grip / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+    member = grip / "member-repo"
+    (member / ".git").mkdir(parents=True)  # a registered member => populated
+    return grip
+
+
+def _make_linked_griptree_of(tmp_path: Path, grip: Path, name: str = "dev-tree") -> Path:
+    """A linked griptree (griptree.json singular) whose sub-repo git worktree
+    pointer resolves its parent back to *grip*. Sibling on disk, exactly like
+    a real linked griptree beside its gripspace."""
+    worktrees_dir = grip / "member-repo" / ".git" / "worktrees" / "dev"
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    griptree = tmp_path / name
+    (griptree / ".gitgrip").mkdir(parents=True)
+    (griptree / ".gitgrip" / "griptree.json").write_text(
+        '{"branch": "dev", "path": "' + str(griptree) + '"}'
+    )
+    linked_repo = griptree / "member-repo"
+    linked_repo.mkdir()
+    (linked_repo / ".git").write_text(f"gitdir: {worktrees_dir}\n")
+    return griptree
+
+
+class TestInvertedGripspaceRootMarker:
+    def setup_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+
+    def teardown_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+
+    def _clear_env(self, monkeypatch):
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+
+    # WITNESS 1 (write): a parent gripspace does NOT plant a marker pointing at
+    # its own linked child.
+    def test_write_refuses_a_parent_to_own_child_marker(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        griptree = _make_linked_griptree_of(tmp_path, grip)
+        # precondition: the child truly resolves its parent back to grip
+        assert _marker_target_is_own_child(grip, griptree) is True
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(griptree.resolve(), "GRIPSPACE_ROOT")
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        assert not marker.exists(), (
+            "parent gripspace planted an inverted marker to its own child"
+        )
+        assert "own linked griptrees" in capsys.readouterr().err
+
+    # WITNESS 2 (read): an inverted marker already on disk is treated as stale;
+    # the resolver walks up (which resolves the parent to ITSELF).
+    def test_read_ignores_an_inverted_marker_and_walks_up(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        griptree = _make_linked_griptree_of(tmp_path, grip)
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{griptree.resolve()}\n")  # the inverted marker
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        resolved, stale = _read_shared_gripspace_root_marker()
+        assert resolved is None
+        assert stale == griptree.resolve()
+        _gripspace_cache.clear()
+        root, source = _resolve_root_and_source()
+        assert root is None
+        assert source.startswith("walk-up")
+        assert "inverted gripspace-root marker" in capsys.readouterr().err
+
+    # WITNESS 3 (regression): the DESIGNED child->parent case is unchanged --
+    # a call from inside the linked child with GRIPSPACE_ROOT=parent writes
+    # nothing (self_root == resolved, the pre-existing early return).
+    def test_linked_child_to_parent_still_writes_nothing(self, tmp_path, monkeypatch):
+        grip = _make_populated_gripspace(tmp_path)
+        griptree = _make_linked_griptree_of(tmp_path, grip)
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(griptree)
+        _gripspace_cache.clear()
+        # from inside the child, self_root resolves UP to grip == the target
+        _persist_shared_gripspace_root(grip.resolve(), "GRIPSPACE_ROOT")
+        assert not (grip / _GRIPSPACE_ROOT_MARKER_RELPATH).exists()
+        assert not (griptree / _GRIPSPACE_ROOT_MARKER_RELPATH).exists()
+
+    # WITNESS 4 (scope): the guard is NARROW -- a target that is a SEPARATE
+    # gripspace (not this root's own linked child) still persists, so the
+    # designed env-less-convergence marker is not lost.
+    def test_a_separate_gripspace_target_still_persists(self, tmp_path, monkeypatch):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        grip_b = _make_populated_gripspace(tmp_path, "desk-b")
+        assert _marker_target_is_own_child(grip_a, grip_b) is False
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(grip_b.resolve(), "GRIPSPACE_ROOT")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
+        assert marker.is_file()
+        assert marker.read_text().strip() == str(grip_b.resolve())

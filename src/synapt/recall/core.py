@@ -5037,6 +5037,55 @@ def _gripspace_has_registered_repo(root: Path) -> bool:
     return False
 
 
+_INVERTED_MARKER_WARNED: set[str] = set()
+
+
+def _marker_target_is_own_child(marker_dir: Path, target: Path) -> bool:
+    """True when *target* is a LINKED griptree (``.gitgrip/griptree.json``)
+    whose parent gripspace is *marker_dir* itself.
+
+    This is the one shape a shared-gripspace-root marker must never take: a
+    gripspace ROOT recording a redirect to one of its OWN member griptrees.
+    Following it collapses the parent's presence, cursors and per-desk buckets
+    onto a child desk -- the "one directory, two identities" store collision,
+    the sibling of ``_persist``'s unpopulated-root guard (recall#1124). Linked
+    children correctly point UP at the parent (``self_root == resolved`` there,
+    so ``_persist`` returns early and never writes); only a parent pointing
+    DOWN at a child is inverted. Neither write such a marker nor follow it.
+    """
+    try:
+        target = target.resolve()
+    except OSError:
+        return False
+    if not (target / ".gitgrip" / "griptree.json").is_file():
+        return False
+    parent = _resolve_griptree_parent(target)
+    try:
+        return parent is not None and parent.resolve() == marker_dir.resolve()
+    except OSError:
+        return False
+
+
+def _warn_inverted_marker_once(marker_dir: Path, target: Path) -> None:
+    """Log an ignored inverted marker once per (marker_dir, target) pair, so a
+    long-running MCP server that re-resolves on every call reports the stale
+    redirect exactly once rather than on every message."""
+    key = f"{marker_dir}=>{target}"
+    if key in _INVERTED_MARKER_WARNED:
+        return
+    _INVERTED_MARKER_WARNED.add(key)
+    import sys
+
+    print(
+        f"[recall] ignoring an inverted gripspace-root marker at "
+        f"{marker_dir / _GRIPSPACE_ROOT_MARKER_RELPATH}: it names {target}, one "
+        f"of this gripspace's own linked griptrees (a parent->child redirect "
+        f"that would collapse two desks onto one store). Resolving by walk-up "
+        f"instead; remove the marker to silence this.",
+        file=sys.stderr,
+    )
+
+
 def _persist_shared_gripspace_root(resolved: Path, env_var: str) -> None:
     """Record *resolved* as the shared coordinate for the CALLER's own
     gripspace, so a later call with no env var in its shell (a bare CLI
@@ -5077,6 +5126,19 @@ def _persist_shared_gripspace_root(resolved: Path, env_var: str) -> None:
             f"repo) -- not binding it to {resolved} from {env_var}. "
             f"Register a repo first (gr spawn / gr repo add) if this "
             f"binding is intentional.",
+            file=sys.stderr,
+        )
+        return
+    if _marker_target_is_own_child(self_root, resolved):
+        import sys
+
+        print(
+            f"[recall] refusing to persist a shared-gripspace-root marker: "
+            f"{resolved} is one of {self_root}'s own linked griptrees, so a "
+            f"marker here would make this gripspace root redirect to its own "
+            f"child (collapsing two desks onto one store). Not binding it from "
+            f"{env_var}. A linked child resolves UP to this root already; a "
+            f"root must not resolve DOWN to a child.",
             file=sys.stderr,
         )
         return
@@ -5125,6 +5187,13 @@ def _read_shared_gripspace_root_marker() -> tuple[Path | None, Path | None]:
     except OSError:
         return None, None
     if recorded.is_dir() and _is_gripspace_root_marker_dir(recorded):
+        if _marker_target_is_own_child(self_root, recorded):
+            # An inverted parent->child marker: this gripspace root names one
+            # of its own linked griptrees. Do not follow it (that collapses two
+            # desks onto one store); report it stale so the resolver walks up,
+            # which resolves this root to ITSELF. Logged once.
+            _warn_inverted_marker_once(self_root, recorded)
+            return None, recorded
         return recorded, None
     return None, recorded
 
