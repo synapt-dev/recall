@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -732,6 +733,56 @@ def _segment_transcript(
     return segments
 
 
+# Found in review (measured 2026-09-09/10): one entry's local MLX inference can run
+# for the whole external 3600s cron cap while every other entry in the batch
+# never gets a turn. Reproduced directly against a scratch copy of a real
+# store: a "No transcript found" warning for one (unrelated, genuinely
+# transcript-less) session was the last thing printed before the batch moved
+# on to a DIFFERENT entry that DOES have a transcript and entered real MLX
+# generation (mlx_lm generate_step/stream_generate, confirmed via
+# faulthandler.dump_traceback_later) -- RSS stayed flat (~24-34MB, the
+# weights are memory-mapped, not resident) the whole time, matching the
+# production symptom exactly. So the earlier warning was a red herring, not
+# the hang: the actual defect is that no single entry's enrichment is bounded,
+# so one slow (or externally-contended) entry can consume the entire batch's
+# budget and starve every entry after it.
+_ENRICH_ENTRY_TIMEOUT_SECONDS = int(os.environ.get("SYNAPT_ENRICH_ENTRY_TIMEOUT", "300"))
+
+
+class _EnrichEntryTimeout(Exception):
+    """Raised inside the SIGALRM handler when one entry's bound trips."""
+
+
+def _enrich_entry_bounded(entry: JournalEntry, *args, **kwargs) -> JournalEntry | None:
+    """Call ``enrich_entry`` with a per-entry wall-clock bound.
+
+    Unix only (SIGALRM); platforms without it (Windows) call straight through
+    unbounded -- unchanged behavior there, never a regression. On a trip,
+    logs ``SKIPPED <session> <reason>`` and returns None, which the caller
+    already treats as an ordinary enrichment failure: the entry stays an auto
+    stub and is retried next run, same as any other failure mode.
+    """
+    if not hasattr(signal, "SIGALRM"):
+        return enrich_entry(entry, *args, **kwargs)
+
+    def _on_alarm(signum, frame):
+        raise _EnrichEntryTimeout()
+
+    previous_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(_ENRICH_ENTRY_TIMEOUT_SECONDS)
+    try:
+        return enrich_entry(entry, *args, **kwargs)
+    except _EnrichEntryTimeout:
+        logger.warning(
+            "SKIPPED %s: enrichment exceeded %ss bound",
+            entry.session_id, _ENRICH_ENTRY_TIMEOUT_SECONDS,
+        )
+        return None
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 def enrich_transcript_segments(
     transcript_path: Path,
     project_dir: Path,
@@ -821,7 +872,7 @@ def enrich_transcript_segments(
                 auto=True,
                 enriched=False,
             )
-            enriched = enrich_entry(
+            enriched = _enrich_entry_bounded(
                 stub, project_dir, model,
                 client=client,
                 adapter_path=adapter_path,
@@ -907,7 +958,7 @@ def enrich_all(
             print(f"  Would enrich: {entry.session_id[:8]} — {focus_preview}")
             count += 1
         else:
-            enriched = enrich_entry(entry, project_dir, model, client=client, adapter_path=adapter_path)
+            enriched = _enrich_entry_bounded(entry, project_dir, model, client=client, adapter_path=adapter_path)
             if enriched:
                 append_entry(enriched, journal_path)
                 print(f"  Enriched: {entry.session_id[:8]} — {enriched.focus[:80]}")

@@ -4,6 +4,53 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-09-10
+
+Minor release. 164 commits across 68 first-parent merges since 0.24.2 (66 pull
+requests plus a topology-repair sync from main and one direct branch merge).
+This is a **minor**, not a patch, because the
+range adds new surface a patch would not: the `recall_code` tool — a code-symbol
+index and plain-language search (#1150) — and new store-resolution refusals that
+change what a call is allowed to do (#1132), alongside candidate-merge
+distinctiveness (#1148), a save create-path helper (#1129), and a review-install
+hint (#1180). Today's sender-attribution and gripspace-root marker fixes ride in
+this range.
+
+### Highlights by area
+
+- **Features:** `recall_code` code index and search (#1150); candidate-merge
+  distinctiveness (#1148); resolver refusals for an unpopulated or
+  out-of-gripspace root (#1132); a save create-path helper (#1129); a
+  review-install hint for gr2 review runs (#1180).
+- **Store resolution and identity:** a gripspace-root marker refuses an
+  unrelated target; the inverted parent→child marker is neither written nor
+  followed, and its dangling/pruned-worktree over-block (write) and under-block
+  (read) are split by liveness; a deterministic per-workspace coordinate (#974);
+  cwd-inference no longer strands a store; Codex and Google-ADK project
+  roots resolve (#1097); channel sender attribution and journal agent-id
+  attribution name the calling session.
+- **Channels:** sender attribution keyed on the session; UTC timestamps render
+  with their zone; bracketed-paste for `speak_to_agent`; the
+  knowledge-sync path no longer doubles.
+- **Journal:** meaningful auto-stubs (#937); carry-forward "done" matching;
+  agent-id attribution; the wake read reports truncation instead of hiding it
+  (#856); compaction boilerplate is stripped.
+- **Enrich and sleep cycle:** per-entry enrich bound; working-memory
+  second-pull boost; recluster maintenance and refusals (#435); signature
+  distinctiveness and tiebreak determinism;
+  candidate-side containment and merge-image floors; sharded save-clusters
+  receipts.
+- **Code index and search:** grammar-hash refresh on change; path and definition
+  preference in ranking; batch chunk hydrate; chunk-header date text.
+- **CI and tests:** extras-matrix smoke coverage; pytest-asyncio dependency;
+  Windows path normalization and assertions (#1136); crewai skipped without an
+  LLM (#1137); test isolation; cold-refresh contract-drift coverage.
+- **Performance:** Codex cwd and session caches; O(1) session update on
+  materialize-all-chunks; a session-overview covering index.
+
+The detailed entries below were authored as changes landed and are grouped under
+this release.
+
 ### Fixed
 - **A session that ended without a handoff is named as such at the next wake.**
   A host crash, kill, or forced shutdown runs no SessionEnd, so no checkpoint

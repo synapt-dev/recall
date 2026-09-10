@@ -742,5 +742,226 @@ class TestShardedRecallDBSharded(unittest.TestCase):
         db.close()
 
 
+class TestShardedRecallDBSessionOverviewCache(unittest.TestCase):
+    """R3.1: the generation-keyed ``session_overview()`` cache (design
+    tracked privately; see recall#1147 Probe 2 for the public trail).
+
+    Four freeze witnesses, each isolated so a targeted mutation kills only
+    its own test: a cache HIT is actually consulted (not merely correct by
+    coincidence), a MISS on generation bump, a MISS on schema-version
+    bump, and BYTE-IDENTITY of the cached round trip against the uncached
+    result. The hit/miss witnesses poison whatever cache row the code
+    itself just wrote (discovered by reading the table back), rather than
+    assuming a key shape, so each stays a witness of its own dimension
+    only -- see the per-witness comments below for the isolation argument.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.index_dir = Path(self.tmpdir)
+
+    def _make_chunk(
+        self, chunk_id: str, session_id: str, timestamp: str, turn_index: int, text: str
+    ) -> TranscriptChunk:
+        return TranscriptChunk(
+            id=chunk_id,
+            session_id=session_id,
+            timestamp=timestamp,
+            turn_index=turn_index,
+            user_text=text,
+            assistant_text="assistant",
+        )
+
+    def _open_generation_backed_store(self) -> ShardedRecallDB:
+        """A single-shard store that publishes a real generation on its
+        first ``save_chunks`` call -- required for the cache to activate
+        at all (no generation identity means no caching, ruled
+        2026-09-09; see ``test_save_chunks_routes_through_rebuild_when_a_
+        sharded_store_has_zero_shards`` above for the same zero-shard
+        starting layout)."""
+        RecallDB(self.index_dir / "index.db").close()
+        RecallDB(self.index_dir / "data_001.db").close()
+        return ShardedRecallDB.open(self.index_dir)
+
+    def _cache_rows(self, db: ShardedRecallDB) -> list:
+        """Raw introspection of the cache table -- discovers whatever key
+        the code actually used rather than assuming one, so a mutation
+        that changes WHICH key is used doesn't also break this helper."""
+        return db._index._conn.execute(
+            "SELECT generation_name, shard_name, schema_version, overview_json "
+            "FROM shard_overview_cache"
+        ).fetchall()
+
+    def _poisoned_overview(self, sentinel_turn_count: int) -> dict:
+        return {
+            "s1": {
+                "activity": (1, "poisoned"),
+                "earliest_ts": "2020-01-01T00:00:00Z",
+                "latest_ts": "2020-01-01T00:00:00Z",
+                "turn_count": sentinel_turn_count,
+                "has_real_activity": True,
+                "transcript_path": "",
+                "agent_ids": frozenset(),
+            }
+        }
+
+    def test_cache_hit_is_actually_consulted_not_recomputed(self):
+        """Proves the SECOND call reads the cache rather than merely
+        recomputing the (identical, so indistinguishable) right answer:
+        after the first call populates the cache, this poisons the exact
+        row that call wrote with a sentinel no real computation could
+        produce, and asserts the sentinel comes back.
+
+        Mutation that kills only this witness: make ``_shard_overview``'s
+        ``if cached is not None: return cached`` branch dead code. That
+        mutation cannot affect the other three witnesses here -- (b)/(c)
+        assert the sentinel is ABSENT after a bump, which stays true
+        trivially if the cache is never read at all; (d) calls the
+        storage-layer cache functions directly, never through
+        ``_shard_overview``.
+        """
+        db = self._open_generation_backed_store()
+        db.save_chunks([
+            self._make_chunk("s1:t0", "s1", "2026-01-01T00:00:00Z", 0, "alpha"),
+        ])
+        first = db.session_overview()
+        self.assertEqual(first["s1"]["turn_count"], 1)
+
+        rows = self._cache_rows(db)
+        self.assertEqual(len(rows), 1, "exactly one shard, one cache row expected")
+        gen_name, shard_name, schema_version, _ = rows[0]
+        db._index.set_cached_shard_overview(
+            gen_name, shard_name, schema_version, self._poisoned_overview(424242)
+        )
+
+        second = db.session_overview()
+        self.assertEqual(
+            second["s1"]["turn_count"], 424242,
+            "a real recompute would never produce this sentinel -- if this "
+            "fails, the second call is not reading the cache",
+        )
+        db.close()
+
+    def test_cache_misses_on_generation_bump(self):
+        """A second ``save_chunks`` call always publishes a FRESH
+        generation (``generations.rebuild_and_publish`` mints a new name
+        every call -- see ``save_chunks``'s own docstring), so the second
+        ``session_overview()`` here must reflect the NEW content, not a
+        stale blob cached under the first generation's name.
+
+        Mutation that kills only this witness: hardcode the
+        ``generation_name`` argument ``_shard_overview`` passes to the
+        cache methods to a fixed literal, ignoring the real one. That
+        cannot affect (a) (single generation throughout, so a fixed key
+        is still self-consistent across its two calls), (c) (schema_version
+        is a different key column, handled independently), or (d) (calls
+        the storage layer directly with its own explicit keys).
+        """
+        db = self._open_generation_backed_store()
+        db.save_chunks([
+            self._make_chunk("s1:t0", "s1", "2026-01-01T00:00:00Z", 0, "v1"),
+        ])
+        v1 = db.session_overview()
+        self.assertEqual(v1["s1"]["turn_count"], 1)
+
+        db.save_chunks([
+            self._make_chunk("s1:t0", "s1", "2026-01-01T00:00:00Z", 0, "v1"),
+            self._make_chunk("s1:t1", "s1", "2026-01-02T00:00:00Z", 1, "v2"),
+        ])
+        v2 = db.session_overview()
+        self.assertEqual(
+            v2["s1"]["turn_count"], 2,
+            "a stale generation-A cache value leaked forward after the bump",
+        )
+        self.assertEqual(v2["s1"]["latest_ts"], "2026-01-02T00:00:00Z")
+        db.close()
+
+    def test_cache_misses_on_schema_version_bump(self):
+        """Poisons the real cache row the first call wrote, then bumps
+        ``SHARD_OVERVIEW_CACHE_SCHEMA_VERSION`` (module-level constant,
+        re-imported fresh on every ``session_overview()`` call since the
+        import is inside the function body, not at module load) and
+        confirms the poisoned, now-wrong-schema-version row is NOT read.
+
+        Mutation that kills only this witness: hardcode the
+        ``schema_version`` argument ``_shard_overview`` passes to the
+        cache methods to a fixed literal, ignoring the real (patched)
+        one. That cannot affect (a) (single schema version throughout its
+        two calls), (b) (generation_name is a different key column), or
+        (d) (calls the storage layer directly with its own explicit keys).
+        """
+        db = self._open_generation_backed_store()
+        db.save_chunks([
+            self._make_chunk("s1:t0", "s1", "2026-01-01T00:00:00Z", 0, "alpha"),
+        ])
+        real = db.session_overview()
+        self.assertEqual(real["s1"]["turn_count"], 1)
+
+        rows = self._cache_rows(db)
+        self.assertEqual(len(rows), 1)
+        gen_name, shard_name, schema_version, _ = rows[0]
+        db._index.set_cached_shard_overview(
+            gen_name, shard_name, schema_version, self._poisoned_overview(999999)
+        )
+
+        with mock.patch(
+            "synapt.recall.storage.SHARD_OVERVIEW_CACHE_SCHEMA_VERSION",
+            schema_version + 1,
+        ):
+            bumped = db.session_overview()
+        self.assertEqual(
+            bumped["s1"]["turn_count"], 1,
+            "a schema-version bump must not read the old-version cached blob",
+        )
+        db.close()
+
+    def test_cached_round_trip_is_byte_identical_to_uncached(self):
+        """The cache write/read round trip must return a value that is
+        not merely JSON-equal but TYPE-identical to the uncached result:
+        ``activity`` is compared with plain ``max()`` across shards in
+        ``session_overview()``, and comparing a tuple against a list
+        raises ``TypeError`` -- a real bug this witness would catch that
+        a plain ``==`` on the two dicts alone would not, since Python
+        does not consider a shape difference here unless you ask.
+
+        Mutation that kills only this witness: drop the ``tuple(...)``
+        (or ``frozenset(...)``) cast in ``_deserialize_shard_overview``,
+        leaving that field a list. The other three witnesses only assert
+        on ``turn_count``/``latest_ts`` (plain ints/strings, unaffected by
+        this), so this mutation cannot touch them.
+        """
+        from synapt.recall.storage import SHARD_OVERVIEW_CACHE_SCHEMA_VERSION
+
+        db = self._open_generation_backed_store()
+        db.save_chunks([
+            self._make_chunk("s1:t0", "s1", "2026-01-01T00:00:00Z", 0, "alpha"),
+            self._make_chunk("s2:t0", "s2", "2026-01-02T00:00:00Z", 0, "beta"),
+        ])
+        shard = db._data_dbs[0]
+        uncached = shard.session_overview()
+        self.assertGreaterEqual(len(uncached), 1)
+
+        db._index.set_cached_shard_overview(
+            "gen-byte-identity-probe", shard.path.name,
+            SHARD_OVERVIEW_CACHE_SCHEMA_VERSION, uncached,
+        )
+        round_tripped = db._index.get_cached_shard_overview(
+            "gen-byte-identity-probe", shard.path.name,
+            SHARD_OVERVIEW_CACHE_SCHEMA_VERSION,
+        )
+        self.assertEqual(round_tripped, uncached)
+        for session_id, entry in round_tripped.items():
+            self.assertIsInstance(
+                entry["activity"], tuple,
+                f"{session_id}: activity must round-trip as a tuple ("
+                "max() compares it against other shards' tuples)",
+            )
+            self.assertIsInstance(
+                entry["agent_ids"], frozenset,
+                f"{session_id}: agent_ids must round-trip as a frozenset",
+            )
+        db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

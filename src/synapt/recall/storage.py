@@ -158,15 +158,56 @@ CREATE TABLE IF NOT EXISTS cluster_summaries (
 -- Join table for cluster membership. No REFERENCES constraints because
 -- PRAGMA foreign_keys is OFF (SQLite default) and clustering is fully
 -- rebuilt on every recall build — orphans are impossible in practice.
+--
+-- run_id is NULL for ordinary self-batch clustering (the
+-- table's original rows -- a full rebuild replaces them wholesale, so
+-- there is nothing to undo by run) and set ONLY for rows written by
+-- merge_chunks_into_cluster(). A live-store incident recovered a bad
+-- merge's rows by their shared added_at TIMESTAMP because no run_id
+-- existed to key on -- correct that time only because one write call
+-- produces one timestamp for every row, which is not guaranteed in
+-- general (clock resolution, or a future caller batching differently).
+-- run_id is deliberate identity for exactly this recovery, not a
+-- coincidence of implementation.
 CREATE TABLE IF NOT EXISTS cluster_chunks (
     cluster_id  TEXT NOT NULL,
     chunk_id    TEXT NOT NULL,
     added_at    TEXT NOT NULL,
+    run_id      TEXT,
     PRIMARY KEY (cluster_id, chunk_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cluster_chunks_chunk ON cluster_chunks(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
+
+-- recall#435's recluster maintenance op reselects the same
+-- stale chunks every run when they fail to reach MIN_CLUSTER_SIZE (measured
+-- on the real store: 98.9% batch overlap between consecutive runs). This
+-- table records which chunks a recluster run has already tried, so batch
+-- selection can prefer never-tried chunks first. One row per chunk_id --
+-- INSERT OR REPLACE on a repeat attempt, never deleted: a chunk that later
+-- clusters is excluded from the stale query entirely and will never be
+-- selected again, so its (now-inert) attempt row needs no cleanup.
+CREATE TABLE IF NOT EXISTS recluster_attempts (
+    chunk_id     TEXT PRIMARY KEY,
+    attempted_at TEXT NOT NULL,
+    run_id       TEXT NOT NULL
+);
+
+-- recall#435 follow-on: a bounded, persisted per-cluster token signature
+-- (top N tokens by WITHIN-cluster document frequency), so a stale chunk can
+-- be compared against what a cluster is ACTUALLY about instead of a
+-- truncated raw-text search_text sample (measured: search_text averages
+-- 121 chars, ~10-35 content tokens, versus a chunk's own 100-200 -- Jaccard
+-- against that size mismatch dilutes real overlap below any sane
+-- threshold). One row per cluster_id, INSERT OR REPLACE -- a cluster whose
+-- membership changes gets a fresh signature computed from its current
+-- members, never an incremental patch.
+CREATE TABLE IF NOT EXISTS cluster_token_signatures (
+    cluster_id  TEXT PRIMARY KEY,
+    tokens      TEXT NOT NULL,  -- JSON list, top N by document frequency
+    updated_at  TEXT NOT NULL
+);
 
 -- Access tracking tables for adaptive memory (Phase 2).
 -- access_log is append-only: every returned search result or drill-down is
@@ -299,6 +340,64 @@ CREATE TABLE IF NOT EXISTS query_tail_cursors (
     last_success_at TEXT NOT NULL
 );
 """
+
+# R3.1: caches ShardedRecallDB.session_overview()'s per-shard result, keyed on
+# the immutable generation identity (generations.py: shards are never mutated
+# in place once a generation is published) plus a schema_version constant so
+# a session_overview() shape change can never read an older blob as current.
+# No (size, mtime) fallback -- Stromus's ruling 2026-09-09: a store with no
+# generation identity (the legacy flat layout) is not cached at all and pays
+# the uncached cost, same as before this existed.
+_SHARD_OVERVIEW_CACHE_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS shard_overview_cache (
+    generation_name TEXT NOT NULL,
+    shard_name TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    overview_json TEXT NOT NULL,
+    PRIMARY KEY (generation_name, shard_name, schema_version)
+);
+"""
+
+# Bump whenever session_overview()'s returned per-session dict gains, drops,
+# or renames a field -- an old cached blob under a stale version is never
+# read as current (the schema_version column is part of the cache key).
+SHARD_OVERVIEW_CACHE_SCHEMA_VERSION = 1
+
+
+def _serialize_shard_overview(overview: dict[str, dict]) -> str:
+    """JSON-encode session_overview()'s return shape for the cache.
+
+    ``activity`` is a real ``(int, str)`` tuple (compared with plain
+    ``max()`` by callers) and ``agent_ids`` a ``frozenset`` — neither is
+    JSON-native, so both are converted here and restored by
+    ``_deserialize_shard_overview`` on the way back, keeping the
+    round-tripped value type-identical to the uncached result, not merely
+    JSON-identical.
+    """
+    return json.dumps(
+        {
+            session_id: {
+                **{k: v for k, v in entry.items() if k not in ("activity", "agent_ids")},
+                "activity": list(entry["activity"]),
+                "agent_ids": sorted(entry["agent_ids"]),
+            }
+            for session_id, entry in overview.items()
+        },
+        sort_keys=True,
+    )
+
+
+def _deserialize_shard_overview(blob: str) -> dict[str, dict]:
+    raw = json.loads(blob)
+    return {
+        session_id: {
+            **{k: v for k, v in entry.items() if k not in ("activity", "agent_ids")},
+            "activity": tuple(entry["activity"]),
+            "agent_ids": frozenset(entry["agent_ids"]),
+        }
+        for session_id, entry in raw.items()
+    }
+
 
 _QUERY_TAIL_FTS_TABLE_SQL = """\
 CREATE VIRTUAL TABLE query_tail_fts USING fts5(
@@ -552,6 +651,7 @@ class RecallDB:
     def _ensure_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.executescript(_QUERY_TAIL_SCHEMA_SQL)
+        self._conn.executescript(_SHARD_OVERVIEW_CACHE_SCHEMA_SQL)
         # Migrate existing tables: add columns that may be missing
         query_tail_cursor_columns = {
             row[1]
@@ -570,11 +670,43 @@ class RecallDB:
                 "ADD COLUMN observed_prefix_sha256 TEXT NOT NULL DEFAULT ''"
             )
         self._migrate_chunks_table()
+        # session_overview's GROUP BY session_id aggregates timestamp,
+        # turn_index, transcript_path, and agent_id per row. idx_chunks_session
+        # alone covers the GROUP BY key, but referencing any of those four
+        # columns forces SQLite off the index and into a per-row table lookup
+        # (measured: on an isolated shard copy, adding ANY one of them to the
+        # SELECT list -- independent of which aggregate function touches it --
+        # was the entire cost; julianday() and GROUP_CONCAT specifically were
+        # not).
+        #
+        # This index covers session_id/timestamp/turn_index/agent_id -- NOT
+        # transcript_path. That is deliberate, not an oversight: a 5-column
+        # index covering all five was measured to cost ~22% more per INSERT
+        # than no covering index at all, entirely from having one more
+        # composite index on the table, not from the aggregate itself
+        # (recall#1147 follow-on, tracked privately -- an interleaved,
+        # two-batch-size write-cost measurement). transcript_path IS a
+        # per-session constant (one source transcript file per session_id),
+        # unlike agent_id (see session_overview()'s docstring) -- so instead
+        # of covering it too, session_overview() fetches it via one lookup
+        # PER SESSION rather than folding it into the per-CHUNK aggregate.
+        # That drops the insert cost to ~18% while keeping the same read
+        # benefit as the 5-column shape (measured, same follow-on).
+        #
+        # Created here, AFTER _migrate_chunks_table(), not in _SCHEMA_SQL's
+        # executescript above: an older chunks table may not have
+        # transcript_path/agent_id yet, and creating an index that
+        # references them before the migration adds them fails outright.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_overview_covering "
+            "ON chunks(session_id, timestamp, turn_index, agent_id)"
+        )
         self._migrate_knowledge_table()
         self._migrate_clusters_table()
         self._migrate_access_stats_table()
         self._migrate_contradictions_table()
         self._migrate_chunk_links_table()
+        self._migrate_cluster_chunks_table()
         # Check if FTS table exists (FTS5 virtual tables don't support
         # IF NOT EXISTS, so we check manually before creating)
         row = self._conn.execute(
@@ -801,6 +933,23 @@ class RecallDB:
                     "ALTER TABLE cluster_summaries ADD COLUMN content_hash TEXT"
                 )
                 self._conn.commit()
+
+    def _migrate_cluster_chunks_table(self) -> None:
+        """Add ``run_id`` to a ``cluster_chunks`` table created before it
+        existed. NULL default: pre-existing rows were not written by any
+        merge run and have nothing to be keyed by."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='cluster_chunks'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(cluster_chunks)").fetchall()
+        }
+        if "run_id" not in cols:
+            self._conn.execute("ALTER TABLE cluster_chunks ADD COLUMN run_id TEXT")
+            self._conn.commit()
 
     def _migrate_access_stats_table(self) -> None:
         """Add promotion columns that may be missing from an older access_stats table."""
@@ -1420,7 +1569,7 @@ class RecallDB:
         from synapt.recall.core import TranscriptChunk
 
         rows = self._conn.execute(
-            "SELECT id, session_id, timestamp, turn_index "
+            "SELECT id, session_id, timestamp, turn_index, date_text "
             "FROM chunks ORDER BY rowid"
         ).fetchall()
 
@@ -1435,6 +1584,7 @@ class RecallDB:
                 tools_used=[],
                 files_touched=[],
                 tool_content="",
+                date_text=r["date_text"] or "",
                 transcript_path="",
                 byte_offset=-1,
                 byte_length=0,
@@ -1513,7 +1663,27 @@ class RecallDB:
         return loaded
 
     def session_overview(self) -> dict[str, dict]:
-        """Return routing and listing metadata without materializing chunks."""
+        """Return routing and listing metadata without materializing chunks.
+
+        Split into two queries rather than one, deliberately: agent_id is
+        NOT a per-session constant (a session can genuinely have multiple
+        contributing agents -- resume.py and sharded_db.py both treat
+        session_overview's ``agent_ids`` as a real multi-value set, unioned
+        across chunks/shards, and resolve scope with ``agent_id in
+        agent_ids``), so it stays a real ``GROUP_CONCAT(DISTINCT ...)``
+        aggregate over every chunk. transcript_path IS a per-session
+        constant (one source transcript file per session_id), so instead
+        of folding it into the same per-chunk aggregate -- which would
+        require covering it in the same index as the other four columns,
+        at a measured ~22% insert-cost premium (recall#1147 follow-on,
+        tracked privately) -- it is fetched via one lookup PER SESSION
+        (a MIN(rowid) per session_id, restricted to rows that actually
+        HAVE a transcript_path, matching the tolerance the old single-query
+        MIN(NULLIF(transcript_path, '')) had for some rows being empty).
+        Measured: this keeps the same read benefit as covering all five
+        columns, at a lower per-insert cost (~18% vs ~22%), because the
+        second query does N_SESSIONS lookups, not N_CHUNKS.
+        """
         rows = self._conn.execute(
             "SELECT session_id, "
             "MIN(NULLIF(timestamp, '')) AS earliest_ts, "
@@ -1526,11 +1696,21 @@ class RecallDB:
             "         THEN timestamp END) AS activity_raw, "
             "MAX(julianday(timestamp)) AS fallback_jd, "
             "MAX(CASE WHEN julianday(timestamp) IS NULL THEN timestamp END) AS fallback_raw "
-            ", MIN(NULLIF(transcript_path, '')) AS transcript_path "
             ", GROUP_CONCAT(DISTINCT CASE WHEN turn_index != -1 "
             "THEN NULLIF(agent_id, '') END) AS agent_ids "
             "FROM chunks GROUP BY session_id"
         ).fetchall()
+
+        transcript_paths: dict[str, str] = {
+            row["session_id"]: row["transcript_path"]
+            for row in self._conn.execute(
+                "SELECT session_id, transcript_path FROM chunks "
+                "WHERE rowid IN ("
+                "  SELECT MIN(rowid) FROM chunks "
+                "  WHERE transcript_path != '' GROUP BY session_id"
+                ")"
+            ).fetchall()
+        }
 
         result: dict[str, dict] = {}
         for row in rows:
@@ -1550,12 +1730,82 @@ class RecallDB:
                 "latest_ts": row["latest_ts"] or "",
                 "turn_count": int(row["turn_count"] or 0),
                 "has_real_activity": bool(row["activity_count"]),
-                "transcript_path": row["transcript_path"] or "",
+                "transcript_path": transcript_paths.get(row["session_id"], ""),
                 "agent_ids": frozenset(
                     part for part in (row["agent_ids"] or "").split(",") if part
                 ),
             }
         return result
+
+    def get_cached_shard_overview(
+        self, generation_name: str, shard_name: str, schema_version: int
+    ) -> dict[str, dict] | None:
+        """Return a cached ``session_overview()`` result for one shard, or
+        None on a cache miss.
+
+        Never raises: a database that has never been through
+        ``_ensure_schema()`` (a read-only-opened index.db older than this
+        cache) has no ``shard_overview_cache`` table at all, and a
+        corrupt/unreadable entry is possible if a write was interrupted
+        mid-commit — both degrade to a miss rather than an error, the same
+        courtesy-not-dependency shape as the Codex-session-cwd cache
+        (``codex.py``'s ``_cwd_cache``).
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT overview_json FROM shard_overview_cache "
+                "WHERE generation_name = ? AND shard_name = ? AND schema_version = ?",
+                (generation_name, shard_name, schema_version),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        try:
+            return _deserialize_shard_overview(row["overview_json"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+
+    def set_cached_shard_overview(
+        self,
+        generation_name: str,
+        shard_name: str,
+        schema_version: int,
+        overview: dict[str, dict],
+    ) -> None:
+        """Best-effort cache write, on its OWN short-lived connection —
+        never the connection ``session_overview()`` was called through.
+
+        That connection may be read-only (``RecallDB.open_readonly``,
+        resume's cold path opens index.db this way) or contending with an
+        active build's write lock on index.db; this cache is a courtesy,
+        never a dependency (same rule as ``flush_cwd_cache``'s docstring),
+        so a bounded, short ``busy_timeout`` and a swallowed
+        ``OperationalError`` mean a busy or read-only index.db just skips
+        the write and the next call recomputes uncached — never blocks or
+        fails the caller.
+        """
+        try:
+            conn = sqlite3.connect(str(self._path), timeout=0.5)
+            try:
+                conn.execute("PRAGMA busy_timeout=500")
+                conn.executescript(_SHARD_OVERVIEW_CACHE_SCHEMA_SQL)
+                conn.execute(
+                    "INSERT OR REPLACE INTO shard_overview_cache "
+                    "(generation_name, shard_name, schema_version, overview_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        generation_name,
+                        shard_name,
+                        schema_version,
+                        _serialize_shard_overview(overview),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            pass
 
     def session_activity(self) -> dict[str, tuple[int, str]]:
         """Return each session's newest activity without materializing chunks."""
@@ -2326,7 +2576,7 @@ class RecallDB:
         self,
         clusters: list[dict],
         chunk_memberships: list[tuple[str, str, str]],
-    ) -> None:
+    ) -> dict:
         """Replace all clusters and memberships (full rebuild).
 
         Args:
@@ -2334,13 +2584,122 @@ class RecallDB:
                 cluster_type, session_ids, branch, date_start, date_end,
                 chunk_count, status, created_at, updated_at.
             chunk_memberships: List of (cluster_id, chunk_id, added_at) tuples.
+
+        Returns:
+            A receipt dict with ``dangling_removed``: the count of
+            ``cluster_chunks`` rows deleted because their ``cluster_id``
+            matched no row in ``clusters`` at all, regardless of cluster_type
+            -- a state that used to be permanently invisible to this
+            method's own cleanup and would otherwise survive every future
+            call unreported.
         """
         cur = self._conn.cursor()
 
-        # Clear topic-derived cluster data (preserve access-promoted singletons)
+        # A full rebuild re-derives clusters from the WHOLE known corpus
+        # every time (recall#435's own "full-corpus, O(store size)" design)
+        # with no notion of recluster_stale_chunks(merge_into_existing=True)'s
+        # additive, run_id-tagged rows -- so the DELETE below, unqualified,
+        # silently discarded every incremental maintenance batch's
+        # provenance, and for a chunk the fresh self-batch grouping does not
+        # place anywhere, its membership outright (measured against the live
+        # production store and reproduced in
+        # test_ordinary_second_build_does_not_silently_erase_a_same_session_incremental_merge).
+        #
+        # An earlier version of this fix re-anchored by matching the
+        # preserved chunk_id against the fresh INSERT alone. That misses the
+        # case that matters most on the live store: a chunk merge_into_
+        # existing placed BECAUSE the self-batch grouping never would (that
+        # IS what "stale" means for most of these chunks -- MIN_CLUSTER_SIZE
+        # excludes a chunk with no peer). Such a chunk is placed by NEITHER
+        # pass, so chunk_id-only re-anchoring silently does nothing and the
+        # row is lost exactly as before (R2 probe A). The same version also
+        # stamped a preserved run_id onto ANY fresh row sharing that chunk_id
+        # -- including one the FRESH BUILD itself just wrote in an unrelated
+        # cluster -- corrupting run_id's contract that a bad run can be
+        # undone by exactly its own rows (R2 probe B: revert-by-run_id would
+        # then delete the build's own membership).
+        #
+        # Fixed shape: snapshot each preserved row's OLD cluster_id and
+        # added_at too, plus every OTHER member (preserved or not) that OLD
+        # cluster had. After the fresh insert: a chunk the fresh pass placed
+        # is left alone, full stop -- its row is the BUILD's, not the
+        # merge's, and nothing is stamped onto it (probe B). A chunk the
+        # fresh pass did NOT place is re-inserted under its OWN preserved
+        # (chunk_id, added_at, run_id), into whichever fresh cluster now
+        # holds the LARGEST share of its old cluster's other members --
+        # never the old cluster_id itself, which a merge's changed true
+        # membership means essentially never survives a rebuild unchanged
+        # (see clustering._cluster_id: a deterministic sha1 of sorted
+        # founding chunk_ids, computed once and never recomputed by
+        # merge_chunks_into_cluster). If none of the old cluster's other
+        # members were placed anywhere either (the whole grouping
+        # dissolved), the chunk is left stale -- it re-enters
+        # stale_transcript_chunk_ids and is caught by the ordinary
+        # maintenance pass next time, same as any other stale chunk.
+        #
+        # A second, distinct case: a preserved row whose old cluster_id
+        # matches NO cluster at all, even before this call started (not "the
+        # grouping dissolved during this rebuild" -- "this reference was
+        # already broken"). That is never a real grouping to vote among, so
+        # it is dissolved unconditionally rather than searched for siblings.
+        # The row itself is removed by the widened DELETE below in the same
+        # statement as an ordinary topic-cluster wipe, and the count is
+        # returned so a corrupted store cleaning up is visible, not silent.
+        preserved_rows = cur.execute(
+            "SELECT cluster_id, chunk_id, added_at, run_id FROM cluster_chunks "
+            "WHERE run_id IS NOT NULL"
+        ).fetchall()
+        old_cluster_ids = sorted({r[0] for r in preserved_rows})
+        old_cluster_members: dict[str, set[str]] = {}
+        # A preserved row's old_cluster_id may already be absent from
+        # clusters BEFORE this call does anything -- a row this permissive
+        # about its own cluster_id (merge_chunks_into_cluster used to write
+        # one with no existence check at all) can outlive the cluster it
+        # names if something else removes that cluster without also
+        # touching cluster_chunks. Snapshotting which old_cluster_ids are
+        # actually live right now, before any delete, is what lets the
+        # reinsertion loop below tell "this cluster is dissolving as PART OF
+        # this rebuild" (real siblings, worth voting among) apart from "this
+        # cluster was already gone before this call started" (nothing to
+        # vote among -- the row is corrupted state, not a live grouping,
+        # and must dissolve rather than be treated as having siblings).
+        existing_old_cluster_ids: set[str] = set()
+        if old_cluster_ids:
+            qmarks = ",".join("?" * len(old_cluster_ids))
+            for cid, chunk_id in cur.execute(
+                f"SELECT cluster_id, chunk_id FROM cluster_chunks "
+                f"WHERE cluster_id IN ({qmarks})", old_cluster_ids,
+            ).fetchall():
+                old_cluster_members.setdefault(cid, set()).add(chunk_id)
+            existing_old_cluster_ids = {
+                r[0] for r in cur.execute(
+                    f"SELECT cluster_id FROM clusters WHERE cluster_id IN ({qmarks})",
+                    old_cluster_ids,
+                ).fetchall()
+            }
+
+        # Count dangling rows (referencing no cluster at all, regardless of
+        # cluster_type) before removing them -- the receipt line below is
+        # the only record that this ever happens, so a corrupted store
+        # cleaning up silently would look identical to one that was never
+        # corrupted.
+        dangling_removed = cur.execute(
+            "SELECT COUNT(*) FROM cluster_chunks WHERE cluster_id NOT IN "
+            "(SELECT cluster_id FROM clusters)"
+        ).fetchone()[0]
+
+        # Clear topic-derived cluster data (preserve access-promoted
+        # singletons), AND any row whose cluster_id matches no cluster at
+        # all -- a dangling reference is not a topic-cluster membership, so
+        # the topic-only scope above never saw it and never will on any
+        # LATER call either (this same query, re-run next time, still
+        # excludes a cluster_id that stays absent forever). Stale means
+        # stale: the chunk re-enters stale_transcript_chunk_ids exactly as
+        # if its membership had simply never been written.
         cur.execute(
             "DELETE FROM cluster_chunks WHERE cluster_id IN "
-            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic')"
+            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic') "
+            "OR cluster_id NOT IN (SELECT cluster_id FROM clusters)"
         )
         # Preserve LLM-generated summaries — they're expensive to regenerate
         # and remain valid when cluster_id is unchanged (deterministic ID).
@@ -2350,6 +2709,10 @@ class RecallDB:
             "DELETE FROM cluster_summaries WHERE cluster_id IN "
             "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic') "
             "AND method != 'llm'"
+        )
+        cur.execute(
+            "DELETE FROM cluster_token_signatures WHERE cluster_id IN "
+            "(SELECT cluster_id FROM clusters WHERE cluster_type = 'topic')"
         )
         # Disable FTS trigger during bulk delete, then rebuild
         cur.execute("DROP TRIGGER IF EXISTS clusters_ad")
@@ -2396,6 +2759,66 @@ class RecallDB:
                 (cluster_id, chunk_id, added_at),
             )
 
+        # Re-home preserved rows the fresh pass did NOT place (see the
+        # snapshot comment above). fresh_location is built from
+        # chunk_memberships directly -- the exact set just inserted above,
+        # never re-queried, so it cannot see a chunk that landed in the
+        # fresh set for some OTHER unrelated reason after this point.
+        fresh_location: dict[str, str] = {
+            chunk_id: cluster_id for cluster_id, chunk_id, _added_at in chunk_memberships
+        }
+        reinserted_clusters: set[str] = set()
+        for old_cluster_id, chunk_id, added_at, run_id in preserved_rows:
+            if chunk_id in fresh_location:
+                # Placed by the fresh pass: that row is the BUILD's, not the
+                # merge's. Leave it exactly as inserted -- run_id stays NULL.
+                continue
+            if old_cluster_id not in existing_old_cluster_ids:
+                # This row's cluster was already gone before this call
+                # started -- not a real grouping that dissolved just now,
+                # so there is nothing to vote among. The DELETE above already
+                # removed the row itself; dissolve it outright rather than
+                # searching old_cluster_members for "siblings" that share
+                # nothing but a dead cluster_id.
+                continue
+            # Not placed: home it with whichever fresh cluster now holds the
+            # LARGEST share of its old cluster's OTHER members (siblings
+            # that a merge or the original self-batch pass put beside it).
+            votes: dict[str, int] = {}
+            for sibling in old_cluster_members.get(old_cluster_id, ()):
+                target = fresh_location.get(sibling)
+                if target is not None:
+                    votes[target] = votes.get(target, 0) + 1
+            if not votes:
+                # The old cluster fully dissolved: nothing to home this
+                # chunk against. Leave it stale for the ordinary maintenance
+                # pass to re-home from scratch next time.
+                continue
+            target_cluster_id = max(votes, key=lambda cid: (votes[cid], cid))
+            cur.execute(
+                "INSERT OR IGNORE INTO cluster_chunks "
+                "(cluster_id, chunk_id, added_at, run_id) VALUES (?, ?, ?, ?)",
+                (target_cluster_id, chunk_id, added_at, run_id),
+            )
+            reinserted_clusters.add(target_cluster_id)
+
+        for cluster_id in reinserted_clusters:
+            cur.execute(
+                "UPDATE clusters SET chunk_count = "
+                "(SELECT COUNT(*) FROM cluster_chunks WHERE cluster_chunks.cluster_id = clusters.cluster_id) "
+                "WHERE cluster_id = ?",
+                (cluster_id,),
+            )
+
+        for c in clusters:
+            sig = c.get("signature_tokens")
+            if sig is not None:
+                cur.execute(
+                    "INSERT OR REPLACE INTO cluster_token_signatures "
+                    "(cluster_id, tokens, updated_at) VALUES (?, ?, ?)",
+                    (c["cluster_id"], json.dumps(sig), c["updated_at"]),
+                )
+
         # Keep orphaned LLM summaries temporarily — they carry content_hash
         # values that upgrade_large_cluster_summaries() can match against
         # to avoid regenerating identical summaries. Orphans without
@@ -2409,6 +2832,262 @@ class RecallDB:
 
         # Rebuild FTS from all clusters (topic + preserved access singletons)
         cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
+        self._conn.commit()
+        return {"dangling_removed": dangling_removed}
+
+    def append_clusters(
+        self,
+        clusters: list[dict],
+        chunk_memberships: list[tuple[str, str, str]],
+    ) -> None:
+        """Insert NEW clusters/memberships without touching existing ones.
+
+        recall#435 follow-on (the recluster maintenance op): ``save_clusters``
+        above is a full-corpus REPLACE -- it deletes every ``cluster_type =
+        'topic'`` row before inserting, which is correct for a full build but
+        would erase every already-clustered chunk if used to add a small
+        incremental batch of newly-stale chunks. This is the additive
+        counterpart: plain inserts, ``OR IGNORE`` so a rerun over the same
+        (already-applied) batch is a no-op rather than a duplicate-key error.
+        """
+        cur = self._conn.cursor()
+        for c in clusters:
+            cur.execute(
+                "INSERT OR IGNORE INTO clusters "
+                "(cluster_id, topic, search_text, cluster_type, session_ids, branch, "
+                " date_start, date_end, chunk_count, status, tags, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    c["cluster_id"],
+                    c["topic"],
+                    c.get("search_text", ""),
+                    c.get("cluster_type", "topic"),
+                    json.dumps(c.get("session_ids", [])),
+                    c.get("branch"),
+                    c.get("date_start"),
+                    c.get("date_end"),
+                    c.get("chunk_count", 0),
+                    c.get("status", "active"),
+                    json.dumps(c.get("tags", [])),
+                    c["created_at"],
+                    c["updated_at"],
+                ),
+            )
+        for cluster_id, chunk_id, added_at in chunk_memberships:
+            cur.execute(
+                "INSERT OR IGNORE INTO cluster_chunks "
+                "(cluster_id, chunk_id, added_at) VALUES (?, ?, ?)",
+                (cluster_id, chunk_id, added_at),
+            )
+        for c in clusters:
+            sig = c.get("signature_tokens")
+            if sig is not None:
+                cur.execute(
+                    "INSERT OR REPLACE INTO cluster_token_signatures "
+                    "(cluster_id, tokens, updated_at) VALUES (?, ?, ?)",
+                    (c["cluster_id"], json.dumps(sig), c["updated_at"]),
+                )
+        cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
+        self._conn.commit()
+
+    def mark_recluster_attempted(self, chunk_ids: list[str], run_id: str) -> None:
+        """Record that a recluster run tried these chunk ids.
+
+        ``INSERT OR REPLACE`` -- a chunk attempted again on a later run just
+        updates its timestamp/run_id, it does not accumulate history rows.
+        """
+        if not chunk_ids:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self._conn.cursor()
+        cur.executemany(
+            "INSERT OR REPLACE INTO recluster_attempts (chunk_id, attempted_at, run_id) "
+            "VALUES (?, ?, ?)",
+            [(cid, now, run_id) for cid in chunk_ids],
+        )
+        self._conn.commit()
+
+    def get_recluster_attempted_ids(self) -> set[str]:
+        """Chunk ids a recluster run has already tried and failed on."""
+        return {
+            row[0]
+            for row in self._conn.execute("SELECT chunk_id FROM recluster_attempts").fetchall()
+        }
+
+    def save_cluster_token_signature(
+        self, cluster_id: str, tokens: list[str], updated_at: str,
+    ) -> None:
+        """Persist a cluster's bounded token signature, replacing any prior
+        one -- a cluster's membership changing invalidates its old signature
+        outright, there is no incremental patch that stays correct."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO cluster_token_signatures "
+            "(cluster_id, tokens, updated_at) VALUES (?, ?, ?)",
+            (cluster_id, json.dumps(tokens), updated_at),
+        )
+        self._conn.commit()
+
+    def load_cluster_token_signatures(self) -> dict[str, set[str]]:
+        """Every persisted cluster signature, keyed by ``cluster_id``.
+
+        Cheap by construction: each signature is capped at a small fixed
+        token count (see ``clustering.TOP_SIGNATURE_TOKENS``), so this is
+        cluster-count * a constant, never chunk-count or corpus size.
+        """
+        return {
+            row[0]: set(json.loads(row[1]))
+            for row in self._conn.execute(
+                "SELECT cluster_id, tokens FROM cluster_token_signatures"
+            ).fetchall()
+        }
+
+    def cluster_ids_with_signature_oldest_first(self) -> list[str]:
+        """Every cluster_id with a row in ``cluster_token_signatures``,
+        oldest ``updated_at`` first -- selection order for
+        ``clustering.redrive_cluster_signatures``'s bounded batches, so a
+        drain across repeated calls makes forward progress rather than
+        re-checking the same freshly-redriven clusters first."""
+        return [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT cluster_id FROM cluster_token_signatures "
+                "ORDER BY updated_at ASC"
+            ).fetchall()
+        ]
+
+    def active_topic_clusters_missing_signature(self) -> list[str]:
+        """Active topic cluster ids with no row in ``cluster_token_signatures``
+        yet -- the backfill queue for clusters that predate this table."""
+        return [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT cl.cluster_id FROM clusters cl "
+                "LEFT JOIN cluster_token_signatures sig "
+                "  ON sig.cluster_id = cl.cluster_id "
+                "WHERE cl.cluster_type = 'topic' AND cl.status = 'active' "
+                "  AND sig.cluster_id IS NULL"
+            ).fetchall()
+        ]
+
+    def load_cluster_member_chunk_ids(self, cluster_ids: list[str]) -> dict[str, list[str]]:
+        """Member chunk ids for each of the given clusters, keyed by
+        ``cluster_id``, EARLIEST membership first. Bounded by the caller's
+        own cluster batch, not the corpus -- used to compute a signature
+        from ACTUAL current members, and (ordering now load-bearing there)
+        by ``recluster_stale_chunks``'s reference-core check to identify
+        the founding member when no number is cited by a majority.
+
+        Ordered by ``added_at, chunk_id``, not ``added_at`` alone: on the
+        real store, 104,992 of 121,688 cluster_chunks rows -- most of the
+        corpus -- share a single ``added_at`` value from the first build,
+        so ``added_at`` alone leaves "earliest member" a tie SQLite breaks
+        however its query plan happens to return rows for that tie, not a
+        stable rule. ``chunk_id`` as a secondary key makes the order a
+        deterministic total order regardless of how many rows tie on
+        ``added_at``."""
+        if not cluster_ids:
+            return {}
+        placeholders = ",".join("?" * len(cluster_ids))
+        result: dict[str, list[str]] = {cid: [] for cid in cluster_ids}
+        for cluster_id, chunk_id in self._conn.execute(
+            f"SELECT cluster_id, chunk_id FROM cluster_chunks "
+            f"WHERE cluster_id IN ({placeholders}) ORDER BY added_at, chunk_id",
+            cluster_ids,
+        ).fetchall():
+            result[cluster_id].append(chunk_id)
+        return result
+
+    def load_cluster_topics(self, cluster_ids: list[str]) -> dict[str, str]:
+        """Topic label for each of the given clusters, keyed by
+        ``cluster_id``. Bounded by the caller's own set -- used to label a
+        merge sample for hand-reading without a caller having to query
+        ``clusters`` directly."""
+        if not cluster_ids:
+            return {}
+        placeholders = ",".join("?" * len(cluster_ids))
+        return dict(
+            self._conn.execute(
+                f"SELECT cluster_id, topic FROM clusters WHERE cluster_id IN ({placeholders})",
+                cluster_ids,
+            ).fetchall()
+        )
+
+    def merge_chunks_into_cluster(
+        self,
+        cluster_id: str,
+        chunk_ids: list[str],
+        appended_text: str,
+        added_at: str,
+        run_id: str | None = None,
+    ) -> None:
+        """Add chunk(s) to an EXISTING cluster without changing its identity.
+
+        Unlike ``append_clusters`` (new clusters formed from a self-batch),
+        this grows a cluster that already exists and may already be
+        referenced by its ``cluster_id`` elsewhere -- so the id, unlike a
+        full rebuild's, does not get recomputed from the new membership set.
+        ``chunk_count`` is recomputed from ``cluster_chunks`` itself rather
+        than incremented, so a rerun over an already-merged chunk (``INSERT
+        OR IGNORE``) cannot inflate the count.
+
+        ``run_id``, if given, is stamped on every membership row this call
+        writes (see ``cluster_chunks``'s schema comment) so a bad run can be
+        undone by exactly its own rows, not by a shared ``added_at``
+        timestamp -- which a live-store incident had to fall back to
+        because this column did not exist yet, and a shared timestamp is
+        only unambiguous by accident of one write call producing one clock
+        reading for every row.
+
+        Also deletes any persisted token signature for this cluster: a
+        signature is a snapshot of a specific membership set, and this call
+        just changed that set, so the old signature is now describing
+        members the cluster no longer has in the shape it was signed. The
+        delete re-enters the cluster into the backfill queue (a cluster with
+        no signature row) rather than leaving a stale one silently drifting.
+
+        Refuses (raises ``ValueError``) if ``cluster_id`` is not currently in
+        ``clusters``. This call used to write the membership row regardless
+        -- correct as long as the caller's lookup of ``cluster_id`` was still
+        true at write time, but nothing enforced that, and a full rebuild
+        (``save_clusters``) removing the cluster between the caller's lookup
+        and this write left a run_id-tagged row permanently pointing at
+        nothing: invisible to every future rebuild's own cleanup, since that
+        cleanup can only ever see cluster_ids clusters still has. The caller
+        must re-resolve a live cluster_id (or accept the chunk as unclustered
+        for now) rather than have this method write a reference it cannot
+        stand behind.
+        """
+        if not chunk_ids:
+            return
+        cur = self._conn.cursor()
+        exists = cur.execute(
+            "SELECT 1 FROM clusters WHERE cluster_id = ?", (cluster_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(
+                f"merge_chunks_into_cluster refused: cluster_id {cluster_id!r} "
+                "is not in clusters. It may have been removed by a concurrent "
+                "full rebuild between the caller's lookup and this call; "
+                "re-resolve a live cluster_id rather than writing a reference "
+                "this call cannot stand behind."
+            )
+        cur.executemany(
+            "INSERT OR IGNORE INTO cluster_chunks (cluster_id, chunk_id, added_at, run_id) "
+            "VALUES (?, ?, ?, ?)",
+            [(cluster_id, cid, added_at, run_id) for cid in chunk_ids],
+        )
+        cur.execute(
+            "UPDATE clusters SET "
+            "  chunk_count = (SELECT COUNT(*) FROM cluster_chunks "
+            "                 WHERE cluster_chunks.cluster_id = clusters.cluster_id), "
+            "  search_text = substr(search_text || ' ' || ?, 1, 4000), "
+            "  updated_at = ? "
+            "WHERE cluster_id = ?",
+            (appended_text, added_at, cluster_id),
+        )
+        cur.execute(
+            "DELETE FROM cluster_token_signatures WHERE cluster_id = ?", (cluster_id,),
+        )
         self._conn.commit()
 
     def load_clusters(self, status: str = "active") -> list[dict]:

@@ -457,6 +457,75 @@ def _resolve_display_name(project_dir: Path | None = None) -> str:
     return _resolve_griptree(project_dir)
 
 
+def _session_key(project_dir: Path | None = None) -> str:
+    """The calling session's OWN stable id, computed WITHOUT a name.
+
+    This is exactly what a post computes today (``_agent_id`` with no name):
+    the registered id, or ``s_<hash of griptree:datadir:ppid>``. It is the
+    recovery key for (tracked privately) — ppid-scoped, so two sessions that resolve to
+    the SAME griptree marker (the store-resolution defect) stay
+    distinct, while the two MCP server processes under one claude process share
+    it (same ppid).
+    """
+    return _agent_id(project_dir)
+
+
+def _record_session_identity(
+    conn: sqlite3.Connection,
+    session_key: str,
+    agent_id: str,
+    display_name: str,
+    now: str,
+) -> None:
+    """Map this session's own id -> the joined (agent_id, display_name).
+
+    Called on a NAMED agent join so a later post that only knows the session id
+    can recover the name-derived agent_id and the display name.
+    """
+    conn.execute(
+        "INSERT INTO session_map (session_id, agent_id, display_name, updated_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(session_id) DO UPDATE SET "
+        "agent_id=excluded.agent_id, display_name=excluded.display_name, "
+        "updated_at=excluded.updated_at",
+        (session_key, agent_id, display_name, now),
+    )
+
+
+def _resolve_session_identity(
+    project_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str, str | None]:
+    """Resolve (agent_id, display_name) for the CALLING session by its own key.
+
+    Returns the joined identity when this session has recorded one at join;
+    otherwise ``(session_key, None)`` so the caller falls back to its own id
+    exactly as before. This never hands back another session's row, and — because
+    a joined agent's row is the name-derived a_ id (role 'agent') — never a human
+    row for an agent that has joined (tracked privately).
+    """
+    session_key = _session_key(project_dir)
+    own = conn is None
+    if own:
+        try:
+            conn = _open_db(project_dir)
+        except Exception:
+            return session_key, None
+    try:
+        row = conn.execute(
+            "SELECT agent_id, display_name FROM session_map WHERE session_id = ?",
+            (session_key,),
+        ).fetchone()
+        if row and row["agent_id"]:
+            return row["agent_id"], (row["display_name"] or None)
+    except Exception:
+        pass
+    finally:
+        if own:
+            conn.close()
+    return session_key, None
+
+
 def _normalize_display_name(name: str) -> str:
     """Normalize a display name for uniqueness checks."""
     return " ".join(name.split()).strip().casefold()
@@ -629,6 +698,21 @@ def _generate_msg_id(timestamp: str, agent_id: str, body: str) -> str:
     seed = f"{timestamp}{agent_id}{body}"
     return "m_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
 
+def _render_ts(ts: str) -> str:
+    """Render a stored UTC timestamp for a reader on this host: local wall time plus the zone name.
+
+    Stored form is ``%Y-%m-%dT%H:%M:%S.%fZ`` (see ``_now_iso``). The old ``ts[:16]`` slice dropped
+    the ``Z`` and left an ISO-shaped value that read as local time, hours off. A value that does not
+    parse falls back to its first 16 characters so a malformed row still renders.
+    """
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return (ts or "")[:16]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
 
 def _now_iso() -> str:
     """Return current UTC time as ISO 8601 string with microsecond precision.
@@ -789,6 +873,21 @@ CREATE TABLE IF NOT EXISTS unread_flags (
     dirty INTEGER DEFAULT 0,
     last_cleared_at TEXT,
     PRIMARY KEY (agent_id, channel)
+);
+
+-- tracked privately: a post knows only the session's own id (s_<griptree:datadir:ppid>,
+-- computed WITHOUT a name), but a named join writes its presence row under a
+-- name-derived a_ id. This maps the session's own id -> the joined (agent_id,
+-- display_name) so a later post recovers the joined name and its agent_id. Keyed
+-- on the session id (ppid-scoped), not the griptree, so two sessions resolving to
+-- the SAME griptree marker (the store-resolution defect) stay
+-- distinct, while two MCP server processes under one claude process (same ppid)
+-- share the mapping.
+CREATE TABLE IF NOT EXISTS session_map (
+    session_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -1597,6 +1696,14 @@ def channel_join(
         ).fetchone()
         is_new_join = not (existing and existing["status"] == "online" and has_membership)
 
+        # tracked privately: record this session's own id -> the joined identity, so a
+        # later post (which computes only the nameless session id) recovers the
+        # name-derived agent_id and display name. `aid` here is final (after any
+        # recall#665 collision split). Skip human joins so an agent post sharing
+        # the process never inherits a human mapping.
+        if role != "human":
+            _record_session_identity(conn, _session_key(project_dir), aid, display, now)
+
         conn.commit()
     finally:
         conn.close()
@@ -1646,7 +1753,7 @@ def channel_join(
             msg_ids = {r["message_id"] for r in rows}
             for m in _read_messages(_channel_path(channel, project_dir)):
                 if m.id in msg_ids:
-                    ts = m.timestamp[:16]
+                    ts = _render_ts(m.timestamp)
                     sender = m.from_display or m.from_agent
                     mention_lines.append(f"  {ts}  {sender}: {m.body}")
             if mention_lines:
@@ -1816,9 +1923,23 @@ def channel_post(
     tool handler) can pass the agent's declared name directly.  Also
     derives a distinct agent_id per name (recall#590).
     """
-    aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
-    display = display_name or _resolve_display_name_for(aid, project_dir)
+    if agent_name:
+        # Explicit caller identity (e.g. the human TUI passes agent_name="human").
+        aid = agent_name
+        display = display_name or _resolve_display_name_for(aid, project_dir)
+    elif display_name:
+        # An explicit name on the post itself: honour it directly (recall#590).
+        aid = _agent_id(project_dir, name=display_name)
+        display = display_name
+    else:
+        # tracked privately: an MCP post carries no name. Recover the joined identity by
+        # this session's OWN id instead of recomputing a nameless agent_id that
+        # never matches the named join's a_ row (which stranded the display name
+        # and let a nameless human row tag the post [human]). No join in this
+        # session -> the session key itself, exactly as before.
+        aid, mapped_display = _resolve_session_identity(project_dir)
+        display = mapped_display or _resolve_display_name_for(aid, project_dir)
 
     wt = _resolve_griptree(project_dir)
     msg = ChannelMessage(
@@ -1986,7 +2107,7 @@ def channel_read(
     if pins:
         lines.append(f"## Pinned in #{channel}")
         for pin in pins:
-            ts = pin["pinned_at"][:16]
+            ts = _render_ts(pin["pinned_at"])
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
             mid = f" [{pin['message_id']}]" if pin["message_id"] and _show_ids else ""
             lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
@@ -1997,7 +2118,7 @@ def channel_read(
         lines.append(f"## Status Board — #{channel}")
         for r in board_rows:
             bd = display_map.get(r["agent_id"], r["agent_id"])
-            bts = r["updated_at"][:16].replace("T", " ")
+            bts = _render_ts(r["updated_at"])
             lines.append(f"  {bd} ({bts}): {r['body']}")
         lines.append("")
 
@@ -2008,7 +2129,7 @@ def channel_read(
         self_names.add(own_display.casefold())
     truncated_messages: list[tuple[str, int]] = []
     for msg in messages:
-        ts = msg.timestamp[:16]
+        ts = _render_ts(msg.timestamp)
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
         mid = f" [{msg.id}]" if msg.id and _show_ids else ""
         inline_mid = mid
@@ -2565,7 +2686,7 @@ def channel_board(
         lines = [f"## Status Board — #{channel}"]
         for r in rows:
             display = display_map.get(r["agent_id"], r["agent_id"])
-            ts = r["updated_at"][:16].replace("T", " ")
+            ts = _render_ts(r["updated_at"])
             lines.append(f"  {display} ({ts}): {r['body']}")
         return "\n".join(lines)
     finally:

@@ -1772,6 +1772,26 @@ class TestDurableCheckpointOnColdResume(unittest.TestCase):
         self.assertIsNotNone(entry)
         self.assertEqual(entry.focus, "real handoff")
 
+    def test_selection_skips_auto_stub_with_ordinary_prose_focus(self):
+        # Not every auto stub's focus is harness markup the residue check can
+        # catch — a coordinator's plain-English dispatch text ("MORNING SPARK
+        # ...") captured as the session's first message reads as ordinary
+        # prose. recall#937: an auto=True entry needs done/decisions/next_steps
+        # to carry intent; focus alone never qualifies it, regardless of what
+        # the text looks like.
+        with tempfile.TemporaryDirectory() as tmp:
+            j = _write_journal(tmp, [
+                JournalEntry(timestamp="2026-09-09T04:00:00Z", session_id="s-real",
+                             focus="R3.1 continuity work", next_steps=["fix recall#937"]),
+                JournalEntry(timestamp="2026-09-09T05:00:00Z", session_id="s-stub",
+                             focus="MORNING SPARK (Atlas, 2026-09-09 05:00 CDT). Step zero: ...",
+                             auto=True),
+            ])
+            entry, _ = select_durable_checkpoint(j, _STALE, has_caller=False,
+                                                 tail_newest="2026-06-01T00:00:00Z")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.focus, "R3.1 continuity work")
+
     def test_block_does_not_alter_the_tail(self):
         # Depth: the durable block only ADDS; the rendered turns must be
         # byte-identical with and without it.

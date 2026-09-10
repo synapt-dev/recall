@@ -320,7 +320,22 @@ def test_real_concurrent_build_and_search_across_two_processes(tmp_path):
 
     stdout, _ = proc.communicate(timeout=30)
     assert proc.returncode == 0, f"builder subprocess failed: {stdout}"
-    assert polls > 10, f"rebuild finished too fast to be a real concurrency test ({elapsed:.2f}s, {polls} polls)"
+    # Bound by the monotonic elapsed wall time directly, not a poll-count
+    # proxy: `polls > 10` assumed each iteration costs ~= the bare 0.02s
+    # sleep, so 10 polls implied ~0.2s of real elapsed time. That coupling
+    # breaks in both directions -- a heavier per-poll round trip (DB open +
+    # fts_search + close under CI disk contention) makes poll count
+    # under-report a genuinely long elapsed window, and a faster future CI
+    # image finishing this subprocess's rebuild quickly could legitimately
+    # produce <=10 polls even though real work happened throughout. `elapsed`
+    # is already computed above and is the actual quantity of interest; a
+    # 0.15s floor is comfortably under the old proxy's effective ~0.2s
+    # threshold while measuring the real thing instead of a stand-in for it.
+    min_concurrent_window_seconds = 0.15
+    assert elapsed > min_concurrent_window_seconds, (
+        f"rebuild finished too fast to be a real concurrency test "
+        f"({elapsed:.2f}s, {polls} polls)"
+    )
     assert errors == [], f"reader observed a bad state: {errors}"
     assert observed_states <= {(seed_count, True), (n_chunks, True)}, (
         f"reader observed an unexpected state not in {{before, after}}: {observed_states}"

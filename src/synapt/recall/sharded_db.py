@@ -205,8 +205,45 @@ class ShardedRecallDB:
     def pending_contradiction_count(self) -> int:
         return self._index.pending_contradiction_count()
 
-    def save_clusters(self, clusters: list[dict], memberships: list[tuple]) -> None:
-        self._index.save_clusters(clusters, memberships)
+    def save_clusters(self, clusters: list[dict], memberships: list[tuple]) -> dict:
+        return self._index.save_clusters(clusters, memberships)
+
+    def append_clusters(self, clusters: list[dict], memberships: list[tuple]) -> None:
+        self._index.append_clusters(clusters, memberships)
+
+    def mark_recluster_attempted(self, chunk_ids: list[str], run_id: str) -> None:
+        self._index.mark_recluster_attempted(chunk_ids, run_id)
+
+    def get_recluster_attempted_ids(self) -> set[str]:
+        return self._index.get_recluster_attempted_ids()
+
+    def save_cluster_token_signature(
+        self, cluster_id: str, tokens: list[str], updated_at: str,
+    ) -> None:
+        self._index.save_cluster_token_signature(cluster_id, tokens, updated_at)
+
+    def load_cluster_token_signatures(self) -> dict[str, set[str]]:
+        return self._index.load_cluster_token_signatures()
+
+    def active_topic_clusters_missing_signature(self) -> list[str]:
+        return self._index.active_topic_clusters_missing_signature()
+
+    def cluster_ids_with_signature_oldest_first(self) -> list[str]:
+        return self._index.cluster_ids_with_signature_oldest_first()
+
+    def load_cluster_member_chunk_ids(self, cluster_ids: list[str]) -> dict[str, list[str]]:
+        return self._index.load_cluster_member_chunk_ids(cluster_ids)
+
+    def load_cluster_topics(self, cluster_ids: list[str]) -> dict[str, str]:
+        return self._index.load_cluster_topics(cluster_ids)
+
+    def merge_chunks_into_cluster(
+        self, cluster_id: str, chunk_ids: list[str], appended_text: str, added_at: str,
+        run_id: str | None = None,
+    ) -> None:
+        self._index.merge_chunks_into_cluster(
+            cluster_id, chunk_ids, appended_text, added_at, run_id=run_id,
+        )
 
     def save_cluster_summary(self, cluster_id: str, summary: str, **kwargs) -> None:
         self._index.save_cluster_summary(cluster_id, summary, **kwargs)
@@ -291,12 +328,45 @@ class ShardedRecallDB:
             if rowid < 0 or chunk.session_id not in suppressed
         }
 
+    def _shard_overview(
+        self, db: RecallDB, generation_name: str | None, schema_version: int
+    ) -> dict[str, dict]:
+        """One shard's ``session_overview()``, cached when a generation
+        identity exists (``generation_name`` is not None); uncached
+        otherwise (no legacy-flat-layout fallback, ruled 2026-09-09).
+        """
+        if generation_name is None:
+            return db.session_overview()
+        shard_name = db.path.name
+        cached = self._index.get_cached_shard_overview(generation_name, shard_name, schema_version)
+        if cached is not None:
+            return cached
+        overview = db.session_overview()
+        self._index.set_cached_shard_overview(generation_name, shard_name, schema_version, overview)
+        return overview
+
     def session_overview(self) -> dict[str, dict]:
-        """Return merged session metadata across all chunk shards."""
+        """Return merged session metadata across all chunk shards.
+
+        R3.1: each shard's own ``session_overview()`` is cached, keyed on
+        the CURRENT generation's name (shards are immutable once a
+        generation is published — see ``generations.py``) plus a schema
+        version, so a shape change to the cached dict can never be read as
+        current. No fallback for a store with no generation identity yet
+        (the legacy flat layout): it pays the uncached cost every call,
+        same as it always has, per the 2026-09-09 ruling.
+        """
+        from synapt.recall.generations import read_current_generation
+        from synapt.recall.storage import SHARD_OVERVIEW_CACHE_SCHEMA_VERSION
+
         result: dict[str, dict] = {}
         suppressed = self._suppressed_base_sessions()
+        generation_name = read_current_generation(self._index.path.parent)
         for _, db in self._iter_data_shards():
-            for session_id, overview in db.session_overview().items():
+            shard_overview = self._shard_overview(
+                db, generation_name, SHARD_OVERVIEW_CACHE_SCHEMA_VERSION
+            )
+            for session_id, overview in shard_overview.items():
                 if session_id in suppressed:
                     continue
                 current = result.get(session_id)

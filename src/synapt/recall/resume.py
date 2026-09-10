@@ -134,6 +134,14 @@ class ResumeView:
     # stale one. None means no refresh happened (fresh index, a caller present,
     # lock held, or nothing to refresh).
     refresh_label: str | None = None
+    # R3.1 (recall#435): set by the CLI when a cold no-caller resume found the
+    # index stale, the build lock free, and QUEUED a detached background
+    # rebuild rather than blocking on it (a real refire costs ~14 minutes on
+    # the shared store). None means no background catchup was queued (fresh
+    # index, a caller present, lock already held, or nothing to refresh).
+    # Distinct from refresh_label: that one only ever fires AFTER a build
+    # completed in-process, which the free-lock leg no longer does.
+    background_catchup_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -693,9 +701,19 @@ def _carries_intent(entry: JournalEntry) -> bool:
       session's first user message as the focus, and after a ``/clear`` that
       message is the runtime's own control block. The same residue rule used to
       filter harness turns applies here, so the two stay consistent.
+    * **Any focus on an auto-extracted entry (recall#937).** ``focus`` is
+      derived from every session's first user message unconditionally, so its
+      presence alone says nothing — it is there whether the first message was
+      a real question or a coordinator's dispatch text or a runtime control
+      block. The harness-residue check above only catches the third case; a
+      dispatch message reads as ordinary prose and would slip through it. So
+      an auto entry needs done/decisions/next_steps to carry intent; a
+      focus-only auto entry never does, regardless of what the text is.
     """
     if entry.done or entry.decisions or entry.next_steps:
         return True
+    if entry.auto:
+        return False
     focus = (entry.focus or "").strip()
     if not focus:
         return False
@@ -1101,6 +1119,18 @@ def _format_refresh_label(view: ResumeView) -> list[str]:
     return ["", f"REFRESHED before render — {view.refresh_label}"]
 
 
+def _format_background_catchup_label(view: ResumeView) -> list[str]:
+    """Say a background catchup was queued rather than staying silent about it.
+
+    Deliberately NOT phrased as "REFRESHED" (_format_refresh_label's word) --
+    nothing refreshed THIS render; a stale answer is honestly a stale one,
+    just no longer a silent one.
+    """
+    if not view.background_catchup_label:
+        return []
+    return ["", f"CATCHING UP IN BACKGROUND — {view.background_catchup_label}"]
+
+
 def _format_durable_checkpoint(view: ResumeView) -> list[str]:
     entry = view.durable_checkpoint
     if entry is None:
@@ -1240,6 +1270,7 @@ def format_resume(view: ResumeView, max_chars: int = 600) -> str:
 
     lines = [header]
     lines.extend(_format_refresh_label(view))
+    lines.extend(_format_background_catchup_label(view))
     lines.extend(_format_freshness(view))
     lines.extend(_format_durable_checkpoint(view))
     lines.extend(_format_journal(view))

@@ -1097,15 +1097,22 @@ def build_tmux_commands(
     """Build the tmux command sequence + the Enter count it will send.
 
     load-buffer (body via stdin, never shell-escaped) -> paste-buffer into the
-    target pane (-d deletes the buffer after) -> N send-keys Enter, where N is the
-    runtime Enter count plus one guarded Enter when the paste is collapse-large.
+    target pane (-p bracketed paste, -d deletes the buffer after) -> N send-keys
+    Enter, where N is the runtime Enter count plus one guarded Enter when the
+    paste is collapse-large.
+
+    -p is load-bearing, not decoration: without it, tmux delivers the paste
+    as plain keystrokes rather than a single bracketed-paste event, and the
+    target pane's input handling can truncate or otherwise mangle the body
+    instead of receiving it whole -- measured on a real DM under 1.2KB, well
+    under any size that might otherwise look safe to skip this for.
     """
     enters = enter_count(runtime)
     if len(body) >= large_threshold:
         enters += 1
     cmds: list[list[str]] = [
         ["tmux", "load-buffer", "-b", buffer_name, "-"],
-        ["tmux", "paste-buffer", "-t", target, "-b", buffer_name, "-d"],
+        ["tmux", "paste-buffer", "-p", "-t", target, "-b", buffer_name, "-d"],
     ]
     cmds += [["tmux", "send-keys", "-t", target, "Enter"] for _ in range(enters)]
     return cmds, enters

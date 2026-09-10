@@ -524,7 +524,36 @@ def test_lookup_max_tokens_ladder_is_monotone_and_bounded(monkeypatch):
 
 
 def test_lookup_max_chunks_ladder_control_is_unchanged(monkeypatch):
-    """The parameter control from #993 continues to move independently."""
+    """The parameter control from #993 continues to move independently.
+
+    The clock is pinned. ``_format_chunk_block`` (core.py) appends a
+    freshness label -- ", Nd ago" / ", Nw ago" -- computed from
+    ``datetime.now(timezone.utc)`` against each fixture chunk's fixed
+    2026-08 timestamp, and that label goes to the EMPTY STRING (no ``else``
+    branch) once a chunk turns 30 days old. This control counts BYTES, so
+    that label silently disappearing costs exactly 8 characters the moment
+    the oldest fixture chunk (2026-08-10) crosses the 30-day line -- which
+    it did on 2026-09-09, 12 days after this test was authored and merged
+    green (recall PR #1020, CI run 33216927311). No commit ever changed
+    this path; the code is correct and the freshness-relative-to-now
+    behavior is intentional production behavior -- the test itself was
+    the defect, asserting an exact byte count that implicitly depended on
+    real wall-clock time. Freezing "now" to the original authorship moment
+    is what makes the control actually control for one thing at a time; do
+    not unpin this as tidy-up, it will silently drift again in ~18 more
+    days (the next fixture chunk to cross 30) or at any 7-day boundary a
+    week-count digit width changes.
+    """
+    import synapt.recall.core as core
+    from datetime import datetime, timezone
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            frozen = datetime(2026, 8, 28, 22, 31, 0, tzinfo=timezone.utc)
+            return frozen.astimezone(tz) if tz else frozen
+
+    monkeypatch.setattr(core, "datetime", _FrozenDatetime)
     monkeypatch.setenv("SYNAPT_DISABLE_CLUSTERS", "1")
     monkeypatch.setenv("SYNAPT_DISABLE_DEDUP", "1")
     monkeypatch.setenv("SYNAPT_DISABLE_BOOSTS", "1")
@@ -1204,6 +1233,164 @@ def test_list_sessions_batch_hydrates_candidate_sessions(tmp_path, monkeypatch):
     index._db.close()
 
 
+def test_materialize_all_chunks_batch_hydrates_instead_of_one_query_per_chunk(
+    tmp_path, monkeypatch
+):
+    """recall#435: _materialize_all_chunks looped _get_chunk(i) one at a time,
+    issuing one single-row DB query per chunk (335,524 calls / 40.1s cumtime
+    measured against a 167,762-chunk store, the dominant frame in `stats`'s
+    cold-start cost). load_chunks_by_rowids already exists and is already used
+    by list_sessions (test above) -- this wires the same batch path into
+    _materialize_all_chunks instead of inventing new plumbing."""
+    from unittest.mock import Mock
+
+    from synapt.recall.storage import RecallDB
+
+    directory = tmp_path / "index"
+    db = RecallDB(directory / "recall.db")
+    try:
+        db.save_chunks(make_test_chunks())
+    finally:
+        db.close()
+
+    index = TranscriptIndex.load(directory, use_embeddings=False)
+    batch = Mock(wraps=index._db.load_chunks_by_rowids)
+    monkeypatch.setattr(index._db, "load_chunks_by_rowids", batch)
+    monkeypatch.setattr(
+        index,
+        "_get_chunk",
+        lambda _idx: (_ for _ in ()).throw(
+            AssertionError("materialize_all_chunks hydrated one chunk at a time")
+        ),
+    )
+
+    chunks = index._materialize_all_chunks()
+
+    assert len(chunks) == len(make_test_chunks())
+    assert all(c.user_text or c.assistant_text or c.tool_content for c in chunks)
+    batch.assert_called_once()
+
+    # A batch-loaded chunk must refresh the SAME two side-indexes the old
+    # per-chunk _get_chunk path refreshed: index.sessions (the per-session
+    # chunk list search_and other paths read) and _turn_lookup (turn-indexed
+    # access). Refreshing only self.chunks and leaving these pointing at the
+    # pre-hydration stub is silent -- nothing in the assertions above would
+    # catch it, since len()/user_text/batch-call-count are all unaffected by
+    # a side-index left stale. Identity (`is`), not equality: a stub and its
+    # hydrated replacement can compare equal on shared fields while being
+    # two different objects, so only `is` proves the refresh actually ran.
+    for idx, chunk in enumerate(chunks):
+        session_chunks = index.sessions[chunk.session_id]
+        matching = [c for c in session_chunks if c.id == chunk.id]
+        assert len(matching) == 1
+        assert matching[0] is chunk, (
+            f"index.sessions[{chunk.session_id!r}] still holds the pre-hydration "
+            f"chunk for {chunk.id!r}, not the batch-loaded one"
+        )
+        if chunk.turn_index >= 0:
+            assert index._turn_lookup[(chunk.session_id, chunk.turn_index)] is chunk, (
+                f"_turn_lookup[{(chunk.session_id, chunk.turn_index)!r}] still holds "
+                f"the pre-hydration chunk, not the batch-loaded one"
+            )
+
+    index._db.close()
+
+
+def test_materialize_all_chunks_updates_session_list_in_constant_time_per_chunk(
+    tmp_path, monkeypatch
+):
+    """recall#435 follow-on: the batch-hydration fix (above) still updated
+    session_chunks via `for pos, existing in enumerate(session_chunks): if
+    existing.id == loaded.id`, a linear scan run ONCE PER HYDRATED CHUNK --
+    O(session_length) per chunk, O(session_length^2) total for one large
+    session. Measured as the new dominant frame (22.3s tottime) once the DB
+    N+1 from the batch fix was resolved.
+
+    Wall-clock timing assertions are flaky under system load (see
+    test_oversize_catchup's own 2s-deadline flake, diagnosed the same day
+    this test was written) -- so this counts id-COMPARISONS directly via a
+    string subclass, rather than asserting a time bound. A single 400-chunk
+    session: O(n) touches on the order of n comparisons; the un-fixed
+    O(n^2) scan touches up to n^2/2 = 80,000. The bound below (1,500) is
+    comfortably above n for a linear fix and comfortably below n^2/2 for
+    the un-fixed scan, so it discriminates cleanly either way."""
+    from unittest.mock import Mock
+
+    from synapt.recall.storage import RecallDB
+
+    class CountingStr(str):
+        """A str whose __eq__ increments a shared counter -- lets the test
+        count exactly how many id-comparisons _materialize_all_chunks makes
+        without depending on wall-clock time."""
+
+        def __eq__(self, other):
+            CountingStr.comparisons += 1
+            return str.__eq__(self, other)
+
+        def __hash__(self):
+            return str.__hash__(self)
+
+        comparisons = 0
+
+    n = 400
+    chunks = [
+        TranscriptChunk(
+            id=f"big:{i}",
+            session_id="big-session",
+            timestamp=f"2026-03-01T{(i // 60) % 24:02d}:{i % 60:02d}:00Z",
+            turn_index=i,
+            user_text=f"turn {i} question",
+            assistant_text=f"turn {i} answer",
+        )
+        for i in range(n)
+    ]
+
+    directory = tmp_path / "index"
+    db = RecallDB(directory / "recall.db")
+    try:
+        db.save_chunks(chunks)
+    finally:
+        db.close()
+
+    index = TranscriptIndex.load(directory, use_embeddings=False)
+
+    # Relabel every stub chunk's id with the counting subclass AFTER load, so
+    # the counter measures only _materialize_all_chunks's own comparisons,
+    # not construction/loading overhead. The DB-loaded replacement chunks
+    # need the SAME treatment: a chunk loaded from load_chunks_by_rowids has
+    # a plain str id (built fresh from the DB row), so once it replaces a
+    # stub in session_chunks, a naive relabel-only-the-stubs approach stops
+    # seeing comparisons at that position after its first replacement --
+    # undercounting a real scan that still runs. Wrap the batch loader's
+    # return value to relabel loaded chunks' ids too, so every comparison
+    # for the life of the call is visible to the counter.
+    real_batch_load = index._db.load_chunks_by_rowids
+
+    def counting_batch_load(rowids):
+        result = real_batch_load(rowids)
+        for chunk in result.values():
+            chunk.id = CountingStr(chunk.id)
+        return result
+
+    batch = Mock(wraps=counting_batch_load)
+    monkeypatch.setattr(index._db, "load_chunks_by_rowids", batch)
+
+    for c in index.chunks:
+        c.id = CountingStr(c.id)
+    CountingStr.comparisons = 0
+
+    materialized = index._materialize_all_chunks()
+
+    assert len(materialized) == n
+    assert all(c.user_text for c in materialized)
+    assert CountingStr.comparisons < 1500, (
+        f"{CountingStr.comparisons} id-comparisons for {n} chunks in one "
+        f"session -- looks like an O(session_length) scan per hydrated "
+        f"chunk, not the O(1) position lookup this test guards"
+    )
+    index._db.close()
+
+
 # ---------------------------------------------------------------------------
 # Tests: build_index incremental change detection
 # ---------------------------------------------------------------------------
@@ -1240,8 +1427,25 @@ def test_build_index_reparses_changed_files():
             }]
         }
 
-        # Ensure mtime changes (HFS+ has 1s granularity)
-        time.sleep(1.1)
+        # Ensure mtime changes: poll on a monotonic deadline for the
+        # filesystem to actually record a value different from the one
+        # captured above, instead of blindly sleeping a fixed 1.1s that
+        # assumed every filesystem's mtime granularity is <=1s (HFS+ is;
+        # some are coarser). os.utime bumps the mtime to "now" on each poll
+        # so a fine-grained filesystem (most of them) clears this near-
+        # instantly instead of always paying the fixed cost, while a
+        # coarser one still converges once real wall-clock time crosses its
+        # resolution boundary.
+        old_mtime = os.path.getmtime(transcript)
+        deadline = time.monotonic() + 5.0
+        while os.path.getmtime(transcript) == old_mtime:
+            assert time.monotonic() < deadline, (
+                f"filesystem mtime for {transcript} never advanced past "
+                f"{old_mtime} within 5s -- cannot exercise the incremental "
+                f"re-parse path on this filesystem"
+            )
+            time.sleep(0.05)
+            os.utime(transcript, None)
 
         # Append a third turn
         with open(transcript, "a", encoding="utf-8") as f:

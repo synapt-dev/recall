@@ -472,6 +472,60 @@ def test_gr2_workspace_boundary_beats_an_enclosing_git_root(tmp_path):
     )
 
 
+def test_constituent_git_repo_inside_a_gr2_workspace_uses_the_workspace_bucket(tmp_path):
+    """recall#974 witness: a constituent git repo (with its own .git) inside a
+    gr2 (.grip) workspace must resolve to the WORKSPACE bucket, not the repo
+    name, so a session standing in the repo and a session standing at the
+    workspace root write to the SAME bucket.
+
+    This is the live split-brain: a gr2 workspace ``synapt-dev`` holds a
+    constituent repo ``synapt`` (recall's own clone) with a real ``.git``. From
+    the workspace root the coordinate derives to ``synapt-dev``; from inside the
+    constituent repo it derives to ``synapt`` (the repo basename); with
+    SYNAPT_RECALL_WORKTREE set by pane bookkeeping it is a third value. The
+    ``.grip`` workspace marker must win over a constituent ``.git`` so the bucket
+    is one coordinate regardless of cwd. RED before the fix (the constituent repo
+    mints its own ``synapt``-named bucket).
+
+    Distinct from the gr1 contract in
+    ``test_worktree_bucket_uses_the_repo_root_beneath_a_gripspace`` below, which
+    stays per-repo: that gripspace has no ``.grip`` marker.
+    """
+    workspace = _make_gr2_workspace(tmp_path)
+    repo = _make_git_repo(workspace, "synapt")  # constituent repo WITH .git
+    nested = repo / "src" / "synapt"
+    nested.mkdir(parents=True)
+
+    expected = workspace / ".synapt" / "recall" / "worktrees" / "gr2-workspace"
+    assert project_worktree_dir(workspace) == expected
+    assert project_worktree_dir(repo) == expected  # RED on dev: mints .../synapt
+    assert project_worktree_dir(nested) == expected
+
+
+def test_env_coordinate_still_wins_over_gr2_workspace_derivation(tmp_path, monkeypatch):
+    """Control for the recall#974 fix: SYNAPT_RECALL_WORKTREE set must STILL win
+    over the .grip-workspace derivation, so this fix can never be read later as
+    having changed env precedence. The fix only decides what the derivation
+    yields when no explicit coordinate is given; the env override is untouched.
+
+    (The env is consulted only when no explicit project_dir is passed — that is
+    the resolver's contract — so the env half calls _worktree_name() with no dir,
+    and the derivation half passes the workspace explicitly.)
+    """
+    from synapt.recall.core import _worktree_name
+
+    workspace = _make_gr2_workspace(tmp_path)
+    _make_git_repo(workspace, "synapt")
+
+    # Env set, no explicit dir → env wins (unchanged by the fix).
+    monkeypatch.setenv("SYNAPT_RECALL_WORKTREE", "explicit-coord")
+    assert _worktree_name() == "explicit-coord"
+
+    # Same workspace, env cleared → the fix's derivation yields the workspace.
+    monkeypatch.delenv("SYNAPT_RECALL_WORKTREE", raising=False)
+    assert _worktree_name(workspace) == "gr2-workspace"
+
+
 def test_worktree_bucket_uses_the_repo_root_beneath_a_gripspace(tmp_path):
     """Constituent repos share the store but retain distinct stable buckets."""
     grip = _make_gripspace(tmp_path)
@@ -532,6 +586,57 @@ def test_worktree_bucket_uses_a_linked_repo_file_as_its_root(tmp_path):
 
     assert root_bucket == nested_bucket
     assert root_bucket == grip / ".synapt" / "recall" / "worktrees" / "repo-a"
+
+
+def test_gr2_linked_griptree_keeps_its_own_bucket_not_the_parents(tmp_path):
+    """recall#974, the gr2-linked case (unwitnessed until now, measured live as
+    `synapt` and its linked griptree `synapt-dev` both landing in the `synapt`
+    bucket). A linked griptree resolves its STORE to the parent gr2 workspace by
+    membership, but its per-worktree journal BUCKET must stay its own name, or two
+    distinct desks that share one store collapse into one journal and each reads the
+    other's entries.
+
+    The parent is a gr2 gripspace (``.grip`` for the bucket branch AND
+    ``.gitgrip/griptrees.json`` so ``_resolve_griptree_parent`` can find it). The
+    linked griptree carries its own ``.grip`` and a sub-repo ``.git`` file pointing
+    back at the parent's worktree, exactly like a real ``gr tree`` desk.
+    """
+    parent = tmp_path / "parent"
+    (parent / ".grip").mkdir(parents=True)
+    (parent / ".gitgrip").mkdir()
+    (parent / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+    main_repo = _make_git_repo(parent, "repo-a")
+    worktree_dir = main_repo / ".git" / "worktrees" / "dev"
+    worktree_dir.mkdir(parents=True)
+
+    griptree = tmp_path / "dev-tree"
+    (griptree / ".grip").mkdir(parents=True)
+    (griptree / ".gitgrip").mkdir()
+    (griptree / ".gitgrip" / "griptree.json").write_text("{}")
+    linked_repo = griptree / "repo-a"
+    linked_repo.mkdir()
+    (linked_repo / ".git").write_text(f"gitdir: {worktree_dir}\n")
+    nested = griptree / "docs"
+    nested.mkdir()
+
+    # STORE-ROOT-UNCHANGED CONTROL: membership resolution is untouched by this fix
+    # — the griptree's store still resolves to the parent gripspace.
+    assert _find_gripspace_root(griptree) == parent
+
+    parent_bucket = project_worktree_dir(parent)
+    griptree_bucket = project_worktree_dir(griptree)
+    nested_bucket = project_worktree_dir(nested)
+
+    # Shared store root, distinct buckets — the whole point. Only the bucket LEAF
+    # differs; the worktrees/ store root is identical (store-root-unchanged control).
+    assert griptree_bucket.parent == parent_bucket.parent == (
+        parent / ".synapt" / "recall" / "worktrees"
+    )
+    assert parent_bucket == parent / ".synapt" / "recall" / "worktrees" / "parent"
+    assert griptree_bucket == parent / ".synapt" / "recall" / "worktrees" / "dev-tree"
+    assert griptree_bucket != parent_bucket
+    # a subdir of the griptree reads the griptree's bucket, not a slice
+    assert nested_bucket == griptree_bucket
 
 
 class TestProjectTranscriptDirsGripspace:
@@ -934,10 +1039,18 @@ def _make_named_gripspace(tmp_path: Path, name: str) -> Path:
     .gitgrip/griptrees.json), distinct from _make_gripspace's default -- for
     tests that need TWO real gripspaces (the agent's own worktree and the
     shared canonical root) rather than one gripspace plus an unmarked dir.
+
+    POPULATED by default (one registered child repo) -- a real gr-spawned
+    agent worktree always has at least one member repo, and
+    _persist_shared_gripspace_root refuses to persist a marker into a
+    gripspace that isn't (recall#1124). Tests that specifically need the
+    UNPOPULATED, hand-built-scratch-dir shape use _make_gripspace instead,
+    which deliberately has no child repo.
     """
     grip = tmp_path / name
     (grip / ".gitgrip").mkdir(parents=True)
     (grip / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+    _make_git_repo(grip, "repo")
     return grip
 
 
@@ -1062,6 +1175,112 @@ class TestGripspaceRootMarkerPersistence:
         monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
         assert project_data_dir() == shared_ws / ".synapt" / "recall"
 
+    def test_unpopulated_scratch_gripspace_refuses_to_persist_the_marker(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """recall#1124 negative witness, reproducing the 2026-09-05 incident
+        shape exactly: a hand-built scratch dir (real .gitgrip marker, but
+        NO registered repo -- never gr-spawned, never gr repo add'd) with
+        GRIPSPACE_ROOT still live in the shell from an earlier, unrelated
+        session, then a bare `synapt build` run from that scratch dir.
+
+        The env-bound call itself still resolves to the real (populated)
+        shared root for THIS process -- that resolution is correct and is
+        the resolver's own contract (#1123 covers whether the BUILD should
+        have run there at all). What must NOT happen is the scratch dir's
+        marker getting poisoned with the real root, because that poisoning
+        is what made a LATER, entirely env-less call also silently reach
+        the real store.
+        """
+        scratch = _make_gripspace(tmp_path)  # unpopulated: no child repo
+        shared_ws = _make_named_gripspace(tmp_path, "shared-canonical")
+        before = sorted(str(p.relative_to(shared_ws)) for p in shared_ws.rglob("*"))
+
+        monkeypatch.chdir(scratch)
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.setenv("GRIPSPACE_ROOT", str(shared_ws))
+        assert project_data_dir() == shared_ws / ".synapt" / "recall"
+        _gripspace_cache.clear()
+
+        marker = scratch / ".synapt" / "gripspace-root"
+        assert not marker.exists()
+
+        err = capsys.readouterr().err
+        assert str(scratch) in err
+        assert str(shared_ws) in err
+        assert "GRIPSPACE_ROOT" in err
+
+        after = sorted(str(p.relative_to(shared_ws)) for p in shared_ws.rglob("*"))
+        assert after == before  # the real store's own tree got no side effect
+
+        # The incident's actual failure mode: a LATER, env-less call from
+        # the same scratch dir must resolve to the scratch dir's OWN store,
+        # never silently converge on the real one via a marker that was
+        # correctly never written.
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        assert project_data_dir() == scratch / ".synapt" / "recall"
+
+    def test_populated_agent_worktree_control_for_the_refusal(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Control for the refusal above: a populated gripspace (the normal
+        _make_named_gripspace shape) persists exactly as before, with no
+        refusal message on stderr. Without this, a mutation that refuses
+        EVERY persist unconditionally would pass the negative witness
+        trivially."""
+        agent_ws = _make_named_gripspace(tmp_path, "agent-worktree")
+        shared_ws = _make_named_gripspace(tmp_path, "shared-canonical")
+        monkeypatch.chdir(agent_ws)
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.setenv("GRIPSPACE_ROOT", str(shared_ws))
+        assert project_data_dir() == shared_ws / ".synapt" / "recall"
+        marker = agent_ws / ".synapt" / "gripspace-root"
+        assert marker.is_file()
+        assert Path(marker.read_text().strip()) == shared_ws
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize(
+        "signal,expect_registered",
+        [
+            ("declared_griptrees_only", True),
+            ("worktrees_only", True),
+            ("empty", False),
+        ],
+    )
+    def test_each_registered_repo_signal_is_independently_sufficient(
+        self, tmp_path, monkeypatch, signal, expect_registered
+    ):
+        """R2 survivor on v1 (Stromus, m_8b405299): every test in this file
+        registers a repo the SAME way -- _make_named_gripspace's direct
+        child .git dir -- so the declared-griptrees.json branch of
+        _gripspace_has_registered_repo was never exercised by anything;
+        deleting that branch left the whole 79-test file green. Exercise
+        each of the three signals _gripspace_has_registered_repo reads
+        (declared griptrees.json entries, a direct child .git repo --
+        covered elsewhere, and .worktrees/*) in ISOLATION, so a mutation
+        that drops any single one of them is caught by exactly this test.
+        """
+        self_root = tmp_path / "self-root"
+        (self_root / ".gitgrip").mkdir(parents=True)
+        if signal == "declared_griptrees_only":
+            (self_root / ".gitgrip" / "griptrees.json").write_text(
+                json.dumps({"griptrees": {"some-repo": {"path": "/anywhere"}}})
+            )
+        elif signal == "worktrees_only":
+            (self_root / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+            (self_root / ".worktrees").mkdir()
+            _make_git_repo(self_root / ".worktrees", "wt1")
+        else:
+            (self_root / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+
+        shared_ws = _make_named_gripspace(tmp_path, "shared-canonical")
+        monkeypatch.chdir(self_root)
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.setenv("GRIPSPACE_ROOT", str(shared_ws))
+        assert project_data_dir() == shared_ws / ".synapt" / "recall"
+        marker = self_root / ".synapt" / "gripspace-root"
+        assert marker.is_file() == expect_registered
+
 
 class TestGripspaceRootSourceDisclosure:
     """One word naming which of env:GRIPSPACE_ROOT / env:SYNAPT_RECALL_ROOT /
@@ -1135,3 +1354,450 @@ class TestGripspaceRootSourceDisclosure:
         assert source.startswith("walk-up")
         assert str(shared_ws) in source
         assert "stale" in source.lower()
+
+
+class TestNearestExistingStoreRoot:
+    """A store deliberately initialized at a root NESTED under an agent
+    desk is not itself a git worktree or a gripspace boundary, so the
+    git/gripspace walk-up used to skip straight past it to the ENCLOSING
+    desk's root -- a root nested under a desk is never isolated. These
+    tests exercise the ambient (no env override, no
+    explicit project_dir) resolution path only; the env-override case is
+    covered by test_env_root_wins_over_gripspace_inference et al. above and
+    unaffected by this change (env override still runs before this check
+    even applies)."""
+
+    def test_nested_store_wins_over_enclosing_gripspace(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        desk = _make_gr2_workspace(fake_home)
+        nested = desk / "nested-store"
+        nested_recall = nested / ".synapt" / "recall"
+        nested_recall.mkdir(parents=True)
+        (nested_recall / "knowledge.jsonl").write_text("")
+        monkeypatch.chdir(nested)
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            assert project_data_dir(None) == nested / ".synapt" / "recall"
+
+    def test_control_no_nested_store_still_walks_up_to_gripspace(self, tmp_path, monkeypatch):
+        """Unaffected case: no store nested below cwd, the enclosing
+        gripspace still wins exactly as before this change."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        desk = _make_gr2_workspace(fake_home)
+        sub = desk / "plain-subdir"
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            assert project_data_dir(None) == desk / ".synapt" / "recall"
+
+    def test_nearest_existing_store_root_helper_returns_none_when_absent(self, tmp_path):
+        from synapt.recall.core import _nearest_existing_store_root
+
+        fake_home = tmp_path / "home"
+        bare = fake_home / "bare"
+        bare.mkdir(parents=True)
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            assert _nearest_existing_store_root(bare) is None
+
+    def test_debris_directory_is_not_mistaken_for_an_initialized_store(
+        self, tmp_path
+    ):
+        """The discriminating pair: a bare .synapt/recall directory holding
+        only a side-file from an unrelated tool must NOT be treated as an
+        initialized store, while the same shape with real store content
+        one level further out IS. Measured (Stromus, 2026-09-05): gr spawn
+        writes .synapt/recall/spawn_state.json as a side-file under the
+        clone it runs from, leaving a directory that exists but was never
+        actually used as a recall store; is_dir() alone mistook it for one
+        and routed resolution away from the real store to reach it."""
+        from synapt.recall.core import _nearest_existing_store_root
+
+        fake_home = tmp_path / "home"
+        real_store_root = fake_home / "real-store-root"
+        real_recall = real_store_root / ".synapt" / "recall"
+        real_recall.mkdir(parents=True)
+        (real_recall / "knowledge.jsonl").write_text("")
+
+        debris_root = real_store_root / "debris-clone"
+        debris_recall = debris_root / ".synapt" / "recall"
+        debris_recall.mkdir(parents=True)
+        (debris_recall / "spawn_state.json").write_text("{}")
+
+        deepest = debris_root / "deepest"
+        deepest.mkdir()
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            # The debris directory is skipped entirely -- resolution finds
+            # the real store one level further out, not the nearer debris.
+            assert _nearest_existing_store_root(deepest) == real_store_root
+            # And the debris directory alone, with nothing further out,
+            # correctly finds nothing.
+            assert _nearest_existing_store_root(debris_root, stop_at=debris_root) is None
+
+    def test_nearest_existing_store_root_stops_at_the_first_one_found(self, tmp_path):
+        """Two nested stores: the walk must stop at the NEARER one, never
+        continue past it to an ancestor's."""
+        from synapt.recall.core import _nearest_existing_store_root
+
+        fake_home = tmp_path / "home"
+        outer = fake_home / "outer"
+        (outer / ".synapt" / "recall").mkdir(parents=True)
+        (outer / ".synapt" / "recall" / "knowledge.jsonl").write_text("")
+        inner = outer / "inner"
+        (inner / ".synapt" / "recall").mkdir(parents=True)
+        (inner / ".synapt" / "recall" / "knowledge.jsonl").write_text("")
+        deepest = inner / "deepest"
+        deepest.mkdir()
+        with patch("synapt.recall.core.Path.home", return_value=fake_home):
+            assert _nearest_existing_store_root(deepest) == inner
+            assert _nearest_existing_store_root(inner) == inner
+            assert _nearest_existing_store_root(outer) == outer
+
+    def test_explicit_project_dir_bypasses_the_nested_store_check(self, tmp_path, monkeypatch):
+        """An explicitly-passed project_dir is a deliberate root (matching
+        the env-override suppression rule) -- it must not be redirected by
+        a nested store the caller did not ask about."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        desk = _make_gr2_workspace(fake_home)
+        nested = desk / "nested-store"
+        nested_recall = nested / ".synapt" / "recall"
+        nested_recall.mkdir(parents=True)
+        (nested_recall / "knowledge.jsonl").write_text("")
+        other = tmp_path / "other-explicit-root"
+        other.mkdir()
+        monkeypatch.chdir(nested)
+        assert project_data_dir(other) == other / ".synapt" / "recall"
+
+
+class TestIsInitializedStoreEvidenceBranches:
+    """_is_initialized_store() claims THREE independent OR-branches of
+    evidence: knowledge.jsonl, an index database (recall.db or index.db),
+    or a per-worktree journal (worktrees/*/journal.jsonl). Only the
+    knowledge.jsonl branch was exercised above (indirectly, through
+    _nearest_existing_store_root). Found in R1 review (Sentinel,
+    2026-09-05): disabling ONLY the index-db branch left the full suite
+    green -- neither the index-db nor the worktree-journal branch had a
+    test that would fail if either were silently dropped in a future
+    refactor. These call _is_initialized_store() directly, one witness
+    per branch, so each branch has its own failure mode."""
+
+    def test_index_database_alone_is_an_initialized_store(self, tmp_path):
+        """recall_build writes index/recall.db (or the sharded index.db)
+        without ever writing knowledge.jsonl for a build-only store -- that
+        alone must be sufficient evidence."""
+        from synapt.recall.core import _is_initialized_store
+
+        recall_db_dir = tmp_path / "build-only-recall-db" / ".synapt" / "recall"
+        (recall_db_dir / "index").mkdir(parents=True)
+        (recall_db_dir / "index" / "recall.db").write_text("")
+        assert _is_initialized_store(recall_db_dir) is True
+
+        index_db_dir = tmp_path / "build-only-index-db" / ".synapt" / "recall"
+        (index_db_dir / "index").mkdir(parents=True)
+        (index_db_dir / "index" / "index.db").write_text("")
+        assert _is_initialized_store(index_db_dir) is True
+
+        # Negative control: an index/ directory that holds neither db file
+        # must not itself count as evidence.
+        empty_index_dir = tmp_path / "empty-index-dir" / ".synapt" / "recall"
+        (empty_index_dir / "index").mkdir(parents=True)
+        assert _is_initialized_store(empty_index_dir) is False
+
+    def test_per_worktree_journal_alone_is_an_initialized_store(self, tmp_path):
+        """recall_journal's first write lands at worktrees/<name>/journal.jsonl
+        without ever touching knowledge.jsonl or the index -- that alone
+        must be sufficient evidence."""
+        from synapt.recall.core import _is_initialized_store
+
+        journal_dir = tmp_path / "journal-only" / ".synapt" / "recall"
+        (journal_dir / "worktrees" / "main").mkdir(parents=True)
+        (journal_dir / "worktrees" / "main" / "journal.jsonl").write_text("")
+        assert _is_initialized_store(journal_dir) is True
+
+        # Negative control: a worktrees/ directory that exists but holds no
+        # journal.jsonl anywhere under it (e.g. only a side-file from other
+        # tooling) must not count as evidence.
+        no_journal_dir = tmp_path / "worktrees-no-journal" / ".synapt" / "recall"
+        (no_journal_dir / "worktrees" / "main").mkdir(parents=True)
+        (no_journal_dir / "worktrees" / "main" / "spawn_state.json").write_text("{}")
+        assert _is_initialized_store(no_journal_dir) is False
+
+
+class TestRecallSaveHonorsGripspaceRootOverCwd:
+    """Direct call-site witness for recall_save, not just project_data_dir in
+    isolation. A mutation test (Stromus, 2026-09-05) reverting recall_save's
+    ``project = None`` back to ``project = Path.cwd().resolve()`` left 108
+    tests passing -- the core bug report (a save from a desk whose cwd holds
+    its own store landed there instead of at an explicitly-pinned
+    GRIPSPACE_ROOT) was verified only by hand, never by an automated
+    regression test bound to recall_save itself. This closes that gap."""
+
+    def test_recall_save_lands_in_gripspace_root_not_cwd_store(
+        self, tmp_path, monkeypatch
+    ):
+        from synapt.recall import server as server_mod
+
+        gripspace_root = tmp_path / "gripspace-root"
+        gripspace_root.mkdir()
+
+        desk = tmp_path / "desk"
+        desk_recall = desk / ".synapt" / "recall"
+        desk_recall.mkdir(parents=True)
+        (desk_recall / "knowledge.jsonl").write_text("")
+
+        monkeypatch.chdir(desk)
+        monkeypatch.setenv("GRIPSPACE_ROOT", str(gripspace_root))
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+
+        with patch.object(server_mod, "get_embedding_provider", return_value=None):
+            result = server_mod.recall_save(
+                content="gripspace-root call-site witness", category="workflow"
+            )
+
+        assert "saved" in result.lower(), result
+        gripspace_knowledge = gripspace_root / ".synapt" / "recall" / "knowledge.jsonl"
+        desk_knowledge = desk_recall / "knowledge.jsonl"
+        assert gripspace_knowledge.exists()
+        assert "gripspace-root call-site witness" in gripspace_knowledge.read_text()
+        # The desk's own store must be untouched -- still the empty file
+        # this test created it with, not a second copy of the save.
+        assert desk_knowledge.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Inverted gripspace-root marker: a gripspace ROOT must never record a
+# shared-root marker pointing at one of its OWN linked griptrees. Following
+# that redirect collapses the parent's presence, cursors and per-desk buckets
+# onto a child desk (the "one directory, two identities" store collision). A
+# hand probe run from the parent desk with GRIPSPACE_ROOT naming a linked child
+# planted exactly such a marker; the parent then resolved onto the child store.
+# ---------------------------------------------------------------------------
+
+from synapt.recall.core import (  # noqa: E402
+    _persist_shared_gripspace_root,
+    _read_shared_gripspace_root_marker,
+    _resolve_root_and_source,
+    _marker_target_is_own_child,
+    _GRIPSPACE_ROOT_MARKER_RELPATH,
+    _INVERTED_MARKER_WARNED,
+)
+
+
+def _make_populated_gripspace(tmp_path: Path, name: str = "workspace") -> Path:
+    """A gripspace root with a registered member repo (so it counts as
+    POPULATED for the marker-persistence guard)."""
+    grip = tmp_path / name
+    (grip / ".gitgrip").mkdir(parents=True)
+    (grip / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+    member = grip / "member-repo"
+    (member / ".git").mkdir(parents=True)  # a registered member => populated
+    return grip
+
+
+def _make_linked_griptree_of(tmp_path: Path, grip: Path, name: str = "dev-tree") -> Path:
+    """A linked griptree (griptree.json singular) whose sub-repo git worktree
+    pointer resolves its parent back to *grip*. Sibling on disk, exactly like
+    a real linked griptree beside its gripspace."""
+    worktrees_dir = grip / "member-repo" / ".git" / "worktrees" / "dev"
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    griptree = tmp_path / name
+    (griptree / ".gitgrip").mkdir(parents=True)
+    (griptree / ".gitgrip" / "griptree.json").write_text(
+        '{"branch": "dev", "path": "' + str(griptree) + '"}'
+    )
+    linked_repo = griptree / "member-repo"
+    linked_repo.mkdir()
+    (linked_repo / ".git").write_text(f"gitdir: {worktrees_dir}\n")
+    return griptree
+
+
+class TestInvertedGripspaceRootMarker:
+    def setup_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+
+    def teardown_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+
+    def _clear_env(self, monkeypatch):
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+
+    # WITNESS 1 (write): a parent gripspace does NOT plant a marker pointing at
+    # its own linked child.
+    def test_write_refuses_a_parent_to_own_child_marker(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        griptree = _make_linked_griptree_of(tmp_path, grip)
+        # precondition: the child truly resolves its parent back to grip
+        assert _marker_target_is_own_child(grip, griptree) is True
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(griptree.resolve(), "GRIPSPACE_ROOT")
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        assert not marker.exists(), (
+            "parent gripspace planted an inverted marker to its own child"
+        )
+        assert "own linked griptrees" in capsys.readouterr().err
+
+    # WITNESS 2 (read): an inverted marker already on disk is treated as stale;
+    # the resolver walks up (which resolves the parent to ITSELF).
+    def test_read_ignores_an_inverted_marker_and_walks_up(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        griptree = _make_linked_griptree_of(tmp_path, grip)
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{griptree.resolve()}\n")  # the inverted marker
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        resolved, stale = _read_shared_gripspace_root_marker()
+        assert resolved is None
+        assert stale == griptree.resolve()
+        _gripspace_cache.clear()
+        root, source = _resolve_root_and_source()
+        assert root is None
+        assert source.startswith("walk-up")
+        assert "inverted gripspace-root marker" in capsys.readouterr().err
+
+    # WITNESS 3 (regression): the DESIGNED child->parent case is unchanged --
+    # a call from inside the linked child with GRIPSPACE_ROOT=parent writes
+    # nothing (self_root == resolved, the pre-existing early return).
+    def test_linked_child_to_parent_still_writes_nothing(self, tmp_path, monkeypatch):
+        grip = _make_populated_gripspace(tmp_path)
+        griptree = _make_linked_griptree_of(tmp_path, grip)
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(griptree)
+        _gripspace_cache.clear()
+        # from inside the child, self_root resolves UP to grip == the target
+        _persist_shared_gripspace_root(grip.resolve(), "GRIPSPACE_ROOT")
+        assert not (grip / _GRIPSPACE_ROOT_MARKER_RELPATH).exists()
+        assert not (griptree / _GRIPSPACE_ROOT_MARKER_RELPATH).exists()
+
+    # WITNESS 4 (scope): the guard is NARROW -- a target that is a SEPARATE
+    # gripspace (not this root's own linked child) still persists, so the
+    # designed env-less-convergence marker is not lost.
+    def test_a_separate_gripspace_target_still_persists(self, tmp_path, monkeypatch):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        grip_b = _make_populated_gripspace(tmp_path, "desk-b")
+        assert _marker_target_is_own_child(grip_a, grip_b) is False
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(grip_b.resolve(), "GRIPSPACE_ROOT")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
+        assert marker.is_file()
+        assert marker.read_text().strip() == str(grip_b.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Dangling-worktree over-block (fix-forward from the inverted-marker R1, angle
+# d): _resolve_griptree_parent trusts the gitdir path string without confirming
+# the worktree directory still exists, so a linked griptree whose worktree was
+# pruned (git worktree remove) -- griptree.json + .git pointer left behind --
+# was treated as a live own-child and a legitimate marker write to it was
+# OVER-blocked. The guard now confirms liveness and biases to "not own child"
+# when it cannot; general gripspace resolution is unchanged.
+# ---------------------------------------------------------------------------
+
+from synapt.recall.core import (  # noqa: E402
+    _griptree_worktree_is_live,
+    _resolve_griptree_parent,
+)
+
+
+def _make_linked_griptree_dangling(tmp_path: Path, grip: Path, name: str = "pruned-tree") -> Path:
+    """A linked griptree whose sub-repo .git pointer names a worktree dir that
+    was never created (or was pruned): the pointer dangles."""
+    # Deliberately do NOT create grip/member-repo/.git/worktrees/<name>.
+    dangling_worktree = grip / "member-repo" / ".git" / "worktrees" / "pruned"
+    griptree = tmp_path / name
+    (griptree / ".gitgrip").mkdir(parents=True)
+    (griptree / ".gitgrip" / "griptree.json").write_text(
+        '{"branch": "pruned", "path": "' + str(griptree) + '"}'
+    )
+    linked_repo = griptree / "member-repo"
+    linked_repo.mkdir()
+    (linked_repo / ".git").write_text(f"gitdir: {dangling_worktree}\n")
+    assert not dangling_worktree.exists()  # the pointer really is dangling
+    return griptree
+
+
+class TestDanglingWorktreeOwnChild:
+    def setup_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+
+    def teardown_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+
+    # WITNESS (the fix): a dangling-worktree linked griptree is NOT a live
+    # own-child, so a legitimate marker write to it is NOT over-blocked.
+    def test_dangling_worktree_target_is_not_own_child_and_write_persists(
+        self, tmp_path, monkeypatch
+    ):
+        grip = _make_populated_gripspace(tmp_path)
+        dangling = _make_linked_griptree_dangling(tmp_path, grip)
+        assert _griptree_worktree_is_live(dangling) is False
+        # the pruned pointer still string-resolves a parent, which is exactly
+        # why the predicate must not stop at "resolves to marker_dir":
+        assert _resolve_griptree_parent(dangling) == grip
+        assert _marker_target_is_own_child(grip, dangling) is False
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(dangling.resolve(), "GRIPSPACE_ROOT")
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        assert marker.is_file()
+        assert marker.read_text().strip() == str(dangling.resolve())
+
+    # CONTROL (the guard still fires): a LIVE linked griptree of grip is still a
+    # live own-child, so the write is still refused -- the fix narrows the guard,
+    # it does not disable it.
+    def test_live_worktree_own_child_is_still_refused(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        live = _make_linked_griptree_of(tmp_path, grip)  # worktree dir exists
+        assert _griptree_worktree_is_live(live) is True
+        assert _marker_target_is_own_child(grip, live) is True
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(live.resolve(), "GRIPSPACE_ROOT")
+        assert not (grip / _GRIPSPACE_ROOT_MARKER_RELPATH).exists()
+        assert "own linked griptrees" in capsys.readouterr().err
+
+    # WITNESS (read stays STRICT): an inverted marker naming a PRUNED own child
+    # must still be treated stale on READ and NOT followed -- liveness gates the
+    # write refusal only, never the read. Following it would collapse the parent
+    # onto the pruned child's store (the child keeps its .gitgrip/.synapt).
+    def test_read_treats_a_pruned_own_child_marker_as_stale(self, tmp_path, monkeypatch, capsys):
+        grip = _make_populated_gripspace(tmp_path)
+        pruned = _make_linked_griptree_dangling(tmp_path, grip)
+        # write-side view: NOT a live own-child, so a write would be allowed...
+        assert _marker_target_is_own_child(grip, pruned) is False
+        # ...but the read is strict: structurally an own child regardless of liveness
+        assert _marker_target_is_own_child(grip, pruned, require_live=False) is True
+        marker = grip / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{pruned.resolve()}\n")  # the inverted marker, pruned child
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        monkeypatch.chdir(grip)
+        _gripspace_cache.clear()
+        resolved, stale = _read_shared_gripspace_root_marker()
+        assert resolved is None
+        assert stale == pruned.resolve()
+        _gripspace_cache.clear()
+        root, source = _resolve_root_and_source()
+        assert root is None
+        assert source.startswith("walk-up")
+        assert "inverted gripspace-root marker" in capsys.readouterr().err

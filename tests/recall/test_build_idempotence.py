@@ -540,6 +540,156 @@ def test_build_never_calls_the_summary_grinder(tmp_path, monkeypatch):
 
 
 # ===========================================================================
+# F. recall#435 — skip_clustering keeps a bare resume's silent rebuild fast
+# ===========================================================================
+#
+# cluster_chunks() re-clusters the FULL corpus (every transcript-only chunk in
+# the store, not just what this build added) -- O(store size), not O(what
+# changed). On the real ~168k-chunk team store, 2026-09-05, this phase alone
+# OOM-killed two independent build processes (Sentinel's, then Atlas's) after
+# the FTS5 save/publish phase had already completed cleanly in ~100s. Layne's
+# ruling: move full-corpus clustering OUT of the incremental build path first;
+# incremental clustering into a maintenance operation is the follow-on, not
+# this step.
+
+def test_skip_clustering_keeps_existing_callers_unchanged(tmp_path, monkeypatch):
+    """The default (no skip_clustering argument) must still cluster -- every
+    existing build/rebuild/setup call site is unaffected by this change."""
+    import synapt.recall.clustering as clustering
+    from synapt.recall.cli import _archive_and_build
+
+    calls: list[int] = []
+    real_cluster_chunks = clustering.cluster_chunks
+
+    def _spy(chunks):
+        calls.append(len(chunks))
+        return real_cluster_chunks(chunks)
+
+    monkeypatch.setattr(clustering, "cluster_chunks", _spy)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8)
+
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    assert calls == [8], f"default build must still cluster all transcript chunks: {calls}"
+
+
+def test_skip_clustering_true_never_calls_cluster_chunks(tmp_path, monkeypatch):
+    """cold_no_caller_refresh's own automatic rebuild passes skip_clustering=True
+    (see its call to _archive_and_build_locked) -- this is the direct witness on
+    _archive_and_build itself, independent of that wiring, so a regression in
+    either place is caught by its own test."""
+    import synapt.recall.clustering as clustering
+    from synapt.recall.cli import _archive_and_build
+
+    calls: list[int] = []
+    monkeypatch.setattr(clustering, "cluster_chunks", lambda chunks: calls.append(len(chunks)) or [])
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8)
+
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    assert calls == [], f"skip_clustering=True must never call cluster_chunks: {calls}"
+
+
+def test_skip_clustering_true_still_saves_chunks_to_fts5(tmp_path):
+    """Skipping clustering must not skip the actual indexing -- the chunks are
+    still searchable, only unclustered. Real (unmocked) build + real search."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.core import project_index_dir
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8, prefix="banana")
+
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    from synapt.recall.storage import RecallDB
+    db = RecallDB(project_index_dir(project) / "recall.db")
+    try:
+        results = db.fts_search("banana", limit=5)
+        assert results, "chunks must still be indexed and searchable when clustering is skipped"
+        # cluster_type scoped: build_timeline_clusters (Phase 10, unaffected by
+        # skip_clustering) writes its own rows to the same table under a
+        # different cluster_type, so an unscoped count is not a witness on
+        # topic clustering specifically.
+        assert db.cluster_count(cluster_type="topic") == 0, (
+            "no TOPIC clusters should exist -- topic clustering was skipped"
+        )
+    finally:
+        db.close()
+
+
+def test_cold_no_caller_refresh_passes_skip_clustering_true(monkeypatch):
+    """The one caller recall#435 targets: a bare resume's silent, automatic
+    rebuild must set skip_clustering=True. R3.1 (recall#435) moved this call
+    out of the caller's own process into a detached background script
+    (_BACKGROUND_COLD_REFRESH_SCRIPT, spawned via subprocess.Popen) so a bare
+    resume never blocks on it -- there is no longer a kwargs dict to capture
+    in THIS process, since the real _archive_and_build_locked call now runs
+    inside the spawned child. The direct witness moves to the exact source
+    text that child will run: assert the spawned argv carries the module's
+    own script constant (not an ad-hoc string), and that the constant's own
+    _archive_and_build_locked call carries skip_clustering=True -- a future
+    refactor that drops the flag from that call site fails this test by
+    inspection, same as the retired kwargs assertion did before R3.1."""
+    from synapt.recall import cli
+
+    monkeypatch.setattr(cli, "_newest_source_file", lambda project_dir: Path("/w/rollout.jsonl"))
+    # project_data_dir mocked out entirely (same pattern as
+    # TestColdNoCallerRefresh in test_cold_no_caller_refresh.py) so no real
+    # implicit recall data path is ever resolved -- the store-isolation guard
+    # only has something to check when the real implementation runs.
+    monkeypatch.setattr(cli, "project_data_dir", lambda project_dir=None: Path("/tmp/x"))
+    monkeypatch.setattr(cli, "_acquire_build_lock", lambda data_dir, timeout=None: 7)
+    monkeypatch.setattr(cli, "_release_build_lock", lambda fd: None)
+    monkeypatch.setattr(
+        "synapt.recall.freshness.check_index_freshness",
+        lambda *a, **k: mock_freshness(),
+    )
+
+    captured: dict = {}
+
+    def _spy_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return None
+
+    monkeypatch.setattr(cli.subprocess, "Popen", _spy_popen)
+
+    outcome = cli.cold_no_caller_refresh(Path("/proj"), Path("/proj/.synapt/recall/index"))
+
+    assert outcome.reason == "queued_background", (
+        f"a free lock must queue the background script, not run inline: {outcome}"
+    )
+    argv = captured.get("argv")
+    assert argv is not None, "cold_no_caller_refresh must spawn the background script via Popen"
+    assert argv[2] is cli._BACKGROUND_COLD_REFRESH_SCRIPT, (
+        "must spawn the exact module-level script constant, not an ad-hoc string"
+    )
+    assert "skip_clustering=True" in cli._BACKGROUND_COLD_REFRESH_SCRIPT, (
+        "the spawned script's own _archive_and_build_locked call must carry "
+        f"skip_clustering=True; script text: {cli._BACKGROUND_COLD_REFRESH_SCRIPT}"
+    )
+
+
+def mock_freshness():
+    from synapt.recall.freshness import IndexFreshness
+    return IndexFreshness(stale=True, build_timestamp="old", scanned="archive+sources")
+
+
+# ===========================================================================
 # E. `synapt maintain` — the grinder's new, explicit home
 # ===========================================================================
 
@@ -602,6 +752,131 @@ def test_maintain_passes_the_limit_through_and_reports_backlog(tmp_path, monkeyp
     out = capsys.readouterr().out.lower()
     assert seen == [3], f"maintain did not pass --limit through: {seen}"
     assert "remaining" in out, "maintain must report the remaining backlog, not drain it silently"
+
+
+def test_maintain_recluster_refuse_above_flag_reaches_the_function(tmp_path, monkeypatch, capsys):
+    """--recluster-refuse-above must thread to recluster_stale_chunks's
+    refuse_above kwarg. The ceiling (clustering.py:1189-1194) is a first
+    estimate against an unmeasured per-chunk memory cost, not a validated
+    safety property -- a legitimate one-time event (a fleet-wide catchup
+    after an outage) can push a real backlog above it, and there must be a
+    sanctioned way to raise it per run rather than only a programmatic
+    bypass of the guard."""
+    import synapt.recall.clustering as clustering
+    from synapt.recall.cli import cmd_maintain, make_parser
+
+    seen: list[int] = []
+
+    def _spy(db, batch_size=2000, merge_into_existing=False, refuse_above=50_000):
+        seen.append(refuse_above)
+        return {
+            "refused": False, "total_stale_at_start": 0, "batches_run": 0,
+            "chunks_clustered": 0, "still_stale": 0, "fresh_in_batch": 0,
+            "fallback_in_batch": 0, "merged_into_existing": 0,
+            "batch_boilerplate_dropped": [], "merge_samples": [],
+            "merge_run_id": None, "dry_run": False, "drain_command": "",
+        }
+
+    monkeypatch.setattr(clustering, "recluster_stale_chunks", _spy)
+    monkeypatch.chdir(tmp_path)
+
+    project = tmp_path
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8)
+
+    from synapt.recall.cli import _archive_and_build
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=False)
+
+    args = make_parser().parse_args(
+        ["maintain", "--recluster", "--recluster-refuse-above", "100000"]
+    )
+    cmd_maintain(args)
+
+    assert seen == [100000], f"--recluster-refuse-above did not reach the function: {seen}"
+
+
+def test_maintain_recluster_refuse_above_explicit_zero_is_not_treated_as_unset(
+    tmp_path, monkeypatch, capsys
+):
+    """--recluster-refuse-above 0 is a legitimate (if extreme) explicit value
+    and must reach the function as 0, not fall through to the default via a
+    truthiness check -- ``x or DEFAULT`` treats 0 the same as omitted; the
+    exact test is ``is None``."""
+    import synapt.recall.clustering as clustering
+    from synapt.recall.cli import cmd_maintain, make_parser
+
+    seen: list[int] = []
+
+    def _spy(db, batch_size=2000, merge_into_existing=False, refuse_above=50_000):
+        seen.append(refuse_above)
+        return {
+            "refused": False, "total_stale_at_start": 0, "batches_run": 0,
+            "chunks_clustered": 0, "still_stale": 0, "fresh_in_batch": 0,
+            "fallback_in_batch": 0, "merged_into_existing": 0,
+            "batch_boilerplate_dropped": [], "merge_samples": [],
+            "merge_run_id": None, "dry_run": False, "drain_command": "",
+        }
+
+    monkeypatch.setattr(clustering, "recluster_stale_chunks", _spy)
+    monkeypatch.chdir(tmp_path)
+
+    project = tmp_path
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8)
+
+    from synapt.recall.cli import _archive_and_build
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=False)
+
+    args = make_parser().parse_args(
+        ["maintain", "--recluster", "--recluster-refuse-above", "0"]
+    )
+    cmd_maintain(args)
+
+    assert seen == [0], (
+        f"--recluster-refuse-above 0 was treated as unset, fell through to "
+        f"the default: {seen}"
+    )
+
+
+def test_maintain_recluster_default_refuse_above_still_refuses_at_50001(
+    tmp_path, monkeypatch, capsys
+):
+    """Omitting --recluster-refuse-above must leave the default ceiling
+    (clustering.DEFAULT_RECLUSTER_REFUSE_ABOVE = 50_000) unchanged for every
+    other caller: one chunk over it must still refuse. Runs the REAL
+    recluster_stale_chunks (only its stale-id source is faked, real backlogs
+    this size are not built in a test) so this exercises the actual refusal
+    branch the flag threads into, not a mock of it."""
+    import synapt.recall.clustering as clustering
+    from synapt.recall.cli import cmd_maintain, make_parser
+
+    fake_stale_ids = [f"chunk-{i}" for i in range(50_001)]
+    monkeypatch.setattr(
+        clustering, "stale_transcript_chunk_ids", lambda db: fake_stale_ids
+    )
+    monkeypatch.chdir(tmp_path)
+
+    project = tmp_path
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8)
+
+    from synapt.recall.cli import _archive_and_build
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=False)
+
+    args = make_parser().parse_args(["maintain", "--recluster"])
+    cmd_maintain(args)
+
+    out = capsys.readouterr().out
+    assert "REFUSED" in out, f"default ceiling did not refuse at 50,001: {out}"
+    assert "50000" in out or "50,000" in out, (
+        f"refusal message must name the ceiling actually used: {out}"
+    )
+    assert "--recluster-refuse-above" in out, (
+        f"refusal message must name the flag that raises it: {out}"
+    )
 
 
 # ===========================================================================

@@ -247,6 +247,34 @@ class TestReadLatestMeaningful(unittest.TestCase):
         self.assertIsNotNone(result, "Should find meaningful entry under 25 empty ones")
         self.assertEqual(result.focus, "deep work")
 
+    def test_auto_stub_with_only_focus_does_not_shadow_manual_entry(self):
+        """An auto-extracted stub with only `focus` set is not a bridge (recall#937).
+
+        `auto_extract_entry` derives `focus` from every session's first user
+        message unconditionally -- including a `/clear` command's own harness
+        markup, or a coordinator's dispatch text captured as if it were the
+        agent's own intent. So `focus` alone on an `auto=True` entry carries
+        no signal: it is universally present and says nothing about whether
+        anyone wrote anything down. A hand-written entry with real next_steps,
+        superseded in the file by a newer auto stub, must still be what
+        `read_latest(meaningful=True)` returns.
+        """
+        append_entry(JournalEntry(
+            timestamp="2026-09-09T10:02:03",
+            focus="R3.1 continuity work",
+            next_steps=["fix recall#937", "re-check the checkpoint shape"],
+        ), self.path)
+        append_entry(JournalEntry(
+            timestamp="2026-09-09T10:04:17",
+            focus="<command-name>/clear</command-name><command-message>clear</command-message>",
+            auto=True,
+        ), self.path)
+
+        result = read_latest(self.path, meaningful=True)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.timestamp, "2026-09-09T10:02:03")
+        self.assertEqual(result.next_steps, ["fix recall#937", "re-check the checkpoint shape"])
+
 
 class TestHasContent(unittest.TestCase):
     def test_empty_entry_has_no_content(self):
@@ -552,6 +580,28 @@ class TestNextStepCarryForward(unittest.TestCase):
         self.assertIsNotNone(previous)
         self.assertEqual(previous.session_id, "prior")
 
+    def test_read_previous_meaningful_skips_foreign_auto_focus_only_stub(self):
+        """recall#937 v2 (Stromus R2 probe A): the carry-forward path has the
+        same shadowing bug as read_latest -- a foreign session's auto stub
+        with only `focus` set (no next_steps) must not be treated as the
+        previous session's real handoff."""
+        append_entry(JournalEntry(
+            timestamp="2026-03-01T10:00:00",
+            session_id="prior",
+            focus="prior session",
+            next_steps=["follow up"],
+        ), self.path)
+        append_entry(JournalEntry(
+            timestamp="2026-03-02T09:00:00",
+            session_id="foreign-stub",
+            focus="MORNING SPARK dispatch text captured as focus",
+            auto=True,
+        ), self.path)
+
+        previous = read_previous_meaningful("current", self.path)
+        self.assertIsNotNone(previous)
+        self.assertEqual(previous.session_id, "prior")
+
     def test_merge_carries_forward_unresolved_prior_steps(self):
         previous = JournalEntry(
             timestamp="2026-03-01T10:00:00",
@@ -832,6 +882,52 @@ class TestCarryForwardAgingAndBound(unittest.TestCase):
             [], ["Ship docs", "follow up with team [carried since 2026-08-11]"], prev)
         self.assertEqual(merged, [])
         self.assertEqual(report.retired_by_done, 2)
+
+    def test_done_retires_the_response_renderers_own_bulleted_display_text(self):
+        """recall#984, today's data point (Stromus, #dev m_6fb60a1c): a carried
+        step retired NOTHING even when done listed the step's "exact text" --
+        because the exact text the agent had in hand was copied from the
+        tool's own carry-forward response, which renders each carried step
+        as ``f"- {step}"`` (format_carry_forward_response). The renderer's
+        leading "- " is display formatting, not part of the stored step, so
+        a literal copy-paste of the displayed line carried an extra token
+        that pre-fix exact-equality never accounted for. Following the
+        tool's own instruction ("list its exact text under done") must not
+        silently fail to retire."""
+        from synapt.recall.journal import merge_carried_forward_with_report
+        prev = self._entry(
+            "2026-08-20T09:00:00+00:00",
+            ["work out why the index rebuild stalls on cold start [carried since 2026-08-10]"],
+        )
+        rendered_display_line = (
+            "- work out why the index rebuild stalls on cold start [carried since 2026-08-10]"
+        )
+        merged, report = merge_carried_forward_with_report([], [rendered_display_line], prev)
+        self.assertEqual(merged, [])
+        self.assertEqual(report.retired_by_done, 1)
+
+    def test_done_retires_a_double_bulleted_write_echo(self):
+        """recall#984 v2 (Stromus R2, #dev, 2026-09-05): a done item can
+        ALREADY carry a leading "- " in storage (auto-extraction or a
+        copy-paste that included one), and the tool's own read-back renderers
+        (format_entry_full, format_for_session_start) add ANOTHER "- " on top
+        for display -- the write-echo shape is "- - <step>". A single strip
+        (v1's fix) removes only the outer bullet and leaves one behind, so
+        this shape still failed to retire in Stromus's real-carried-step
+        probe (0 retired, 2 carried) even though plain text, one bullet, and
+        stamped text all correctly retired 1. Bullets must strip repeatedly,
+        not once."""
+        from synapt.recall.journal import merge_carried_forward_with_report
+        prev = self._entry(
+            "2026-08-20T09:00:00+00:00",
+            ["work out why the index rebuild stalls on cold start [carried since 2026-08-10]"],
+        )
+        double_bulleted_line = (
+            "- - work out why the index rebuild stalls on cold start [carried since 2026-08-10]"
+        )
+        merged, report = merge_carried_forward_with_report([], [double_bulleted_line], prev)
+        self.assertEqual(merged, [])
+        self.assertEqual(report.retired_by_done, 1)
 
     def test_near_miss_does_not_retire(self):
         """The issue's explicit ask: rewording must NOT retire; only exact text does."""

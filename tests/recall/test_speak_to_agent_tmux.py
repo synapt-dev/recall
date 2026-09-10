@@ -106,9 +106,21 @@ def test_build_tmux_commands_sequence_for_claude():
     cmds, enters = build_tmux_commands("synapt:3", "claude", "hi", buffer_name="b")
     assert enters == 2
     assert cmds[0] == ["tmux", "load-buffer", "-b", "b", "-"]  # body piped via stdin
-    assert cmds[1] == ["tmux", "paste-buffer", "-t", "synapt:3", "-b", "b", "-d"]
+    assert cmds[1] == ["tmux", "paste-buffer", "-p", "-t", "synapt:3", "-b", "b", "-d"]
     send_keys = [c for c in cmds if c[:2] == ["tmux", "send-keys"]]
     assert send_keys == [["tmux", "send-keys", "-t", "synapt:3", "Enter"]] * 2
+
+
+def test_build_tmux_commands_paste_buffer_carries_bracketed_paste_flag():
+    """-p is load-bearing, not decoration. Without it, tmux delivers the
+    paste as plain keystrokes and a body under 1.2KB can arrive at the
+    target pane head-truncated (measured: a real 1,121-byte DM arrived
+    tail-only). This test fails the moment -p is dropped from
+    build_tmux_commands, independent of the exact argv shape asserted above.
+    """
+    cmds, _enters = build_tmux_commands("synapt:9", "claude", "hi", buffer_name="b")
+    paste = [c for c in cmds if c[:2] == ["tmux", "paste-buffer"]][0]
+    assert "-p" in paste, f"paste-buffer command missing -p (bracketed paste): {paste}"
 
 
 def test_build_tmux_commands_codex_gets_three_enters():

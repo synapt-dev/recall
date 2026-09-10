@@ -230,7 +230,9 @@ class JournalEntry:
     auto: bool = False       # True if synthesized at build time
     enriched: bool = False   # True if LLM-enriched
     griptree: str = ""       # Agent's griptree identity (e.g., "synapt/synapt")
-    agent_id: str = ""       # Agent's session-scoped ID (e.g., "s_a1b2c3d4")
+    agent_id: str = ""       # Agent's stable identity (e.g., "apollo-001"); empty
+                             # when only a session-scoped fallback is available —
+                             # the session id lives in session_id, never here.
     repair: bool = False     # True if written by repair_journal
 
     def to_dict(self) -> dict:
@@ -300,13 +302,24 @@ def read_latest(path: Path | None = None, meaningful: bool = False) -> JournalEn
 
     If *meaningful* is True, skip auto-extracted entries that have no
     focus/done/decisions/next — these are noise from the SessionEnd hook.
+
+    A *focus* alone does not qualify an ``auto=True`` entry (recall#937):
+    ``auto_extract_entry`` derives focus from every session's first user
+    message unconditionally, including a ``/clear``'s own harness markup or
+    a coordinator's dispatch text captured as if it were the agent's own
+    intent. Universal-presence fields carry no signal. A hand-written entry
+    can still be "just a focus" and count — a human choosing to write only
+    that down is a real, if thin, bridge; an auto-extractor doing the same
+    on every session is not.
     """
     if not meaningful:
         entries = read_entries(path, n=1)
         return entries[0] if entries else None
     # Already deduped+sorted newest-first, so first with rich content wins
     for entry in read_entries(path, n=50):
-        if entry.focus or entry.done or entry.decisions or entry.next_steps:
+        if entry.done or entry.decisions or entry.next_steps:
+            return entry
+        if entry.focus and not entry.auto:
             return entry
     return None
 
@@ -319,9 +332,16 @@ def read_previous_meaningful(
 
     If *current_session_id* is provided, entries from the same session are
     skipped so repeated writes do not carry forward their own next steps.
+
+    Same auto-focus-only exclusion as :func:`read_latest` (recall#937): this
+    checks it locally rather than tightening ``has_rich_content()`` itself,
+    which also gates the write path in ``cli.py``/``server.py`` and is left
+    unchanged pending a separate look at whether it needs the same rule.
     """
     for entry in read_entries(path, n=50):
         if not entry.has_rich_content():
+            continue
+        if entry.auto and not (entry.done or entry.decisions or entry.next_steps):
             continue
         if current_session_id and entry.session_id == current_session_id:
             continue
@@ -605,8 +625,20 @@ def is_withheld_marker(step: str) -> bool:
 
 def _step_key(step: str) -> str:
     """Normalize a next-step string for exact matching (the age stamp is ignored,
-    so ``done`` can name a carried step with or without its stamp)."""
+    so ``done`` can name a carried step with or without its stamp; leading
+    ``"- "`` bullets are also ignored, since the tool's own carry-forward
+    response renders each carried step as ``f"- {step}"`` -- recall#984:
+    copying that displayed line verbatim, exactly as the tool's own
+    instruction says to, must not silently fail to retire because of a
+    formatting artifact the tool itself introduced. Stripped REPEATEDLY, not
+    once (recall#984 v2): a done item can already carry a bullet in storage
+    (auto-extraction, or a copy-paste that included one), and the read-back
+    renderers add another on top for display -- "- - <step>" -- so a single
+    strip leaves one bullet behind and the match still fails."""
     bare, _ = strip_carry_stamp(step)
+    bare = bare.strip()
+    while bare.startswith("- "):
+        bare = bare[2:]
     return " ".join(bare.split()).casefold()
 
 
@@ -1086,7 +1118,15 @@ def auto_extract_entry(
     try:
         from synapt.recall.channel import _resolve_griptree, _agent_id
         griptree = _resolve_griptree()
-        agent_id = _agent_id()
+        resolved = _agent_id()
+        # A session-scoped fallback (s_xxxxxxxx) is what _agent_id() returns for
+        # an unregistered session; it is NOT an agent identity. Storing it in
+        # agent_id makes the row unattributable-by-agent while looking attributed.
+        # The session is already captured in session_id, so record a real agent
+        # identity or nothing. Same s_-is-session-shaped convention
+        # the channel path uses for from_display (channel.py). _agent_id() itself
+        # is untouched — channel presence legitimately uses the s_ ephemeral form.
+        agent_id = "" if resolved.startswith("s_") else resolved
     except Exception:
         pass  # Channel module may not be available
 

@@ -1441,11 +1441,67 @@ class TranscriptIndex:
         return loaded
 
     def _materialize_all_chunks(self) -> list[TranscriptChunk]:
-        """Force hydration of all chunks when a full-scan path needs raw text."""
-        if not self._lazy_chunks:
+        """Force hydration of all chunks when a full-scan path needs raw text.
+
+        recall#435: this used to call _get_chunk(i) once per chunk, issuing one
+        single-row DB query per chunk (the dominant cost of a cold `stats` run
+        against a large store -- 335,524 calls / 40.1s cumtime measured against
+        167,762 chunks). load_chunks_by_rowids already exists and is already
+        used the same way by list_sessions's own batch-hydration path; this
+        collects every rowid that still needs hydrating and loads them in one
+        batched call (SQLite-variable-limit-chunked inside load_chunks_by_rowids
+        itself) instead of N individual round-trips.
+        """
+        if not self._lazy_chunks or self._db is None:
             return self.chunks
-        for i in range(len(self.chunks)):
-            self._get_chunk(i)
+        # idx -> position within self.sessions[chunk.session_id]. self.sessions
+        # was built in __init__ by walking self.chunks in order and appending
+        # each chunk to its session's list, so replaying that same walk here
+        # (over the CURRENT, not-yet-mutated self.chunks) reconstructs the
+        # exact position each index lands at in its session list -- letting a
+        # hydrated chunk be written back in O(1) instead of the O(session
+        # length) linear id-scan this used to do per chunk (measured as the
+        # new dominant frame, 22.3s tottime, once the batch-hydration fix
+        # above resolved the DB N+1: a session_length^2 blowup for any one
+        # large session, witnessed at 80,200 comparisons for a 400-chunk
+        # session in this function's own test).
+        to_load: dict[int, int] = {}
+        session_position: dict[int, int] = {}
+        session_counts: dict[str, int] = {}
+        for i, chunk in enumerate(self.chunks):
+            sid = chunk.session_id
+            session_position[i] = session_counts.get(sid, 0)
+            session_counts[sid] = session_position[i] + 1
+            if chunk.user_text or chunk.assistant_text or chunk.tool_content or chunk.transcript_path:
+                continue
+            rowid = self._idx_to_rowid.get(i)
+            if rowid is not None:
+                to_load[rowid] = i
+        if not to_load:
+            return self.chunks
+        loaded_by_rowid = self._db.load_chunks_by_rowids(list(to_load.keys()))
+        for rowid, idx in to_load.items():
+            loaded = loaded_by_rowid.get(rowid)
+            if loaded is None:
+                continue
+            self.chunks[idx] = loaded
+            session_chunks = self.sessions.get(loaded.session_id)
+            if session_chunks is not None:
+                pos = session_position.get(idx, -1)
+                if 0 <= pos < len(session_chunks) and session_chunks[pos].id == loaded.id:
+                    session_chunks[pos] = loaded
+                else:
+                    # Defensive fallback only: the precomputed position should
+                    # always be correct (self.chunks's order and every chunk's
+                    # session_id are stable across this call), so this branch
+                    # is not expected to run. If some future change breaks
+                    # that invariant, correctness still wins over speed here.
+                    for scan_pos, existing in enumerate(session_chunks):
+                        if existing.id == loaded.id:
+                            session_chunks[scan_pos] = loaded
+                            break
+            if loaded.turn_index >= 0:
+                self._turn_lookup[(loaded.session_id, loaded.turn_index)] = loaded
         return self.chunks
 
     def _ensure_embeddings_loaded(self) -> None:
@@ -2541,25 +2597,16 @@ class TranscriptIndex:
         token_count = 0
         access_items: list[dict] = []
 
-        # Knowledge nodes first
-        for node in (knowledge_results or []):
-            block = self._format_knowledge_block(node)
-            block_tokens = len(block) // 4
-            if token_count + block_tokens > max_tokens and len(lines) > 1:
-                break
-            lines.append(block)
-            token_count += block_tokens
-            item_id = node.get("id", "")
-            access_items.append({
-                "item_type": "knowledge",
-                "item_id": item_id,
-                "score": node.get("score", 0.0),
-            })
-            wm.record("knowledge", item_id, node.get("content", ""))
-
         # Re-rank cluster hits by durability: durable clusters are more
         # valuable in concise mode (high-level context). Ephemeral clusters
-        # (debugging narration, navigation) get score discounts.
+        # (debugging narration, navigation) get score discounts. Computed
+        # BEFORE the knowledge loop so a token reservation can be made for
+        # it below — knowledge rows carry a static confidence*specificity*
+        # knowledge_boost multiplier clusters never get, so without a floor
+        # a handful of off-topic-but-boosted knowledge rows can consume the
+        # entire budget before cluster_hits is even considered (reproduced
+        # live: off-topic knowledge rows scoring 27-44 ran ahead of clusters
+        # on-topic for the query, scoring ~12.65).
         _durability_mult = {"durable": 1.0, "mixed": 0.8, "ephemeral": 0.5}
         ranked_hits = []
         for cluster_id, score in cluster_hits:
@@ -2570,6 +2617,42 @@ class TranscriptIndex:
             mult = _durability_mult.get(dur, 0.7)  # unclassified = 0.7
             ranked_hits.append((cluster_id, score * mult, info))
         ranked_hits.sort(key=lambda x: x[1], reverse=True)
+
+        # Reserve budget for at least the top MIN_CLUSTER_SURVIVORS cluster
+        # hits so an off-topic knowledge row can never fully displace them —
+        # a floor on cluster survival, not a floor on knowledge eligibility,
+        # since knowledge and cluster scores are not on a comparable scale
+        # (knowledge_boost alone can 2x a score; nothing on the cluster side
+        # corresponds to it). When there are no cluster hits to reserve for
+        # (e.g. the query only matches knowledge), the reservation is zero
+        # and knowledge rows behave exactly as before.
+        MIN_CLUSTER_SURVIVORS = 2
+        reserved_tokens = 0
+        for cluster_id, score, info in ranked_hits[:MIN_CLUSTER_SURVIVORS]:
+            reserved_tokens += len(self._format_cluster_block(cluster_id, info, query=query)) // 4
+        knowledge_ceiling = max(0, max_tokens - reserved_tokens)
+
+        # Knowledge nodes first, but never past the reserved cluster floor.
+        # The "show at least one item even if it's oversized" leniency only
+        # applies when there is nothing else to fall back on (no cluster
+        # hits) -- otherwise a single oversized knowledge block would still
+        # consume the whole budget on its first iteration and defeat the
+        # reservation above before it ever gets a chance to matter.
+        for node in (knowledge_results or []):
+            block = self._format_knowledge_block(node)
+            block_tokens = len(block) // 4
+            allow_oversized_first = len(lines) == 1 and not ranked_hits
+            if token_count + block_tokens > knowledge_ceiling and not allow_oversized_first:
+                break
+            lines.append(block)
+            token_count += block_tokens
+            item_id = node.get("id", "")
+            access_items.append({
+                "item_type": "knowledge",
+                "item_id": item_id,
+                "score": node.get("score", 0.0),
+            })
+            wm.record("knowledge", item_id, node.get("content", ""))
 
         # Cluster summaries — pass query for snippet extraction
         for cluster_id, score, info in ranked_hits:
@@ -4679,6 +4762,81 @@ def _find_gripspace_root(path: Path) -> Path | None:
     return None
 
 
+def _is_initialized_store(recall_dir: Path) -> bool:
+    """Return True only if *recall_dir* (a ``.synapt/recall`` path) is a
+    genuinely initialized recall store, not merely a directory that exists.
+
+    ``is_dir()`` is not sufficient: other tools can create ``.synapt/recall/``
+    for reasons that have nothing to do with recall ever having been used
+    there. Measured directly (Stromus, 2026-09-05): ``gr spawn`` writes
+    ``.synapt/recall/spawn_state.json`` as a side-file under the clone it
+    runs from, so a bare ``gitgrip/.synapt/recall`` directory existed on a
+    real desk holding nothing but that one unrelated file -- and the
+    nearest-existing-store check below, keyed on ``is_dir()`` alone, treated
+    it as an initialized store and routed resolution away from the real
+    gripspace store to reach it.
+
+    A store is genuinely initialized once recall itself has written to it:
+    ``knowledge.jsonl`` (the first thing ``recall_save`` writes), an index
+    database (``recall.db`` or the sharded ``index.db``, written by
+    ``recall_build``), or a per-worktree journal (``recall_journal``'s first
+    write). Any one of these is sufficient; a directory holding only
+    side-files from other tools is not.
+    """
+    if (recall_dir / "knowledge.jsonl").exists():
+        return True
+    index_dir = recall_dir / "index"
+    if (index_dir / "recall.db").exists() or (index_dir / "index.db").exists():
+        return True
+    worktrees_dir = recall_dir / "worktrees"
+    if worktrees_dir.is_dir():
+        return any(worktrees_dir.glob("*/journal.jsonl"))
+    return False
+
+
+def _nearest_existing_store_root(path: Path, stop_at: Path | None = None) -> Path | None:
+    """Walk up from *path* and return the NEAREST ancestor (including
+    *path* itself) that already has an initialized ``.synapt/recall``
+    store, stopping at *stop_at* (inclusive) if given, else at ``$HOME``
+    or the filesystem root. Returns ``None`` if none exists in that range.
+
+    A store deliberately initialized at a root NESTED under an agent desk
+    (e.g. a test-isolation directory a level below the desk's own
+    gripspace) is not itself a git worktree or a gripspace boundary, so the
+    walk-up in ``project_data_dir`` used to skip straight past it to the
+    ENCLOSING desk's root -- a root nested under a desk is never isolated.
+    This check runs BEFORE the boundary is
+    accepted in the ambient (no env override, no explicit project_dir)
+    branch: an already-initialized store at or below the git/gripspace
+    boundary wins over that boundary, because it is the more specific,
+    already-established coordinate.
+
+    ``stop_at`` is load-bearing, not cosmetic: an unbounded walk toward
+    ``$HOME`` treats ANY existing store between the caller's boundary and
+    home as if it were nested under the caller's own project, which is not
+    the claim this check is allowed to make. Measured directly (2026-09-05):
+    a stray ``.synapt/recall`` leaked at the shared macOS ``$TMPDIR`` root
+    by an unrelated earlier run silently hijacked five pre-existing
+    ambient-resolution tests the moment this function's walk was allowed to
+    pass their fixture's own gripspace boundary looking for something
+    nearer -- the exact "walked past the wrong thing" failure this function
+    exists to fix, one boundary further out. Bounding the walk at the
+    caller-supplied boundary means a store outside that boundary can never
+    be mistaken for one nested inside it, leaked debris included. It never
+    walks PAST an existing store to find an ancestor's -- only the nearest
+    one, starting from *path*.
+    """
+    home = Path.home().resolve()
+    limit = stop_at.resolve() if stop_at is not None else home
+    current = path.resolve()
+    while True:
+        if _is_initialized_store(current / ".synapt" / "recall"):
+            return current
+        if current == limit or current == home or current == current.parent:
+            return None
+        current = current.parent
+
+
 def _resolve_griptree_parent(griptree_path: Path) -> Path | None:
     """Resolve a linked griptree back to its parent gripspace root.
 
@@ -4760,6 +4918,34 @@ def _worktree_name(project_dir: Path | None = None) -> str:
 
     current = (project_dir or Path.cwd()).resolve()
     grip_root = _find_gripspace_root(current)
+    # A gr2 workspace (`.grip` marker) is ONE per-worktree bucket: a constituent
+    # repo's own `.git` must NOT mint a per-repo slice, or a session standing in
+    # the repo and a session standing at the workspace root write to different
+    # buckets keyed on the cwd basename. The workspace boundary wins over any
+    # constituent `.git` below it. gr1 gripspaces (no `.grip`) keep their
+    # per-constituent-repo buckets via the walk below.
+    #
+    # THE BUCKET IS LOCALITY, NOT MEMBERSHIP (recall#974). `_find_gripspace_root`
+    # resolves a linked griptree (`.gitgrip/griptree.json`) to its PARENT gripspace
+    # by membership, so its index and knowledge cohere with the parent's store —
+    # correct for the STORE. But a linked griptree is a DISTINCT desk that shares
+    # the store while keeping its own history, so the per-worktree journal bucket
+    # must use the linked griptree's OWN name, not the parent's. Returning
+    # `grip_root.name` here (the membership-resolved parent) collapsed a linked
+    # griptree and its parent gr2 workspace into one bucket, and each read the
+    # other's entries (measured live: `synapt` and its linked griptree `synapt-dev`
+    # both landed in the `synapt` bucket). So when membership proves we are inside a
+    # gr2 workspace, take the NEAREST `.grip` by LOCALITY as the desk instead.
+    if grip_root is not None and (grip_root / ".grip").is_dir():
+        home = Path.home().resolve()
+        candidate = current
+        while candidate != candidate.parent:
+            if (candidate / ".grip").is_dir():
+                return candidate.name
+            if candidate == home:
+                break
+            candidate = candidate.parent
+        return grip_root.name
     candidate = current
     while candidate != candidate.parent:
         # A .git marker identifies the root of either a main checkout or a
@@ -4812,7 +4998,151 @@ def _guard_data_root(operation: str, path: Path) -> Path:
 _GRIPSPACE_ROOT_MARKER_RELPATH = Path(".synapt") / "gripspace-root"
 
 
-def _persist_shared_gripspace_root(resolved: Path) -> None:
+def _gripspace_has_registered_repo(root: Path) -> bool:
+    """True when *root* is a POPULATED gripspace: something (``gr spawn``,
+    ``gr repo add``) has actually registered at least one member repo,
+    rather than *root* being a hand-built directory that merely carries a
+    gripspace marker with nothing inside it.
+
+    Read using only the OSS-visible signals ``project_transcript_dirs``
+    already reads for the same purpose (declared griptrees, direct child
+    ``.git`` repos, ``.worktrees/*``) -- this deliberately never parses any
+    gr2 workspace/agent/repo manifest for identity content, which stays
+    premium (see the Identity Test in claude.md).
+    """
+    griptrees_json = root / ".gitgrip" / "griptrees.json"
+    if griptrees_json.is_file():
+        try:
+            data = json.loads(griptrees_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if data.get("griptrees"):
+            return True
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if not child.is_dir():
+            continue
+        if (child / ".git").exists():
+            return True
+        if child.name == ".worktrees":
+            try:
+                worktrees = list(child.iterdir())
+            except OSError:
+                worktrees = []
+            if any(wt.is_dir() and (wt / ".git").exists() for wt in worktrees):
+                return True
+    return False
+
+
+_INVERTED_MARKER_WARNED: set[str] = set()
+
+
+def _griptree_worktree_is_live(griptree_path: Path) -> bool:
+    """True when *griptree_path* has at least one sub-repo whose ``.git`` file
+    points at a linked worktree directory that STILL EXISTS.
+
+    ``_resolve_griptree_parent`` derives the parent by string-walking the
+    ``gitdir:`` path and never checks that the worktree it names is still
+    there, so a linked griptree whose worktree has been pruned (``git worktree
+    remove``) -- leaving ``griptree.json`` and the ``.git`` pointer behind --
+    still resolves a parent from a dead pointer. This confirms the pointer is
+    live, so the own-child guard rests on a real membership rather than a stale
+    one.
+    """
+    try:
+        children = list(griptree_path.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        git_path = child / ".git"
+        if git_path.is_file():
+            try:
+                content = git_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if content.startswith("gitdir:"):
+                gitdir = Path(content.split(":", 1)[1].strip())
+                if gitdir.exists():
+                    return True
+    return False
+
+
+def _marker_target_is_own_child(
+    marker_dir: Path, target: Path, *, require_live: bool = True
+) -> bool:
+    """True when *target* is a LINKED griptree (``.gitgrip/griptree.json``)
+    whose parent gripspace is *marker_dir* itself.
+
+    This is the one shape a shared-gripspace-root marker must never take: a
+    gripspace ROOT recording a redirect to one of its OWN member griptrees.
+    Following it collapses the parent's presence, cursors and per-desk buckets
+    onto a child desk -- the "one directory, two identities" store collision,
+    the sibling of ``_persist``'s unpopulated-root guard (recall#1124). Linked
+    children correctly point UP at the parent (``self_root == resolved`` there,
+    so ``_persist`` returns early and never writes); only a parent pointing
+    DOWN at a child is inverted.
+
+    ``require_live`` splits the two call sites, because the safe direction is
+    opposite for each:
+
+    - The WRITE refusal (``require_live=True``, the default) must be NARROW: a
+      target whose worktree has been pruned (``.git`` pointer dangling) is no
+      longer a live child, so refusing a legitimate marker to it would
+      OVER-block a real write. Bias to "not own child" when membership cannot
+      be confirmed live.
+    - The READ "treat as stale" test (``require_live=False``) must be STRICT:
+      a recorded marker naming an own child by structure is inverted whether
+      or not the worktree still exists, and FOLLOWING it collapses the parent
+      onto that child's store. A pruned child still has its ``.grip`` /
+      ``.synapt/recall`` and is still the wrong store to resolve onto, so the
+      read must reject it regardless of liveness (the under-block a liveness-
+      gated read would allow).
+
+    Scoped to this predicate rather than ``_resolve_griptree_parent`` so
+    general gripspace resolution (``_find_gripspace_root``) is unchanged; only
+    the marker guard narrows, and only on the write side.
+    """
+    try:
+        target = target.resolve()
+    except OSError:
+        return False
+    if not (target / ".gitgrip" / "griptree.json").is_file():
+        return False
+    parent = _resolve_griptree_parent(target)
+    try:
+        if parent is None or parent.resolve() != marker_dir.resolve():
+            return False
+    except OSError:
+        return False
+    if require_live:
+        return _griptree_worktree_is_live(target)
+    return True
+
+
+def _warn_inverted_marker_once(marker_dir: Path, target: Path) -> None:
+    """Log an ignored inverted marker once per (marker_dir, target) pair, so a
+    long-running MCP server that re-resolves on every call reports the stale
+    redirect exactly once rather than on every message."""
+    key = f"{marker_dir}=>{target}"
+    if key in _INVERTED_MARKER_WARNED:
+        return
+    _INVERTED_MARKER_WARNED.add(key)
+    import sys
+
+    print(
+        f"[recall] ignoring an inverted gripspace-root marker at "
+        f"{marker_dir / _GRIPSPACE_ROOT_MARKER_RELPATH}: it names {target}, one "
+        f"of this gripspace's own linked griptrees (a parent->child redirect "
+        f"that would collapse two desks onto one store). Resolving by walk-up "
+        f"instead; remove the marker to silence this.",
+        file=sys.stderr,
+    )
+
+
+def _persist_shared_gripspace_root(resolved: Path, env_var: str) -> None:
     """Record *resolved* as the shared coordinate for the CALLER's own
     gripspace, so a later call with no env var in its shell (a bare CLI
     invocation) can converge on the same root an env-bound call (the MCP
@@ -4827,9 +5157,46 @@ def _persist_shared_gripspace_root(resolved: Path) -> None:
     cwd happens to walk up into a REAL gripspace (rather than a tmp_path
     fixture) must not have this side effect plant a real file, the same
     contract project_data_dir already enforces for its own store root.
+
+    Refuses when the caller's own gripspace is not itself POPULATED (no
+    registered repo) -- a real agent worktree is created by ``gr spawn`` /
+    ``gr repo add`` and always has at least one member repo; a hand-built
+    scratch directory that merely carries a bare gripspace marker never
+    does. Without this, an ambient ``GRIPSPACE_ROOT`` still set in a shell
+    poisons the FIRST scratch gripspace it happens to be run from with a
+    marker pointing at the real team root, and every later env-less call
+    from that scratch dir silently converges on the real store too
+    (recall#1124, the marker half of a 2026-09-05 incident; #1123 is the
+    resolver half). An explicit ``project_dir`` argument still bypasses this
+    entire function (named intent, never ambient) -- see the caller.
     """
     self_root = _find_gripspace_root(Path.cwd())
     if self_root is None or self_root == resolved:
+        return
+    if not _gripspace_has_registered_repo(self_root):
+        import sys
+
+        print(
+            f"[recall] refusing to persist a shared-gripspace-root marker: "
+            f"{self_root} is not a populated gripspace (no registered "
+            f"repo) -- not binding it to {resolved} from {env_var}. "
+            f"Register a repo first (gr spawn / gr repo add) if this "
+            f"binding is intentional.",
+            file=sys.stderr,
+        )
+        return
+    if _marker_target_is_own_child(self_root, resolved):
+        import sys
+
+        print(
+            f"[recall] refusing to persist a shared-gripspace-root marker: "
+            f"{resolved} is one of {self_root}'s own linked griptrees, so a "
+            f"marker here would make this gripspace root redirect to its own "
+            f"child (collapsing two desks onto one store). Not binding it from "
+            f"{env_var}. A linked child resolves UP to this root already; a "
+            f"root must not resolve DOWN to a child.",
+            file=sys.stderr,
+        )
         return
     marker = self_root / _GRIPSPACE_ROOT_MARKER_RELPATH
     _guard_data_root("gripspace_root_marker", marker)
@@ -4876,6 +5243,18 @@ def _read_shared_gripspace_root_marker() -> tuple[Path | None, Path | None]:
     except OSError:
         return None, None
     if recorded.is_dir() and _is_gripspace_root_marker_dir(recorded):
+        # STRICT on read (require_live=False): an inverted marker naming an own
+        # child must not be followed whether or not the child's worktree is
+        # still live -- a pruned child keeps its .grip/.synapt store and is
+        # still the wrong coordinate to resolve onto. Liveness gates the WRITE
+        # refusal only.
+        if _marker_target_is_own_child(self_root, recorded, require_live=False):
+            # An inverted parent->child marker: this gripspace root names one
+            # of its own linked griptrees. Do not follow it (that collapses two
+            # desks onto one store); report it stale so the resolver walks up,
+            # which resolves this root to ITSELF. Logged once.
+            _warn_inverted_marker_once(self_root, recorded)
+            return None, recorded
         return recorded, None
     return None, recorded
 
@@ -4937,7 +5316,7 @@ def _resolve_root_and_source(project_dir: Path | None = None) -> tuple[Path | No
             # checkout while the store itself is redirected. Only
             # GRIPSPACE_ROOT (gr spawn's uniform per-agent binding) gets
             # persisted for a later env-less call to converge on.
-            _persist_shared_gripspace_root(resolved)
+            _persist_shared_gripspace_root(resolved, var)
         return resolved, f"env:{var}"
     marker_root, stale_target = _read_shared_gripspace_root_marker()
     if marker_root is not None:
@@ -5018,15 +5397,38 @@ def project_data_dir(project_dir: Path | None = None) -> Path:
 
         # Priority 1: git worktree → resolve to main worktree root
         main_root = _git_main_worktree_root(root)
-        if main_root is not None:
-            root = main_root
+        boundary = main_root
 
         # Priority 2: GitGrip gripspace → resolve to gripspace root
         # If CWD (or resolved root) is inside a gripspace, prefer the
         # gripspace root so all constituent repos share one recall index.
-        grip_root = _find_gripspace_root(root)
+        grip_root = _find_gripspace_root(boundary if boundary is not None else root)
         if grip_root is not None:
-            root = grip_root
+            boundary = grip_root
+
+        # Priority 0c (ambient only): an already-initialized store nested
+        # strictly between `root` and `boundary` (inclusive of both ends)
+        # wins over the boundary -- it is the more specific, already-
+        # established coordinate, and the walk-up must not skip past it to
+        # an enclosing desk's root. Bounded at `boundary` on purpose: a
+        # store existing further out, between the boundary and $HOME, is
+        # not nested under this project and must never hijack resolution --
+        # see _nearest_existing_store_root's docstring for the leaked-store
+        # incident that made this bound load-bearing rather than cosmetic.
+        # Skipped when project_dir was explicitly passed: a deliberate root
+        # is the caller's own choice, same as the env-override suppression
+        # above.
+        nearest_store_root = (
+            _nearest_existing_store_root(
+                root, stop_at=boundary if boundary is not None else root
+            )
+            if project_dir is None
+            else None
+        )
+        if nearest_store_root is not None:
+            root = nearest_store_root
+        elif boundary is not None:
+            root = boundary
         elif project_dir is None and root == Path.home().resolve():
             # AMBIENT inference (no project_dir passed) that falls all the way to
             # $HOME — a store sitting above every project on the machine — is

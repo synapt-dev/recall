@@ -53,7 +53,23 @@ _MATCH_KIND_RANK = {"exact": 0, "prefix": 1, "substring": 2}
 # alone can return several substring hits) still crowds out a later token's
 # exact hit within its own per-token slice before the global sort ever sees
 # it.
-_CANDIDATE_POOL_PER_TOKEN = 20
+_CANDIDATE_POOL_PER_TOKEN = 100
+# 20 was measured too small on the first real query through the MCP tool
+# (2026-09-06): "build" alone substring-matches well over 20 symbols in this
+# repo, so ``_acquire_build_lock`` never entered the pool for either of the
+# two words it contains and coverage ranking had nothing to rank. 100 costs
+# one indexed SQLite query per token and is still bounded.
+
+
+def _stem(word: str) -> str:
+    """Fold the plainest English inflections so a question's "acquired" can
+    meet a symbol's "acquire" and "indexes" can meet "index". Deliberately
+    tiny: strip one of ed / es / s / ing when at least four letters remain.
+    Not a stemmer; a coverage aid that never widens below four characters."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)]
+    return word
 
 # --- Optional per-hit annotator seam ---
 # A downstream layer may register a per-hit annotation callable via the
@@ -98,10 +114,138 @@ def _identifier_tokens(query: str) -> list[str]:
     don't crowd out real symbol names in the fixed-size result budget."""
     raw = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query)
     raw = [t for t in raw if t.lower() not in _STOPWORDS]
+    raw = list(dict.fromkeys(raw + [_stem(t.lower()) for t in raw]))
     joined_underscore = "_".join(re.findall(r"[A-Za-z]+", query))
     joined_none = "".join(re.findall(r"[A-Za-z]+", query)).lower()
     candidates = list(dict.fromkeys(raw + [joined_underscore, joined_none, query]))
     return [c for c in candidates if len(c) >= 3]
+
+
+# Directory basenames that conventionally hold vendored, reference, or
+# third-party code rather than the project's own production sources --
+# industry-standard names (vendor/, node_modules/, third_party/) plus this
+# gripspace's own read-only comparison and research conventions
+# (reference/, research/, documented in the gripspace's own CLAUDE.md).
+# Matched against ANY path component so a nested checkout (reference/
+# hindsight/...) is caught, not only a first-level one.
+#
+# Known tradeoff, accepted: this also demotes a PRODUCTION path that merely
+# happens to have a directory component of the same name (a docs/reference/
+# tree inside someone's own project, say). Acceptable for symbol ranking --
+# a rare false demotion inside home code is a much smaller cost than the
+# common case this exists for (a real vendored/reference sibling routinely
+# outranking home code), and the caller still SEES the hit, just later.
+_FOREIGN_DIR_NAMES = frozenset(
+    {
+        "reference",
+        "research",
+        "vendor",
+        "vendored",
+        "third_party",
+        "thirdparty",
+        "node_modules",
+    }
+)
+
+
+def _git_top(path) -> "Path | None":
+    """Walk up from ``path`` to the nearest ancestor containing ``.git``, or
+    None if no ancestor has one. Bounded so a bad path can't spin forever."""
+    from pathlib import Path
+
+    current = Path(path).resolve()
+    for _ in range(64):
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+    return None
+
+
+def _has_foreign_component(rel_path: str) -> bool:
+    """A named-convention check that works regardless of ``repo_root``'s own
+    git identity: any directory component matching a known vendored/
+    reference/research name flags the whole path foreign."""
+    parts = rel_path.replace("\\", "/").split("/")[:-1]
+    return any(p.lower() in _FOREIGN_DIR_NAMES for p in parts)
+
+
+def _is_foreign_path(repo_root, rel_path: str, home_git_top, cache: dict) -> bool:
+    """A hit is foreign when EITHER (a) its path carries a known vendored/
+    reference/research directory component -- the signal that actually
+    fires when ``repo_root`` is an ungoverned directory sitting above
+    several sibling projects, which is the shape behind most of a
+    nine-question replay's wrong answers -- or (b) it lives inside a DIFFERENT
+    git repository than the one ``repo_root`` itself belongs to, catching a
+    genuine vendored submodule embedded within an otherwise well-scoped
+    project. When ``repo_root`` has no git identity of its own, (b)
+    degenerates to no signal (every candidate would look equally foreign);
+    (a) is what carries the fixture's actual measured improvement."""
+    if _has_foreign_component(rel_path):
+        return True
+    if home_git_top is None:
+        return False
+    from pathlib import Path
+
+    hit_dir = (Path(repo_root) / rel_path).parent
+    if hit_dir in cache:
+        return cache[hit_dir]
+    result = _git_top(hit_dir) != home_git_top
+    cache[hit_dir] = result
+    return result
+
+
+_KIND_RANK = {"class": 0, "function": 0, "method": 0}
+# A class/function/method is a definition the reader can read as an answer;
+# a bare constant rarely is. Unknown/unseen kinds default to 1 (with the
+# constants) rather than 0, so an unrecognized future kind doesn't silently
+# claim the definition-preference tier it hasn't earned.
+
+
+def _name_words(name: str) -> list[str]:
+    """Split a symbol name into lowercase word parts across snake_case and
+    camelCase boundaries, so ``ChannelMessage`` yields ["channel",
+    "message"] and ``recall_channel`` yields ["recall", "channel"] --
+    the same granularity _identifier_tokens already uses on the query
+    side, applied here to the SYMBOL side so the two can be compared."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    parts = re.split(r"[_\W]+", spaced)
+    return [p.lower() for p in parts if p]
+
+
+def _name_match_ratio(name: str, query_words: set) -> float:
+    """How much of the SYMBOL's own name is explained by the query, not how
+    much of the query the symbol happens to contain. ``channel_post``
+    against a query covering "channel"+"post" scores 1.0 (the whole name is
+    query content); ``test_recall_channel_uses_registry_dispatch`` against
+    the same two covered words scores ~0.29 (2 of 7) even though its RAW
+    token_coverage is the same. This is what lets a short, precise
+    production symbol outrank a long incidental match without touching
+    token_coverage's own well-justified role as the primary signal (design
+    history above: "coverage ranks first")."""
+    words = [_stem(w) for w in _name_words(name) if w not in _STOPWORDS]
+    if not words:
+        return 0.0
+    covered = sum(1 for w in words if w in query_words)
+    return covered / len(words)
+
+
+def _is_test_path(path: str) -> bool:
+    """A test file is a legitimate hit but never the definition a reader is
+    looking for first; it ranks before foreign paths only, ahead of raw
+    coverage -- promoted from a coverage tie-break to an absolute
+    production-before-test preference alongside path affinity above, so a
+    test symbol matching an extra incidental word (e.g. the repo's own name
+    in a fixture's docstring) no longer outranks a production symbol."""
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1]
+    return (
+        any(part in ("test", "tests") for part in parts[:-1])
+        or base.startswith("test_")
+        or base.endswith(("_test.py", ".test.ts", ".test.js", "_test.go", "_test.rs"))
+    )
 
 
 def _match_kind(symbol_name: str, token: str) -> str:
@@ -141,8 +285,8 @@ def recall_code(
         {
             "query": str,
             "symbols": [{name, kind, path, line_start, line_end, signature,
-                         matched_token, match_kind, annotation?,
-                         annotation_error?}],
+                         matched_token, match_kind, token_coverage, is_test,
+                         annotation?, annotation_error?}],
             "has_code_hit": bool,
             "has_memory_hit": bool,
             "memories": str,
@@ -154,18 +298,69 @@ def recall_code(
     "annotation_error" instead of raising, since annotation is enrichment,
     not the answer.
     """
-    seen: set[tuple[str, str, int]] = set()
-    candidates: list[dict] = []
+    # Dogfood finding (2026-09-06, first real query through the MCP tool):
+    # "where is the build lock acquired" returned four test fixtures named
+    # ``build`` as "exact" hits and never the real ``_acquire_build_lock``,
+    # because (a) a symbol was kept under the FIRST token that found it, so a
+    # later, better match kind on the same symbol was dropped, and (b) one
+    # exact hit on a generic word outranked a symbol containing TWO of the
+    # query's words. So: a duplicate upgrades its match kind, coverage
+    # (how many distinct query words the name contains) ranks first, then
+    # match kind, then non-test paths over test paths, then name.
+    query_words = list(
+        dict.fromkeys(
+            _stem(t.lower())
+            for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query)
+            if t.lower() not in _STOPWORDS
+        )
+    )
+    # _name_words below splits a SYMBOL's name on '_'/camelCase into
+    # word-level parts (e.g. "target_symbol" -> ["target", "symbol"]), but
+    # query_words is compound-token granularity (regex-captured whole
+    # identifiers, e.g. "target_symbol" as ONE token) -- built for
+    # substring-based token_coverage, where that granularity is correct.
+    # Comparing the two directly makes a fully-relevant exact match score
+    # 0.0 (neither "target" nor "symbol" individually is in query_words),
+    # so name_match_ratio needs the QUERY split at the same word-level
+    # granularity as the symbol side.
+    query_words_set = {
+        _stem(w) for w in _name_words(query) if w not in _STOPWORDS
+    }
+    by_key: dict[tuple[str, str, int], dict] = {}
     for token in _identifier_tokens(query):
         for hit in find_symbols(db_path, token, repo=repo, limit=_CANDIDATE_POOL_PER_TOKEN):
             key = (hit["path"], hit["name"], hit["line_start"])
-            if key in seen:
-                continue
-            seen.add(key)
-            hit["matched_token"] = token
-            hit["match_kind"] = _match_kind(hit["name"], token)
-            candidates.append(hit)
-    candidates.sort(key=lambda h: (_MATCH_KIND_RANK[h["match_kind"]], h["name"]))
+            kind = _match_kind(hit["name"], token)
+            kept = by_key.get(key)
+            if kept is None:
+                hit["matched_token"] = token
+                hit["match_kind"] = kind
+                by_key[key] = hit
+            elif _MATCH_KIND_RANK[kind] < _MATCH_KIND_RANK[kept["match_kind"]]:
+                kept["matched_token"] = token
+                kept["match_kind"] = kind
+    candidates = list(by_key.values())
+    home_git_top = _git_top(repo_root)
+    git_top_cache: dict = {}
+    for hit in candidates:
+        lowered = hit["name"].lower()
+        hit["token_coverage"] = sum(1 for w in query_words if w in lowered)
+        hit["is_test"] = _is_test_path(hit["path"])
+        hit["is_foreign"] = _is_foreign_path(
+            repo_root, hit["path"], home_git_top, git_top_cache
+        )
+        hit["name_match_ratio"] = _name_match_ratio(hit["name"], query_words_set)
+    candidates.sort(
+        key=lambda h: (
+            h["is_foreign"],
+            h["is_test"],
+            -h["token_coverage"],
+            -h["name_match_ratio"],
+            _MATCH_KIND_RANK[h["match_kind"]],
+            _KIND_RANK.get(h.get("kind"), 1),
+            h["name"],
+        )
+    )
     symbol_hits = candidates[:max_symbols]
 
     annotator = _load_annotator()

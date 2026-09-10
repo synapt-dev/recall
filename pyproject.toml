@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synapt"
-version = "0.24.2"
+version = "0.25.0"
 description = "Persistent conversational memory for AI coding assistants"
 readme = "README.md"
 license = "MIT"
@@ -117,6 +117,7 @@ dev = ["watchfiles>=0.20"]
 test = [
     "build>=1.0",
     "pytest>=7.0",
+    "pytest-asyncio>=0.23",
     "tomli>=2.0; python_version < '3.11'",
     "numpy",
     "pytest-benchmark>=4.0",
@@ -162,6 +163,7 @@ x = "synapt.x.server"
 
 [tool.pytest.ini_options]
 addopts = "--benchmark-disable"
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

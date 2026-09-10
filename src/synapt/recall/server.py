@@ -77,6 +77,7 @@ MCP_INSTRUCTIONS = (
     "\n"
     "WHEN TO SEARCH (do this automatically, without being asked):\n"
     "- When you need file history or design rationale for a specific path -> recall_files\n"
+    "- When you need to know where something is defined in the code AND why it is that way -> recall_code\n"
     "- Before making a design decision -> recall_search for prior discussion\n"
     "- When debugging an error -> recall_search for past fixes\n"
     "- When user references past work -> recall_search immediately\n"
@@ -88,6 +89,7 @@ MCP_INSTRUCTIONS = (
     "- recall_quick: Fast, cheap knowledge check. Use speculatively when unsure.\n"
     "- recall_search: Full search with transcript chunks. Use when you need detail.\n"
     "- recall_files: Use for file history questions like 'who changed this and why?'\n"
+    "- recall_code: Code symbols (where defined, file:line) plus the team's memory of them, one result. Ask it in plain words.\n"
     "- recall_journal: Read/write session notes. Check at session start.\n"
     "- recall_remind: Set/check cross-session reminders.\n"
     "\n"
@@ -750,6 +752,92 @@ def recall_files(
         return f"File search failed: {exc}"
 
 
+def _format_recall_code(result: dict, root: Path, db: Path, stats) -> str:
+    """Render a code_search.recall_code() result as one readable block."""
+    lines: list[str] = []
+    fresh = (
+        f"{stats.files_indexed} files re-parsed, {stats.files_skipped} unchanged, "
+        f"{stats.files_pruned} pruned"
+    )
+    lines.append(f"Code hits for \"{result['query']}\" in {root.name} ({fresh}; index {db}):")
+    if result["symbols"]:
+        for hit in result["symbols"]:
+            span = f"{hit['path']}:{hit['line_start']}-{hit['line_end']}"
+            lines.append(
+                f"  {hit['kind']} {hit['name']}  {span}  "
+                f"[{hit['match_kind']} on \"{hit['matched_token']}\"]"
+            )
+            sig = (hit.get("signature") or "").strip()
+            if sig:
+                lines.append(f"      {sig}")
+            for note in hit.get("annotation") or []:
+                text = note.get("excerpt") if isinstance(note, dict) else str(note)
+                if text:
+                    lines.append(f"      why: {text}")
+            if hit.get("annotation_error"):
+                lines.append(f"      (annotation failed: {hit['annotation_error']})")
+    else:
+        lines.append("  No code symbol matched; memories only.")
+    if getattr(stats, "parser_stack_missing", False):
+        lines.append(
+            "  (tree-sitter-language-pack is not installed, so the code index is empty: "
+            "pip install 'synapt[code-index]')"
+        )
+    lines.append("")
+    lines.append("What the team said:")
+    lines.append(result["memories"])
+    return "\n".join(lines)
+
+
+def recall_code(
+    query: str,
+    repo_root: str | None = None,
+    max_symbols: int = 5,
+    max_chunks: int = 3,
+) -> str:
+    """Find where something is defined in this repo's code AND what the team
+    has said about it, in one result.
+
+    Ask in plain words ("cold no-caller refresh", "where is the build lock
+    acquired"). Returns matching symbols (kind, name, file:line span, how the
+    match was made) followed by recall_search memories for the same query.
+    A query with no code hit says so and returns memories only. The symbol
+    index is refreshed first by content hash, so an edited file is re-parsed
+    and an unchanged one costs nothing.
+
+    Args:
+        query: Plain-language question or a symbol name.
+        repo_root: Repository to index and search. Defaults to the current
+            working directory.
+        max_symbols: Maximum code symbols to return.
+        max_chunks: Maximum memory chunks to return.
+    """
+    from synapt.recall.code_index import index_repo
+    from synapt.recall.code_search import recall_code as _recall_code
+
+    root = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
+    if not root.is_dir():
+        return f"Repo root not found: {root}"
+    db = project_data_dir(root) / "code_index.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        stats = index_repo(root, db, repo=root.name)
+    except Exception as exc:
+        return f"Code index failed at {db}: {exc}"
+    try:
+        result = _recall_code(
+            query,
+            db_path=str(db),
+            repo=root.name,
+            repo_root=str(root),
+            max_symbols=max_symbols,
+            max_chunks=max_chunks,
+        )
+    except Exception as exc:
+        return f"Code search failed: {exc}"
+    return _format_recall_code(result, root, db, stats)
+
+
 def recall_sessions(
     max_sessions: int = 20,
     after: str | None = None,
@@ -1116,7 +1204,12 @@ def _run_build_job(project: Path, receipt: dict, incremental: bool) -> None:
         receipt["phase"] = phase
         if "started_at" not in receipt:
             receipt["started_at"] = datetime.now(timezone.utc).isoformat()
-        _write_build_receipt(project, receipt)
+        # Found in review: this write raced recall_build_status's locked read
+        # (and, on Windows, atomic_json_write's rename could collide with an
+        # open-for-read handle and raise PermissionError) because it was the
+        # only writer in this module not holding _BUILD_RECEIPT_LOCK.
+        with _BUILD_RECEIPT_LOCK:
+            _write_build_receipt(project, receipt)
 
     try:
         report("starting")
@@ -1179,7 +1272,11 @@ def recall_build(incremental: bool = True) -> str:
     """
     from synapt.recall.cli import _acquire_build_lock, _release_build_lock
 
-    project = Path.cwd().resolve()
+    # None => resolve via SYNAPT_RECALL_ROOT / GRIPSPACE_ROOT + inference
+    # (project_data_dir, _archive_and_build, and every downstream helper
+    # below already handle None; only this cwd-forcing forwarding
+    # suppressed the override).
+    project = None
     with _BUILD_RECEIPT_LOCK:
         receipt_lock = _acquire_build_lock(
             project_data_dir(project), timeout=5, name="build-receipt.lock",
@@ -1245,7 +1342,9 @@ def recall_build_status(build_id: str = "") -> str:
 
     Omit build_id to read the newest receipt for the current project.
     """
-    project = Path.cwd().resolve()
+    # Same None-forwarding as recall_build: let SYNAPT_RECALL_ROOT /
+    # GRIPSPACE_ROOT take effect instead of a pre-resolved cwd.
+    project = None
     if build_id:
         if not _BUILD_ID_RE.fullmatch(build_id):
             return "Invalid build id. Expected build_<12 lowercase hex characters>."
@@ -1283,12 +1382,17 @@ def recall_setup(no_hook: bool = False) -> str:
     """
     from synapt.recall.cli import _archive_and_build, _ensure_gitignore, _install_global_hooks
 
-    project = Path.cwd().resolve()
+    # Two different concerns, two different roots. .gitignore (step 3) must
+    # stay tied to the ACTUAL cwd -- it belongs to the git repo standing
+    # here, regardless of where the store lives. The index build (step 1)
+    # is store resolution and must honor an env override the same way
+    # recall_build does: forward None, never a pre-resolved cwd.
+    cwd = Path.cwd().resolve()
     steps: list[str] = []
 
     # 1. Archive transcripts + build index
     try:
-        final_index = _archive_and_build(project, use_embeddings=True)
+        final_index = _archive_and_build(None, use_embeddings=True)
     except Exception as e:
         return f"Setup failed during index build: {e}"
     finally:
@@ -1316,11 +1420,11 @@ def recall_setup(no_hook: bool = False) -> str:
         steps.append("Hook installation skipped (no_hook=True)")
 
     # 3. Add .synapt/ to .gitignore
-    _ensure_gitignore(project)
+    _ensure_gitignore(cwd)
     steps.append(".synapt/ ensured in .gitignore")
 
-    # Summary
-    index_dir = project_index_dir(project)
+    # Summary: same root as step 1's build -- forward None, never cwd.
+    index_dir = project_index_dir(None)
     if index_dir.exists() and any(index_dir.iterdir()):
         total_size = sum(fp.stat().st_size for fp in index_dir.iterdir() if fp.is_file())
         steps.append(f"Index size: {format_size(total_size)}")
@@ -2187,9 +2291,26 @@ def recall_correct(
         # Step 3: Sync to DB so the node is immediately searchable
         try:
             from synapt.recall.consolidate import _sync_knowledge_to_db
-            from synapt.recall.core import project_data_dir
-            project_dir = project_data_dir()
-            _sync_knowledge_to_db(project_dir, kn_path)
+            from synapt.recall.core import project_index_dir
+            from synapt.recall.sharding import live_store_path
+            # None => resolve via SYNAPT_RECALL_ROOT / GRIPSPACE_ROOT + inference,
+            # the same pattern recall_save uses (project_data_dir's own docstring).
+            # Passing project_data_dir()'s OWN return value here was the bug: that
+            # value is already the resolved DATA dir (<root>/.synapt/recall), and
+            # _sync_knowledge_to_db's project_index_dir(project_dir) applies
+            # project_data_dir() to it a SECOND time, doubling the suffix onto a
+            # path that never exists -- silently no-opping the sync while this
+            # function still reported success (tracked privately, no number here).
+            db_path = live_store_path(project_index_dir(None))
+            if not db_path.exists():
+                # Not an assert: assert is stripped under python -O, which would
+                # silently drop this refusal and let the false success message
+                # through on an optimized interpreter (Stromus R2, v1).
+                raise FileNotFoundError(
+                    f"no recall index at {db_path}; refusing to claim a sync "
+                    "that cannot happen"
+                )
+            _sync_knowledge_to_db(None, kn_path)
             synced = "  Synced to search index."
         except Exception:
             synced = "  (Will sync on next consolidation.)"
@@ -2462,7 +2583,7 @@ def recall_save(
         import hashlib
         from datetime import datetime, timezone
 
-        from synapt.recall.knowledge import VALID_CATEGORIES, KnowledgeNode, append_node
+        from synapt.recall.knowledge import VALID_CATEGORIES, KnowledgeNode, save_knowledge_node
         from synapt.recall.sharding import live_store_path
         from synapt.recall.storage import RecallDB
 
@@ -2472,7 +2593,10 @@ def recall_save(
                 f"Valid categories: {', '.join(sorted(VALID_CATEGORIES))}."
             )
 
-        project = Path.cwd().resolve()
+        # None => resolve via SYNAPT_RECALL_ROOT / GRIPSPACE_ROOT + inference.
+        # Forwarding Path.cwd() would suppress the override, same pattern as
+        # recall_export's existing fix for the same class of bug.
+        project = None
         db = RecallDB(live_store_path(project_index_dir(project)))
         try:
             # --- Retract path ---
@@ -2513,8 +2637,9 @@ def recall_save(
                 node.created_at = existing.get("created_at", node.created_at)
                 node.version = existing.get("version", 1) + 1
                 node.lineage_id = existing.get("lineage_id", "") or existing["id"]
-            append_node(node, project_data_dir(project) / "knowledge.jsonl")
-            db.upsert_knowledge_node(node.to_dict())
+            save_knowledge_node(
+                node, project_data_dir(project) / "knowledge.jsonl", project_index_dir(project)
+            )
 
             embedded = False
             provider = get_embedding_provider()
@@ -3175,14 +3300,26 @@ def _with_directive_check(fn):
     return wrapper
 
 
+# The pending deferred-exec timer from the most recent recall_reload() call,
+# exposed at module level so a test (or a second reload call) can cancel it
+# rather than let it fire against an unpatched/unexpected os.execv later.
+_pending_reload_timer: "threading.Timer | None" = None
+
+
 def recall_reload() -> str:
     """Restart the MCP server to pick up code changes after pip install.
 
-    Replaces the current process with a fresh one via os.execv().
-    The MCP client (Claude Code) will reconnect automatically.
+    Replaces the current process with a fresh one via os.execv(), a short
+    moment after this call returns so its own response reaches the caller
+    first. Claude Code does NOT auto-reconnect a stdio MCP child whose
+    process is replaced: from an interactive session, run /mcp to
+    reconnect after this completes.
     """
     import os
     import sys
+    import threading
+
+    global _pending_reload_timer
 
     stale = _check_version_stale()
     log = logging.getLogger("synapt.recall")
@@ -3194,11 +3331,35 @@ def recall_reload() -> str:
     # Flush any pending DB writes
     _invalidate_cache()
 
-    # Replace this process with a fresh one
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    def _delayed_execv() -> None:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    # os.execv never returns — this is just for type checkers
-    return "Reloading..."  # pragma: no cover
+    # Defer the process replacement (measured with a minimal stdio client
+    # against the real server): calling os.execv() inline here, before
+    # returning, preempted this call's own response — a minimal stdio client
+    # timed out waiting for a reply to THIS call, then got an "Invalid
+    # request parameters" rejection on its next call, because the fresh
+    # process's MCP session was never initialized by that connection and
+    # nothing re-initializes it. The stdio pipe itself survives the execv;
+    # the MCP session handshake does not, and no client-side auto-reconnect
+    # exists to redo it.
+    #
+    # The timer is a daemon thread and exposed at module level (rather than
+    # fired inline in a way a caller cannot observe or cancel) because a
+    # caller — the real server or a test — must be able to prevent this
+    # scheduled execv from firing after it is no longer wanted; a stray
+    # timer firing unpatched os.execv() after a test's mock context has
+    # closed replaces the TEST RUNNER's own process, not a fixture.
+    timer = threading.Timer(0.2, _delayed_execv)
+    timer.daemon = True
+    _pending_reload_timer = timer
+    timer.start()
+
+    return (
+        "Reloading in ~0.2s. This connection will end when the process is "
+        "replaced. Claude Code does not auto-reconnect a stdio MCP child: "
+        "from an interactive session, run /mcp to reconnect."
+    )
 
 
 def _build_validating_fastmcp_class():
@@ -3286,6 +3447,7 @@ def register_tools(mcp) -> None:
     mcp.tool()(_with_directive_check(recall_search))
     mcp.tool()(_with_directive_check(recall_quick))
     mcp.tool()(_with_directive_check(recall_files))
+    mcp.tool()(_with_directive_check(recall_code))
     mcp.tool()(_with_directive_check(recall_sessions))
     mcp.tool()(_with_directive_check(recall_resume))
     mcp.tool()(recall_build)

@@ -1,0 +1,3491 @@
+"""TDD spec: recall#435 follow-on -- the bounded recluster maintenance op.
+
+recall#435's ``skip_clustering`` build path (merged) saves transcript chunks
+to FTS5 without clustering them, so they stay unclustered until something
+else clusters them. This is that something else: ``synapt maintain
+--recluster``, which clusters the oldest bounded batch of stale chunks and
+reports what is left.
+
+The load-bearing property under test is the memory bound: the op must never
+reload the already-clustered corpus to add a small batch. Concretely, that
+means it must call the ADDITIVE ``append_clusters`` (insert-only), never the
+full-corpus-REPLACE ``save_clusters`` (deletes every existing topic cluster
+first) -- using the wrong one would silently erase every already-clustered
+chunk the first time the maintenance op ran on a real store. That distinction
+is asserted directly, not just inferred from an end-to-end count.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from conftest import assistant_entry, user_text_entry, write_jsonl
+
+
+def _transcript(path: Path, *, turns: int = 2, prefix: str = "q") -> Path:
+    entries = []
+    for i in range(turns):
+        entries.append(
+            user_text_entry(f"{prefix} question {i}", uuid=f"{prefix}-u{i}",
+                             ts=f"2026-03-01T10:{i:02d}:00Z")
+        )
+        entries.append(
+            assistant_entry(text=f"{prefix} answer {i}", uuid=f"{prefix}-a{i}",
+                             ts=f"2026-03-01T10:{i:02d}:30Z")
+        )
+    write_jsonl(path, entries)
+    return path
+
+
+def _build_store_with_stale_chunks(tmp_path, *, turns: int = 8, prefix: str = "recluster"):
+    """A store built with skip_clustering=True: chunks indexed, none clustered."""
+    from synapt.recall.cli import _archive_and_build
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=turns, prefix=prefix)
+
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+    return project
+
+
+# _transcript's shared "question"/"answer" boilerplate made
+# every "singleton" cluster with every OTHER singleton (measured: a
+# 5-singleton fixture built with _transcript came back 100% clustered, not
+# stuck at all). Each of these uses a fully distinct sentence template, not
+# a shared phrase with a swapped-in topic word, so nothing overlaps between
+# them beyond stopwords.
+_DISJOINT_SINGLETON_TEXT = [
+    ("Giraffes wander the savanna grasslands searching for acacia leaves",
+     "Their long necks reach branches nothing else on the plain can touch"),
+    ("Lighthouses warn sailors away from rocky treacherous coastlines",
+     "Keepers once climbed spiral staircases to trim the flickering wick"),
+]
+
+
+def _disjoint_singleton(path: Path, *, index: int) -> Path:
+    """A one-turn transcript whose vocabulary shares nothing with the other
+    disjoint singleton or with the clusterable group below."""
+    user_text, assistant_text = _DISJOINT_SINGLETON_TEXT[index]
+    write_jsonl(path, [
+        user_text_entry(user_text, uuid=f"s{index}-u", ts=f"2026-03-01T09:{index:02d}:00Z"),
+        assistant_entry(text=assistant_text, uuid=f"s{index}-a",
+                         ts=f"2026-03-01T09:{index:02d}:30Z"),
+    ])
+    return path
+
+
+def _open_db(project):
+    from synapt.recall.core import project_index_dir
+    from synapt.recall.storage import RecallDB
+
+    return RecallDB(project_index_dir(project) / "recall.db")
+
+
+def test_stale_transcript_chunk_ids_finds_exactly_the_skipped_chunks(tmp_path):
+    from synapt.recall.clustering import stale_transcript_chunk_ids
+
+    project = _build_store_with_stale_chunks(tmp_path, turns=8)
+    db = _open_db(project)
+    try:
+        stale = stale_transcript_chunk_ids(db)
+        assert len(stale) == 8, f"all 8 transcript chunks should be stale: {stale}"
+        assert db.cluster_count(cluster_type="topic") == 0
+    finally:
+        db.close()
+
+
+def test_recluster_end_to_end_clusters_the_stale_batch(tmp_path):
+    """The one e2e: build with skip_clustering, recluster, verify by fruit."""
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = _build_store_with_stale_chunks(tmp_path, turns=8)
+    db = _open_db(project)
+    try:
+        assert len(stale_transcript_chunk_ids(db)) == 8
+
+        receipt = recluster_stale_chunks(db, batch_size=100)
+
+        assert receipt["refused"] is False
+        assert receipt["total_stale_at_start"] == 8
+        assert receipt["still_stale"] == 0, receipt
+        assert stale_transcript_chunk_ids(db) == []
+
+        # A real cluster-scoped read, not just a count: the chunks are
+        # actually reachable through cluster_chunks under a real cluster_id.
+        rows = db._conn.execute(
+            "SELECT cc.chunk_id FROM cluster_chunks cc "
+            "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+            "WHERE cl.cluster_type = 'topic'"
+        ).fetchall()
+        assert len(rows) >= 1, "reclustered chunks must be reachable via cluster_chunks"
+    finally:
+        db.close()
+
+
+def test_recluster_never_touches_already_clustered_chunks(tmp_path):
+    """The critical regression: using save_clusters (full REPLACE) instead of
+    append_clusters (additive) would wipe every pre-existing topic cluster
+    the first time --recluster ran on a real store. Build a FULLY clustered
+    store, hand-craft one stale chunk, recluster, and assert the original
+    cluster survives untouched."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+    from synapt.recall.core import project_index_dir
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _transcript(source / "s1.jsonl", turns=8, prefix="original")
+
+    # Default build: clusters everything (skip_clustering defaults False).
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        original_cluster_rows = db._conn.execute(
+            "SELECT cluster_id, chunk_count FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchall()
+        assert original_cluster_rows, "fixture must produce at least one real topic cluster"
+        original_membership_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cluster_chunks cc "
+            "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+            "WHERE cl.cluster_type = 'topic'"
+        ).fetchone()[0]
+        assert original_membership_count > 0
+        assert stale_transcript_chunk_ids(db) == [], "fixture must start fully clustered"
+    finally:
+        db.close()
+
+    # Add a second, separate transcript WITHOUT clustering it (simulates the
+    # automatic cold_no_caller_refresh path leaving new chunks stale).
+    _transcript(source / "s2.jsonl", turns=4, prefix="newstuff")
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = stale_transcript_chunk_ids(db)
+        assert len(stale_before) == 4, f"only the new transcript's chunks should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100)
+        assert receipt["still_stale"] == 0, receipt
+
+        # The ORIGINAL cluster(s) must be byte-for-byte present -- this is
+        # what would break if recluster_stale_chunks called save_clusters
+        # (full-corpus replace) instead of append_clusters (additive).
+        surviving_rows = db._conn.execute(
+            "SELECT cluster_id, chunk_count FROM clusters WHERE cluster_type = 'topic' "
+            "ORDER BY cluster_id"
+        ).fetchall()
+        surviving_ids = {r[0] for r in surviving_rows}
+        for cluster_id, chunk_count in original_cluster_rows:
+            assert cluster_id in surviving_ids, (
+                f"original cluster {cluster_id} was destroyed by recluster -- "
+                "this is the save_clusters-vs-append_clusters regression"
+            )
+        surviving_membership_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cluster_chunks cc "
+            "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+            "WHERE cl.cluster_type = 'topic'"
+        ).fetchone()[0]
+        assert surviving_membership_count >= original_membership_count, (
+            "recluster must add memberships, never reduce below the pre-existing count"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_refuses_above_ceiling_and_names_the_drain_command(tmp_path):
+    from synapt.recall.clustering import recluster_stale_chunks
+
+    project = _build_store_with_stale_chunks(tmp_path, turns=8)
+    db = _open_db(project)
+    try:
+        # Test-scale ceiling: catches a mutant that ignores the bound and
+        # would otherwise attempt the whole stale set regardless of size.
+        receipt = recluster_stale_chunks(db, batch_size=100, refuse_above=3)
+
+        assert receipt["refused"] is True
+        assert receipt["total_stale_at_start"] == 8
+        assert receipt["still_stale"] == 8, "a refusal must cluster nothing"
+        assert receipt["drain_command"], "a refusal must name an actionable next command"
+        assert "--recluster" in receipt["drain_command"]
+    finally:
+        db.close()
+
+
+def test_recluster_ceiling_boundary_exact_value_proceeds_one_over_refuses(tmp_path):
+    """Pins the '>' in the refuse_above comparison: a mutant weakening it to
+    '>=' would refuse at the exact ceiling too, and every other test in this
+    file uses stale counts far from any ceiling, so nothing else catches
+    that one-token change."""
+    from synapt.recall.clustering import recluster_stale_chunks
+
+    project = _build_store_with_stale_chunks(tmp_path, turns=8)
+    db = _open_db(project)
+    try:
+        # Exactly AT the ceiling: must proceed (docstring says "above", not
+        # "at or above"). batch_size=100 so the whole set clusters in one go.
+        receipt_at = recluster_stale_chunks(db, batch_size=100, refuse_above=8)
+        assert receipt_at["refused"] is False, (
+            "total_stale == refuse_above must proceed, not refuse"
+        )
+    finally:
+        db.close()
+
+    second = tmp_path / "second"
+    second.mkdir()
+    project2 = _build_store_with_stale_chunks(second, turns=8)
+    db2 = _open_db(project2)
+    try:
+        # ONE past the ceiling: must refuse.
+        receipt_over = recluster_stale_chunks(db2, batch_size=100, refuse_above=7)
+        assert receipt_over["refused"] is True, (
+            "total_stale == refuse_above + 1 must refuse"
+        )
+    finally:
+        db2.close()
+
+
+def test_recluster_drain_command_names_the_actual_computed_run_count(tmp_path):
+    """Pins the ceil-division arithmetic itself: a mutant hardcoding
+    runs=1 would pass every other test in this file, because every other
+    scenario here happens to need exactly one more run."""
+    from synapt.recall.clustering import recluster_stale_chunks
+
+    # 12 chunks, same prefix/topic so they cluster together as one group
+    # (already established by the turns=8 e2e above) -- batch_size=5 leaves
+    # a deterministic remainder whose drain count is NOT 1.
+    project = _build_store_with_stale_chunks(tmp_path, turns=12)
+    db = _open_db(project)
+    try:
+        receipt = recluster_stale_chunks(db, batch_size=5)
+
+        assert receipt["still_stale"] == 7, receipt
+        # ceil(7 / 5) == 2 -- if this were hardcoded to 1, this assertion
+        # is the only thing in the file that would catch it.
+        assert "at least 2 more runs" in receipt["drain_command"], receipt
+    finally:
+        db.close()
+
+
+def test_recluster_processes_oldest_batch_first_and_reports_backlog(tmp_path):
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = _build_store_with_stale_chunks(tmp_path, turns=8)
+    db = _open_db(project)
+    try:
+        stale_ids_before = stale_transcript_chunk_ids(db)
+        oldest_half = set(stale_ids_before[:4])
+
+        receipt = recluster_stale_chunks(db, batch_size=4)
+
+        assert receipt["still_stale"] == 4, receipt
+        assert receipt["drain_command"], "a nonzero backlog must name the drain command"
+
+        remaining = set(stale_transcript_chunk_ids(db))
+        assert remaining.isdisjoint(oldest_half), (
+            "the OLDEST batch must be the one clustered, not an arbitrary subset"
+        )
+    finally:
+        db.close()
+
+
+# the recall#435 op reselects the same stale chunks every run
+# when they fail to reach MIN_CLUSTER_SIZE (measured on the real store:
+# 98.9% batch overlap between two consecutive runs, only 22 of 2000 chunks
+# actually clearing). recluster_attempts + _select_recluster_batch fix this
+# by routing future batches around chunks already tried and failed.
+
+def _build_store_with_two_singletons_and_a_cluster(tmp_path):
+    """2 genuinely disjoint singletons (will never cluster with anything)
+    plus 8 chunks that all share one topic (will cluster together in one
+    shot). 10 stale chunks total.
+
+    Deliberately does NOT assume anything about which chunks land in which
+    position of stale_transcript_chunk_ids()'s own ordering -- measured
+    while writing this test that chunk insertion order is not simply
+    "files in the order passed" or "oldest entry timestamp first", so every
+    assertion below identifies chunks by content (the id string), or uses a
+    batch_size covering the WHOLE set so ordering cannot matter."""
+    from synapt.recall.cli import _archive_and_build
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _disjoint_singleton(source / "singleton0.jsonl", index=0)
+    _disjoint_singleton(source / "singleton1.jsonl", index=1)
+    _transcript(source / "cluster.jsonl", turns=8, prefix="widget")
+
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+    return project
+
+
+def _add_clusterable_chunks(project, tmp_path, *, name: str, turns: int, prefix: str):
+    """Adds a new skip_clustering=True source, simulating more chunks
+    arriving (e.g. from ongoing team activity) between recluster runs."""
+    from synapt.recall.cli import _archive_and_build
+
+    source = tmp_path / f"source_{name}"
+    source.mkdir()
+    _transcript(source / f"{name}.jsonl", turns=turns, prefix=prefix)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+
+def test_recluster_attempted_marker_routes_around_stuck_singletons(tmp_path):
+    """After a singleton fails to cluster, a LATER run must not reselect it
+    while fresh (never-tried) chunks exist -- this is the mutant's target
+    (dropping the skip reds this assertion).
+
+    _select_recluster_batch's fresh-first-then-fallback split is order-
+    independent by construction (fresh always fills the batch before any
+    fallback chunk is considered, regardless of how fresh/attempted ids are
+    interleaved in the stale list) -- that property is exactly what this
+    test relies on instead of any assumption about processing order."""
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = _build_store_with_two_singletons_and_a_cluster(tmp_path)
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 10
+        singleton_ids = {cid for cid in stale_before if "singleton" in cid}
+        assert len(singleton_ids) == 2
+
+        # Run 1 sees ALL 10 at once (batch_size=10): the 8 widget chunks
+        # clear MIN_CLUSTER_SIZE together, the 2 disjoint singletons cannot
+        # cluster with anything and must fail -- deterministic regardless
+        # of ordering, since nothing is left out of this batch.
+        receipt1 = recluster_stale_chunks(db, batch_size=10)
+        assert receipt1["chunks_clustered"] == 8, receipt1
+        attempted_after_1 = db.get_recluster_attempted_ids()
+        assert attempted_after_1 == singleton_ids, (
+            f"only the two chunks that actually FAILED should be marked, got {attempted_after_1}"
+        )
+        assert set(stale_transcript_chunk_ids(db)) == singleton_ids
+
+        # More chunks arrive (a different topic), simulating ongoing
+        # skip_clustering builds elsewhere on the store.
+        _add_clusterable_chunks(project, tmp_path, name="gadgets", turns=4, prefix="gadget")
+        stale_now = set(stale_transcript_chunk_ids(db))
+        gadget_ids = stale_now - singleton_ids
+        assert singleton_ids <= stale_now, "the two singletons must still be present and stale"
+        assert len(gadget_ids) == 4, stale_now
+
+        # Run 2, batch_size=4: exactly the 4 fresh gadgets exist. With the
+        # skip working, the 2 already-attempted singletons must NOT fill
+        # any of this batch even though 4 == batch_size leaves no numeric
+        # need to reach for them.
+        receipt2 = recluster_stale_chunks(db, batch_size=4)
+        assert receipt2["fresh_in_batch"] == 4, receipt2
+        assert receipt2["fallback_in_batch"] == 0, (
+            f"the two stuck singletons must not be reselected this run: {receipt2}"
+        )
+        assert receipt2["chunks_clustered"] == 4, receipt2
+
+        # Verify by fruit: only the singletons remain stale.
+        assert set(stale_transcript_chunk_ids(db)) == singleton_ids
+    finally:
+        db.close()
+
+
+def test_recluster_attempted_marker_falls_back_once_fresh_is_exhausted(tmp_path):
+    """Once every never-tried chunk is gone, the op must fall back to
+    already-attempted ones rather than declaring victory with a nonzero
+    backlog it refuses to touch."""
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = _build_store_with_two_singletons_and_a_cluster(tmp_path)
+    db = _open_db(project)
+    try:
+        recluster_stale_chunks(db, batch_size=10)  # widgets cluster, singletons fail
+        assert len(stale_transcript_chunk_ids(db)) == 2  # only the 2 singletons remain
+
+        # No fresh chunks exist at all now -- every stale chunk is
+        # already-attempted. The op must still process them (fall back)
+        # rather than treat "0 fresh available" as "nothing to do".
+        receipt2 = recluster_stale_chunks(db, batch_size=4)
+        assert receipt2["fresh_in_batch"] == 0, receipt2
+        assert receipt2["fallback_in_batch"] == 2, receipt2
+    finally:
+        db.close()
+
+
+# recluster_stale_chunks() clusters a batch against ITSELF only,
+# so a stale chunk that IS similar to an EXISTING cluster still gets no home
+# unless enough of its own similar chunks happen to land in the SAME batch.
+# merge_into_existing lets a stale chunk join an existing cluster (asymmetric
+# containment of the cluster's persisted top-N signature in the chunk's own
+# tokens -- cheap, no corpus reload) before self-batch clustering runs.
+
+# A dozen distinct topic words, cycled across turns so each has real
+# WITHIN-cluster document frequency (unlike a 2-3-word fixture, whose
+# signature would be too small to ever clear MIN_SHARED_SIGNATURE_TOKENS --
+# measured while writing this: the "original question/answer" fixture used
+# elsewhere in this file produces a 3-token signature, below the floor).
+_TOPIC_WORDS = [
+    "kubernetes", "deployment", "container", "cluster", "pod", "service",
+    "ingress", "namespace", "volume", "secret", "configmap", "replica",
+]
+
+
+def _topic_transcript(path: Path, *, turns: int = 8) -> Path:
+    """A transcript whose turns share most of ``_TOPIC_WORDS``, so the
+    resulting cluster's persisted signature carries a realistic number of
+    genuinely high-document-frequency tokens."""
+    entries = []
+    for i in range(turns):
+        words = " ".join(w for j, w in enumerate(_TOPIC_WORDS) if (j + i) % 3 != 0)
+        entries.append(
+            user_text_entry(f"question about {words}", uuid=f"topic-u{i}",
+                             ts=f"2026-03-01T10:{i:02d}:00Z")
+        )
+        entries.append(
+            assistant_entry(text=f"answer about {words}", uuid=f"topic-a{i}",
+                             ts=f"2026-03-01T10:{i:02d}:30Z")
+        )
+    write_jsonl(path, entries)
+    return path
+
+
+def _similar_to_cluster_singleton(path: Path) -> Path:
+    """One-turn transcript sharing every one of ``_TOPIC_WORDS`` with the
+    topic cluster built by ``_topic_transcript`` (distinct uuids so a
+    rebuild does not collide on identity)."""
+    words = " ".join(_TOPIC_WORDS)
+    write_jsonl(path, [
+        user_text_entry(f"question about {words}", uuid="sim-u",
+                         ts="2026-03-01T11:00:00Z"),
+        assistant_entry(text=f"answer about {words}", uuid="sim-a",
+                         ts="2026-03-01T11:00:30Z"),
+    ])
+    return path
+
+
+def test_recluster_merge_into_existing_joins_a_similar_stale_chunk(tmp_path):
+    """The one e2e: a stale chunk whose tokens CONTAIN an
+    EXISTING cluster's persisted signature joins that cluster under its SAME
+    cluster_id (membership added, chunk_count grows) instead of needing a
+    same-batch partner to form a new one. A dissimilar stale chunk in the
+    same batch does not merge and, alone, cannot reach MIN_CLUSTER_SIZE by
+    self-batch clustering either -- it stays stale, which is correct: this
+    lane widens WHERE a chunk can find a home, it does not lower the bar
+    for what counts as a cluster."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing = db._conn.execute(
+            "SELECT cluster_id, chunk_count FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchall()
+        assert len(existing) == 1, f"fixture must produce exactly one existing cluster: {existing}"
+        existing_cluster_id, existing_count = existing[0]
+
+        # save_clusters must have written a signature at build time -- this
+        # is the other half of the wiring, checked directly rather than
+        # only inferred from the merge succeeding below.
+        signatures = db.load_cluster_token_signatures()
+        assert existing_cluster_id in signatures, (
+            f"a topic cluster must get a persisted signature at build time: {signatures.keys()}"
+        )
+        assert len(signatures[existing_cluster_id]) >= 8, (
+            f"fixture's signature must clear MIN_SHARED_SIGNATURE_TOKENS to "
+            f"be a meaningful test: {signatures[existing_cluster_id]}"
+        )
+    finally:
+        db.close()
+
+    _similar_to_cluster_singleton(source / "similar.jsonl")
+    _disjoint_singleton(source / "dissimilar.jsonl", index=0)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = stale_transcript_chunk_ids(db)
+        assert len(stale_before) == 2, f"exactly the two new chunks should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, receipt
+        assert receipt["still_stale"] == 1, receipt  # the dissimilar chunk, alone
+
+        stale_after = stale_transcript_chunk_ids(db)
+        assert len(stale_after) == 1
+        merged_chunk_id = (set(stale_before) - set(stale_after)).pop()
+
+        row = db._conn.execute(
+            "SELECT cluster_id, chunk_count FROM clusters WHERE cluster_id = ?",
+            (existing_cluster_id,),
+        ).fetchone()
+        assert row is not None, "the existing cluster must still exist under the SAME cluster_id"
+        assert row[1] == existing_count + 1, (
+            f"chunk_count must grow by exactly the one merged chunk: {row}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids, (
+            f"the merged chunk must be a real member of the existing cluster: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_merge_into_existing_dry_run_reports_without_writing(tmp_path):
+    """dry_run=True computes the SAME numbers a real run
+    would (verified by running the identical batch for real immediately
+    after) while writing nothing -- the whole point being that the
+    mandated hand-read of merged pairs never has to touch the live store,
+    or even a full copy of it, to see what a merge run WOULD do."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    _similar_to_cluster_singleton(source / "similar.jsonl")
+    _disjoint_singleton(source / "dissimilar.jsonl", index=0)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, existing_count, existing_topic = db._conn.execute(
+            "SELECT cluster_id, chunk_count, topic FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        stale_before = set(stale_transcript_chunk_ids(db))
+        member_count_before = db._conn.execute(
+            "SELECT COUNT(*) FROM cluster_chunks WHERE cluster_id = ?",
+            (existing_cluster_id,),
+        ).fetchone()[0]
+
+        dry_receipt = recluster_stale_chunks(
+            db, batch_size=100, merge_into_existing=True, dry_run=True,
+        )
+
+        assert dry_receipt["dry_run"] is True
+        assert dry_receipt["merged_into_existing"] == 1, dry_receipt
+        assert dry_receipt["still_stale"] == 1, dry_receipt  # the dissimilar chunk
+        assert dry_receipt["merge_run_id"] is None, (
+            "a dry run stamps nothing, so it must report no run id to undo"
+        )
+        assert len(dry_receipt["merge_samples"]) == 1, dry_receipt
+        sample = dry_receipt["merge_samples"][0]
+        assert sample["cluster_id"] == existing_cluster_id
+        assert sample["cluster_topic"] == existing_topic, (
+            "a hand-read needs the topic label without a second DB query"
+        )
+
+        # Verify by fruit, not by trusting the receipt: NOTHING moved.
+        assert set(stale_transcript_chunk_ids(db)) == stale_before, (
+            "dry_run must not change which chunks are stale"
+        )
+        row = db._conn.execute(
+            "SELECT chunk_count FROM clusters WHERE cluster_id = ?",
+            (existing_cluster_id,),
+        ).fetchone()
+        assert row[0] == existing_count, "dry_run must not change chunk_count"
+        member_count_after = db._conn.execute(
+            "SELECT COUNT(*) FROM cluster_chunks WHERE cluster_id = ?",
+            (existing_cluster_id,),
+        ).fetchone()[0]
+        assert member_count_after == member_count_before, (
+            "dry_run must not add any cluster_chunks row"
+        )
+        assert db.get_recluster_attempted_ids() == set(), (
+            "dry_run must not mark an attempt either -- that changes future batch selection"
+        )
+
+        # The SAME batch, run for real right after, must land on the SAME numbers.
+        real_receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+        assert real_receipt["merged_into_existing"] == dry_receipt["merged_into_existing"]
+        assert real_receipt["chunks_clustered"] == dry_receipt["chunks_clustered"]
+        assert real_receipt["still_stale"] == dry_receipt["still_stale"]
+    finally:
+        db.close()
+
+
+def test_merge_run_id_is_stamped_and_distinct_across_separate_runs(tmp_path):
+    """A membership row a MERGE writes carries that run's
+    OWN run_id (never a shared added_at timestamp -- the fallback a
+    live-store incident needed before this column existed), so an undo can
+    be scoped to exactly one run without touching another's rows. Rows from
+    ORDINARY self-batch clustering (formed at build time, never by a merge)
+    carry no run_id at all -- there is nothing there to undo-by-run."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import backfill_cluster_signatures, recluster_stale_chunks
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()[0]
+        original_run_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT run_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert original_run_ids == {None}, (
+            f"chunks clustered at build time must carry no run_id: {original_run_ids}"
+        )
+    finally:
+        db.close()
+
+    write_jsonl(source / "similar1.jsonl", [
+        user_text_entry("question about " + " ".join(_TOPIC_WORDS), uuid="sim1-u",
+                         ts="2026-03-01T11:01:00Z"),
+        assistant_entry(text="answer about " + " ".join(_TOPIC_WORDS), uuid="sim1-a",
+                         ts="2026-03-01T11:01:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        receipt1 = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+        assert receipt1["merged_into_existing"] == 1, receipt1
+        run_id_1 = receipt1["merge_run_id"]
+        assert run_id_1, "a real merge run must report the run_id it stamped"
+
+        # The merge just deleted this cluster's signature (self-healing
+        # invalidation) -- restore it so a SECOND, later merge has
+        # something to match against, same as a real operator's next
+        # backfill would.
+        backfill_cluster_signatures(db, batch_size=500)
+    finally:
+        db.close()
+
+    write_jsonl(source / "similar2.jsonl", [
+        user_text_entry("question about " + " ".join(_TOPIC_WORDS), uuid="sim2-u",
+                         ts="2026-03-01T11:02:00Z"),
+        assistant_entry(text="answer about " + " ".join(_TOPIC_WORDS), uuid="sim2-a",
+                         ts="2026-03-01T11:02:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        receipt2 = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+        assert receipt2["merged_into_existing"] == 1, receipt2
+        run_id_2 = receipt2["merge_run_id"]
+        assert run_id_2 and run_id_2 != run_id_1, (
+            "two separate merge runs must be undo-able independently"
+        )
+
+        rows = dict(db._conn.execute(
+            "SELECT chunk_id, run_id FROM cluster_chunks "
+            "WHERE cluster_id = ? AND run_id IS NOT NULL",
+            (existing_cluster_id,),
+        ).fetchall())
+        assert len(rows) == 2, rows
+        assert set(rows.values()) == {run_id_1, run_id_2}, (
+            f"exactly the two runs' own ids must be on their own rows: {rows}"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_merge_into_existing_distinctiveness_through_the_real_call_site(tmp_path):
+    """R2 finding: both distinctiveness unit tests call ``_match_existing_cluster``
+    directly with a HAND-BUILT ``signature_df``, so neither ever exercises
+    ``recluster_stale_chunks``'s own ``signature_df = _signature_cross_cluster_df(...)``
+    call site -- a mutant replacing that line with an empty ``Counter()``
+    survives every existing test, because every real end-to-end
+    ``merge_into_existing`` fixture sits under the 20-cluster population
+    guard (one real cluster). This builds ONE real cluster (via
+    ``_topic_transcript``, its signature carrying BOTH a group of tokens
+    unique to it and a group shared with 19 additional PURELY SYNTHETIC
+    decoy signatures, injected directly via ``save_cluster_token_signature``
+    -- 20 total clusters, at the activation boundary) and runs TWO stale
+    candidates through the real ``recluster_stale_chunks(merge_into_existing=True)``
+    call: one sharing only the cluster-specific group (must merge), one
+    sharing only the group common across the 19 decoys too (must not)."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    common_group = [f"commonword{i}" for i in range(10)]
+
+    def _topic_transcript_with_common_group(path: Path, *, turns: int = 8) -> Path:
+        entries = []
+        common = " ".join(common_group)
+        for i in range(turns):
+            rare = " ".join(w for j, w in enumerate(_TOPIC_WORDS) if (j + i) % 3 != 0)
+            entries.append(
+                user_text_entry(f"question about {rare} {common}", uuid=f"ctopic-u{i}",
+                                 ts=f"2026-03-01T10:{i:02d}:00Z")
+            )
+            entries.append(
+                assistant_entry(text=f"answer about {rare} {common}", uuid=f"ctopic-a{i}",
+                                 ts=f"2026-03-01T10:{i:02d}:30Z")
+            )
+        write_jsonl(path, entries)
+        return path
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript_with_common_group(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+
+        # Verify by fruit, not assumption: both groups must actually have
+        # landed in the persisted signature before the test means anything.
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert set(_TOPIC_WORDS) & real_signature, (
+            f"fixture assumption: the rare/topic group must be in the real "
+            f"signature: {sorted(real_signature)}"
+        )
+        assert set(common_group) & real_signature, (
+            f"fixture assumption: the common group must be in the real "
+            f"signature too: {sorted(real_signature)}"
+        )
+
+        # 19 purely synthetic decoys, no backing `clusters` row needed --
+        # they exist only to make common_group's tokens document-frequency
+        # 20 (real + 19 decoys) instead of 1, and to reach the 20-cluster
+        # population floor. common_group is the ONLY overlap with the real
+        # signature; _TOPIC_WORDS appears in no decoy.
+        now = "2026-03-01T12:00:00Z"
+        for i in range(19):
+            decoy_signature = list(common_group) + [f"decoyfiller{i}_{j}" for j in range(50)]
+            db.save_cluster_token_signature(f"decoy-{i}", decoy_signature, now)
+
+        total_clusters = len(db.load_cluster_token_signatures())
+        assert total_clusters == 20, (
+            f"fixture assumption: exactly 20 total signatures (1 real + 19 "
+            f"decoys), the activation boundary: {total_clusters}"
+        )
+
+        write_jsonl(source / "rare_candidate.jsonl", [
+            user_text_entry("question about " + " ".join(_TOPIC_WORDS), uuid="rare-u",
+                             ts="2026-03-01T11:00:00Z"),
+            assistant_entry(text="answer about " + " ".join(_TOPIC_WORDS), uuid="rare-a",
+                             ts="2026-03-01T11:00:30Z"),
+        ])
+        write_jsonl(source / "common_candidate.jsonl", [
+            user_text_entry("question about " + " ".join(common_group), uuid="common-u",
+                             ts="2026-03-01T11:01:00Z"),
+            assistant_entry(text="answer about " + " ".join(common_group), uuid="common-a",
+                             ts="2026-03-01T11:01:30Z"),
+        ])
+        _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                            incremental=True, skip_clustering=True)
+    finally:
+        db.close()
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the rare candidate must merge, not the common one: {receipt}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        merged_chunk_id = (stale_before - stale_after).pop()
+        assert "rare" in merged_chunk_id, (
+            f"the RARE candidate must be the one that merged, not the common "
+            f"one: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids, (
+            f"the merged chunk must be a real member of the real cluster: {member_ids}"
+        )
+        assert not any("common" in cid for cid in member_ids), (
+            f"the common candidate must never have joined the real cluster: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_merge_into_existing_normalizes_candidate_side_symmetrically(tmp_path):
+    """Mutation witness for the CANDIDATE side of the normalization fix,
+    isolated from the signature side: the real cluster is built from
+    ordinary (undecorated) topic-word text, so its persisted signature
+    already carries the bare forms without needing any fix on that side.
+    The candidate's own text renders every shared topic word dot-suffixed
+    (period-joined, so the tokenizer keeps each word's own trailing dot as
+    part of that one token) -- if ``recluster_stale_chunks`` stopped
+    normalizing the candidate's own tokens before the match (see the
+    ``_normalize_signature_tokens`` call at the real call site), every one
+    of those tokens would arrive as "kubernetes." rather than "kubernetes"
+    and share nothing at all with the signature's bare forms."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert any(w in real_signature for w in _TOPIC_WORDS), (
+            f"fixture assumption: bare topic words must be in the real "
+            f"signature: {sorted(real_signature)}"
+        )
+        assert not any(f"{w}." in real_signature for w in _TOPIC_WORDS), (
+            f"fixture assumption: the corpus never uses a dot-suffixed "
+            f"form, so none should be persisted either: {sorted(real_signature)}"
+        )
+
+        dotted = ". ".join(_TOPIC_WORDS) + "."
+        write_jsonl(source / "dotted_candidate.jsonl", [
+            user_text_entry(f"question about {dotted}", uuid="dotted-u",
+                             ts="2026-03-01T11:00:00Z"),
+            assistant_entry(text=f"answer about {dotted}", uuid="dotted-a",
+                             ts="2026-03-01T11:00:30Z"),
+        ])
+        _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                            incremental=True, skip_clustering=True)
+    finally:
+        db.close()
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 1, f"exactly the one new candidate should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+        assert receipt["merged_into_existing"] == 1, (
+            f"the dot-suffixed candidate must still merge once its own "
+            f"tokens are normalized the same way the signature's are: {receipt}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert any("dotted" in cid for cid in member_ids), (
+            f"the dotted candidate must be a real member of the real cluster: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+def test_backfill_cluster_signatures_fills_in_clusters_that_predate_the_table(tmp_path):
+    """A cluster with no persisted signature yet (predates this table, or
+    had one invalidated by ``merge_chunks_into_cluster``) gets one from
+    ``backfill_cluster_signatures``, computed from its ACTUAL current
+    members -- bounded per batch of clusters, never the whole corpus."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import backfill_cluster_signatures
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        cluster_id = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()[0]
+        assert cluster_id in db.load_cluster_token_signatures()
+
+        # Simulate a cluster that predates the signature table.
+        db._conn.execute(
+            "DELETE FROM cluster_token_signatures WHERE cluster_id = ?", (cluster_id,)
+        )
+        db._conn.commit()
+        assert cluster_id in db.active_topic_clusters_missing_signature()
+
+        receipt = backfill_cluster_signatures(db, batch_size=500)
+        assert receipt["clusters_signed"] == 1, receipt
+        assert receipt["clusters_remaining"] == 0, receipt
+
+        signatures = db.load_cluster_token_signatures()
+        assert cluster_id in signatures
+        assert len(signatures[cluster_id]) >= 8, signatures[cluster_id]
+    finally:
+        db.close()
+
+
+def test_compute_boilerplate_stoplist_finds_tokens_pervasive_across_clusters():
+    """A token in a small minority of signatures is real topic vocabulary;
+    a token repeated across most of them (an injected boilerplate preamble,
+    on the real store) cannot be evidence of any one topic. Pure function,
+    no DB -- the incident this catches: real-store measurement found one
+    token set shared across 35 clusters via a verbatim skill preamble."""
+    from synapt.recall.clustering import compute_boilerplate_stoplist
+
+    signatures = {
+        "clust-a": {"kubernetes", "pod", "boilerplate_marker"},
+        "clust-b": {"deployment", "service", "boilerplate_marker"},
+        "clust-c": {"release", "pyproject", "boilerplate_marker"},
+        "clust-d": {"boilerplate_marker"},
+        "clust-e": {"giraffe", "savanna"},  # no boilerplate token at all
+    }
+    stoplist = compute_boilerplate_stoplist(signatures, min_fraction=0.20)
+    tokens = [tok for tok, _frac in stoplist]
+
+    assert "boilerplate_marker" in tokens, stoplist
+    # boilerplate_marker is in 4/5 = 0.80, the highest fraction -- must sort first.
+    assert tokens[0] == "boilerplate_marker", stoplist
+    # Real topic vocabulary, each appearing in exactly one signature (0.20,
+    # not strictly greater than the 0.20 floor), must NOT be flagged.
+    for real_word in ("kubernetes", "pod", "deployment", "giraffe"):
+        assert real_word not in tokens, stoplist
+
+
+def test_compute_boilerplate_stoplist_empty_signatures_is_empty_not_a_crash():
+    from synapt.recall.clustering import compute_boilerplate_stoplist
+
+    assert compute_boilerplate_stoplist({}) == []
+
+
+def _decoy_signatures(n: int, *, size: int = 64) -> dict[str, frozenset[str]]:
+    """N cluster signatures with mutually disjoint, synthetic vocabulary --
+    background population for tests that are NOT about distinctiveness
+    weighting, so every token in the signature actually under test still
+    gets document frequency 1 (present in only that one signature) and
+    therefore a UNIFORM per-token IDF. Under uniform IDF, the weighted
+    containment ratio in ``_match_existing_cluster`` reduces exactly to the
+    old ``|shared| / |signature|`` count ratio (every token contributes the
+    same weight), so these decoys let existing count/ratio-focused tests
+    keep testing exactly what they tested before the distinctiveness
+    weighting existed, just against a realistically-sized cluster
+    population instead of a population of one or two."""
+    return {
+        f"decoy-{i}": frozenset(f"decoytok{i}_{j}" for j in range(size))
+        for i in range(n)
+    }
+
+
+# Hand-read finding: recall's own context-echo user_text
+# ("(context: User previously asked: X)", core.py's synthetic restatement
+# for every sub-chunk past the first of a long assistant reply) is the
+# ENTIRE user_text for those chunks, not a span inside a larger blob -- so
+# two sequential sub-chunks of the SAME exchange share it verbatim, which
+# can supply enough shared tokens to pass MIN_SHARED_SIGNATURE_TOKENS and
+# CONTAINMENT_THRESHOLD on its own, regardless of what each chunk's
+# assistant_text (its actual content) says.
+
+def _echo_chunk(chunk_id: str, echoed_question: str, assistant_text: str):
+    from synapt.recall.core import TranscriptChunk
+
+    return TranscriptChunk(
+        id=chunk_id,
+        session_id="echo-session",
+        timestamp="2026-03-01T12:00:00Z",
+        turn_index=1,
+        user_text=f"(context: User previously asked: {echoed_question})",
+        assistant_text=assistant_text,
+    )
+
+
+def test_context_echo_alone_does_not_match_but_real_body_overlap_still_does():
+    """One witness, both directions: the SAME rich echoed prefix wraps two
+    chunks. The one whose ASSISTANT TEXT actually shares the cluster's topic
+    matches; the one whose assistant text is genuinely unrelated must not
+    match on the echo alone, even though the echo text is deliberately built
+    to supply every one of the cluster's signature tokens if it were not
+    stripped."""
+    from synapt.recall.clustering import (
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _chunk_tokens,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(_TOPIC_WORDS)
+    assert len(signature) >= MIN_SHARED_SIGNATURE_TOKENS
+
+    # The echoed question is a verbatim restatement of the topic words --
+    # exactly what an unstripped echo would leak into BOTH sub-chunks below.
+    rich_echo = "question about " + " ".join(_TOPIC_WORDS)
+
+    on_topic = _echo_chunk(
+        "echo-session:t2", rich_echo,
+        "answer about " + " ".join(_TOPIC_WORDS),
+    )
+    off_topic = _echo_chunk(
+        "echo-session:t3", rich_echo,
+        _DISJOINT_SINGLETON_TEXT[0][1],  # giraffes/savanna, shares nothing
+    )
+
+    # Decoys give the topic words a uniform, non-degenerate IDF (see
+    # _decoy_signatures) so this test still isolates the echo-stripping
+    # behavior it's named for, not the distinctiveness weighting.
+    cluster_signatures = {"clust-topic": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    on_topic_tokens = _chunk_tokens(on_topic)
+    off_topic_tokens = _chunk_tokens(off_topic)
+
+    # Sanity: if the echo were NOT stripped, the off-topic chunk's raw
+    # tokens (echo + giraffe body) would still contain every topic word and
+    # trivially clear the floor -- proving this test can actually fail.
+    unstripped_off_topic = set(rich_echo.lower().split()) | off_topic_tokens
+    assert len(signature & unstripped_off_topic) >= MIN_SHARED_SIGNATURE_TOKENS
+
+    assert _match_existing_cluster(
+        on_topic_tokens, cluster_signatures, signature_df,
+    ) == "clust-topic", (
+        "a chunk whose own assistant text shares the topic must still match"
+    )
+    assert _match_existing_cluster(
+        off_topic_tokens, cluster_signatures, signature_df,
+    ) is None, (
+        "a chunk that shares ONLY the echoed context, not its own content, "
+        "must not match -- the echo must be stripped before comparison"
+    )
+
+
+# Hand-read, second round: an editor's "User selected: <path>
+# N→<code>" line-selection echo puts bare decimal line numbers into the
+# token stream, and two entirely unrelated files that both happen to start
+# a selection around the same line number then share a run of "distinctive"
+# tokens that are really just consecutive integers. Measured: one real
+# cluster signature was 64/64 bare numbers, no topical content at all.
+
+def test_chunk_tokens_drops_bare_numbers_from_a_line_numbered_dump():
+    """The general rule, not a shape-specific strip: a content token has at
+    least one letter. Applied at _chunk_tokens, this also covers digit
+    ranges and digit-arrow-digit shapes for free, since _tokenize already
+    treats '-' and the arrow as separators -- "100-200" and "100→200"
+    both arrive as separate bare-digit tokens already, not one joined one."""
+    from synapt.recall.clustering import _chunk_tokens
+    from synapt.recall.core import TranscriptChunk
+
+    chunk = TranscriptChunk(
+        id="numbered:t1", session_id="numbered-session",
+        timestamp="2026-03-01T12:00:00Z", turn_index=1,
+        user_text="",
+        assistant_text=(
+            "User selected: src/lib.rs\n"
+            "100→fn migrate_gripspace(repos: Vec<String>) -> Result<()> {\n"
+            "101→    let parsed = parsed_repos.push(repo);\n"
+            "102-105→    Ok(())\n"
+        ),
+    )
+    tokens = _chunk_tokens(chunk)
+    bare_numbers = {t for t in tokens if t.isdigit()}
+    assert bare_numbers == set(), f"bare line-number tokens must not survive: {bare_numbers}"
+    assert "migrate_gripspace" in tokens or "parsed_repos.push" in tokens, (
+        "real code identifiers from the same dump must still come through"
+    )
+
+
+def test_signature_of_bare_numbers_is_never_a_merge_target():
+    """Direct test of the eligibility guard in _match_existing_cluster,
+    not just the _chunk_tokens fix: a signature PERSISTED BEFORE the
+    letter-bearing filter existed can still be sitting on disk as pure
+    line-number tokens until its next backfill (measured: 5.0% of a real
+    store's rebuilt signatures still carried 5+ bare-numeric tokens right
+    after a full rebuild, one was 64/64). Hand-built here, not through
+    _chunk_tokens, because _chunk_tokens' own fix already keeps a FRESH
+    chunk from ever producing such tokens again -- going through the real
+    pipeline would prove only the tokenizer fix, not this separate guard."""
+    from synapt.recall.clustering import (
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    numeric_signature = frozenset(str(n) for n in range(100, 100 + MIN_SHARED_SIGNATURE_TOKENS + 20))
+    # Shares EVERY signature token plus real, unrelated words -- old floor
+    # (>= 8 shared) and old ratio (shared/len(signature) == 1.0) both pass.
+    chunk_tokens = numeric_signature | {"giraffe", "savanna", "acacia"}
+
+    cluster_signatures = {"clust-numeric": numeric_signature}
+    assert _match_existing_cluster(
+        chunk_tokens, cluster_signatures, _signature_cross_cluster_df(cluster_signatures),
+    ) is None, "a signature with no letter-bearing tokens must never be a merge target"
+
+
+def test_containment_ratio_is_enforced_independently_of_the_absolute_floor():
+    """R2 finding: setting CONTAINMENT_THRESHOLD to 0.0 still passed every
+    existing test in this file -- the 8-token absolute floor alone blocked
+    every fixture pair on its own, so nothing exercised the RATIO gate's
+    own discriminating power once the floor is already cleared. A 64-token,
+    all-letter-bearing signature (so the letter-eligibility guard is not
+    what's under test here): sharing exactly 8 tokens (0.125 -- clears the
+    floor, below the 0.20 ratio) must not match; sharing 16 (0.25 -- clears
+    both) must."""
+    from synapt.recall.clustering import (
+        CONTAINMENT_THRESHOLD,
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(64))
+    assert len(signature) == 64
+
+    # Decoys give every "topicword*" token document frequency 1 (present
+    # only in the signature under test) and therefore a uniform per-token
+    # IDF -- under uniform IDF the weighted containment ratio reduces
+    # exactly to the plain count ratio this test is named for.
+    cluster_signatures = {"clust-x": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    shared_at_floor = sorted(signature)[:MIN_SHARED_SIGNATURE_TOKENS]
+    low_ratio_tokens = frozenset(shared_at_floor) | {"unrelated1", "unrelated2"}
+    assert len(low_ratio_tokens & signature) == MIN_SHARED_SIGNATURE_TOKENS
+    assert MIN_SHARED_SIGNATURE_TOKENS / len(signature) < CONTAINMENT_THRESHOLD, (
+        "fixture assumption: 8/64 must sit BELOW the ratio threshold"
+    )
+
+    shared_above_ratio = sorted(signature)[: MIN_SHARED_SIGNATURE_TOKENS * 2]
+    high_ratio_tokens = frozenset(shared_above_ratio) | {"unrelated1", "unrelated2"}
+    assert len(high_ratio_tokens & signature) == MIN_SHARED_SIGNATURE_TOKENS * 2
+    assert (MIN_SHARED_SIGNATURE_TOKENS * 2) / len(signature) >= CONTAINMENT_THRESHOLD, (
+        "fixture assumption: 16/64 must sit AT OR ABOVE the ratio threshold"
+    )
+
+    assert _match_existing_cluster(
+        low_ratio_tokens, cluster_signatures, signature_df,
+    ) is None, (
+        "8/64 clears the absolute floor but not the containment ratio -- must not match"
+    )
+    assert _match_existing_cluster(
+        high_ratio_tokens, cluster_signatures, signature_df,
+    ) == "clust-x", (
+        "16/64 clears both the floor and the ratio -- must match"
+    )
+
+
+# 10-sample hand read of live merge_into_existing candidates (recall#435
+# follow-on, tracked privately; candidate-side lane, unblocked once the
+# signature tiebreak fix converged): 5 of 10 shared mostly vocabulary
+# common across MANY other clusters'
+# signatures -- a recurring harness/status prompt's own words -- and clear
+# BOTH the count floor and the containment ratio on that shared vocabulary
+# alone, despite having no real topical relationship to the cluster they'd
+# join. The other 5 share genuinely rare, cluster-specific vocabulary. The
+# two tests below reproduce each shape directly against _match_existing_cluster.
+
+def test_common_cross_cluster_tokens_do_not_merge_despite_clearing_count_and_ratio():
+    """A candidate that shares an ENTIRE signature made of tokens recurring
+    across many OTHER clusters' signatures too (the shape of a harness/
+    status-update prompt's own vocabulary) must not merge, even though the
+    raw count (20 shared, well above the floor) and containment ratio
+    (1.0, well above the threshold) both clear comfortably on their own --
+    exactly the false-merge shape a count/ratio-only check cannot see."""
+    from synapt.recall.clustering import (
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    boilerplate = frozenset(f"ritualword{i}" for i in range(20))
+    assert len(boilerplate) >= MIN_SHARED_SIGNATURE_TOKENS
+    target_signature = boilerplate
+
+    # 30 OTHER clusters share the SAME boilerplate vocabulary -- a
+    # recurring prompt appearing across many unrelated real-topic clusters
+    # -- plus their own disjoint filler, so they aren't literal duplicate
+    # signatures, just clusters that also happen to carry this vocabulary.
+    other_clusters = {
+        f"clust-other-{i}": boilerplate | frozenset(f"filler{i}_{j}" for j in range(10))
+        for i in range(30)
+    }
+    cluster_signatures = {"clust-target": target_signature, **other_clusters}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    candidate_tokens = boilerplate | {"unrelated_word_a", "unrelated_word_b"}
+    assert len(candidate_tokens & target_signature) == len(boilerplate), (
+        "fixture assumption: the candidate shares the WHOLE target signature"
+    )
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) is None, (
+        "shared tokens that recur across many OTHER clusters' signatures "
+        "carry no topical signal, however many are shared or how high the "
+        "raw containment ratio reads"
+    )
+
+
+def test_genuinely_rare_shared_tokens_still_merge():
+    """The other half of the same fixture shape: a candidate sharing
+    vocabulary specific to ONLY the target cluster's signature (present in
+    no other cluster) must still merge -- the distinctiveness check
+    preserves exactly the matches it exists to keep, not just the ones it
+    exists to block."""
+    from synapt.recall.clustering import (
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    distinctive = frozenset(f"specificterm{i}" for i in range(10))
+    target_signature = distinctive
+    decoys = _decoy_signatures(30)
+    cluster_signatures = {"clust-target": target_signature, **decoys}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    candidate_tokens = distinctive | {"chunk_only_word"}
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) == "clust-target", (
+        "tokens specific to a single cluster's signature are exactly the "
+        "distinctiveness signal this check exists to preserve a match on"
+    )
+
+
+# Real-store measurement (recall#435 follow-on, tracked privately, Stromus's independent
+# cross-check + a read-only probe against the live signature table): the
+# AVERAGE-IDF floor this replaces cleared 1.0 on a real fresh-batch sample
+# where 15 of 20 shared tokens recurred across 49 OTHER clusters'
+# signatures too -- a handful of genuinely rare tokens dragged the average
+# over the line. This fixture reproduces that arithmetic directly: 5
+# tokens unique to the target cluster (idf = ln(50/1) = 3.91) plus 15
+# tokens shared with 49 other clusters (idf floors at 0.1, since their df
+# equals total_clusters exactly) average to (5*3.91 + 15*0.1) / 20 = 1.05
+# -- comfortably OVER the old 1.0 floor despite 75% of the shared
+# vocabulary being boilerplate common to the majority of the population.
+
+def test_few_rare_tokens_no_longer_drag_many_common_ones_over_the_line():
+    """The exact miscalibration the average-IDF floor shipped with:
+    averaging let a small rare-token minority pull a boilerplate-dominated
+    match over the line. The count-based floor cannot be dragged this
+    way -- a common token simply never counts as evidence, however many
+    rare ones sit beside it in the same shared set."""
+    from synapt.recall.clustering import (
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    rare = frozenset(f"raretoken{i}" for i in range(5))
+    semi_common = frozenset(f"semicommon{i}" for i in range(15))
+    target_signature = rare | semi_common
+    assert len(target_signature) == 20
+
+    # 49 OTHER clusters carry the SAME 15 semi-common tokens (their own
+    # disjoint filler besides) -- df(semi_common) = 50 (target + 49
+    # others), df(rare) = 1 (only the target). 1 target + 49 others = 50
+    # total clusters, matching the real-store arithmetic above exactly.
+    other_clusters = {
+        f"clust-other-{i}": semi_common | frozenset(f"filler{i}_{j}" for j in range(45))
+        for i in range(49)
+    }
+    cluster_signatures = {"clust-target": target_signature, **other_clusters}
+    assert len(cluster_signatures) == 50, "fixture assumption: N=50 exactly"
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+    assert signature_df["semicommon0"] == 50, (
+        f"fixture assumption: semi-common tokens sit in ALL 50 signatures: "
+        f"{signature_df['semicommon0']}"
+    )
+    assert signature_df["raretoken0"] == 1, (
+        f"fixture assumption: rare tokens sit in only the target: "
+        f"{signature_df['raretoken0']}"
+    )
+
+    candidate_tokens = target_signature | {"unrelated_a", "unrelated_b"}
+    assert len(candidate_tokens & target_signature) == 20, (
+        "fixture assumption: the candidate shares the WHOLE target signature"
+    )
+    assert len(candidate_tokens & target_signature) >= MIN_SHARED_SIGNATURE_TOKENS
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) is None, (
+        "only 5 of the 20 shared tokens individually clear the rarity "
+        "ceiling -- below the 8-token floor -- so this must not merge "
+        "even though it shares the entire signature at containment 1.0"
+    )
+
+
+# Real-store hand-read finding: a cluster
+# whose members are mostly one recurring HARNESS/CRON/RITUAL prompt (e.g. a
+# nightly close-shop checklist, or a wake-loop's "check #dev channel"
+# instruction) gets a persisted signature dominated by that prompt's own
+# generic process vocabulary (branch, merge, PRs, ready...) -- present in
+# nearly every member purely because the prompt repeats verbatim, not
+# because it is this cluster's real topic. Measured on the real store: of
+# 300 sampled signed clusters, 128 (42.7%) had at least 80% of their members
+# share byte-identical user_text. The batch-derived boilerplate stoplist in
+# ``recluster_stale_chunks`` cannot see this -- it is computed from the
+# INCOMING BATCH, and this pollution lives in the PERSISTED CLUSTER side.
+
+def _cluster_member_chunk(chunk_id: str, user_text: str, assistant_text: str):
+    from synapt.recall.core import TranscriptChunk
+
+    return TranscriptChunk(
+        id=chunk_id,
+        session_id="dup-session",
+        timestamp="2026-03-01T12:00:00Z",
+        turn_index=1,
+        user_text=user_text,
+        assistant_text=assistant_text,
+    )
+
+
+def test_strip_cluster_duplicate_user_text_drops_a_recurring_ritual_prompt():
+    """Four members, three sharing one byte-identical ritual prompt as their
+    user_text (75% >= the 50% majority floor) and one with its own distinct
+    user_text. The three ritual-prompt members lose their user_text for
+    signature purposes; the odd one out keeps its own."""
+    from synapt.recall.clustering import _strip_cluster_duplicate_user_text
+
+    ritual = "10PM CLOSE SHOP -- Stromus. Zero Agent-tool calls. DANGLING-WORK SWEEP."
+    chunks = [
+        _cluster_member_chunk("c1", ritual, "Close-shop routine starting. First the sweep."),
+        _cluster_member_chunk("c2", ritual, "Executing the routine, token-preservation mode."),
+        _cluster_member_chunk("c3", ritual, "Sweep clean, syncing the .msg now."),
+        _cluster_member_chunk("c4", "what's the status on the release?", "Everything shipped."),
+    ]
+
+    stripped = _strip_cluster_duplicate_user_text(chunks)
+    by_id = {c.id: c for c in stripped}
+
+    for cid in ("c1", "c2", "c3"):
+        assert by_id[cid].user_text == "", (
+            f"{cid}'s user_text is the 75%-majority ritual prompt and must be dropped"
+        )
+        assert by_id[cid].assistant_text == chunks[["c1", "c2", "c3"].index(cid)].assistant_text, (
+            "assistant_text (the actual varying content) must be untouched"
+        )
+    assert by_id["c4"].user_text == "what's the status on the release?", (
+        "the one member with its OWN distinct user_text must be untouched"
+    )
+
+
+def test_strip_cluster_duplicate_user_text_leaves_small_clusters_alone():
+    """Two members sharing an identical, genuinely topical user_text (not a
+    generic ritual prompt) must NOT be stripped: below
+    MIN_CLUSTER_SIZE_FOR_DUPLICATE_GUARD, two members sharing text is as
+    likely to be real coincidental topical overlap as it is to be a
+    recurring harness prompt, and this guard only has evidence once there
+    are enough members to call something a majority."""
+    from synapt.recall.clustering import (
+        MIN_CLUSTER_SIZE_FOR_DUPLICATE_GUARD,
+        _strip_cluster_duplicate_user_text,
+    )
+
+    shared = "please review PR #400"
+    chunks = [
+        _cluster_member_chunk("c1", shared, "LGTM, merged."),
+        _cluster_member_chunk("c2", shared, "One nit, otherwise fine."),
+    ]
+    assert len(chunks) < MIN_CLUSTER_SIZE_FOR_DUPLICATE_GUARD, (
+        "fixture assumption: below the minimum cluster size for this guard"
+    )
+
+    stripped = _strip_cluster_duplicate_user_text(chunks)
+    by_id = {c.id: c for c in stripped}
+    assert by_id["c1"].user_text == shared
+    assert by_id["c2"].user_text == shared
+
+
+def test_strip_cluster_duplicate_user_text_below_majority_floor_is_untouched():
+    """Three members, no single user_text shared by a majority (each
+    distinct) -- the ordinary, non-polluted case. Nothing is stripped."""
+    from synapt.recall.clustering import _strip_cluster_duplicate_user_text
+
+    chunks = [
+        _cluster_member_chunk("c1", "question one", "answer one"),
+        _cluster_member_chunk("c2", "question two", "answer two"),
+        _cluster_member_chunk("c3", "question three", "answer three"),
+    ]
+    stripped = _strip_cluster_duplicate_user_text(chunks)
+    for original, result in zip(chunks, stripped):
+        assert result.user_text == original.user_text
+
+
+def test_tokenize_cluster_members_signature_drops_ritual_prompt_vocabulary():
+    """End-to-end through the tokenizer + signature builder: with the
+    ritual-prompt user_text stripped, the resulting signature's top tokens
+    come from the varying assistant_text (the real content), not from the
+    prompt's own generic process vocabulary."""
+    from synapt.recall.clustering import _cluster_signature_tokens, _tokenize_cluster_members
+
+    ritual = ("10PM CLOSE SHOP -- Stromus rhythm. Zero Agent-tool calls. "
+              "DANGLING-WORK SWEEP verified branch merge prs ready.")
+    chunks = [
+        _cluster_member_chunk("c1", ritual, "baseline running giraffe savanna experiment"),
+        _cluster_member_chunk("c2", ritual, "giraffe savanna experiment baseline nearly done"),
+        _cluster_member_chunk("c3", ritual, "savanna baseline experiment giraffe results in"),
+        _cluster_member_chunk("c4", ritual, "giraffe experiment baseline savanna concluded"),
+    ]
+
+    token_sets = _tokenize_cluster_members(chunks)
+    signature = _cluster_signature_tokens(token_sets)
+
+    for ritual_only_word in ("sweep", "dangling", "prs", "branch", "merge"):
+        assert ritual_only_word not in signature, (
+            f"{ritual_only_word!r} comes only from the stripped ritual prompt "
+            f"and must not reach the signature: {signature}"
+        )
+    for real_word in ("giraffe", "savanna", "baseline", "experi"):  # "experiment" stems to "experi"
+        assert real_word in signature, (
+            f"{real_word!r} is the cluster's real, varying content and must "
+            f"survive into the signature: {signature}"
+        )
+
+
+# Real-store hand-read finding (recall#435 follow-on, tracked privately): a persisted
+# signature carries a word's sentence-final punctuated form and its
+# mid-sentence form as two SEPARATE tokens ("now." / "now",
+# "story." / "story"), each with its own, spuriously-lower document
+# frequency -- and separately carries agent/founder display names used
+# purely as speaker-attribution markers ("apollo.", "atla", "stromu"),
+# present in 32%-62% of ALL 479 real persisted signatures with no topical
+# content at all. _normalize_topic_token already fixed the first shape for
+# TOPIC LABELS; neither fix had ever reached SIGNATURE building.
+
+def test_cluster_signature_tokens_collapses_trailing_dot_variants():
+    """A word's sentence-final punctuated form and its mid-sentence form
+    must count as the SAME token for signature purposes, mirroring
+    _normalize_topic_token's existing topic-label behavior -- otherwise
+    the punctuated form is spuriously rare within this cluster's own
+    document-frequency count and can independently claim a signature slot
+    the bare form should have owned outright."""
+    from synapt.recall.clustering import _cluster_signature_tokens
+
+    token_sets = [
+        {"giraffe", "savanna"},
+        {"giraffe.", "savanna"},
+        {"giraffe", "acacia"},
+        {"giraffe.", "acacia"},
+        {"giraffe", "unrelated"},
+    ]
+    signature = _cluster_signature_tokens(token_sets, top_n=64)
+    assert "giraffe." not in signature, (
+        f"the punctuated form must not survive as its own token: {signature}"
+    )
+    assert "giraffe" in signature
+
+
+def test_cluster_signature_tokens_drops_roster_display_names():
+    """An agent/founder display name used purely as a speaker-attribution
+    marker (measured on the real store: dev/stromu/fathom/atla/apollo sit
+    at 32%-62% cross-cluster document frequency, none of it topical) must
+    never reach a persisted signature, however often it recurs within this
+    one cluster's own members -- both its stemmed mid-sentence form and
+    its unstemmed, dot-suffixed sentence-final form."""
+    from synapt.recall.clustering import _cluster_signature_tokens
+
+    token_sets = [
+        {"atla", "giraffe"},
+        {"stromu", "savanna"},
+        {"apollo.", "acacia"},
+        {"fathom", "giraffe"},
+        {"dev", "savanna"},
+    ]
+    signature = _cluster_signature_tokens(token_sets, top_n=64)
+    for roster_token in ("atla", "stromu", "apollo", "apollo.", "fathom", "dev"):
+        assert roster_token not in signature, (
+            f"{roster_token!r} must never reach a persisted signature: {signature}"
+        )
+    assert {"giraffe", "savanna", "acacia"} <= set(signature)
+
+
+# Second real-store finding from the same morning follow-on: a cluster's
+# persisted signature computed BEFORE a tokenization fix landed (the
+# context-echo strip, the ritual-prompt strip above) keeps carrying that
+# pollution forever -- ``backfill_cluster_signatures`` only fills in
+# ABSENT signatures, so an already-signed-but-polluted cluster is never
+# revisited. ``redrive_cluster_signatures`` recomputes EVERY currently
+# signed cluster from its actual current members with the CURRENT
+# tokenizer, and only writes where the recomputed value actually differs
+# -- itself a WRITE to the store, so it gets the same dry-run-with-a-count
+# discipline as the merge lane.
+
+def test_redrive_cluster_signatures_dry_run_reports_without_writing(tmp_path):
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import redrive_cluster_signatures
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        cluster_id = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()[0]
+
+        # Simulate a signature computed by a since-fixed, buggy mechanism:
+        # inject a marker token that a fresh recomputation could not produce.
+        polluted = ["polluted_marker_token", "another_stale_token"]
+        db.save_cluster_token_signature(cluster_id, polluted, "2026-01-01T00:00:00Z")
+        assert db.load_cluster_token_signatures()[cluster_id] == set(polluted)
+
+        receipt = redrive_cluster_signatures(db, dry_run=True)
+        assert receipt["dry_run"] is True
+        assert receipt["clusters_checked"] >= 1, receipt
+        assert receipt["clusters_changed"] >= 1, receipt
+        assert cluster_id in receipt["changed_cluster_ids"], receipt
+
+        # No write happened: the polluted signature is still exactly what
+        # was stored, byte for byte -- verify by fruit, not by the flag.
+        assert db.load_cluster_token_signatures()[cluster_id] == set(polluted), (
+            "dry_run must not have written anything"
+        )
+    finally:
+        db.close()
+
+
+def test_redrive_cluster_signatures_writes_the_recomputed_signature(tmp_path):
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import redrive_cluster_signatures
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        cluster_id = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()[0]
+        polluted = ["polluted_marker_token"]
+        db.save_cluster_token_signature(cluster_id, polluted, "2026-01-01T00:00:00Z")
+
+        receipt = redrive_cluster_signatures(db, dry_run=False)
+        assert receipt["dry_run"] is False
+        assert cluster_id in receipt["changed_cluster_ids"], receipt
+
+        rewritten = db.load_cluster_token_signatures()[cluster_id]
+        assert "polluted_marker_token" not in rewritten, (
+            "the stale marker must be gone after a real (non-dry) redrive"
+        )
+        assert len(rewritten) >= 8, rewritten
+    finally:
+        db.close()
+
+
+def test_redrive_cluster_signatures_leaves_unchanged_signatures_alone(tmp_path):
+    """A cluster whose stored signature already matches a fresh
+    recomputation is reported as unchanged, not as changed -- the receipt
+    must distinguish real drift from a no-op re-derivation."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import redrive_cluster_signatures
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        cluster_id = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()[0]
+        # Freshly built by the current tokenizer already -- redrive should
+        # find nothing to change.
+        before = db.load_cluster_token_signatures()[cluster_id]
+
+        receipt = redrive_cluster_signatures(db, dry_run=False)
+        assert cluster_id not in receipt["changed_cluster_ids"], receipt
+        assert receipt["clusters_unchanged"] >= 1, receipt
+
+        after = db.load_cluster_token_signatures()[cluster_id]
+        assert after == before
+    finally:
+        db.close()
+
+
+def test_redrive_cluster_signatures_refuses_above_ceiling(tmp_path):
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import redrive_cluster_signatures
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        receipt = redrive_cluster_signatures(db, refuse_above=0, dry_run=True)
+        assert receipt["refused"] is True, receipt
+        assert receipt["clusters_checked"] == 0, receipt
+    finally:
+        db.close()
+
+
+def test_recluster_merge_help_text_describes_the_shipped_mechanism():
+    """Sentinel's carried finding (m_8a65239d): --recluster-merge's help
+    text described the abandoned Jaccard-against-search_text mechanism
+    (measured and rejected -- see recluster_stale_chunks' own docstring),
+    not the containment-of-a-persisted-signature mechanism that actually
+    shipped. Source-string regression, not a behavior test: this is
+    documentation drift, not logic."""
+    cli_source = (Path(__file__).parents[2] / "src" / "synapt" / "recall" / "cli.py").read_text()
+    assert "Jaccard-matched against cluster search_text" not in cli_source, (
+        "the abandoned mechanism's wording must not still be in the help text"
+    )
+    assert "containment of the cluster's persisted top-64" in cli_source, (
+        "the help text must describe the actual shipped matching mechanism"
+    )
+
+
+# Real-store finding: a live redrive's second dry_run pass, in a fresh
+# process, reported hundreds of clusters as "changed" with nothing between
+# the two passes but a process restart. Root cause: _cluster_signature_tokens
+# used Counter.most_common(top_n), whose tie-break at the cutoff falls back
+# to Counter's insertion order -- which comes from iterating the input
+# set[str] objects, and Python randomizes string-hash-derived set iteration
+# order per process. A pytest run (one process, one hash seed) can never see
+# this: the same input always produces the same output WITHIN a process.
+# The only witness that can see it is two SEPARATE processes with two
+# DIFFERENT hash seeds computing the same signature and comparing.
+
+_SIGNATURE_TIEBREAK_SUBPROCESS_SCRIPT = """
+import json
+from synapt.recall.clustering import _cluster_signature_tokens
+
+# Reproduces the real shape measured on the store: 34 tokens with count=2
+# (unambiguous top ranks), 74 tokens with count=1 all tied at the count
+# sitting exactly at the top_n=64 cutoff -- 30 of those 74 must be chosen
+# arbitrarily unless the tie-break is deterministic.
+hi = [f"hi{i}" for i in range(34)]
+lo = [f"lo{i}" for i in range(74)]
+set_a = set(hi) | set(lo[:37])
+set_b = set(hi) | set(lo[37:])
+signature = _cluster_signature_tokens([set_a, set_b], top_n=64)
+print(json.dumps(signature))
+"""
+
+
+def _run_signature_tiebreak_subprocess(hashseed: str) -> list[str]:
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = hashseed
+    result = subprocess.run(
+        [sys.executable, "-c", _SIGNATURE_TIEBREAK_SUBPROCESS_SCRIPT],
+        env=env, capture_output=True, text=True, check=True, timeout=30,
+    )
+    return json.loads(result.stdout)
+
+
+def test_cluster_signature_tiebreak_is_stable_across_process_hash_seeds():
+    """The witness that a same-process mutation test cannot provide: compute
+    the SAME tied-boundary signature in two separate subprocesses with two
+    DIFFERENT PYTHONHASHSEED values and require byte-identical output. This
+    is the actual property _cluster_signature_tokens must have (a pure
+    function of the token multiset, not of that process's hash seed) --
+    reverting the (-count, token) sort back to Counter.most_common(top_n)
+    makes this test fail (verified by hand: seed 0 and seed 1 disagree on
+    which lo-tokens fill the last several slots)."""
+    sig_seed0 = _run_signature_tiebreak_subprocess("0")
+    sig_seed1 = _run_signature_tiebreak_subprocess("1")
+
+    assert sig_seed0 == sig_seed1, (
+        "the signature must not depend on the process's hash seed -- "
+        f"seed 0 gave {sig_seed0}, seed 1 gave {sig_seed1}"
+    )
+    assert len(sig_seed0) == 64, sig_seed0
+    # The 34 unambiguous high-count tokens must always be present.
+    assert all(f"hi{i}" in sig_seed0 for i in range(34)), sig_seed0
+
+
+# A follow-on to the recluster candidate-matching false-merge work
+# (2026-09-06): two more false-merge classes found
+# in a live batch-15 stratified sample. (a) A pasted macOS screenshot's
+# "[Image: source: /var/folders/.../TemporaryItems/.../Screenshot ...png]"
+# line is filesystem-path METADATA about how the image arrived, not content
+# -- identical in SHAPE across any two unrelated screenshots on the same
+# host, so two chunks whose only real connection is "both pasted a
+# screenshot" cleared containment on the temp-folder hash and path
+# fragments. (b) A candidate compared ONE AT A TIME (a stratified sample
+# probe, not a full batch) never runs the per-batch 20%-of-batch
+# compute_boilerplate_stoplist check at all -- there is no batch population
+# to compute a fraction over -- so recurring team/process vocabulary
+# ("session", "task", "entry") that is common across the STORE but never
+# clears a single-candidate's own non-existent batch fraction still counted
+# toward containment and the distinctiveness floor.
+
+def test_strip_image_paste_boilerplate_removes_the_bracketed_source_line():
+    from synapt.recall.clustering import _strip_image_paste_boilerplate
+
+    text = (
+        "Here's the bug [Image: source: /var/folders/44/"
+        "b5xdrsh50mlfkm0t_rbb8d5w0000gn/T/TemporaryItems/"
+        "NSIRD_screencaptureui_ABC123/Screenshot 2026-09-06 at 8.14.02 AM.png] "
+        "the who-output is wrong"
+    )
+    stripped = _strip_image_paste_boilerplate(text)
+    assert "[Image" not in stripped, stripped
+    assert "b5xdrsh50mlfkm0t_rbb8d5w0000gn" not in stripped, stripped
+    assert "the who-output is wrong" in stripped, (
+        "real content on the same line, outside the bracket, must survive"
+    )
+
+
+def test_is_path_fragment_token_catches_hex_runs_and_filenames_not_real_words():
+    from synapt.recall.clustering import _is_path_fragment_token
+
+    assert _is_path_fragment_token("b5xdrsh50mlfkm0t_rbb8d5w0000gn"), (
+        "the macOS temp-folder hash shape (long, mixed letters+digits) "
+        "must be caught as the backstop for whatever the bracket strip "
+        "does not have an exact shape for"
+    )
+    assert _is_path_fragment_token("deadbeefcafe1234"), "a long hex run is a hash, not a word"
+    assert _is_path_fragment_token("screenshot.png"), "an image filename is path metadata"
+    for real_word in ("session", "screenshot", "entry", "foundation", "gate"):
+        assert not _is_path_fragment_token(real_word), (
+            f"a real English/process word must never be flagged as a path "
+            f"fragment: {real_word!r}"
+        )
+
+
+def test_chunk_tokens_strips_image_paste_boilerplate_and_path_fragments():
+    """Both structural strips run on BOTH sides of a comparison because
+    they live inside _chunk_tokens itself, which backfill/redrive's
+    signature-building path and recluster's candidate-matching path both
+    call -- this test only needs to prove _chunk_tokens does it once."""
+    from synapt.recall.clustering import _chunk_tokens
+    from synapt.recall.core import TranscriptChunk
+
+    chunk = TranscriptChunk(
+        id="imgpaste:t1", session_id="imgpaste-session",
+        timestamp="2026-09-06T12:00:00Z", turn_index=1,
+        user_text=(
+            "(here's what I see) [Image: source: /var/folders/44/"
+            "b5xdrsh50mlfkm0t_rbb8d5w0000gn/T/TemporaryItems/"
+            "NSIRD_screencaptureui_XYZ789/Screenshot 2026-09-06 at 3.10.00 PM.png]"
+        ),
+        assistant_text="the who output looks completely wrong in this screenshot",
+    )
+    tokens = _chunk_tokens(chunk)
+    assert "b5xdrsh50mlfkm0t_rbb8d5w0000gn" not in tokens, tokens
+    assert not any(t.endswith("png") for t in tokens), tokens
+    # "temporaryitem" (_tokenize stems the plural "TemporaryItems" to this
+    # singular form -- verified directly, not assumed) is the mutation
+    # witness for the BRACKET-LEVEL strip specifically, not the per-token
+    # backstop: it is short (13 chars, under the backstop's 20-char floor),
+    # pure-alpha (no digit, so _is_path_fragment_token's mixed-alnum rule
+    # never fires on it), and not an image filename -- if the bracket
+    # strip were disabled, nothing else in this function would remove it,
+    # so its absence is proof the bracket itself was stripped, not just
+    # its shape-suspicious contents.
+    assert "temporaryitem" not in tokens, tokens
+    # "screenshot" and "wrong" are ordinary content words, not curated
+    # stopwords (unlike "output"/"this" in this coding-transcript corpus's
+    # own _STOP_TOKENS) -- real, non-path-shaped content must survive
+    # alongside the metadata strip.
+    assert "screenshot" in tokens, tokens
+    assert "wrong" in tokens, tokens
+
+
+def test_chunk_tokens_drops_a_bare_path_fragment_token_outside_any_image_bracket():
+    """Mutation witness for the BACKSTOP CLAUSE specifically (`and not
+    _is_path_fragment_token(t)` at the _chunk_tokens filter site), as
+    distinct from the bracket-level strip covered above. Stromus's R2
+    (2026-09-06): removing that clause left all existing tests green,
+    because every path-shaped token in this file's other fixtures sits
+    INSIDE a "[Image: source: ...]" span, so _strip_image_paste_boilerplate
+    already eats it before the backstop ever needs to fire -- the backstop
+    itself was never independently exercised. This chunk has no bracket at
+    all: a bare 28-char hex run appears in plain prose, the shape
+    _is_path_fragment_token's own direct unit test already proves it
+    catches, but never before proven to be wired into _chunk_tokens for
+    text the bracket regex has nothing to match."""
+    from synapt.recall.clustering import _chunk_tokens
+    from synapt.recall.core import TranscriptChunk
+
+    chunk = TranscriptChunk(
+        id="barehexoutsidebracket:t1", session_id="barehexoutsidebracket-session",
+        timestamp="2026-09-06T12:00:00Z", turn_index=1,
+        user_text="",
+        assistant_text=(
+            "the crash trace lives at deadbeefcafe0123456789abcdef on disk, "
+            "unrelated to any screenshot paste"
+        ),
+    )
+    tokens = _chunk_tokens(chunk)
+    assert "[Image" not in chunk.assistant_text, (
+        "fixture assumption: no bracket at all, so only the backstop clause "
+        "can be what removes the hex run"
+    )
+    assert "deadbeefcafe0123456789abcdef" not in tokens, tokens
+    # Real content words on the same line must still survive -- the
+    # backstop drops the SHAPE, not the sentence.
+    assert "crash" in tokens, tokens
+    assert "trace" in tokens, tokens
+    assert "disk" in tokens, tokens
+
+
+def test_compute_generic_token_stoplist_finds_tokens_pervasive_across_all_clusters():
+    """Same contract as compute_boilerplate_stoplist, over a DIFFERENT
+    population: signature_df / total_clusters (how many DISTINCT cluster
+    signatures carry a token, out of every cluster in the store) rather
+    than a per-batch document frequency. 12 of 20 clusters carry
+    'pervasive' (60%, clears 20%); 3 of 20 carry 'occasional' (15%, does
+    not)."""
+    from collections import Counter
+
+    from synapt.recall.clustering import compute_generic_token_stoplist
+
+    signature_df = Counter({"pervasive": 12, "occasional": 3, "unique": 1})
+    stoplist = compute_generic_token_stoplist(signature_df, total_clusters=20, min_fraction=0.20)
+
+    tokens = {tok for tok, _frac in stoplist}
+    assert tokens == {"pervasive"}, f"only the token above 20% of 20 clusters should appear: {stoplist}"
+    frac = dict(stoplist)["pervasive"]
+    assert abs(frac - 0.60) < 1e-9, frac
+
+
+def test_compute_generic_token_stoplist_empty_is_empty_not_a_crash():
+    from collections import Counter
+
+    from synapt.recall.clustering import compute_generic_token_stoplist
+
+    assert compute_generic_token_stoplist(Counter(), total_clusters=0) == []
+
+
+def test_generic_store_wide_vocabulary_stripped_from_both_sides_blocks_a_false_merge():
+    """Direct reproduction of row 8/row 9's shape: a candidate that shares
+    ONLY store-wide-common process vocabulary with a target signature must
+    not merge on that vocabulary alone, and stripping it must come off
+    BOTH the candidate tokens and the signature (see recluster_stale_chunks'
+    merge_into_existing block) -- stripping only one side leaves the other
+    side's copy of the token still inflating the containment ratio's
+    denominator or numerator."""
+    from synapt.recall.clustering import (
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+        compute_generic_token_stoplist,
+    )
+
+    from synapt.recall.clustering import MIN_CLUSTERS_FOR_DISTINCTIVENESS
+
+    generic = frozenset(f"processword{i}" for i in range(10))
+    assert len(generic) >= MIN_SHARED_SIGNATURE_TOKENS
+    target_signature = generic
+
+    # 'generic' recurs in the target plus 9 other clusters (10 total, 100%
+    # pervasive) -- deliberately BELOW MIN_CLUSTERS_FOR_DISTINCTIVENESS (20),
+    # where the EXISTING per-token rarity check is skipped outright (see
+    # _match_existing_cluster's docstring: too few clusters to compare
+    # against makes every token trivially look "common"). That isolates
+    # this test to what the NEW store-wide stoplist adds: at this
+    # population size the old distinctiveness floor cannot block a
+    # pervasive-token-only match at all, so if this fixture's "before"
+    # assertion below did NOT hold, the mechanism under test would be
+    # proven to add nothing a bigger population's existing check doesn't
+    # already cover. Each other cluster also carries disjoint filler so
+    # the fixture is realistic, not literal duplicate signatures.
+    other_clusters = {
+        f"clust-other-{i}": generic | frozenset(f"filler{i}_{j}" for j in range(10))
+        for i in range(9)
+    }
+    cluster_signatures_raw = {"clust-target": target_signature, **other_clusters}
+    assert len(cluster_signatures_raw) < MIN_CLUSTERS_FOR_DISTINCTIVENESS, (
+        "fixture assumption: below the activation floor, so the existing "
+        "distinctiveness check is skipped and cannot be what blocks the match"
+    )
+
+    raw_signature_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    stoplist = compute_generic_token_stoplist(
+        raw_signature_df, len(cluster_signatures_raw), min_fraction=0.20,
+    )
+    generic_tokens = frozenset(tok for tok, _frac in stoplist)
+    assert generic_tokens == generic, f"the fixture's own generic vocabulary must be the whole stoplist: {stoplist}"
+
+    candidate_tokens = generic | {"unrelated_a", "unrelated_b"}
+
+    # WITHOUT stripping: raw containment on the whole shared signature.
+    unfiltered_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures_raw, unfiltered_df,
+    ) == "clust-target", (
+        "fixture assumption: without the strip this is exactly the "
+        "false-merge shape -- shared count and containment both clear on "
+        "generic vocabulary alone"
+    )
+
+    # WITH stripping applied to BOTH sides (the real call site's shape).
+    stripped_candidate = candidate_tokens - generic_tokens
+    stripped_signatures = {
+        cid: sig - generic_tokens for cid, sig in cluster_signatures_raw.items()
+    }
+    stripped_df = _signature_cross_cluster_df(stripped_signatures)
+    assert _match_existing_cluster(
+        stripped_candidate, stripped_signatures, stripped_df,
+    ) is None, (
+        "once store-wide-generic vocabulary is stripped from both the "
+        "candidate and every signature, nothing distinctive remains to "
+        "merge on"
+    )
+
+
+def test_signature_side_generic_strip_prevents_dilution_not_false_merges():
+    """Mutation witness for the SIGNATURE-side half of the generic strip
+    specifically (the candidate-side strip alone does not exercise this):
+    once a generic token is gone from the CANDIDATE's own tokens (always
+    true here -- both branches below apply the candidate-side strip
+    identically), it can never land in the shared intersection regardless
+    of what the signature carries, so stripping the signature too changes
+    NOTHING about which tokens are shared -- only the containment ratio's
+    DENOMINATOR, which can only raise or hold the ratio, never lower it.
+    So this property is the OPPOSITE of a false-merge guard: a signature
+    padded with generic bulk (44 tokens: 10 generic + 8 real topic words
+    the candidate genuinely shares + 26 other real topic words it does not)
+    dilutes a genuine 8-shared-token match to 8/44=0.182, BELOW
+    CONTAINMENT_THRESHOLD, even though 8 clears MIN_SHARED_SIGNATURE_TOKENS
+    outright -- stripping the generic bulk from the signature too raises it
+    to 8/34=0.235, above threshold. Without this half, a real match can be
+    wrongly missed; it does not, on its own, block anything the
+    candidate-side strip did not already block."""
+    from synapt.recall.clustering import (
+        CONTAINMENT_THRESHOLD,
+        MIN_SHARED_SIGNATURE_TOKENS,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+        compute_generic_token_stoplist,
+    )
+
+    generic = frozenset(f"genericword{i}" for i in range(10))
+    rare_shared = frozenset(f"realtopicword{i}" for i in range(8))
+    assert len(rare_shared) == MIN_SHARED_SIGNATURE_TOKENS, (
+        "fixture assumption: exactly at the absolute shared-count floor, "
+        "so only the RATIO determines the outcome"
+    )
+    rare_unshared = frozenset(f"othertopicword{i}" for i in range(26))
+    target_signature = generic | rare_shared | rare_unshared
+    assert len(target_signature) == 44
+
+    generic_decoys = {
+        f"clust-genericdecoy-{i}": generic | frozenset(f"gfiller{i}_{j}" for j in range(10))
+        for i in range(10)
+    }
+    plain_decoys = {
+        f"clust-plaindecoy-{i}": frozenset(f"pfiller{i}_{j}" for j in range(20))
+        for i in range(39)
+    }
+    cluster_signatures_raw = {"clust-target": target_signature, **generic_decoys, **plain_decoys}
+    assert len(cluster_signatures_raw) == 50
+
+    raw_signature_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    stoplist = compute_generic_token_stoplist(raw_signature_df, 50, min_fraction=0.20)
+    generic_tokens = frozenset(tok for tok, _frac in stoplist)
+    assert generic_tokens == generic, (
+        f"fixture assumption: 'generic' sits at 11/50=22%, above the 20% "
+        f"floor, and nothing else does: {stoplist}"
+    )
+
+    candidate_tokens = (generic | rare_shared | {"unrelated_a"}) - generic_tokens
+    assert candidate_tokens == rare_shared | {"unrelated_a"}, (
+        "candidate-side strip applied identically in both branches below"
+    )
+
+    unstripped_shared = candidate_tokens & target_signature
+    assert len(unstripped_shared) == MIN_SHARED_SIGNATURE_TOKENS, (
+        f"fixture assumption: shared count clears the absolute floor either way: {unstripped_shared}"
+    )
+    unstripped_containment = len(unstripped_shared) / len(target_signature)
+    assert unstripped_containment < CONTAINMENT_THRESHOLD, (
+        f"fixture assumption: 8/44={unstripped_containment:.3f} must sit BELOW threshold"
+    )
+
+    unstripped_df = _signature_cross_cluster_df(cluster_signatures_raw)
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures_raw, unstripped_df,
+    ) is None, (
+        "WITHOUT the signature-side strip, generic bulk still padding the "
+        "signature's denominator must dilute this genuine match below "
+        "threshold -- the real merge is missed, not a false merge blocked"
+    )
+
+    stripped_signatures = {
+        cid: sig - generic_tokens for cid, sig in cluster_signatures_raw.items()
+    }
+    stripped_target = stripped_signatures["clust-target"]
+    assert stripped_target == rare_shared | rare_unshared and len(stripped_target) == 34
+    stripped_containment = len(candidate_tokens & stripped_target) / len(stripped_target)
+    assert stripped_containment >= CONTAINMENT_THRESHOLD, (
+        f"fixture assumption: 8/34={stripped_containment:.3f} must sit AT OR ABOVE threshold"
+    )
+
+    stripped_df = _signature_cross_cluster_df(stripped_signatures)
+    assert _match_existing_cluster(
+        candidate_tokens, stripped_signatures, stripped_df,
+    ) == "clust-target", (
+        "WITH the signature-side strip, the same 8 genuinely-shared topic "
+        "words are no longer diluted by generic bulk in the denominator, "
+        "and the real match is recovered"
+    )
+
+
+def test_generic_stoplist_leaves_genuinely_distinctive_topic_vocabulary_alone():
+    """Control for the mechanism above: a candidate sharing a cluster's
+    genuinely topic-specific vocabulary (present in no other cluster, so
+    nowhere near the 20% store-wide floor) must still merge -- the
+    store-wide stoplist only removes tokens that actually clear the
+    pervasiveness bar, not everything a candidate happens to share."""
+    from synapt.recall.clustering import (
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+        compute_generic_token_stoplist,
+    )
+
+    distinctive = frozenset(_TOPIC_WORDS)
+    target_signature = distinctive
+    decoys = _decoy_signatures(30)
+    cluster_signatures = {"clust-target": target_signature, **decoys}
+
+    raw_signature_df = _signature_cross_cluster_df(cluster_signatures)
+    stoplist = compute_generic_token_stoplist(
+        raw_signature_df, len(cluster_signatures), min_fraction=0.20,
+    )
+    assert not (set(distinctive) & {tok for tok, _f in stoplist}), (
+        f"topic-specific vocabulary present in only ONE of 31 signatures "
+        f"(3%) must never clear a 20% store-wide floor: {stoplist}"
+    )
+
+    candidate_tokens = distinctive | {"chunk_only_word"}
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, raw_signature_df,
+    ) == "clust-target", "a genuine topical match must survive the store-wide strip untouched"
+
+
+def test_recluster_merge_into_existing_strips_store_wide_generic_vocabulary_through_the_real_call_site(tmp_path):
+    """The call-site wiring test: recluster_stale_chunks(merge_into_existing=True)
+    must compute the generic stoplist from the REAL loaded cluster
+    signatures and apply it to both the candidate and its in-memory copy of
+    every signature -- not just have the two halves work correctly in
+    isolation (the direct unit tests above). Population held at exactly
+    MIN_CLUSTERS_FOR_DISTINCTIVENESS (20, "the activation boundary," same
+    convention as test_recluster_merge_into_existing_distinctiveness_through_the_real_call_site)
+    deliberately: the call site gates the WHOLE store-wide stoplist
+    computation behind that same floor (a fixture with too few real
+    clusters made every token of a genuine signature read as "100%
+    pervasive" by construction and wiped real matches -- see the comment
+    at the call site), so a population below it would prove nothing about
+    this mechanism specifically."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    generic_group = [f"genericprocessword{i}" for i in range(10)]
+
+    def _topic_transcript_with_generic_group(path: Path, *, turns: int = 8) -> Path:
+        entries = []
+        generic = " ".join(generic_group)
+        for i in range(turns):
+            rare = " ".join(w for j, w in enumerate(_TOPIC_WORDS) if (j + i) % 3 != 0)
+            entries.append(
+                user_text_entry(f"question about {rare} {generic}", uuid=f"gtopic-u{i}",
+                                 ts=f"2026-03-01T10:{i:02d}:00Z")
+            )
+            entries.append(
+                assistant_entry(text=f"answer about {rare} {generic}", uuid=f"gtopic-a{i}",
+                                 ts=f"2026-03-01T10:{i:02d}:30Z")
+            )
+        write_jsonl(path, entries)
+        return path
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript_with_generic_group(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert set(_TOPIC_WORDS) & real_signature, (
+            f"fixture assumption: the rare/topic group must be in the real signature: {sorted(real_signature)}"
+        )
+        assert set(generic_group) & real_signature, (
+            f"fixture assumption: the generic group must be in the real signature too: {sorted(real_signature)}"
+        )
+
+        # 19 purely synthetic decoys ALSO carry generic_group -- 20 total
+        # signatures (1 real + 19 decoys, the population-gate boundary)
+        # all carrying it, i.e. 100%, comfortably above the 20% fraction
+        # floor. _TOPIC_WORDS appears in no decoy.
+        now = "2026-03-01T12:00:00Z"
+        for i in range(19):
+            decoy_signature = list(generic_group) + [f"decoyfiller{i}_{j}" for j in range(50)]
+            db.save_cluster_token_signature(f"decoy-{i}", decoy_signature, now)
+
+        total_clusters = len(db.load_cluster_token_signatures())
+        assert total_clusters == 20, f"fixture assumption: 1 real + 19 decoys, at the population-gate boundary: {total_clusters}"
+
+        write_jsonl(source / "rare_candidate.jsonl", [
+            user_text_entry("question about " + " ".join(_TOPIC_WORDS), uuid="grare-u",
+                             ts="2026-03-01T11:00:00Z"),
+            assistant_entry(text="answer about " + " ".join(_TOPIC_WORDS), uuid="grare-a",
+                             ts="2026-03-01T11:00:30Z"),
+        ])
+        write_jsonl(source / "generic_candidate.jsonl", [
+            user_text_entry("question about " + " ".join(generic_group), uuid="ggeneric-u",
+                             ts="2026-03-01T11:01:00Z"),
+            assistant_entry(text="answer about " + " ".join(generic_group), uuid="ggeneric-a",
+                             ts="2026-03-01T11:01:30Z"),
+        ])
+        _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                            incremental=True, skip_clustering=True)
+    finally:
+        db.close()
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the rare (topic-word) candidate must merge, not the "
+            f"generic-vocabulary-only one: {receipt}"
+        )
+        dropped = {tok for tok, _frac in receipt["batch_boilerplate_dropped"]}
+        assert set(generic_group) <= dropped, (
+            f"the generic group must appear in the run's own reported "
+            f"stoplist, not just work by coincidence: {receipt['batch_boilerplate_dropped']}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        merged_chunk_id = (stale_before - stale_after).pop()
+        # chunk_id derives from the source FILENAME ("rare_candidate.jsonl"
+        # / "generic_candidate.jsonl"), not the uuid field set above -- see
+        # the sibling distinctiveness call-site test's identical convention.
+        assert "rare" in merged_chunk_id, (
+            f"the RARE (topic-word) candidate must be the one that merged: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids, f"the merged chunk must be a real member: {member_ids}"
+        assert not any("generic" in cid for cid in member_ids), (
+            f"the generic-vocabulary-only candidate must never have joined: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+# MIN_CANDIDATE_CONTAINMENT: CONTAINMENT_THRESHOLD alone is signature-side only, so
+# a SMALL signature reads high containment on a coincidental handful of
+# shared tokens regardless of how large or unrelated the candidate is.
+# Hand-read finding (batch-25, five real false merges, tracked privately):
+# candidates 173-558 tokens, signatures 12-31 tokens, 8-11 shared -- every
+# one cleared CONTAINMENT_THRESHOLD and MIN_SHARED_SIGNATURE_TOKENS, none
+# shared more than 6.4% of their OWN tokens. The fixtures below reproduce
+# that shape directly rather than replaying the live hand-read sample
+# (which lives in the private tracker, not this public repo).
+
+def test_thin_signature_large_candidate_is_refused_by_the_candidate_floor():
+    """Direct reproduction of the row-8 false-merge shape: a 15-token
+    signature, a candidate carrying 10 of those 15 tokens plus 150 tokens
+    of unrelated filler. Signature-side containment is 10/15 = 0.667 (clears
+    CONTAINMENT_THRESHOLD easily); candidate-side containment is
+    10/160 = 0.0625 (well below MIN_CANDIDATE_CONTAINMENT's 0.153). Must
+    not match."""
+    from synapt.recall.clustering import (
+        MIN_CANDIDATE_CONTAINMENT,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(15))
+    shared_words = frozenset(sorted(signature)[:10])
+    filler = frozenset(f"filler{i}" for i in range(150))
+    candidate_tokens = shared_words | filler
+    assert len(candidate_tokens) == 160, "fixture assumption: 10 shared + 150 filler"
+
+    signature_containment = len(shared_words) / len(signature)
+    candidate_containment = len(shared_words) / len(candidate_tokens)
+    assert signature_containment == 10 / 15
+    assert candidate_containment == 10 / 160
+    assert candidate_containment < MIN_CANDIDATE_CONTAINMENT, (
+        "fixture assumption: candidate-side ratio must sit below the floor"
+    )
+
+    cluster_signatures = {"clust-thin": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) is None, (
+        "high signature-side containment on a small signature must not "
+        "override a low candidate-side containment -- this is exactly the "
+        "row-8 false-merge shape"
+    )
+
+
+def test_thin_signature_large_candidate_would_have_matched_without_the_floor():
+    """Mutation witness, same fixture as the test above: with
+    ``min_candidate_containment=0.0`` (the pre-fix behavior --
+    CONTAINMENT_THRESHOLD alone), the identical inputs DO match. This is
+    the concrete proof that MIN_CANDIDATE_CONTAINMENT is the thing doing
+    the work, not some other floor already in the function -- removing
+    just this one check (as a real mutation would) makes the false merge
+    happen again."""
+    from synapt.recall.clustering import (
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(15))
+    shared_words = frozenset(sorted(signature)[:10])
+    filler = frozenset(f"filler{i}" for i in range(150))
+    candidate_tokens = shared_words | filler
+
+    cluster_signatures = {"clust-thin": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+        min_candidate_containment=0.0,
+    ) == "clust-thin", (
+        "with the candidate floor disabled, the same inputs that the test "
+        "above correctly refuses must merge -- proving the floor, not some "
+        "other check, is what blocks the false merge"
+    )
+
+
+def test_large_candidate_with_real_proportional_overlap_still_matches():
+    """The floor's other half: a candidate that is ALSO large but shares a
+    proportionally large fraction of its own tokens (not just a coincidental
+    handful) must still match. The floor targets DILUTION, not candidate
+    SIZE -- a long chunk that is genuinely mostly about the cluster's topic
+    is not the false-merge shape this exists to catch."""
+    from synapt.recall.clustering import (
+        MIN_CANDIDATE_CONTAINMENT,
+        _match_existing_cluster,
+        _signature_cross_cluster_df,
+    )
+
+    signature = frozenset(f"topicword{i}" for i in range(30))
+    shared_words = signature  # shares the WHOLE signature
+    filler = frozenset(f"onlocaltext{i}" for i in range(60))
+    candidate_tokens = shared_words | filler
+    assert len(candidate_tokens) == 90
+
+    candidate_containment = len(shared_words) / len(candidate_tokens)
+    assert candidate_containment == 30 / 90
+    assert candidate_containment >= MIN_CANDIDATE_CONTAINMENT, (
+        "fixture assumption: candidate-side ratio must clear the floor"
+    )
+
+    cluster_signatures = {"clust-real": signature, **_decoy_signatures(50)}
+    signature_df = _signature_cross_cluster_df(cluster_signatures)
+
+    assert _match_existing_cluster(
+        candidate_tokens, cluster_signatures, signature_df,
+    ) == "clust-real", (
+        "a large candidate with genuine proportional overlap must still "
+        "match -- the floor must not penalize candidate length by itself"
+    )
+
+
+def _thin_signature_topic_transcript(path: Path, *, words: list[str], turns: int = 8) -> Path:
+    """Same shape as ``_topic_transcript`` but with a caller-chosen, SHORT
+    word list, so the resulting persisted signature stays small (the
+    real-store shape MIN_CANDIDATE_CONTAINMENT is measured against:
+    signatures 12-31 tokens, not TOP_SIGNATURE_TOKENS' 64-token cap)."""
+    entries = []
+    for i in range(turns):
+        w = " ".join(v for j, v in enumerate(words) if (j + i) % 3 != 0)
+        entries.append(
+            user_text_entry(f"question about {w}", uuid=f"thin-u{i}",
+                             ts=f"2026-03-01T10:{i:02d}:00Z")
+        )
+        entries.append(
+            assistant_entry(text=f"answer about {w}", uuid=f"thin-a{i}",
+                             ts=f"2026-03-01T10:{i:02d}:30Z")
+        )
+    write_jsonl(path, entries)
+    return path
+
+
+def test_recluster_merge_into_existing_refuses_a_diluted_candidate_end_to_end(tmp_path):
+    """End-to-end through the real ``recluster_stale_chunks`` call site, not
+    just the unit-level ``_match_existing_cluster``: a diluted candidate
+    (row-8 shape) stays stale and is counted in the receipt's
+    ``floor_refused``, while a companion candidate that genuinely overlaps
+    the same cluster's topic still merges in the SAME batch -- proving the
+    floor discriminates within one batch, not just in isolation."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    thin_words = [f"nichetopic{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _thin_signature_topic_transcript(source / "topic.jsonl", words=thin_words, turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert len(real_signature) < 20, (
+            f"fixture assumption: a genuinely THIN signature, in the "
+            f"12-31-token measured range, not the 64-token cap: {sorted(real_signature)}"
+        )
+    finally:
+        db.close()
+
+    # Diluted candidate: shares real topic words but they are drowned in
+    # ~250 tokens of unrelated filler -- high signature-side containment,
+    # low candidate-side containment. Same shape as the unit tests above,
+    # built through the real ingestion/tokenization pipeline this time.
+    # Filler goes in ASSISTANT text, not user text: core.py truncates
+    # user_text at 1500 chars but assistant_text at 5000, measured while
+    # writing this fixture -- 150 filler words in user_text silently lost
+    # more than half of them, pushing the candidate-side ratio back ABOVE
+    # the floor and defeating the fixture's own purpose without any test
+    # failing to explain why.
+    diluted_filler = " ".join(f"unrelatedfiller{i}" for i in range(250))
+    write_jsonl(source / "diluted_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)}",
+                         uuid="diluted-u", ts="2026-03-01T11:00:00Z"),
+        assistant_entry(text=diluted_filler, uuid="diluted-a", ts="2026-03-01T11:00:30Z"),
+    ])
+    # Genuine candidate: the same thin topic words, no dilution -- must
+    # still merge, proving the floor is not blocking the whole cluster.
+    write_jsonl(source / "genuine_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)}",
+                         uuid="genuine-u", ts="2026-03-01T11:01:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)}",
+                         uuid="genuine-a", ts="2026-03-01T11:01:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        # Verify by fruit, not by construction: check the ACTUAL persisted
+        # chunk's tokens and ratio against the real signature before running
+        # the op, so a future truncation/tokenization change that silently
+        # shifts this fixture back above the floor fails HERE with a clear
+        # message, not three asserts later as an unexplained merge count.
+        from synapt.recall.clustering import MIN_CANDIDATE_CONTAINMENT, _chunk_tokens
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        diluted_id = next(cid for cid in stale_before if "diluted" in cid)
+        diluted_chunk = db.load_chunks_by_rowids([id_rowid_map[diluted_id]])[id_rowid_map[diluted_id]]
+        diluted_tokens = _chunk_tokens(diluted_chunk)
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        diluted_shared = real_signature & diluted_tokens
+        diluted_ratio = len(diluted_shared) / len(diluted_tokens) if diluted_tokens else 0.0
+        assert diluted_ratio < MIN_CANDIDATE_CONTAINMENT, (
+            f"fixture assumption: the diluted candidate's real candidate-side "
+            f"ratio must sit below the floor -- tokens={len(diluted_tokens)}, "
+            f"shared={len(diluted_shared)}, ratio={diluted_ratio:.4f}, "
+            f"floor={MIN_CANDIDATE_CONTAINMENT}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the genuine candidate must merge, not the diluted one: {receipt}"
+        )
+        assert receipt["floor_refused"] == 1, (
+            f"the diluted candidate's refusal must be counted as a floor "
+            f"refusal, not silently folded into ordinary still-stale: {receipt}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        assert len(stale_after) == 1, (
+            "the diluted candidate stays stale (safe direction: recoverable "
+            "next batch, never a wrong merge that needs a gated live-store "
+            "write to undo)"
+        )
+        merged_chunk_id = (stale_before - stale_after).pop()
+        assert "genuine" in merged_chunk_id, (
+            f"the GENUINE candidate must be the one that merged: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert not any("diluted" in cid for cid in member_ids), (
+            f"the diluted candidate must never have joined: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+# ref_disjoint_refused: neither containment floor above reads the TEXT, only
+# the token overlap, so a candidate and a target cluster can clear both
+# while explicitly citing DIFFERENT issue/PR numbers -- measured directly on
+# a live batch (batch 30, run 8fda059a865e): 30 of 182 real merges had
+# overlapping candidate/prior-member citations, 41 had both sides non-empty
+# and disjoint. See REFERENCE_NUMBER_RE and _extract_reference_numbers.
+
+def test_extract_reference_numbers_matches_every_stated_prefix_form():
+    """Unit-level: repo-prefixed, bare, PR-prefixed, and issue-prefixed forms
+    all resolve to the same flat number set; a number embedded in a longer
+    digit run (no word boundary) is not falsely captured."""
+    from synapt.recall.clustering import _extract_reference_numbers
+
+    text = (
+        "grip#846 landed, see also #703 and PR #1161 plus issue#199. "
+        "Not a match: v20261 and 8461234 and #1"
+    )
+    refs = _extract_reference_numbers(text)
+    assert refs == {"846", "703", "1161", "199"}, refs
+
+
+def test_extract_reference_numbers_empty_text_is_empty_not_a_crash():
+    from synapt.recall.clustering import _extract_reference_numbers
+
+    assert _extract_reference_numbers("") == frozenset()
+    assert _extract_reference_numbers("no numbers cited here at all") == frozenset()
+
+
+def test_extract_reference_numbers_matches_task_prefix_form():
+    """A batch-35 sample row cited "recall task 155" and got refs={} under
+    the original three prefix forms -- the whole ref-disjoint check was a
+    silent no-op for that candidate, not because the check judged the
+    number ambiguous, but because the idiom was never recognized."""
+    from synapt.recall.clustering import _extract_reference_numbers
+
+    assert _extract_reference_numbers("recall task 155 v5 needs a re-read") == {"155"}
+    assert _extract_reference_numbers("task#42 is done") == {"42"}
+    # Still below the two-digit floor, same as every other prefix form.
+    assert _extract_reference_numbers("task 5 is tiny") == frozenset()
+
+
+def test_reference_core_returns_numbers_cited_by_at_least_two_members():
+    from synapt.recall.clustering import _reference_core
+
+    core = _reference_core([
+        frozenset({"100"}),
+        frozenset({"100", "200"}),
+        frozenset({"300"}),
+    ])
+    assert core == frozenset({"100"}), core
+
+
+def test_reference_core_falls_back_to_earliest_member_when_no_number_reaches_two_citations():
+    """The row-5 shape directly: five members each citing a DIFFERENT
+    number (no majority anywhere), earliest-first order given exactly as
+    load_cluster_member_chunk_ids now returns it. The core must fall back
+    to the FIRST list entry, not an arbitrary member and not the union."""
+    from synapt.recall.clustering import _reference_core
+
+    core = _reference_core([
+        frozenset({"874"}),   # earliest
+        frozenset({"911"}),
+        frozenset({"990"}),
+        frozenset({"912"}),
+        frozenset({"994"}),   # most recent
+    ])
+    assert core == frozenset({"874"}), core
+
+
+def test_reference_core_empty_members_list_is_empty_not_a_crash():
+    from synapt.recall.clustering import _reference_core
+
+    assert _reference_core([]) == frozenset()
+    assert _reference_core([frozenset(), frozenset()]) == frozenset()
+
+
+def test_recluster_merge_into_existing_refuses_via_reference_core_not_raw_union_end_to_end(tmp_path):
+    """End-to-end reproduction of the batch-35 sample's row 5: an existing
+    cluster whose five prior members each cite a DIFFERENT issue/PR number
+    (no majority anywhere -- 874, 911, 990, 912, 994, in join order), and a
+    candidate citing #994 -- the LAST-joined member's number, present in
+    the raw UNION of all five members' citations. Under the original
+    union-based check this candidate merges (the real, observed
+    false-merge shape). Under the reference-core check it must be
+    refused: the core falls back to the fallback rule's chosen member's
+    own citation (#874) when no number reaches two independent
+    citations, and #994 is disjoint from {874}.
+
+    All five members share the SAME added_at here -- self-batch
+    clustering (``append_clusters``) stamps every row formed in one
+    build call with that build's own wall-clock moment, regardless of
+    per-message ``ts`` (measured directly while building the companion
+    test below; an earlier version of THIS docstring described this
+    fixture as ordered by "added_at," which was not actually true). So
+    within this fixture the fallback is decided entirely by the
+    ``chunk_id`` secondary key (``ORDER BY added_at, chunk_id`` -- tied
+    on the first column, so the second breaks the tie), not by any
+    genuine temporal signal; the companion test below builds a fixture
+    where added_at genuinely varies, specifically to exercise the
+    PRIMARY sort key this one cannot.
+
+    Citing the LAST-joined member deliberately, not an arbitrary one
+    (Stromus's R2 catch on v1, which cited the middle member's #990): a
+    candidate matching any non-fallback single member is refused whether
+    the fallback correctly picks the RULE's member OR incorrectly picks
+    some other single member -- so #990 could not tell "picked the RIGHT
+    one" from "picked A wrong one" and stayed green under a reversed
+    member order (join order [874,911,990,912,994] reversed puts 994
+    first, not 990). #994 is the one number for which "reversed order
+    wins" and "correct order wins" produce opposite verdicts."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import (
+        _chunk_tokens,
+        _match_existing_cluster,
+        _normalize_signature_tokens,
+        recluster_stale_chunks,
+        stale_transcript_chunk_ids,
+    )
+
+    thin_words = [f"corecheck{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # Existing cluster: five members, each citing a DIFFERENT number,
+    # added in this exact order (timestamps ascending -- membership order
+    # follows added_at, which follows archive/build order here).
+    member_numbers = ["874", "911", "990", "912", "994"]
+    entries = []
+    for i, num in enumerate(member_numbers):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i) % 3 != 0)
+        entries.append(user_text_entry(
+            f"question about {w} re #{num}", uuid=f"corering-u{i}",
+            ts=f"2026-03-05T10:{i:02d}:00Z",
+        ))
+        entries.append(assistant_entry(
+            text=f"answer about {w} tracked in #{num}", uuid=f"corering-a{i}",
+            ts=f"2026-03-05T10:{i:02d}:30Z",
+        ))
+    write_jsonl(source / "topic.jsonl", entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+    finally:
+        db.close()
+
+    # Candidate cites #994 -- the LAST-joined member's number, present in
+    # the raw union, absent from the core (no number reaches two
+    # citations, so the core falls back to member 1's #874, the earliest).
+    write_jsonl(source / "unioncore_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re #994",
+                         uuid="unioncore-u", ts="2026-03-05T11:00:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} filed as #994",
+                         uuid="unioncore-a", ts="2026-03-05T11:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 1, f"exactly the one new candidate should be stale: {stale_before}"
+
+        # Verify by fruit: the candidate must actually CLEAR both
+        # containment floors on token grounds alone, or its refusal proves
+        # nothing about the reference-core check specifically.
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        candidate_id = next(iter(stale_before))
+        candidate_chunk = db.load_chunks_by_rowids(
+            [id_rowid_map[candidate_id]]
+        )[id_rowid_map[candidate_id]]
+        cluster_token_sets = db.load_cluster_token_signatures()
+        from synapt.recall.clustering import _signature_cross_cluster_df
+        signature_df = _signature_cross_cluster_df(cluster_token_sets)
+        candidate_tokens = _normalize_signature_tokens(_chunk_tokens(candidate_chunk))
+        would_match = _match_existing_cluster(candidate_tokens, cluster_token_sets, signature_df)
+        assert would_match == existing_cluster_id, (
+            f"fixture assumption: the candidate must clear both containment "
+            f"floors on token grounds alone, so its refusal is attributable "
+            f"to the reference-core check, not the floors: "
+            f"got {would_match!r}, expected {existing_cluster_id!r}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 0, (
+            f"the #994 candidate shares a number only with the raw union, "
+            f"not with the core (which falls back to the chunk_id-tiebreak "
+            f"member's #874, since added_at is tied across this fixture) "
+            f"-- it must be refused, not merged: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 1, (
+            f"the refusal must be attributed to the reference check: {receipt}"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_merge_into_existing_reference_core_earliest_member_by_added_at_not_insertion_order_end_to_end(tmp_path):
+    """Companion to the test above, catching a DIFFERENT mutation: a
+    cluster whose ``chunk_id`` values (and therefore the order SQLite
+    returns rows in when no ORDER BY is given -- measured directly, not
+    assumed; see below) diverge from its ``added_at`` chronological
+    order.
+
+    Two gaps found empirically while building this fixture, both
+    corrected here rather than assumed:
+
+    (1) Self-batch clustering cannot build an added_at divergence at
+    all: ``append_clusters`` stamps every row formed in ONE build call
+    with the SAME ``added_at`` (the build's own wall-clock moment),
+    regardless of the per-message ``ts`` values in the source transcript
+    -- an earlier version of this fixture varied only ``ts`` and its own
+    "storage order is descending" assumption check passed VACUOUSLY
+    (every added_at was identical, so any ordering of identical values
+    trivially "is" descending) while the real behavior downstream was
+    silently untested. Fixed here by attaching members directly via
+    ``db.merge_chunks_into_cluster``, which takes an EXPLICIT
+    ``added_at`` argument the caller controls -- #990 (2020, oldest),
+    #912 (2021), #994 (2022) -- decoupled entirely from when the call
+    happens or what the source transcript's ``ts`` fields say.
+
+    (2) Dropping ORDER BY does NOT return rows in rowid/insertion order
+    on this table -- measured directly (``ORDER BY rowid`` gives one
+    order, a bare query with no ORDER BY gives a DIFFERENT one). The
+    table's only index is ``idx_cluster_chunks_chunk`` on ``chunk_id``,
+    and empirically SQLite's plan for a bare
+    ``WHERE cluster_id IN (...)`` returns rows in chunk_id-ASCENDING
+    order via that index, not insertion order. So the fixture's source
+    filenames are chosen so chunk_id order (``aaa_seed:t0/t1`` before
+    ``zzz_later_members:t0/t1/t2``, since chunk_id is derived from the
+    filename) puts the SEED members first -- the opposite of added_at
+    order, which puts #990 (2020) first. The two orderings now
+    genuinely disagree about which member is "first."
+
+    With the real ``ORDER BY added_at, chunk_id``, the core correctly
+    falls back to #990 (added_at-earliest) and a candidate citing #990
+    merges. Drop the ORDER BY and the query falls back to chunk_id
+    order, naming a SEED member (#874) instead -- the #990 candidate
+    would be wrongly refused."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import (
+        _chunk_tokens,
+        _match_existing_cluster,
+        _normalize_signature_tokens,
+        backfill_cluster_signatures,
+        recluster_stale_chunks,
+        stale_transcript_chunk_ids,
+    )
+
+    thin_words = [f"storageordercheck{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # Seed: two members via ONE self-batch build, both cite a number that
+    # is NOT the candidate's number, so the fixture only proves something
+    # if the true added_at-earliest member (#990, attached below) is what
+    # the candidate is checked against.
+    seed_numbers = ["874", "911"]
+    seed_entries = []
+    for i, num in enumerate(seed_numbers):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i) % 3 != 0)
+        seed_entries.append(user_text_entry(
+            f"question about {w} re #{num}", uuid=f"storageorder-seed-u{i}",
+            ts=f"2026-03-06T10:{i:02d}:00Z",
+        ))
+        seed_entries.append(assistant_entry(
+            text=f"answer about {w} tracked in #{num}", uuid=f"storageorder-seed-a{i}",
+            ts=f"2026-03-06T10:{i:02d}:30Z",
+        ))
+    # Filename chosen to sort BEFORE the later-attached file below, so
+    # chunk_id order (derived from filename) puts the seed first --
+    # confirmed the divergence this fixture needs (see docstring).
+    write_jsonl(source / "aaa_seed.jsonl", seed_entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    # Three more members, built as fresh/unclustered content first (same
+    # topic vocabulary, different numbers), attached to the seed cluster
+    # DIRECTLY via merge_chunks_into_cluster with explicit, hand-picked
+    # added_at values -- decoupled entirely from filename/chunk_id order,
+    # which sorts these AFTER the seed (filename chosen to sort after
+    # "aaa_seed"), the opposite of added_at order.
+    later_numbers = ["990", "912", "994"]
+    later_entries = []
+    for i, num in enumerate(later_numbers):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i + 2) % 3 != 0)
+        later_entries.append(user_text_entry(
+            f"question about {w} re #{num}", uuid=f"storageorder-later-u{i}",
+            ts=f"2026-03-06T10:{i + 2:02d}:00Z",
+        ))
+        later_entries.append(assistant_entry(
+            text=f"answer about {w} tracked in #{num}", uuid=f"storageorder-later-a{i}",
+            ts=f"2026-03-06T10:{i + 2:02d}:30Z",
+        ))
+    write_jsonl(source / "zzz_later_members.jsonl", later_entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        seed_added_ats = {
+            r[0] for r in db._conn.execute(
+                "SELECT added_at FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert len(seed_added_ats) == 1, (
+            f"fixture assumption: self-batch formation stamps every row "
+            f"with the SAME added_at (the build moment), regardless of "
+            f"per-message ts -- confirmed empirically: {seed_added_ats}"
+        )
+        seed_added_at, = seed_added_ats
+
+        # Matched by CONTENT, not by chunk_id string shape (chunk_id is
+        # derived from the source filename + turn index, e.g.
+        # "later_members:t0" -- not from the uuid passed to
+        # user_text_entry, which names the JSONL message, not the chunk).
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        later_ids_by_number: dict[str, str | None] = {num: None for num in later_numbers}
+        for cid, rowid in id_rowid_map.items():
+            chunk = db.load_chunks_by_rowids([rowid])[rowid]
+            for num in later_numbers:
+                if f"#{num}" in (chunk.user_text or ""):
+                    later_ids_by_number[num] = cid
+        assert all(later_ids_by_number.values()), later_ids_by_number
+
+        # Call order: 990 (added_at 2020, oldest), 912 (2021), 994
+        # (2022) -- earliest added_at value attached THIRD, not first.
+        for num, added_at in (
+            ("990", "2020-01-01T00:00:00+00:00"),
+            ("912", "2021-01-01T00:00:00+00:00"),
+            ("994", "2022-01-01T00:00:00+00:00"),
+        ):
+            db.merge_chunks_into_cluster(
+                existing_cluster_id, [later_ids_by_number[num]],
+                appended_text=f"answer tracked in #{num}", added_at=added_at,
+            )
+
+        # Fixture assumption check: run the EXACT query shape M1 (drop
+        # ORDER BY) produces, not a proxy for it -- an earlier version of
+        # this check asserted about ORDER BY rowid, which is NOT what a
+        # bare query returns on this table (measured directly: this
+        # table's only index is on chunk_id, and SQLite's plan for a
+        # bare ``WHERE cluster_id IN (...)`` returns chunk_id-ascending
+        # order via that index, not rowid/insertion order). The fixture
+        # only proves something if THAT query's first row is a seed
+        # member, not the added_at-earliest one.
+        no_order_by_rows = db._conn.execute(
+            "SELECT chunk_id, added_at FROM cluster_chunks WHERE cluster_id = ?",
+            (existing_cluster_id,),
+        ).fetchall()
+        no_order_by_added_ats = [r["added_at"] for r in no_order_by_rows]
+        assert no_order_by_added_ats[0] == seed_added_at, (
+            f"fixture assumption: a bare (no ORDER BY) query's first row "
+            f"must be a seed member (added_at={seed_added_at!r}), not the "
+            f"added_at-earliest member, or M1 cannot be distinguished "
+            f"from the real fix: {no_order_by_added_ats}"
+        )
+        assert min(no_order_by_added_ats) != seed_added_at, (
+            f"fixture assumption: the added_at-EARLIEST value must belong "
+            f"to a member attached AFTER the seed, not the seed itself: "
+            f"{no_order_by_added_ats}"
+        )
+
+        backfill_cluster_signatures(db, batch_size=500)
+    finally:
+        db.close()
+
+    # Candidate cites #990 -- the added_at-EARLIEST member's number.
+    # Merges under correct added_at ordering; would be wrongly refused
+    # if the query fell back to chunk_id order (which picks a seed
+    # member's #874 first, per the fixture assumption check above).
+    write_jsonl(source / "storageorder_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re #990",
+                         uuid="storageorder-cand-u", ts="2026-03-06T11:00:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} filed as #990",
+                         uuid="storageorder-cand-a", ts="2026-03-06T11:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 1, f"exactly the one new candidate should be stale: {stale_before}"
+
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        candidate_id = next(iter(stale_before))
+        candidate_chunk = db.load_chunks_by_rowids(
+            [id_rowid_map[candidate_id]]
+        )[id_rowid_map[candidate_id]]
+        cluster_token_sets = db.load_cluster_token_signatures()
+        from synapt.recall.clustering import _signature_cross_cluster_df
+        signature_df = _signature_cross_cluster_df(cluster_token_sets)
+        candidate_tokens = _normalize_signature_tokens(_chunk_tokens(candidate_chunk))
+        would_match = _match_existing_cluster(candidate_tokens, cluster_token_sets, signature_df)
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        assert would_match == existing_cluster_id, (
+            f"fixture assumption: the candidate must clear both containment "
+            f"floors on token grounds alone, so its verdict is attributable "
+            f"to the reference-core check, not the floors: "
+            f"got {would_match!r}, expected {existing_cluster_id!r}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"the #990 candidate matches the added_at-EARLIEST member "
+            f"(attached third, not first) -- it must merge under a "
+            f"correct added_at ordering, not one that silently follows "
+            f"storage/rowid order instead: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 0, (
+            f"a merge that succeeds must not also be counted as a refusal: {receipt}"
+        )
+    finally:
+        db.close()
+
+
+def test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_to_end(tmp_path):
+    """End-to-end through the real ``recluster_stale_chunks`` call site: a
+    candidate with genuine topical/token overlap (would clear BOTH
+    containment floors) but citing a DIFFERENT issue number than every prior
+    member of the target cluster is refused and counted separately from
+    ``floor_refused``, while a companion candidate citing the SAME number
+    still merges in the SAME batch -- proving the check discriminates on
+    citation identity, not topic, and that the two refusal counters
+    partition rather than overlap."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import (
+        _chunk_tokens,
+        _match_existing_cluster,
+        _normalize_signature_tokens,
+        recluster_stale_chunks,
+        stale_transcript_chunk_ids,
+    )
+
+    thin_words = [f"refcheck{i}" for i in range(15)]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    # Existing cluster: every member cites grip#846.
+    entries = []
+    for i in range(8):
+        w = " ".join(v for j, v in enumerate(thin_words) if (j + i) % 3 != 0)
+        entries.append(user_text_entry(
+            f"question about {w} re grip#846", uuid=f"refthin-u{i}",
+            ts=f"2026-03-02T10:{i:02d}:00Z",
+        ))
+        entries.append(assistant_entry(
+            text=f"answer about {w} tracked in grip#846", uuid=f"refthin-a{i}",
+            ts=f"2026-03-02T10:{i:02d}:30Z",
+        ))
+    write_jsonl(source / "topic.jsonl", entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+    finally:
+        db.close()
+
+    # Disjoint candidate: same topic words (genuine overlap), cites a
+    # DIFFERENT issue number never mentioned by any prior member.
+    write_jsonl(source / "disjoint_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re #754",
+                         uuid="disjoint-u", ts="2026-03-02T11:00:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} filed as #754",
+                         uuid="disjoint-a", ts="2026-03-02T11:00:30Z"),
+    ])
+    # Same-number candidate: same topic words, cites grip#846 too -- must merge.
+    write_jsonl(source / "sameref_candidate.jsonl", [
+        user_text_entry(f"question about {' '.join(thin_words)} re grip#846",
+                         uuid="sameref-u", ts="2026-03-02T11:01:00Z"),
+        assistant_entry(text=f"answer about {' '.join(thin_words)} also grip#846",
+                         uuid="sameref-a", ts="2026-03-02T11:01:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 2, f"exactly the two new candidates should be stale: {stale_before}"
+
+        # Verify by fruit: the disjoint candidate must actually CLEAR both
+        # containment floors on token grounds alone, or its refusal proves
+        # nothing about the new check specifically.
+        id_rowid_map = db.get_chunk_id_rowid_map()
+        disjoint_id = next(cid for cid in stale_before if "disjoint" in cid)
+        disjoint_chunk = db.load_chunks_by_rowids(
+            [id_rowid_map[disjoint_id]]
+        )[id_rowid_map[disjoint_id]]
+        cluster_token_sets = db.load_cluster_token_signatures()
+        from synapt.recall.clustering import _signature_cross_cluster_df
+        signature_df = _signature_cross_cluster_df(cluster_token_sets)
+        disjoint_tokens = _normalize_signature_tokens(_chunk_tokens(disjoint_chunk))
+        would_match = _match_existing_cluster(disjoint_tokens, cluster_token_sets, signature_df)
+        assert would_match == existing_cluster_id, (
+            f"fixture assumption: the disjoint candidate must clear both "
+            f"containment floors on token grounds alone, so its refusal is "
+            f"attributable to the reference check, not the floors: "
+            f"got {would_match!r}, expected {existing_cluster_id!r}"
+        )
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"exactly the same-number candidate must merge: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 1, (
+            f"the disjoint-citation candidate's refusal must be counted "
+            f"separately from the containment floor: {receipt}"
+        )
+        assert receipt["floor_refused"] == 0, (
+            f"the disjoint candidate would have cleared the containment "
+            f"floor -- it must not ALSO be double-counted there: {receipt}"
+        )
+
+        stale_after = set(stale_transcript_chunk_ids(db))
+        assert len(stale_after) == 1, (
+            "the disjoint candidate stays stale (safe direction, same as "
+            "the containment floor's own refusal)"
+        )
+        merged_chunk_id = (stale_before - stale_after).pop()
+        assert "sameref" in merged_chunk_id, (
+            f"the SAME-number candidate must be the one that merged: {merged_chunk_id}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert not any("disjoint" in cid for cid in member_ids), (
+            f"the disjoint-citation candidate must never have joined: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+def test_reference_check_has_nothing_to_compare_matches_the_scoped_cases():
+    """Unit test for the exact scope Stromus specified: the rare-anchor
+    check applies whenever the reference check itself had nothing decisive
+    to compare -- candidate_refs empty, OR the cluster's own reference core
+    empty -- and never when both sides cite something, whether that shares
+    a number (merges) or is disjoint (the reference-core check already
+    refuses it on its own, before this is even consulted)."""
+    from synapt.recall.clustering import _reference_check_has_nothing_to_compare
+
+    assert _reference_check_has_nothing_to_compare(frozenset(), frozenset())
+    assert _reference_check_has_nothing_to_compare(frozenset(), frozenset({"846"}))
+    assert _reference_check_has_nothing_to_compare(frozenset({"754"}), frozenset())
+    assert not _reference_check_has_nothing_to_compare(frozenset({"754"}), frozenset({"846"}))
+    assert not _reference_check_has_nothing_to_compare(frozenset({"846"}), frozenset({"846"}))
+
+
+def test_rare_anchor_cross_cluster_min_df_returns_min_of_shared_tokens_only():
+    """Unit test: the minimum is taken over tokens the candidate and the
+    signature actually SHARE, not over either side alone -- a token
+    present on only one side never enters the comparison, and no overlap
+    at all reports None rather than a misleading 0."""
+    from collections import Counter
+
+    from synapt.recall.clustering import _rare_anchor_cross_cluster_min_df
+
+    signature_df = Counter({"common": 40, "rare": 2, "onlysig": 5, "onlycand": 1})
+    candidate_tokens = {"common", "rare", "onlycand"}
+    signature = {"common", "rare", "onlysig"}
+    assert _rare_anchor_cross_cluster_min_df(candidate_tokens, signature, signature_df) == 2
+
+    assert _rare_anchor_cross_cluster_min_df(set(), signature, signature_df) is None
+    assert _rare_anchor_cross_cluster_min_df(candidate_tokens, set(), signature_df) is None
+
+
+def test_recluster_merge_into_existing_refuses_when_no_shared_token_is_a_rare_anchor_end_to_end(tmp_path):
+    """RED-first witness for the false-merge shape a batch-36 acceptance
+    sample found (tracked privately): a candidate can clear BOTH
+    containment floors and the EXISTING per-token distinctiveness check
+    (whose rarity ceiling is total_clusters // RARE_TOKEN_DF_DIVISOR --
+    permissive at real-corpus scale, where 24,071 persisted signatures
+    makes even df=2000 count as "distinctive") while sharing NOTHING with
+    the target cluster that is genuinely rare in an absolute sense.
+    Measured on the real store: six false merges from one 15-row sample,
+    every shared token's cross-cluster document frequency at or above 12,
+    against zero shared-token minimums above 18 among the correct merges
+    in the same sample (one exact tie at 18 -- see
+    RARE_ANCHOR_MAX_CROSS_CLUSTER_DF's module comment for which side of
+    that tie the threshold sits on and why).
+
+    Scoped to "the reference check had nothing decisive to compare"
+    (Stromus, 2026-09-07), not to numberless candidates alone: a NUMBERED
+    candidate matching a cluster whose reference core is empty hits the
+    identical false-merge shape (row 10 of the same sample) and must be
+    caught the same way, while a candidate and cluster that both cite
+    numbers stay governed by the reference-core check alone (see
+    test_recluster_merge_into_existing_refuses_disjoint_reference_citation_end_to_end
+    and test_recluster_merge_into_existing_refuses_via_reference_core_not_raw_union_end_to_end,
+    both unaffected by this addition).
+
+    Built at exactly the boundary the existing distinctiveness check
+    cannot see past: 70 total persisted signatures (the real cluster + 69
+    decoys), so RARE_TOKEN_DF_DIVISOR's ceiling is 70 // 10 = 7. The
+    shared-token group's cross-cluster df is engineered to exactly 7 (the
+    real cluster plus 6 decoys carry it) -- clears the OLD check (7 <= 7)
+    while failing the NEW absolute one (7 > 6), proving the old check
+    alone is not sufficient at this scale, not merely restating that it
+    fails at a scale it was never meant to cover.
+
+    Three candidates land in the same batch against the same real cluster:
+      - ``silentnoanchor``: shares only the df=7 group, cites no
+        number -- must be refused (no rare anchor).
+      - ``citednoanchor``: shares the same df=7 group, but ALSO
+        cites a number the cluster's core never mentions -- the cluster's
+        own core is empty, so the reference check has nothing decisive
+        either; must be refused via the SAME rare-anchor path (row 10's
+        shape), not waved through for citing something.
+      - ``controlanchor``: shares the df=7 group AND two tokens
+        that exist ONLY in the real cluster's own signature (df=1) --
+        must still merge, proving the check does not over-refuse a
+        candidate that actually carries a topical anchor.
+    """
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    shared_group = [f"anchorshared{i}" for i in range(10)]
+    rare_group = ["onlyrealclustera", "onlyrealclusterb"]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    # The real cluster: every turn carries the full shared_group +
+    # rare_group, numberless (no member cites any issue/PR/task number --
+    # its reference core is empty, the row-10 half of the scope).
+    # No English "question about"/"answer about" framing words -- those
+    # would land in the real signature too (df=1 across this synthetic
+    # 70-signature population, since no decoy uses them), accidentally
+    # supplying every candidate a free rare anchor regardless of whether
+    # it shares anything else. Every turn is the token groups alone.
+    entries = []
+    for i in range(8):
+        words = " ".join(shared_group + rare_group)
+        entries.append(user_text_entry(words, uuid=f"anchortopic-u{i}",
+                                        ts=f"2026-03-03T10:{i:02d}:00Z"))
+        entries.append(assistant_entry(text=words, uuid=f"anchortopic-a{i}",
+                                        ts=f"2026-03-03T10:{i:02d}:30Z"))
+    write_jsonl(source / "anchortopic.jsonl", entries)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing_cluster_id, = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchone()
+        real_signature = db.load_cluster_token_signatures()[existing_cluster_id]
+        assert set(shared_group) <= real_signature, (
+            f"fixture assumption: the full shared group must land in the "
+            f"real signature: {sorted(real_signature)}"
+        )
+        assert set(rare_group) <= real_signature, (
+            f"fixture assumption: the full rare group must land in the "
+            f"real signature too: {sorted(real_signature)}"
+        )
+
+        now = "2026-03-03T12:00:00Z"
+        # 6 decoys carrying shared_group -- with the real cluster, df=7,
+        # exactly RARE_TOKEN_DF_DIVISOR's ceiling at 70 total clusters.
+        # Padded with 100 unique filler tokens each so a decoy's OWN
+        # containment (10/110) stays well under CONTAINMENT_THRESHOLD --
+        # never a competing match target.
+        for i in range(6):
+            decoy_signature = list(shared_group) + [f"dfdecoyfiller{i}_{j}" for j in range(100)]
+            db.save_cluster_token_signature(f"df-decoy-{i}", decoy_signature, now)
+        # 63 unrelated filler decoys, purely to reach the 70-cluster floor.
+        for i in range(63):
+            filler_signature = [f"unrelatedfiller{i}_{j}" for j in range(10)]
+            db.save_cluster_token_signature(f"filler-decoy-{i}", filler_signature, now)
+
+        total_clusters = len(db.load_cluster_token_signatures())
+        assert total_clusters == 70, (
+            f"fixture assumption: 1 real + 6 df-decoys + 63 filler-decoys "
+            f"= 70, engineered so RARE_TOKEN_DF_DIVISOR's ceiling (70 // 10 "
+            f"= 7) exactly matches shared_group's df: {total_clusters}"
+        )
+
+        # Same "no accidental English framing words" discipline as the
+        # real cluster's own transcript above -- these candidates must
+        # share ONLY the token groups named in each docstring bullet,
+        # nothing else, or a stray shared word supplies an unintended
+        # rare anchor and the witness proves nothing.
+        write_jsonl(source / "silentnoanchor.jsonl", [
+            user_text_entry(" ".join(shared_group),
+                             uuid="silentnoanchor-u", ts="2026-03-03T11:00:00Z"),
+            assistant_entry(text=" ".join(shared_group),
+                             uuid="silentnoanchor-a", ts="2026-03-03T11:00:30Z"),
+        ])
+        write_jsonl(source / "citednoanchor.jsonl", [
+            user_text_entry(" ".join(shared_group) + " issue #999",
+                             uuid="citednoanchor-u", ts="2026-03-03T11:01:00Z"),
+            assistant_entry(text=" ".join(shared_group) + " issue #999",
+                             uuid="citednoanchor-a", ts="2026-03-03T11:01:30Z"),
+        ])
+        write_jsonl(source / "controlanchor.jsonl", [
+            user_text_entry(" ".join(shared_group + rare_group),
+                             uuid="controlanchor-u", ts="2026-03-03T11:02:00Z"),
+            assistant_entry(text=" ".join(shared_group + rare_group),
+                             uuid="controlanchor-a", ts="2026-03-03T11:02:30Z"),
+        ])
+        _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                            incremental=True, skip_clustering=True)
+    finally:
+        db.close()
+
+    db = _open_db(project)
+    try:
+        stale_before = set(stale_transcript_chunk_ids(db))
+        assert len(stale_before) == 3, f"exactly the three new candidates should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+
+        assert receipt["merged_into_existing"] == 1, (
+            f"only the control candidate (genuine rare anchor) may merge: {receipt}"
+        )
+        assert receipt.get("rare_anchor_refused") == 2, (
+            f"both no-anchor candidates -- numberless and numbered alike -- "
+            f"must be refused via the SAME counter: {receipt}"
+        )
+        assert receipt["floor_refused"] == 0, (
+            f"all three candidates clear both containment floors on token "
+            f"grounds alone -- nothing here is a floor refusal: {receipt}"
+        )
+        assert receipt["ref_disjoint_refused"] == 0, (
+            f"the real cluster's reference core is empty, so the "
+            f"disjoint-citation check never has anything decisive to "
+            f"compare against -- its own counter must stay at zero: {receipt}"
+        )
+
+        # Not asserted via the stale-set delta: the two refused candidates
+        # still share shared_group WITH EACH OTHER, so the ordinary
+        # self-batch clustering pass over "remaining_chunks" forms them
+        # into a NEW topic cluster of their own -- correct behavior (a
+        # refusal from one existing cluster is not exile from every
+        # cluster), and unrelated to what this test is checking. The
+        # receipt's own merge_samples names exactly which chunk merged
+        # into WHICH cluster, which is the precise claim under test.
+        merge_sample_chunk_ids = {s["chunk_id"] for s in receipt["merge_samples"]}
+        assert len(merge_sample_chunk_ids) == 1, (
+            f"exactly one merge into an EXISTING cluster this run: {receipt['merge_samples']}"
+        )
+        merged_chunk_id = merge_sample_chunk_ids.pop()
+        assert "controlanchor" in merged_chunk_id, (
+            f"the control candidate must be the one that merged: {merged_chunk_id}"
+        )
+        assert all(
+            s["cluster_id"] == existing_cluster_id for s in receipt["merge_samples"]
+        ), (
+            f"and it must merge into the REAL cluster, not somewhere else: "
+            f"{receipt['merge_samples']}"
+        )
+
+        member_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert not any("silentnoanchor" in cid or "citednoanchor" in cid for cid in member_ids), (
+            f"neither no-anchor candidate may ever join: {member_ids}"
+        )
+    finally:
+        db.close()
+
+
+# The compaction-continuation preamble and command-args wrapper markers
+# (tracked privately) are structural harness artifacts, byte-identical across unrelated
+# sessions, that dominate token overlap the same way the tags in
+# _HARNESS_PREAMBLE_TAGS already do -- found via a batch-31 acceptance
+# sample (2 of 15 rows), not a synthetic scenario.
+
+def test_strip_compaction_and_command_boilerplate_removes_markers_keeps_content():
+    """Unit-level: the preamble sentence and command-args tag markers are
+    removed; genuine surrounding content (including real summary text and
+    the caller's own command argument) survives untouched."""
+    from synapt.recall.clustering import _strip_compaction_and_command_boilerplate
+
+    text = (
+        "This session is being continued from a previous conversation that "
+        "ran out of context. The summary below covers the earlier portion "
+        "of the conversation. Summary: billing dashboard work continues. "
+        "<command-args>schedule the deploy for Friday</command-args>"
+    )
+    stripped = _strip_compaction_and_command_boilerplate(text)
+    assert "This session is being continued" not in stripped
+    assert "<command-args>" not in stripped
+    assert "</command-args>" not in stripped
+    assert "billing dashboard work continues" in stripped
+    assert "schedule the deploy for Friday" in stripped
+
+
+def test_command_name_tag_is_stripped_wholesale():
+    from synapt.recall.clustering import _strip_harness_preamble
+
+    text = "<command-name>/loop</command-name> the actual argument text"
+    stripped = _strip_harness_preamble(text)
+    assert "/loop" not in stripped
+    assert "the actual argument text" in stripped
+
+
+def test_three_unrelated_compaction_summaries_stay_separate_clusters(tmp_path):
+    """End-to-end through the real self-batch clustering path
+    (``cluster_chunks``, the same function ``recluster_stale_chunks`` falls
+    back to): three chunks that share ONLY the compaction preamble, each
+    with a genuinely distinct, distinctive topic, must NOT collapse into one
+    cluster. Mirrors the real batch-31 false-merge shape (three unrelated
+    sessions merged on the preamble alone)."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import cluster_chunks
+
+    preamble = (
+        "This session is being continued from a previous conversation that "
+        "ran out of context. The summary below covers the earlier portion "
+        "of the conversation."
+    )
+    topics = [
+        ("billingfeature123", "billingfeature123 dashboard enterprise customers billing"),
+        ("webhookrace456", "webhookrace456 payment webhook handler race condition"),
+        ("transcodeleak789", "transcodeleak789 video transcoder pipeline memory leak"),
+    ]
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    # Two chunks per topic (MIN_CLUSTER_SIZE=2 -- a singleton never forms an
+    # observable cluster at all, so a single chunk per topic can't show the
+    # separation this test is checking for).
+    for i, (slug, topic_words) in enumerate(topics):
+        write_jsonl(source / f"{slug}.jsonl", [
+            user_text_entry(f"{preamble} Summary: {topic_words} {topic_words}",
+                             uuid=f"{slug}-u1", ts=f"2026-03-03T{10+i:02d}:00:00Z"),
+            assistant_entry(text=f"{topic_words} {topic_words} continuing work",
+                             uuid=f"{slug}-a1", ts=f"2026-03-03T{10+i:02d}:00:30Z"),
+            user_text_entry(f"{preamble} Summary: {topic_words} status update",
+                             uuid=f"{slug}-u2", ts=f"2026-03-03T{10+i:02d}:01:00Z"),
+            assistant_entry(text=f"{topic_words} {topic_words} progress noted",
+                             uuid=f"{slug}-a2", ts=f"2026-03-03T{10+i:02d}:01:30Z"),
+        ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        cluster_ids = {
+            r[0] for r in db._conn.execute(
+                "SELECT DISTINCT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+            ).fetchall()
+        }
+        assert len(cluster_ids) == 3, (
+            f"three genuinely distinct topics sharing only the boilerplate "
+            f"preamble must form three separate clusters, not merge on the "
+            f"preamble: got {len(cluster_ids)} cluster(s)"
+        )
+    finally:
+        db.close()
+
+
+def test_ordinary_second_build_does_not_silently_erase_a_same_session_incremental_merge(tmp_path):
+    """`recluster_stale_chunks(merge_into_existing=True)`'s
+    additive, run_id-tagged membership row is not durable against a normal
+    build. `save_clusters` (called from every build with the default
+    `skip_clustering=False`, which is what actually runs at session start --
+    `_run_build_job` passes no override) is documented "Replace all clusters
+    and memberships (full rebuild)": its first statement deletes every
+    `cluster_chunks` row belonging to ANY topic-type cluster, unscoped by
+    run_id and unscoped to whether that cluster is even present in the
+    build's freshly-computed set. `transcript_only` (cli.py) is the FULL
+    known transcript corpus, not merely new content, so this fires on every
+    ordinary incremental build, not only a first/full one.
+
+    This witness needs no concurrent process and no live-store timing --
+    the defect reproduces from one session alone: build (forms a cluster),
+    merge a stale chunk into it (additive, real run_id), build again with
+    the default clustering-enabled path (no new source content at all).
+    The merged membership must survive; today it does not."""
+    from synapt.recall.cli import _archive_and_build
+    from synapt.recall.clustering import recluster_stale_chunks, stale_transcript_chunk_ids
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _topic_transcript(source / "topic.jsonl", turns=8)
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        existing = db._conn.execute(
+            "SELECT cluster_id FROM clusters WHERE cluster_type = 'topic'"
+        ).fetchall()
+        assert len(existing) == 1, f"fixture must produce exactly one existing cluster: {existing}"
+        existing_cluster_id = existing[0][0]
+    finally:
+        db.close()
+
+    _similar_to_cluster_singleton(source / "similar.jsonl")
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False,
+                        incremental=True, skip_clustering=True)
+
+    db = _open_db(project)
+    try:
+        stale_before = stale_transcript_chunk_ids(db)
+        assert len(stale_before) == 1, f"exactly the one new chunk should be stale: {stale_before}"
+
+        receipt = recluster_stale_chunks(db, batch_size=100, merge_into_existing=True)
+        assert receipt["merged_into_existing"] == 1, receipt
+        merge_run_id = receipt["merge_run_id"]
+        assert merge_run_id, "a real merge_into_existing run must stamp a run_id"
+
+        merged_chunk_id = stale_before[0]
+        member_ids_before = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks WHERE cluster_id = ?",
+                (existing_cluster_id,),
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids_before, (
+            "sanity: the merge must have actually landed before testing "
+            f"whether a rebuild preserves it: {member_ids_before}"
+        )
+    finally:
+        db.close()
+
+    # The ordinary path: an incremental build with clustering ENABLED (the
+    # default -- no skip_clustering override), same as `_run_build_job`
+    # actually calls it. A trivial unrelated turn is added so the build's
+    # own no-op short-circuit (`is_noop` against the manifest signature)
+    # does not skip the whole pipeline outright -- a real session-start
+    # build almost always has SOME new input (the restarting session's own
+    # live activity, if nothing else); transcript_only is the full known
+    # corpus regardless of how little is new (cli.py), so the clustering
+    # step runs in full once triggered.
+    write_jsonl(source / "unrelated.jsonl", [
+        user_text_entry("completely unrelated filler turn", uuid="fill-u",
+                         ts="2026-03-01T12:00:00Z"),
+        assistant_entry(text="completely unrelated filler answer", uuid="fill-a",
+                         ts="2026-03-01T12:00:30Z"),
+    ])
+    _archive_and_build(project, source_dirs=[source], use_embeddings=False, incremental=True)
+
+    db = _open_db(project)
+    try:
+        # This chunk gets PLACED by the fresh self-batch pass (it groups
+        # right back in with its 8 former cluster-mates) -- per R2's
+        # correction, a placed chunk's row is the BUILD's, not the merge's,
+        # and is left with no run_id stamped (see save_clusters). The
+        # invariant this scenario actually demonstrates is membership
+        # survival despite the id changing underneath it, not run_id
+        # survival -- that guarantee belongs to a chunk the fresh pass does
+        # NOT place (test_save_clusters_dangling_row_probes.py's probe A).
+        run_id_rows_after = db._conn.execute(
+            "SELECT COUNT(*) FROM cluster_chunks WHERE run_id = ?", (merge_run_id,)
+        ).fetchone()[0]
+        assert run_id_rows_after == 0, (
+            f"a chunk the fresh pass PLACES should carry no run_id -- that "
+            f"row is the build's, not the merge's; found {run_id_rows_after} "
+            f"row(s) for run_id {merge_run_id}"
+        )
+
+        member_ids_after = {
+            r[0] for r in db._conn.execute(
+                "SELECT chunk_id FROM cluster_chunks cc "
+                "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+                "WHERE cl.cluster_type = 'topic'"
+            ).fetchall()
+        }
+        assert merged_chunk_id in member_ids_after, (
+            f"the merged chunk must still be a member of SOME topic cluster "
+            f"after an ordinary later build: {member_ids_after}"
+        )
+    finally:
+        db.close()

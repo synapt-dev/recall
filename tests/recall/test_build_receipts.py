@@ -190,7 +190,18 @@ def test_receipt_status_uses_query_only_windows_pid_primitive(monkeypatch, tmp_p
     observed = json.loads(server.recall_build_status(receipt["build_id"]))
     assert observed["state"] == "running"
     assert pid_calls == [424242]
-    assert marker_calls == [(tmp_path.resolve(), receipt["server_marker"])]
+    # recall_build_status now forwards None (not a pre-resolved cwd) so
+    # project_data_dir's own env-var-first resolution applies; the
+    # call argument recorded here is therefore None, not tmp_path.resolve().
+    # What must still hold -- and is the actual invariant this test checks
+    # -- is that it resolves to the SAME store the receipt was written
+    # under, whichever raw argument reached it.
+    assert len(marker_calls) == 1
+    called_project, called_marker = marker_calls[0]
+    assert called_marker == receipt["server_marker"]
+    assert server.project_data_dir(called_project) == server.project_data_dir(
+        tmp_path.resolve()
+    )
 
 
 def test_status_cannot_overwrite_a_terminal_receipt_with_interrupted(monkeypatch, tmp_path):
@@ -615,6 +626,72 @@ def test_changed_shards_detects_wal_only_change(monkeypatch, tmp_path):
     assert result["updated_shards"] == ["data_001.db"]
 
 
+def test_progress_write_contends_for_the_receipt_lock_like_every_other_writer(
+    monkeypatch, tmp_path,
+):
+    """Found in review (Sentinel, 2026-09-09, from a Windows CI PermissionError on
+    test_changed_shards_detects_wal_only_change's own recall_build_status poll
+    loop): _run_build_job's report() callback wrote the build receipt WITHOUT
+    holding _BUILD_RECEIPT_LOCK, unlike recall_build's initial write, the
+    terminal write in _run_build_job's own finally block, and the reader
+    recall_build_status -- all three of which correctly acquire it. On Windows
+    an unguarded writer racing a locked reader through atomic_json_write's
+    rename can raise PermissionError; POSIX tends to tolerate the identical
+    race silently, so the defect needs a platform-independent witness.
+
+    The witness needs no Windows and no real file-locking quirk: it holds
+    _BUILD_RECEIPT_LOCK in this thread for a measured interval while a real
+    build's progress callback fires, and asserts the callback's write only
+    completes AFTER the lock is released -- i.e. it contended for the lock
+    the same way every other writer in this module does. Unguarded, the write
+    proceeds immediately regardless of who holds the lock, and reds; guarded,
+    it blocks until release, and greens."""
+    from synapt.recall import cli, server
+
+    proceed = threading.Event()
+    write_events: list[tuple[str, float]] = []
+    events_lock = threading.Lock()
+    original_write = server._write_build_receipt
+
+    def recording_write(project, receipt):
+        original_write(project, receipt)
+        with events_lock:
+            write_events.append((receipt.get("phase"), time.monotonic()))
+
+    def fake_build(project, *, use_embeddings, incremental, progress):
+        assert proceed.wait(2), "main thread never signaled proceed"
+        progress("parsing")  # the write under test, timed against the held lock
+        return _FakeIndex()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_archive_and_build", fake_build)
+    monkeypatch.setattr(server, "_invalidate_cache", lambda: None)
+    monkeypatch.setattr(server, "_write_build_receipt", recording_write)
+
+    build_id = _build_id(server.recall_build(incremental=False))
+    # recall_build() has already acquired-and-released _BUILD_RECEIPT_LOCK by
+    # the time it returns (it only holds it to spawn the worker thread), so
+    # acquiring it here cannot deadlock against that call.
+    server._BUILD_RECEIPT_LOCK.acquire()
+    try:
+        proceed.set()
+        time.sleep(0.4)
+        released_at = time.monotonic()
+    finally:
+        server._BUILD_RECEIPT_LOCK.release()
+
+    _wait_status(server, build_id, "completed")
+
+    parsing_events = [t for phase, t in write_events if phase == "parsing"]
+    assert parsing_events, write_events
+    assert parsing_events[0] >= released_at, (
+        f"progress('parsing') wrote the receipt at {parsing_events[0]:.6f}, "
+        f"{released_at - parsing_events[0]:.6f}s BEFORE the lock was released "
+        f"at {released_at:.6f} -- report()'s write did not contend for "
+        f"_BUILD_RECEIPT_LOCK"
+    )
+
+
 def test_cli_build_forwards_phase_callback_without_changing_sync_result(monkeypatch, tmp_path):
     from synapt.recall import cli
 
@@ -623,7 +700,7 @@ def test_cli_build_forwards_phase_callback_without_changing_sync_result(monkeypa
     monkeypatch.setattr(cli, "_acquire_build_lock", lambda data_dir: 42)
     monkeypatch.setattr(cli, "_release_build_lock", lambda fd: None)
 
-    def inner(*args):
+    def inner(*args, **kwargs):
         args[-1]("parsing")
         return expected
 

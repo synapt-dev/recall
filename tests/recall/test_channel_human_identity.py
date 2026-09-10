@@ -240,3 +240,100 @@ class TestCollisionGuardSplitsIdentity:
                 f"Role correction failed: expected 'agent', got '{role_after}'. "
                 f"Presence dump: {_get_all_presence(tmp_path)}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Sender attribution: a post must carry the joined display name (tracked
+# privately). A named join writes presence under a name-derived a_ id, but a
+# post computes only the nameless session id, so the joined name was stranded
+# and a nameless human row could tag the post [human]. The fix records
+# session_id -> (agent_id, display_name) at join and recovers it at post.
+# ---------------------------------------------------------------------------
+
+def _session_map_recovery_present() -> bool:
+    """True when the loaded channel_post recovers identity via the session map."""
+    return "_resolve_session_identity" in inspect.getsource(channel_post)
+
+
+_SKIP_SESSION_MAP_RECOVERY = (
+    "session-map sender recovery not present in loaded channel module. "
+    "Reinstall: pip install -e '.[dev]' from the correct worktree."
+)
+
+
+def _last_post_sender(project_dir: Path) -> str:
+    """The from_display of the most recent non-join/leave message in #dev."""
+    log = next((project_dir / ".synapt" / "recall").rglob("dev*.jsonl"), None)
+    assert log is not None, "no dev channel log written"
+    for line in reversed(log.read_text().splitlines()):
+        import json as _json
+        d = _json.loads(line)
+        if d.get("type") not in ("join", "leave"):
+            return d.get("from_display") or d.get("from") or ""
+    return ""
+
+
+def _as_session(ppid: int):
+    """Model a distinct OS process: a fresh agent-id cache and a fixed ppid, so
+    the nameless session id s_<griptree:datadir:ppid> is deterministic. Two MCP
+    servers under one claude process share a ppid; two claude sessions differ."""
+    _AGENT_ID_CACHE.clear()
+    return patch("os.getppid", return_value=ppid)
+
+
+class TestSenderAttributionSessionMap:
+    """A post carries the joined display name for the calling session, keyed on
+    the session's own id (not the griptree, which would collide with the
+    store-resolution defect and hand one session another's row)."""
+
+    def test_post_after_join_carries_joined_name_same_session(self, tmp_path):
+        if not _session_map_recovery_present():
+            pytest.skip(_SKIP_SESSION_MAP_RECOVERY)
+        with _patch_no_agent(), _as_session(5001):
+            channel_join("dev", display_name="Stromus", project_dir=tmp_path)
+            channel_post("dev", "verdict", display_name=None, project_dir=tmp_path)
+            assert _last_post_sender(tmp_path) == "Stromus"
+
+    def test_post_recovers_name_across_two_servers_same_ppid(self, tmp_path):
+        """Two MCP server processes under one claude process share a ppid: join
+        on one, post on the other, and the post still carries the joined name."""
+        if not _session_map_recovery_present():
+            pytest.skip(_SKIP_SESSION_MAP_RECOVERY)
+        with _patch_no_agent():
+            with _as_session(7003):  # server 1
+                channel_join("dev", display_name="Stromus", project_dir=tmp_path)
+            with _as_session(7003):  # server 2, fresh cache, SAME ppid
+                channel_post("dev", "verdict", display_name=None, project_dir=tmp_path)
+            assert _last_post_sender(tmp_path) == "Stromus"
+
+    def test_two_sessions_same_marker_never_cross_attribute(self, tmp_path):
+        """Two sessions resolving to the SAME griptree marker (the store-
+        resolution defect) join with different names; each post carries its own
+        name and never the other's. Keying on the griptree would fail this."""
+        if not _session_map_recovery_present():
+            pytest.skip(_SKIP_SESSION_MAP_RECOVERY)
+        with _patch_no_agent():
+            with _as_session(8001):
+                channel_join("dev", display_name="Stromus", project_dir=tmp_path)
+                channel_post("dev", "d1", display_name=None, project_dir=tmp_path)
+                assert _last_post_sender(tmp_path) == "Stromus"
+            with _as_session(8002):
+                channel_join("dev", display_name="Apollo", project_dir=tmp_path)
+                channel_post("dev", "d2", display_name=None, project_dir=tmp_path)
+                got = _last_post_sender(tmp_path)
+                assert got == "Apollo"
+                assert got != "Stromus"
+
+    def test_agent_post_never_tagged_human_after_join(self, tmp_path):
+        """A session-start human join (no name) shares the nameless session id
+        with the agent; after the agent joins by name, its post resolves to the
+        a_ id (role agent) and the reader never tags it [human]."""
+        if not _session_map_recovery_present():
+            pytest.skip(_SKIP_SESSION_MAP_RECOVERY)
+        with _patch_no_agent(), _as_session(9001):
+            channel_join("dev", display_name=None, project_dir=tmp_path, role="human")
+            channel_join("dev", display_name="Stromus", project_dir=tmp_path)
+            channel_post("dev", "verdict", display_name=None, project_dir=tmp_path)
+            rendered = channel_read("dev", project_dir=tmp_path, limit=5, detail="min")
+            assert "Stromus" in rendered
+            assert "[human]" not in rendered

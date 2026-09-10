@@ -72,6 +72,7 @@ from synapt.recall.core import (
     project_transcript_dir,
     project_transcript_dirs,
     all_worktree_archive_dirs,
+    _gripspace_has_registered_repo,
     _is_real_user_message,
     _extract_user_text,
     _extract_assistant_content,
@@ -103,6 +104,90 @@ def _resolve_index_dir(args: argparse.Namespace) -> Path:
     if getattr(args, "out", None):
         return Path(args.out).expanduser()
     return project_index_dir()
+
+
+def _index_gripspace_root(index_dir: Path) -> Path | None:
+    """The workspace root implied by *index_dir*'s own canonical layout
+    (``<root>/.synapt/recall/index``). None if index_dir is not that shape --
+    a ``--index`` pointed at something else cannot be safely mapped back to a
+    root (same reasoning ``cold_no_caller_refresh`` already applies before it
+    will touch build.lock: its ``"custom_store"`` outcome)."""
+    resolved = index_dir.resolve()
+    parent = resolved.parent
+    if resolved.name == "index" and parent.name == "recall" and parent.parent.name == ".synapt":
+        return parent.parent.parent
+    return None
+
+
+def _refuse_if_index_disagrees_with_source(
+    args: argparse.Namespace, index_dir: Path, source_dir: Path
+) -> None:
+    """recall#1123: an ambient index_dir (no explicit ``--index``) resolved
+    via ``GRIPSPACE_ROOT``/``SYNAPT_RECALL_ROOT`` can point at a DIFFERENT
+    workspace than source_dir (cwd). Left unchecked, a caller that goes on
+    to rebuild (resume's cold no-caller path is the one that does) takes
+    THAT workspace's real build.lock and rebuilds ITS index using THIS
+    cwd's content: a cross-workspace index corruption, not merely a wrong
+    read.
+
+    v3 (Stromus's R2 on v2, m_4422aa09): a bare root-vs-root COMPARISON
+    refuses a shape that is legitimate BY DESIGN -- every real agent desk on
+    this host is a filesystem SIBLING of the team's shared GRIPSPACE_ROOT,
+    so ``source_root != index_root`` is true for every correctly-spawned
+    desk, not just for a poisoned one. The fix is a DISCRIMINATOR, not a
+    comparison: refuse only when source_dir's OWN gripspace is not itself
+    POPULATED (no registered repo), reusing recall#1124's
+    ``_gripspace_has_registered_repo`` -- the same signal that already
+    distinguishes a real ``gr spawn``/``gr repo add`` worktree from a
+    hand-built scratch dir for the marker-persistence half of this same
+    incident. A populated source proves this cwd was deliberately set up as
+    a desk; an unpopulated one is indistinguishable from the scratch dir a
+    stray env var poisoned in the original incident.
+
+    KNOWN LIMITATION, filed privately rather than detailed here: a
+    populated gripspace belonging to a DIFFERENT TEAM than the one
+    GRIPSPACE_ROOT names is not caught by this check -- "populated" only
+    proves SOME repo is registered, not that it is the SAME team's. Closing
+    that gap needs a registry signal this function does not have.
+
+    Refuses before anything can touch build.lock, printing both paths and
+    the fix. Skipped when ``--index`` was passed explicitly -- an explicit
+    override is a deliberate choice (``project_data_dir`` suppresses the
+    same env override the same way when project_dir is passed explicitly),
+    and it is also the fix this refusal points the caller at.
+    """
+    if getattr(args, "index", None):
+        return
+    index_root = _index_gripspace_root(index_dir)
+    if index_root is None:
+        return
+    source_root = project_data_dir(source_dir).parent.parent
+    if index_root.resolve() == source_root.resolve():
+        return
+    if _gripspace_has_registered_repo(source_root):
+        return
+    print(
+        "Error: index and source disagree on which workspace they belong to.",
+        file=sys.stderr,
+    )
+    # Resolved for printing, not just for the comparison above: source_root and
+    # index_root are already resolved (project_data_dir / _index_gripspace_root
+    # both call .resolve() internally), but the raw source_dir/index_dir
+    # arguments are not -- on Windows, an unresolved path can render in the
+    # short 8.3 form (RUNNER~1) while its resolved sibling renders long
+    # (runneradmin), so printing them unresolved beside their resolved roots
+    # made the two lines of the SAME error message use two different spellings
+    # of the same directory.
+    print(f"  source (cwd):     {source_dir.resolve()}  ->  workspace {source_root}", file=sys.stderr)
+    print(f"  index (ambient):  {index_dir.resolve()}  ->  workspace {index_root}", file=sys.stderr)
+    print(
+        "This usually means GRIPSPACE_ROOT or SYNAPT_RECALL_ROOT is set to a "
+        "different workspace than your current directory. Fix the environment "
+        "variable, or pass --index explicitly if you really mean to target "
+        "that store.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def _check_legacy_index() -> Path | None:
@@ -286,15 +371,23 @@ def _release_build_lock(fd: int) -> None:
 class ColdRefreshOutcome:
     """Result of a cold no-caller resume refresh, for the render label and tests.
 
-    ``reason`` is one of: ``refreshed`` (the incremental build advanced the
-    index), ``up_to_date`` (build ran, nothing to commit), ``lock_held`` (the
-    build lock was busy -- including a recall#1018 ghost lock -- so NOTHING was
-    built and the read never waited), ``no_source`` (no source to refresh from),
-    ``custom_store`` (a non-canonical ``--index`` this refresh cannot map to a
-    build root), ``error`` (ANY refresh failure -- source discovery, data-dir
-    resolution, lock acquisition, the build, or lock release; the read proceeds
-    on the stale index). The two cursor fields are the index build timestamps
-    before and after, so a reader can tell a freshened tail from a stale one.
+    ``reason`` is one of: ``queued_background`` (R3.1: the lock was free, so a
+    detached background process was spawned to do the incremental build; THIS
+    call never blocked on it and the render proceeds on the current, still-
+    possibly-stale index -- see ``cold_no_caller_refresh``'s docstring for why
+    the free-lock leg no longer builds inline), ``lock_held`` (the build lock
+    was busy -- including a recall#1018 ghost lock, or another background
+    catchup already spawned -- so no new one was queued and the read never
+    waited), ``no_source`` (no source to refresh from), ``custom_store`` (a
+    non-canonical ``--index`` this refresh cannot map to a build root),
+    ``error`` (ANY refresh failure -- source discovery, data-dir resolution,
+    lock acquisition, or lock release; the read proceeds on the stale index).
+    ``refreshed``/``up_to_date`` are retired reason values (pre-R3.1: the
+    free-lock leg built inline and could report them) kept only so old test
+    fixtures reading this docstring have somewhere to look; no code path
+    returns them anymore. The two cursor fields are the index build
+    timestamps before and after THIS call only -- for ``queued_background``
+    they are always equal, since nothing was built in this process.
     """
 
     attempted: bool
@@ -370,26 +463,66 @@ def _newest_source_file(project_dir: Path) -> Path | None:
     return newest
 
 
+# R3.1 (recall#435): the detached background build cold_no_caller_refresh spawns.
+# Mirrors the acquire/build/release sequence that USED to run inline in the
+# free-lock leg, byte-for-byte the same args to _archive_and_build_locked, just
+# moved into a process whose lifetime is independent of the resume call that
+# spawned it. sys.argv[1]/[2] are store_root/project_dir; a lock that is busy
+# by the time this actually runs (a race against another queued refresh) exits
+# quietly -- the caller who wins does the work, exactly like the old inline
+# non-blocking acquire behaved.
+_BACKGROUND_COLD_REFRESH_SCRIPT = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from synapt.recall.cli import (\n"
+    "    _acquire_build_lock, _release_build_lock, _archive_and_build_locked, project_data_dir,\n"
+    ")\n"
+    "store_root = Path(sys.argv[1])\n"
+    "project_dir = Path(sys.argv[2])\n"
+    "data_dir = project_data_dir(store_root)\n"
+    "fd = _acquire_build_lock(data_dir, timeout=0.0)\n"
+    "if fd is not None:\n"
+    "    try:\n"
+    "        _archive_and_build_locked(\n"
+    "            store_root, None, use_embeddings=False, incremental=True,\n"
+    "            chatgpt_archive=None, source_dir=project_dir, skip_clustering=True,\n"
+    "        )\n"
+    "    finally:\n"
+    "        _release_build_lock(fd)\n"
+)
+
+
 def cold_no_caller_refresh(project_dir: Path, index_dir: Path) -> ColdRefreshOutcome:
-    """Incrementally refresh the newest source before a cold, stale resume.
+    """Check whether the newest source can be refreshed, and QUEUE it -- never block.
 
     Contract (durable-checkpoint follow-on): the caller is resume, which has already
-    established there is NO caller session and the index is STALE. This tries to
-    make the tail fresher. It NEVER WAITS ON A HELD BUILD LOCK:
+    established there is NO caller session and the index is STALE. This NEVER WAITS
+    ON A HELD BUILD LOCK, and (R3.1, recall#435) never runs the build itself either:
 
       * try-acquire the build lock NON-BLOCKING (timeout 0). If it is held --
-        the recall#1018 ghost-lock case included -- return immediately having
-        built NOTHING, so resume falls back to the durable-checkpoint block.
-      * otherwise run the OSS incremental build (no embeddings) under that lock.
-        This build is SYNCHRONOUS: when the lock is free it runs inline and
-        delays the render by the incremental build's own duration. It never
-        waits on ANOTHER holder, but it is not free on the success path. It
-        reports the index build timestamp before and after so the render can
-        say what it refreshed.
+        the recall#1018 ghost-lock case included, or a background catchup this
+        function already queued a moment ago -- return immediately having
+        queued NOTHING new, so resume falls back to the durable-checkpoint block.
+      * otherwise release the lock immediately (it was only a probe: is anyone
+        already rebuilding?) and spawn a DETACHED background process that
+        re-acquires the lock itself and runs the exact same OSS incremental
+        build (no embeddings) this function used to run inline. This call
+        returns the instant the process is spawned -- it does not wait for it,
+        so it cannot cost the caller the build's own duration.
 
-    Never raises: EVERY failure in the refresh -- source discovery, data-dir
-    resolution, lock acquisition, the build, and lock release -- degrades to the
-    stale render, which is strictly what resume did before this existed.
+    Measured why this exists (Stromus, 2026-09-05, real 167,762-chunk store):
+    the OLD synchronous free-lock leg cost ~14 minutes of foreground wall time
+    on a real refire. An interactive `resume` blocking for 14 minutes on a
+    background maintenance operation is a correctness bug wearing a
+    freshness feature's clothes; the render must answer from the CURRENT
+    index within the interactive budget and let the rebuild catch up
+    independently of this process's lifetime. ``queued_background`` is
+    honest about this: the render is not fresher than it was before the
+    call, only headed there.
+
+    Never raises: EVERY failure in this check -- source discovery, data-dir
+    resolution, lock acquisition, or lock release -- degrades to the stale
+    render, which is strictly what resume did before this existed.
     """
     from synapt.recall.freshness import check_index_freshness
 
@@ -443,33 +576,34 @@ def cold_no_caller_refresh(project_dir: Path, index_dir: Path) -> ColdRefreshOut
         return ColdRefreshOutcome(True, False, source.name, before, before, "error")
     if lock_fd is None:
         # Ghost-lock control: the lock is held (possibly by a dead holder,
-        # recall#1018). Build nothing, wait for nothing; the caller renders the
-        # durable-checkpoint block and only that.
+        # recall#1018, or a background catchup this function itself already
+        # queued a moment ago). Queue nothing new, wait for nothing; the
+        # caller renders the durable-checkpoint block and only that.
         return ColdRefreshOutcome(True, False, source.name, before, before, "lock_held")
+    # The lock was free at this instant -- that is all this probe establishes.
+    # Release it immediately rather than holding it across a spawn (a lock
+    # held by THIS process while a background process starts under it would
+    # make the child's own acquire race pointlessly against its own parent).
     try:
-        _archive_and_build_locked(
-            store_root, None, use_embeddings=False, incremental=True, chatgpt_archive=None,
-            source_dir=project_dir,
+        _release_build_lock(lock_fd)
+    except OSError:
+        pass
+    # recall#1123 hardening, preserved: name both paths on every cold rebuild,
+    # even the (only) case that reaches here today -- store and source already
+    # agree. cmd_resume's own refusal only guards ITS ambient resolution; a
+    # future caller of cold_no_caller_refresh that skips that guard, or a bug
+    # that narrows the guard's scope, still leaves a legible trail of which
+    # store was queued to rebuild from which source, rather than silence
+    # either way.
+    print(f"[resume] queuing background refresh of store {store_root} from source {project_dir}", file=sys.stderr)
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", _BACKGROUND_COLD_REFRESH_SCRIPT, str(store_root), str(project_dir)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
-    except Exception:
+    except OSError:
         return ColdRefreshOutcome(True, False, source.name, before, before, "error")
-    finally:
-        # Releasing the lock can itself raise OSError (a closed/invalid fd, an
-        # unlink on a vanished lock file). In a finally it would OVERRIDE the
-        # outcome above: a release failure after a successful build is still a
-        # successful refresh, and after a build error is still that build error.
-        # Swallow it to the same non-raising contract this function promises.
-        try:
-            _release_build_lock(lock_fd)
-        except OSError:
-            pass
-
-    after = _build_ts()
-    refreshed = bool(after) and after != before
-    return ColdRefreshOutcome(
-        True, refreshed, source.name, before, after,
-        "refreshed" if refreshed else "up_to_date",
-    )
+    return ColdRefreshOutcome(True, False, source.name, before, before, "queued_background")
 
 
 def _build_journal_files(project_dir: Path) -> list[Path]:
@@ -501,6 +635,7 @@ def _archive_and_build(
     incremental: bool = False,
     chatgpt_archive: str | None = None,
     progress: Callable[[str], None] | None = None,
+    skip_clustering: bool = False,
 ) -> TranscriptIndex | None:
     """Archive transcripts and build the index. Shared by build/rebuild/setup.
 
@@ -509,6 +644,20 @@ def _archive_and_build(
 
     1. Archive transcripts from Claude Code source dir -> .synapt/recall/transcripts/
     2. Build index from archive (not directly from ~/.claude/)
+
+    *skip_clustering*: recall#435. Full-corpus topic clustering (cluster_chunks
+    over every transcript-only chunk, not just what this build added) is O(total
+    store size), not O(what changed) -- on a ~168k-chunk store it is the single
+    most expensive phase of a build and has OOM-killed two independent processes
+    doing it (2026-09-05, this store). Defaults to False so every existing
+    explicit build/rebuild/setup caller is unchanged; the one caller that sets it
+    True is cold_no_caller_refresh's silent, automatic rebuild during a bare
+    resume, which per Layne's 2026-08-25 ruling on recall#435 must return in
+    seconds, not race a background clustering pass to an OOM. Clustering moves to
+    a separate maintenance operation (follow-on; the nightly runner is the named
+    home), not gone -- a build made with this set simply leaves new chunks
+    unclustered until that maintenance op next runs, same tradeoff `maintain`'s
+    own LLM-upgrade summaries already accept for the same reason.
 
     Returns the final TranscriptIndex, or None if no chunks found.
     """
@@ -525,7 +674,7 @@ def _archive_and_build(
     try:
         return _archive_and_build_locked(
             project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
-            progress,
+            progress, skip_clustering=skip_clustering,
         )
     finally:
         _release_build_lock(lock_fd)
@@ -539,6 +688,7 @@ def _archive_and_build_locked(
     chatgpt_archive: str | None,
     progress: Callable[[str], None] | None = None,
     source_dir: Path | None = None,
+    skip_clustering: bool = False,
 ) -> TranscriptIndex | None:
     """Inner build logic — caller must hold the build lock.
 
@@ -550,6 +700,8 @@ def _archive_and_build_locked(
     a cold no-caller resume, where the source is cwd but the store must be the
     GRIPSPACE_ROOT one the load reads, never a cwd-derived secondary store
     (this change's R2 (Atlas)).
+
+    *skip_clustering*: see _archive_and_build's docstring (recall#435).
     """
     import time as _time
 
@@ -893,13 +1045,33 @@ def _archive_and_build_locked(
     final_index.save(index_dir)
     logger.info("build: FTS5 save complete in %.1fs", _time.monotonic() - save_t0)
 
-    # Cluster chunks by topic similarity
-    if progress:
-        progress("clustering")
-    logger.info("build: clustering %d transcript chunks...", sum(1 for c in deduped if c.turn_index >= 0))
-    from synapt.recall.clustering import cluster_chunks as _cluster_chunks, generate_concat_summary
+    # Cluster chunks by topic similarity. recall#435: full-corpus, O(store
+    # size) not O(what changed) -- skipped for the automatic, silent rebuild
+    # a bare resume triggers (cold_no_caller_refresh), which must return in
+    # seconds. New chunks stay unclustered until the next build that does not
+    # skip this (an explicit `synapt build`/`rebuild`, or the follow-on
+    # maintenance operation) -- named tradeoff, not a silent gap: transcript_only
+    # is still computed below (Phase 10 auto-tagging reads it), just not passed
+    # through cluster_chunks.
     transcript_only = [c for c in deduped if c.turn_index >= 0]
-    if transcript_only:
+    if skip_clustering:
+        if progress:
+            progress("clustering_skipped")
+        logger.info(
+            "build: skipping full-corpus clustering (recall#435) -- %d transcript "
+            "chunks stay unclustered until the next non-skipping build",
+            sum(1 for c in transcript_only),
+        )
+        print(
+            f"  Clusters: skipped ({len(transcript_only)} chunks unclustered until "
+            "the next full build/maintenance pass, recall#435)"
+        )
+    if progress and not skip_clustering:
+        progress("clustering")
+    if not skip_clustering:
+        logger.info("build: clustering %d transcript chunks...", sum(1 for c in transcript_only))
+    from synapt.recall.clustering import cluster_chunks as _cluster_chunks, generate_concat_summary
+    if not skip_clustering and transcript_only:
         clusters = _cluster_chunks(transcript_only)
         if clusters:
             # Build chunk ID → TranscriptChunk lookup for summary generation
@@ -928,7 +1100,7 @@ def _archive_and_build_locked(
                     joined = joined[:4000].rsplit(" ", 1)[0]
                 cl["search_text"] = joined
 
-            db.save_clusters(clusters, memberships)
+            clusters_receipt = db.save_clusters(clusters, memberships)
             # Pre-generate concat summaries at build time (read path stays pure).
             # Skip clusters that already have LLM summaries (preserved across rebuilds).
             llm_cluster_ids = {
@@ -945,7 +1117,11 @@ def _archive_and_build_locked(
                     summary = generate_concat_summary(member_chunks, max_tokens=200)
                     if summary:
                         db.save_cluster_summary(cl["cluster_id"], summary)
-            print(f"  Clusters: {len(clusters)} topic clusters from {sum(c['chunk_count'] for c in clusters)} chunks")
+            clusters_line = f"  Clusters: {len(clusters)} topic clusters from {sum(c['chunk_count'] for c in clusters)} chunks"
+            dangling_removed = clusters_receipt.get("dangling_removed", 0)
+            if dangling_removed:
+                clusters_line += f" ({dangling_removed} dangling row(s) removed)"
+            print(clusters_line)
         else:
             print("  Clusters: none (chunks may not be related enough)")
 
@@ -1292,9 +1468,34 @@ def cmd_split(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _configure_codex_cwd_cache(index_dir: Path) -> None:
+    """Arm the process-wide Codex session-cwd cache (recall#1125) for
+    *index_dir* and guarantee it flushes at exit.
+
+    Shared by every command whose call graph can reach
+    ``list_codex_transcripts``/``caller_transcripts`` — a top-level command
+    that reads Codex sessions without arming this cache pays the unscoped
+    machine-wide scan cost the cache exists to avoid every single call,
+    exactly as resume did before recall#1125's first fix. ``atexit`` covers
+    early ``sys.exit`` paths the same way it does in ``cmd_resume``.
+    """
+    import atexit
+
+    from synapt.recall.codex import configure_cwd_cache, flush_cwd_cache
+
+    configure_cwd_cache(index_dir)
+    atexit.register(flush_cwd_cache)
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     """Build a transcript index from local files, HuggingFace, or ChatGPT."""
     project = Path.cwd().resolve()
+    index_dir = project_index_dir(project)
+    # recall#1123 hardening: index_dir is derived FROM project here, so this
+    # can only fire if a future change gives cmd_build its own ambient
+    # index resolution -- an invariant assertion, not a live guard today.
+    _refuse_if_index_disagrees_with_source(args, index_dir, project)
+    _configure_codex_cwd_cache(index_dir)
     use_emb = not args.no_embeddings
 
     # Re-scrub archives if requested
@@ -1375,6 +1576,20 @@ def cmd_build(args: argparse.Namespace) -> None:
     if stats.get("date_range"):
         print(f"  Date range: {stats['date_range']['earliest'][:10]} -> {stats['date_range']['latest'][:10]}")
     print(f"  Saved to: {project_index_dir()}")
+
+
+def cmd_code(args: argparse.Namespace) -> None:
+    """Code symbols plus team memory for one plain-language query."""
+    from synapt.recall.server import recall_code
+
+    print(
+        recall_code(
+            args.query,
+            repo_root=args.repo_root,
+            max_symbols=args.max_symbols,
+            max_chunks=args.max_chunks,
+        )
+    )
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -1695,10 +1910,12 @@ def cmd_sessions(args: argparse.Namespace) -> None:
 def cmd_resume(args: argparse.Namespace) -> None:
     """Print the tail of a session so a fresh session can pick up where it stopped.
 
-    Three outcomes are kept distinguishable because they have different fixes:
-    no index at all (exit 1 — build one), an index with no sessions (exit 0 —
-    nothing to resume), and a session id that does not resolve (exit 1 — the
-    request was wrong). Collapsing them would send the reader down the wrong path.
+    Four outcomes are kept distinguishable because they have different fixes:
+    index and source disagree on which workspace they belong to (exit 1 —
+    fix the environment or pass --index), no index at all (exit 1 — build
+    one), an index with no sessions (exit 0 — nothing to resume), and a
+    session id that does not resolve (exit 1 — the request was wrong).
+    Collapsing them would send the reader down the wrong path.
     """
     from synapt.recall.journal import _journal_path
     from synapt.recall.resume import (
@@ -1711,6 +1928,9 @@ def cmd_resume(args: argparse.Namespace) -> None:
     from synapt.recall.sharding import is_sharded
 
     index_dir = _resolve_index_dir(args)
+    project = getattr(args, "project", None) or Path.cwd()
+    _refuse_if_index_disagrees_with_source(args, index_dir, project)
+
     if (
         not (index_dir / "recall.db").exists()
         and not (index_dir / "chunks.jsonl").exists()
@@ -1720,7 +1940,14 @@ def cmd_resume(args: argparse.Namespace) -> None:
         print("Run 'synapt recall build' or 'synapt init' first.", file=sys.stderr)
         sys.exit(1)
 
-    project = getattr(args, "project", None) or Path.cwd()
+    # recall#1125: every caller of _session_cwd (this function's own loop
+    # below, plus every list_codex_transcripts caller reached through the
+    # freshness check and the cold-path archive) shares one process-wide
+    # cache keyed off this index_dir, so a resume that opens a Codex rollout
+    # file once does not reopen it on the next call as long as it is
+    # unchanged.
+    _configure_codex_cwd_cache(index_dir)
+
     caller_sources = caller_transcripts(project)
 
     # Cold no-caller refresh (durable-checkpoint follow-on): on a cold cross-runtime
@@ -1732,6 +1959,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     # stale render plus the durable-checkpoint block. A free-lock build
     # runs synchronously and delays the render by its own (no-embeddings) duration.
     refresh_label = None
+    background_catchup_label = None
     cold_freshness = None  # source-aware verdict carried into _attach_freshness
     if not caller_sources:
         from synapt.recall.freshness import check_index_freshness
@@ -1758,6 +1986,18 @@ def cmd_resume(args: argparse.Namespace) -> None:
                 refresh_label = (
                     f"source {outcome.source}, index "
                     f"{outcome.cursor_before or '(unrecorded)'} → {outcome.cursor_after}"
+                )
+            elif outcome.reason == "queued_background":
+                # R3.1: a bare resume never blocks on the incremental rebuild
+                # anymore (recall#435 -- 14 minutes of foreground wall on the
+                # real 167,762-chunk store). Say honestly that THIS render is
+                # still the pre-catchup index, and how far behind it is, so a
+                # stale answer is a labeled one, not a silent one.
+                stale_count = len(cold_freshness.new_files) + len(cold_freshness.changed_files)
+                background_catchup_label = (
+                    f"{stale_count} source file(s) behind "
+                    f"(source {outcome.source}) -- incremental rebuild queued in the "
+                    "background, not waited on; this render is the pre-catchup index"
                 )
             # Carry the verdict so the later cheap _attach_freshness cannot erase a
             # known-stale state. After a build ran (refreshed / up_to_date)
@@ -1822,6 +2062,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
     view = attach_durable_checkpoint(view, _journal_path())
     view.refresh_label = refresh_label
+    view.background_catchup_label = background_catchup_label
 
     # The MCP recall_resume tool wraps its output with the
     # query-time freshness line (server.py:_query_freshness_line /
@@ -1919,6 +2160,8 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     if not project_transcript_dirs(project):
         return
 
+    _configure_codex_cwd_cache(project_index_dir(project))
+
     final_index = _archive_and_build(
         project,
         use_embeddings=False,
@@ -1977,6 +2220,7 @@ def cmd_rescrub(args: argparse.Namespace) -> None:
     print(f"[rescrub] Scrubbed {total} archived transcript(s)")
 
     if not args.no_rebuild:
+        _configure_codex_cwd_cache(project_index_dir(project))
         print("[rescrub] Rebuilding index from scrubbed transcripts ...")
         use_emb = not getattr(args, "no_embeddings", False)
         final_index = _archive_and_build(
@@ -3452,6 +3696,13 @@ def cmd_hook(args: argparse.Namespace) -> None:
         # Rebuild with sync
         project = Path.cwd().resolve()
         if project_transcript_dirs(project):
+            precompact_index_dir = project_index_dir(project)
+            # recall#1123 hardening: same invariant assertion as cmd_build --
+            # index_dir is derived FROM project here, so a live refusal would
+            # mean a future change gave this branch its own ambient index
+            # resolution.
+            _refuse_if_index_disagrees_with_source(args, precompact_index_dir, project)
+            _configure_codex_cwd_cache(precompact_index_dir)
             final_index = _archive_and_build(project, use_embeddings=False, incremental=True)
             if final_index:
                 stats = final_index.stats()
@@ -3546,6 +3797,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
     )
 
     project = Path.cwd().resolve()
+    _configure_codex_cwd_cache(project_index_dir(project))
     print(f"[setup] Project: {project}")
     print()
 
@@ -3934,11 +4186,47 @@ def cmd_maintain(args: argparse.Namespace) -> None:
             "  AND cs.cluster_id IS NULL",
             (min_chunks,),
         ).fetchone()[0]
+        recluster_receipt = None
+        recluster_refuse_above = None
+        if getattr(args, "recluster", False):
+            batch_size = args.recluster_batch or clustering.DEFAULT_RECLUSTER_BATCH
+            recluster_refuse_above = (
+                args.recluster_refuse_above
+                if args.recluster_refuse_above is not None
+                else clustering.DEFAULT_RECLUSTER_REFUSE_ABOVE
+            )
+            recluster_receipt = clustering.recluster_stale_chunks(
+                db, batch_size=batch_size,
+                merge_into_existing=getattr(args, "recluster_merge", False),
+                refuse_above=recluster_refuse_above,
+            )
     finally:
         db.close()
 
     print(f"maintain: upgraded {upgraded} cluster summar{'y' if upgraded == 1 else 'ies'}")
     print(f"  {remaining} remaining above the {min_chunks}-chunk threshold")
+
+    if recluster_receipt is not None:
+        r = recluster_receipt
+        if r["refused"]:
+            print(
+                f"  Recluster: REFUSED -- {r['total_stale_at_start']} stale chunks "
+                f"exceeds the safety ceiling ({recluster_refuse_above}; raise it with "
+                f"--recluster-refuse-above N). {r['drain_command']}"
+            )
+        else:
+            print(
+                f"  Recluster: {r['batches_run']} batch(es), "
+                f"{r['fresh_in_batch']} fresh + {r['fallback_in_batch']} fallback "
+                f"in the batch, {r['chunks_clustered']} chunk(s) clustered this run "
+                f"({r.get('merged_into_existing', 0)} merged into existing clusters, "
+                f"{r.get('floor_refused', 0)} refused below the candidate-overlap floor, "
+                f"{r.get('ref_disjoint_refused', 0)} refused on disjoint issue/PR citations, "
+                f"{r.get('merge_cluster_vanished', 0)} refused on a cluster a concurrent "
+                f"rebuild removed), "
+                f"{r['still_stale']} still stale"
+                + (f". {r['drain_command']}" if r["drain_command"] else ".")
+            )
 
 
 def cmd_catchup(args: argparse.Namespace) -> None:
@@ -4088,6 +4376,14 @@ def make_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--profile", action="store_true", help="Show per-phase timing breakdown")
 
     # Benchmark
+    code_parser = subparsers.add_parser(
+        "code", help="Where is this defined, and what did the team say about it (code index + memory)"
+    )
+    code_parser.add_argument("query", help="Plain-language question or a symbol name")
+    code_parser.add_argument("--repo-root", default=None, help="Repository to index and search (default: cwd)")
+    code_parser.add_argument("--max-symbols", type=int, default=5)
+    code_parser.add_argument("--max-chunks", type=int, default=3)
+
     benchmark_parser = subparsers.add_parser("benchmark", help="Run search pipeline benchmarks")
     benchmark_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
     benchmark_parser.add_argument("--json", dest="json_output", action="store_true", help="Output results as JSON")
@@ -4303,6 +4599,36 @@ def make_parser() -> argparse.ArgumentParser:
              "default on purpose: an unbounded grind is what this command exists "
              "to replace.",
     )
+    maintain_parser.add_argument(
+        "--recluster", action="store_true",
+        help="recall#435 follow-on: cluster the oldest bounded batch of "
+             "transcript chunks a skip_clustering build left stale. Default off.",
+    )
+    maintain_parser.add_argument(
+        "--recluster-batch", type=int, default=None,
+        help="Stale chunks to cluster this run (default: "
+             "clustering.DEFAULT_RECLUSTER_BATCH). Bounded on purpose -- this "
+             "is what keeps --recluster from repeating recall#435's OOM.",
+    )
+    maintain_parser.add_argument(
+        "--recluster-merge", action="store_true",
+        help="With --recluster, let a stale chunk join an EXISTING cluster "
+             "(asymmetric containment of the cluster's persisted top-64 "
+             "token signature in the chunk's own tokens, cheap) before "
+             "self-batch clustering runs, instead of only ever forming new "
+             "clusters from same-batch matches. Default off.",
+    )
+    maintain_parser.add_argument(
+        "--recluster-refuse-above", type=int, default=None,
+        help="Raise the runaway-backlog ceiling (default: "
+             "clustering.DEFAULT_RECLUSTER_REFUSE_ABOVE). The ceiling is a "
+             "first-estimate guard against an unbounded grind, not a measured "
+             "memory-safety property -- a total-stale backlog above the "
+             "default can be a legitimate one-time event (e.g. a fleet-wide "
+             "catchup after an outage) rather than something wrong. Raise it "
+             "deliberately per run; the default is unchanged for every other "
+             "caller.",
+    )
 
     migrate_parser = subparsers.add_parser(
         "migrate",
@@ -4348,6 +4674,8 @@ def main():
         cmd_build(args)
     elif args.command == "split":
         cmd_split(args)
+    elif args.command == "code":
+        cmd_code(args)
     elif args.command == "search":
         cmd_search(args)
     elif args.command == "benchmark":
