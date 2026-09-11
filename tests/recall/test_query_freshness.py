@@ -1174,3 +1174,36 @@ def test_successful_refresh_invalidates_the_server_cache(monkeypatch, tmp_path):
 
     assert line.startswith("Freshness: REFRESHED")
     assert invalidations == ["invalidated"]
+
+
+def test_current_session_freshness_line_names_packed_segments(tmp_path, monkeypatch):
+    """When the caller's already-CURRENT session has a sealed pack segment,
+    the freshness line names it; an unpacked CURRENT session carries no
+    packed= token at all (not packed=0)."""
+    from synapt.recall import transcript_pack as tp
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "already indexed", "nothing new", 20)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+
+    # first pass indexes it fully; second pass is CURRENT with nothing to do
+    refresh_current_session(index_dir, tmp_path, policy=_policy())
+    unpacked = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert unpacked.state is QueryFreshnessState.CURRENT
+    assert unpacked.packed_segments == 0
+    assert "packed=" not in format_query_freshness(unpacked)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / f"{SESSION}.jsonl").write_text(transcript.read_text())
+    tp.seal_closed_sessions(project_dir, index_dir)
+
+    packed = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert packed.state is QueryFreshnessState.CURRENT
+    assert packed.packed_segments == 1
+    assert "packed=1 segments" in format_query_freshness(packed)

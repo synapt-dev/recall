@@ -60,10 +60,23 @@ class QueryFreshnessResult:
     wall_seconds: float = 0.0
     cut_short: bool = False
     reason: str = ""
+    packed_segments: int = 0
 
 
 def _source_key(source: CallerTranscript) -> str:
     return query_tail_source_key(source.session_id, source.path)
+
+
+def _packed_segment_count(index_dir: Path, session_id: str) -> int:
+    """How many pack segments this session has (0 or 1 for a closed session
+    sealed in one piece; a future live-session slicer could raise this).
+    Never raises -- a missing or unreadable pack idx just means 0."""
+    try:
+        from synapt.recall.transcript_pack import session_pack_row
+
+        return 1 if session_pack_row(index_dir, session_id) is not None else 0
+    except Exception:
+        return 0
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -307,6 +320,7 @@ def refresh_current_session(
                 index_changed=index_changed,
                 remaining_bytes=0,
                 wall_seconds=time.monotonic() - started,
+                packed_segments=_packed_segment_count(index_dir, source.session_id),
             )
 
         gap = live_size - observed
@@ -887,6 +901,8 @@ def format_query_freshness(result: QueryFreshnessResult) -> str:
             f"cut_short={'true' if result.cut_short else 'false'}",
         ]
     )
+    if result.packed_segments:
+        parts.append(f"packed={result.packed_segments} segments")
     if result.reason:
         parts.append(f"reason={result.reason}")
     return " ".join(parts)

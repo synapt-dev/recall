@@ -1788,6 +1788,66 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         print(f"  Total queries: {len(queries) * iterations}")
 
 
+def cmd_pack(args: argparse.Namespace) -> None:
+    """Seal every CLOSED transcript session of the current project into a
+    content-addressed pack + idx under the index. Loose bytes are never
+    truncated or deleted -- a pack is an additional, verifiable receipt."""
+    from synapt.recall import transcript_pack as tp
+    from synapt.recall.core import project_transcript_dir
+
+    index_dir = _resolve_index_dir(args)
+
+    # --verify only ever reads the existing pack + idx under index_dir; it
+    # has no dependency on a project transcript directory, so the project-dir
+    # resolution below (and its "no transcript directory" refusal) must not
+    # run first -- a caller re-verifying an index from a cwd with no
+    # transcripts of its own must not be refused before verification starts.
+    if getattr(args, "verify", False):
+        result = tp.verify_pack(index_dir)
+        for session_id in result.ok:
+            print(f"verify {session_id[:8]} OK")
+        for session_id in result.sha_mismatch:
+            print(f"verify {session_id[:8]} SHA_MISMATCH", file=sys.stderr)
+        for session_id in result.length_mismatch:
+            print(f"verify {session_id[:8]} LENGTH_MISMATCH", file=sys.stderr)
+        for session_id in result.boundary_violation:
+            print(f"verify {session_id[:8]} BOUNDARY_VIOLATION", file=sys.stderr)
+        print(f"Verified {len(result.ok)} OK, {len(result.sha_mismatch) + len(result.length_mismatch) + len(result.boundary_violation)} failed.")
+        if not result.all_ok:
+            sys.exit(1)
+        return
+
+    project_dir = project_transcript_dir(Path.cwd())
+    if project_dir is None or not project_dir.exists():
+        print("Error: no transcript directory found for this project", file=sys.stderr)
+        sys.exit(1)
+
+    # The runtime that invoked this command names itself in its env (same
+    # convention as cmd_startup): without it the seal cannot exclude the
+    # live, still-growing transcript.
+    current_session_id = (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CODEX_THREAD_ID")
+        or os.environ.get("SYNAPT_SESSION_ID")
+        or None
+    )
+
+    result = tp.seal_closed_sessions(project_dir, index_dir, live_session_id=current_session_id)
+    for receipt in result.receipts:
+        print(tp.format_seal_receipt(receipt))
+    if result.skipped_already_packed:
+        print(f"skipped {len(result.skipped_already_packed)} already-packed session(s)")
+    print(
+        f"Sealed {result.sealed_count} session(s): "
+        f"{result.total_raw_bytes:,} bytes -> {result.total_compressed_bytes:,} compressed."
+    )
+    failed = [r for r in result.receipts if not r.verified]
+    if failed:
+        for r in failed:
+            print(f"seal {r.session_id[:8]} verify=FAILED", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show index statistics."""
     from synapt.recall.sharding import is_sharded
@@ -4390,6 +4450,15 @@ def make_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument("--queries", default=None, help="Semicolon-separated queries (default: built-in set)")
     benchmark_parser.add_argument("--iterations", type=int, default=5, help="Iterations per query (default: 5)")
 
+    # Pack
+    pack_parser = subparsers.add_parser(
+        "pack", help="Seal closed transcript sessions into a content-addressed pack + idx"
+    )
+    pack_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
+    pack_parser.add_argument(
+        "--verify", action="store_true", help="Re-verify every existing packed segment instead of sealing"
+    )
+
     # Stats
     stats_parser = subparsers.add_parser("stats", help="Show index statistics")
     stats_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
@@ -4680,6 +4749,8 @@ def main():
         cmd_search(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
+    elif args.command == "pack":
+        cmd_pack(args)
     elif args.command == "stats":
         cmd_stats(args)
     elif args.command == "sessions":
