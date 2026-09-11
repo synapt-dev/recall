@@ -61,12 +61,34 @@ _CANDIDATE_POOL_PER_TOKEN = 100
 # one indexed SQLite query per token and is still bounded.
 
 
-def _stem(word: str) -> str:
+def _stem(word: str, *, bare_e: bool = False) -> str:
     """Fold the plainest English inflections so a question's "acquired" can
     meet a symbol's "acquire" and "indexes" can meet "index". Deliberately
     tiny: strip one of ed / es / s / ing when at least four letters remain.
-    Not a stemmer; a coverage aid that never widens below four characters."""
-    for suffix in ("ing", "ed", "es", "s"):
+    Not a stemmer; a coverage aid that never widens below four characters.
+
+    ``bare_e=True`` also strips a lone trailing "e" (checked last, lowest
+    priority), closing an asymmetry measured 2026-09-11 on a real query
+    against this repo's own code: "merges"/"merged"/"merging" already
+    stemmed to "merg" under the other four rules, but bare "merge" stemmed
+    to itself, since a lone trailing "e" matched none of them. That left a
+    symbol's own present-tense name unable to meet the query's inflected
+    form of the same word (merge vs merged, score vs scored, tokenize vs
+    tokenized) while every OTHER inflection of the same word already
+    converged -- an inconsistency in ``name_match_ratio``'s WORD-LEVEL
+    equality comparison, not a new capability.
+
+    Default False, and callers feeding ``token_coverage``'s SUBSTRING
+    check (find_symbols' own tokens, and the coverage word list in
+    ``recall_code``) must stay at the default: measured the same day,
+    turning "state" into "stat" made it a substring of the unrelated
+    symbol "stats" ("where is session state saved" ranked stats/stats/
+    stats/stats ahead of every real session_* symbol) -- a false
+    substring collision that widening the STEM never causes for a
+    word-level equality check, only for a substring-containment one. Only
+    ``_name_match_ratio`` (and the query-word set built for it) opts in."""
+    suffixes = ("ing", "ed", "es", "s", "e") if bare_e else ("ing", "ed", "es", "s")
+    for suffix in suffixes:
         if word.endswith(suffix) and len(word) - len(suffix) >= 4:
             return word[: -len(suffix)]
     return word
@@ -225,7 +247,7 @@ def _name_match_ratio(name: str, query_words: set) -> float:
     production symbol outrank a long incidental match without touching
     token_coverage's own well-justified role as the primary signal (design
     history above: "coverage ranks first")."""
-    words = [_stem(w) for w in _name_words(name) if w not in _STOPWORDS]
+    words = [_stem(w, bare_e=True) for w in _name_words(name) if w not in _STOPWORDS]
     if not words:
         return 0.0
     covered = sum(1 for w in words if w in query_words)
@@ -324,7 +346,7 @@ def recall_code(
     # so name_match_ratio needs the QUERY split at the same word-level
     # granularity as the symbol side.
     query_words_set = {
-        _stem(w) for w in _name_words(query) if w not in _STOPWORDS
+        _stem(w, bare_e=True) for w in _name_words(query) if w not in _STOPWORDS
     }
     by_key: dict[tuple[str, str, int], dict] = {}
     for token in _identifier_tokens(query):
