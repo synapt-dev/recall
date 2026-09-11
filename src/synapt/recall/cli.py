@@ -1797,6 +1797,40 @@ def cmd_pack(args: argparse.Namespace) -> None:
 
     index_dir = _resolve_index_dir(args)
 
+    # push/fetch, like --verify, only ever touch index_dir and (for push) the
+    # remote directory -- neither needs a project transcript directory, so
+    # this must run before that resolution too.
+    verb = getattr(args, "verb", None)
+    if verb in ("push", "fetch"):
+        from synapt.recall import transcript_pack_origin as tpo
+
+        remote = getattr(args, "remote", None)
+        if not remote:
+            print(f"Error: pack {verb} needs a remote directory argument", file=sys.stderr)
+            sys.exit(2)
+        remote_dir = Path(remote)
+        if verb == "push":
+            result = tpo.push_to_remote(index_dir, remote_dir)
+            for sha in result.transferred:
+                print(f"push {sha[:12]}")
+            print(
+                f"pushed {result.transferred_count} segment(s) to {remote_dir}; "
+                f"{len(result.already_present)} already present"
+            )
+        else:
+            try:
+                result = tpo.fetch_from_remote(remote_dir, index_dir)
+            except (tpo.RemoteSegmentCorrupt, tpo.RemoteNotFound) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            for sha in result.transferred:
+                print(f"fetch {sha[:12]}")
+            print(
+                f"fetched {result.transferred_count} segment(s) from {remote_dir}; "
+                f"{len(result.already_present)} already present"
+            )
+        return
+
     # --verify only ever reads the existing pack + idx under index_dir; it
     # has no dependency on a project transcript directory, so the project-dir
     # resolution below (and its "no transcript directory" refusal) must not
@@ -4457,6 +4491,14 @@ def make_parser() -> argparse.ArgumentParser:
     pack_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
     pack_parser.add_argument(
         "--verify", action="store_true", help="Re-verify every existing packed segment instead of sealing"
+    )
+    pack_parser.add_argument(
+        "verb", nargs="?", default=None, choices=["push", "fetch"],
+        help="push to or fetch from a directory remote instead of sealing/verifying",
+    )
+    pack_parser.add_argument(
+        "remote", nargs="?", default=None,
+        help="directory remote path, required with push/fetch",
     )
 
     # Stats

@@ -1,6 +1,6 @@
 """Seal CLOSED transcript sessions of a project dir into a content-addressed
-pack + idx under the store, per design/transcript-packfiles-2026-09-11.md's
-working-first proof (steps 1-3), promoted to a shipped verb.
+pack + idx under the store, per the packfile design's working-first proof
+(steps 1-3), promoted to a shipped verb.
 
 No dictionary, no blob dedupe, no live-session slicing -- the same scope as
 the proof. Loose bytes are NEVER truncated or deleted by this module; a pack
