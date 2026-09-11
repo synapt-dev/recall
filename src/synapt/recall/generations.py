@@ -38,6 +38,29 @@ GENERATIONS_DIRNAME = "generations"
 CURRENT_FILENAME = "CURRENT"
 
 
+def _atomic_replace_with_retry(
+    src, dst, *, attempts: int = 10, base_delay: float = 0.01, max_delay: float = 0.2
+) -> None:
+    """``os.replace(src, dst)`` with a bounded retry on Windows PermissionError.
+
+    On Windows (``os.name == "nt"``) a concurrent handle on *dst* -- a reader,
+    or a second writer holding CURRENT open -- makes the replace fail with
+    access-denied (WinError 5); POSIX ``rename`` has no such constraint
+    (seen as ``WinError 5`` in CI on the ``.CURRENT.tmp -> CURRENT``
+    switch). Retry with capped exponential backoff, then re-raise so a
+    genuinely stuck switch fails LOUDLY -- never a silent skip. On POSIX a
+    PermissionError is a real permission problem and is raised at once.
+    """
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or i == attempts - 1:
+                raise
+            time.sleep(min(base_delay * (2 ** i), max_delay))
+
+
 def generations_root(index_dir: Path) -> Path:
     """Directory holding every generation, published or orphaned."""
     return index_dir / GENERATIONS_DIRNAME
@@ -191,7 +214,9 @@ def publish_generation(
         tmp_path = index_dir / f".{CURRENT_FILENAME}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         tmp_path.write_text(new_name, encoding="utf-8")
         try:
-            os.replace(tmp_path, current_path)  # atomic: same dir, same filesystem
+            # atomic: same dir, same filesystem; Windows-retry on the open-handle
+            # race so a reader holding CURRENT does not fail the switch.
+            _atomic_replace_with_retry(tmp_path, current_path)
         except OSError:
             tmp_path.unlink(missing_ok=True)
             raise
