@@ -808,38 +808,56 @@ def recall_code(
     Args:
         query: Plain-language question or a symbol name.
         repo_root: Repository to index and search. Defaults to the current
-            working directory.
+            working directory -- which, for an MCP server whose cwd is a
+            gripspace root (every live caller on this host), IS a
+            multi-repo container: the call refuses and names the member
+            repos rather than silently merging them. Pass repo_root
+            pointing at one specific repo instead.
         max_symbols: Maximum code symbols to return.
         max_chunks: Maximum memory chunks to return.
     """
-    from synapt.recall.code_index import index_repo
+    from synapt.recall.code_index import SKIP_DIRS, index_repo
     from synapt.recall.code_search import recall_code as _recall_code
 
     root = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
     if not root.is_dir():
         return f"Repo root not found: {root}"
     # An ambiguous root -- not itself a git repo, and containing more than
-    # one sibling repo as a direct child -- must never be walked and
-    # indexed as one undifferentiated tree. That merges every sibling
+    # one member repo ANYWHERE below it -- must never be walked and
+    # indexed as one undifferentiated tree. That merges every member
     # repo's symbols under one "repo" tag: any query becomes answerable
-    # from any sibling (a synapt question answered from a client checkout,
+    # from any member (a synapt question answered from a client checkout,
     # or a gitgrip Rust file), and the tag itself is unstable across calls
     # whose effective root varies, which defeats the content-hash re-index
-    # cache -- the same root cause underlies both symptoms. The check uses
-    # only the same OSS-visible signal core._gripspace_has_registered_repo
-    # already reads for the same class of question (a direct child with
-    # its own .git) -- never a gr2 manifest, which stays premium.
+    # cache -- the same root cause underlies both symptoms. The walk below
+    # mirrors index_repo's own (same SKIP_DIRS, so a repo hidden inside a
+    # vendor tree never counted for indexing doesn't count for ambiguity
+    # either) and stops as soon as a second member repo is found -- the
+    # question is only ever "one or more than one," never a full census.
     if not (root / ".git").exists():
-        try:
-            sibling_repos = sorted(
-                c.name for c in root.iterdir() if c.is_dir() and (c / ".git").exists()
-            )
-        except OSError:
-            sibling_repos = []
-        if len(sibling_repos) > 1:
+        member_repos: list[str] = []
+        for dirpath, dirnames, _filenames in os.walk(root):
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in SKIP_DIRS
+                and not d.startswith(".")
+                and not os.path.islink(os.path.join(dirpath, d))
+            ]
+            for d in list(dirnames):
+                if (Path(dirpath) / d / ".git").exists():
+                    member_repos.append(
+                        str((Path(dirpath) / d).relative_to(root))
+                    )
+                    dirnames.remove(d)  # a repo's own internals are never walked
+                    if len(member_repos) > 1:
+                        break
+            if len(member_repos) > 1:
+                break
+        if len(member_repos) > 1:
             return (
                 f"Repo root {root} is not itself a git repository and contains "
-                f"{len(sibling_repos)} member repos ({', '.join(sibling_repos)}). "
+                f"member repos including ({', '.join(sorted(member_repos))}, "
+                "and possibly more). "
                 "Pass repo_root pointing at exactly one of them."
             )
     db = project_data_dir(root) / "code_index.db"
