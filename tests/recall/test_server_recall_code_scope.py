@@ -83,6 +83,36 @@ class TestAmbiguousMultiRepoRootIsRefused:
         result = recall_code("find_me", repo_root=str(sub))
         assert "find_me" in result
 
+    def test_member_repos_nested_two_levels_deep_are_still_refused(self, tmp_path):
+        """Follow-on to the v1 ambiguity guard: it checked only DIRECT
+        children of an un-rooted repo_root, so container/sub/{repo-a,
+        repo-b} with repo_root=container read zero sibling repos (sub
+        itself carries no .git) and walked straight through both,
+        answering from whichever repo's content matched -- the merged-tag
+        bug the guard exists to prevent, one level below where it looked.
+        Every live MCP-server caller on this host passes a gripspace root
+        (repos as direct children, the v1 shape); a stranger's ~/Development
+        with repos nested arbitrarily deep is the shape this closes."""
+        from synapt.recall.server import recall_code
+
+        container = tmp_path / "container"
+        repo_a = container / "sub" / "repo-a"
+        repo_b = container / "sub" / "repo-b"
+        _make_git_repo(repo_a)
+        _make_git_repo(repo_b)
+        (repo_a / "deep_alpha.py").write_text("def deep_alpha():\n    return 1\n")
+        (repo_b / "deep_beta.py").write_text("def deep_beta():\n    return 2\n")
+
+        result = recall_code("deep_beta", repo_root=str(container))
+
+        assert "repo-a" in result and "repo-b" in result, (
+            "refusal must name the ambiguous repos, found at whatever depth"
+        )
+        assert "deep_beta" not in result, (
+            "a root containing member repos nested below its direct "
+            "children must never fall through to indexing and answering"
+        )
+
 
 class TestReparseStabilityFollowsFromScope:
     def test_second_identical_call_reparses_zero_files(self, tmp_path):
@@ -97,7 +127,9 @@ class TestReparseStabilityFollowsFromScope:
         (repo / "widget.py").write_text("def find_me():\n    return 1\n")
 
         first = recall_code("find_me", repo_root=str(repo))
-        assert "1 files re-parsed" in first or "files re-parsed" in first
+        assert "1 files re-parsed" in first, (
+            f"control: the first call must index exactly the one file; got: {first.splitlines()[0]!r}"
+        )
 
         second = recall_code("find_me", repo_root=str(repo))
         assert "0 files re-parsed" in second, (
