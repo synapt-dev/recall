@@ -90,6 +90,38 @@ class TestTokenPrefixes:
         assert "AKIA" not in result
         assert "[REDACTED:" in result
 
+    def test_supabase_personal_access_token_bare(self):
+        """sbp_ + 40 hex chars, per supabase.com/docs/reference/cli
+        (the CLI's own masked example is sbp_ followed by 40 asterisks). A BARE
+        token with no NAME= context must be caught -- that's the gap this fixes.
+        Built at runtime, not as a literal: GitHub's own push protection
+        matches the sbp_+40-hex SHAPE regardless of whether the value is real,
+        so a literal invented token of this exact shape gets blocked on push."""
+        fake_hex = ("0123456789abcdef" * 3)[:40]
+        text = f"sbp_{fake_hex}"
+        result = scrub_text(text)
+        assert fake_hex not in result
+        assert "[REDACTED:" in result
+
+    def test_npm_access_token_bare(self):
+        """npm_ prefix (github.blog's 2021 npm token-format
+        announcement); exact length is not documented anywhere primary, so this
+        matches the codebase's own open-floor convention (see hf_/ghp_ above)
+        rather than inventing an exact length."""
+        text = "npm_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+        result = scrub_text(text)
+        assert "npm_aBcD" not in result
+        assert "[REDACTED:" in result
+
+    def test_runpod_scoped_api_key_bare(self):
+        """rpa_ prefix, documented at runpod.io/blog/scoped-api-keys-runpod
+        for NEW scoped keys only -- legacy RunPod keys have no documented prefix
+        and are explicitly NOT covered (see the near-miss test below)."""
+        text = "rpa_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456"
+        result = scrub_text(text)
+        assert "rpa_ABCD" not in result
+        assert "[REDACTED:" in result
+
 
 # ---------------------------------------------------------------------------
 # Structured secrets
@@ -374,6 +406,29 @@ class TestPreservation:
     def test_url_without_creds_not_redacted(self):
         """postgres:// URL without user:pass should not match."""
         text = "postgres://localhost:5432/mydb"
+        assert scrub_text(text) == text
+
+    def test_supabase_short_token_not_redacted(self):
+        """Precision: sbp_ followed by fewer than 40 hex chars
+        (e.g. a truncated example in a doc, or the word appearing as a prefix
+        of something else) must not match -- 40 is the documented length, not
+        a floor."""
+        text = "sbp_deadbeef"
+        assert scrub_text(text) == text
+
+    def test_npm_prose_not_redacted(self):
+        """Precision: 'npm_' is a real string that appears in prose
+        (package names, env var names) without being a token -- too short to
+        pass the floor should stay untouched."""
+        text = "npm_config_registry is set in .npmrc"
+        assert scrub_text(text) == text
+
+    def test_runpod_legacy_key_bare_still_uncovered(self):
+        """The actual limitation -- a BARE legacy RunPod key (no
+        rpa_ prefix, no NAME= context) has no documented shape to key a
+        pattern off, so it passes through untouched. This is the honest,
+        tested boundary of what this fix covers, not a silent gap."""
+        text = "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"
         assert scrub_text(text) == text
 
     def test_http_url_not_redacted(self):
