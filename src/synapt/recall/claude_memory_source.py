@@ -115,19 +115,29 @@ def admit_and_index_claude_memory(
         os.close(root_fd)
 
     if receipt.state == "complete":
+        # Keyed per ROOT, not on the bare CLAUDE_MEMORY_SOURCE_ID constant:
+        # a process that admits more than one gripspace root used to
+        # collide on that fixed name, and the second admission's provider
+        # was silently dropped even though sync_source() had already
+        # written its content to its own on-disk store. Each root gets its
+        # own registry slot here, and search_registered_sources() already
+        # unions every registered provider's results, so no caller-visible
+        # change beyond this file.
+        registry_name = f"{CLAUDE_MEMORY_SOURCE_ID}:{project_slug(gripspace_root)}"
         try:
             register_source_search_provider(
-                CLAUDE_MEMORY_SOURCE_ID,
+                registry_name,
                 IndexedSourceSearchProvider(admission, open_store, authorize),
             )
         except ValueError:
-            # A second admission in this same process (a repeated call, not
-            # a name clash with an unrelated caller -- this module is the
-            # only one that ever registers CLAUDE_MEMORY_SOURCE_ID) collides
-            # with the registry's overwrite guard even though the new
-            # provider is functionally identical: search_source() always
-            # reads live from the just-resynced SQLite file, never from
-            # anything cached on the admission/provider object, so the
-            # already-registered provider already reflects this sync.
+            # A second admission for the SAME root in this same process (a
+            # repeated call, not a name clash with an unrelated caller --
+            # this module is the only one that ever registers under this
+            # per-root name) collides with the registry's overwrite guard
+            # even though the new provider is functionally identical:
+            # search_source() always reads live from the just-resynced
+            # SQLite file, never from anything cached on the
+            # admission/provider object, so the already-registered
+            # provider already reflects this sync.
             pass
     return receipt

@@ -178,6 +178,71 @@ class TestAdmitAndIndexClaudeMemory:
         assert second.documents_reused == 2
 
 
+class TestSecondAdmissionInSameProcessStaysSearchable:
+    """register_source_search_provider() keyed the process-wide
+    registry on the fixed constant CLAUDE_MEMORY_SOURCE_ID, so a second
+    admit_and_index_claude_memory() call for a DIFFERENT gripspace root in
+    the same process collided with the registry's overwrite guard and was
+    silently swallowed -- the second root's content synced correctly to
+    its own on-disk store but was never reachable through
+    search_registered_sources(), the bridge recall's own search path
+    composes over. Two distinct roots, admitted in one process, must both
+    answer a query for their own content -- a second source genuinely
+    coexisting with the first, not a hypothetical."""
+
+    def test_two_distinct_gripspace_roots_are_both_searchable(
+        self, tmp_path, monkeypatch
+    ):
+        from synapt.recall.claude_memory_source import admit_and_index_claude_memory
+
+        home = tmp_path / "home"
+
+        grip_a = _make_gripspace(tmp_path, name="gripspace-a")
+        _write_memory_files(home, grip_a)
+        # _write_memory_files always writes the same fixed filename/content;
+        # give root B its own distinguishable topic file+phrase so the two
+        # roots' content can't be confused for one another by coincidence.
+        from synapt.recall.core import project_slug
+
+        grip_b = _make_gripspace(tmp_path, name="gripspace-b")
+        memory_dir_b = home / ".claude" / "projects" / project_slug(grip_b) / "memory"
+        memory_dir_b.mkdir(parents=True)
+        (memory_dir_b / "MEMORY.md").write_text(
+            "# MEMORY\n\n- [Second root lane](second_root_lane.md)\n",
+            encoding="utf-8",
+        )
+        (memory_dir_b / "second_root_lane.md").write_text(
+            "Second root private content marker zeltrafoxgamma present here too.\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        receipt_a = admit_and_index_claude_memory(project_dir=grip_a)
+        assert receipt_a is not None and receipt_a.state == "complete"
+
+        receipt_b = admit_and_index_claude_memory(project_dir=grip_b)
+        assert receipt_b is not None and receipt_b.state == "complete"
+
+        results_a = search_registered_sources(
+            SourceSearchRequest(query="active-eviction reratifies scope", limit=5)
+        )
+        assert len(results_a) == 1, (
+            "root A's content must still be searchable after a second "
+            "root is admitted in the same process"
+        )
+
+        results_b = search_registered_sources(
+            SourceSearchRequest(query="zeltrafoxgamma", limit=5)
+        )
+        assert len(results_b) == 1, (
+            "root B synced successfully (receipt.state == 'complete') but "
+            "its content is unreachable through search_registered_sources "
+            "-- the second admission silently lost its registry slot"
+        )
+        assert results_b[0].relative_path == "second_root_lane.md"
+
+
 class TestSyncClaudeMemorySourceOnStartup:
     """server._sync_claude_memory_source_on_startup(): the eager-at-startup
     wiring point, exercised in isolation from a real FastMCP instance and
