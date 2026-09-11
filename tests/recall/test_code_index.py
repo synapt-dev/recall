@@ -482,6 +482,28 @@ def test_vendor_directories_are_skipped(tmp_path: Path):
     assert "vendored" not in names
 
 
+def test_review_clone_directories_are_skipped(tmp_path: Path):
+    """A scratch clone made by review-clone.sh carries a
+    ``.review-clone`` marker file at its root (date-stamped, written as the
+    script's last step). A gripspace-rooted index walk that reaches one of
+    these nested anywhere under it must never index its content -- the
+    review clone is scratch, not a member repo, and its files were already
+    pulled in from an unrelated tree cut for a specific R1/R2 gate."""
+    src = tmp_path / "s"
+    (src / ".git").mkdir(parents=True)
+    (src / "app.js").write_text("function mine(){}")
+    clone_dir = src / "scratch" / "review-sentinel-triage"
+    clone_dir.mkdir(parents=True)
+    (clone_dir / ".review-clone").write_text("2026-09-11T00:00:00Z\n")
+    (clone_dir / "vendored_answer.js").write_text("function scratchClone(){}")
+    db = tmp_path / "s.db"
+
+    index_repo(src, db, repo="demo")
+    names = _names(db)
+    assert "mine" in names
+    assert "scratchClone" not in names
+
+
 def test_unknown_extensions_are_ignored(tmp_path: Path):
     src = tmp_path / "s"
     src.mkdir()

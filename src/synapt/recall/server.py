@@ -818,6 +818,30 @@ def recall_code(
     root = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
     if not root.is_dir():
         return f"Repo root not found: {root}"
+    # An ambiguous root -- not itself a git repo, and containing more than
+    # one sibling repo as a direct child -- must never be walked and
+    # indexed as one undifferentiated tree. That merges every sibling
+    # repo's symbols under one "repo" tag: any query becomes answerable
+    # from any sibling (a synapt question answered from a client checkout,
+    # or a gitgrip Rust file), and the tag itself is unstable across calls
+    # whose effective root varies, which defeats the content-hash re-index
+    # cache -- the same root cause underlies both symptoms. The check uses
+    # only the same OSS-visible signal core._gripspace_has_registered_repo
+    # already reads for the same class of question (a direct child with
+    # its own .git) -- never a gr2 manifest, which stays premium.
+    if not (root / ".git").exists():
+        try:
+            sibling_repos = sorted(
+                c.name for c in root.iterdir() if c.is_dir() and (c / ".git").exists()
+            )
+        except OSError:
+            sibling_repos = []
+        if len(sibling_repos) > 1:
+            return (
+                f"Repo root {root} is not itself a git repository and contains "
+                f"{len(sibling_repos)} member repos ({', '.join(sibling_repos)}). "
+                "Pass repo_root pointing at exactly one of them."
+            )
     db = project_data_dir(root) / "code_index.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     try:
