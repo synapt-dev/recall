@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -263,6 +263,12 @@ def test_project_slug_converts_path(tmp_path):
     slug = project_slug(test_dir)
     expected = str(test_dir.resolve()).replace("\\", "/").replace("/", "-")
     assert slug == expected
+
+
+def test_project_slug_converts_windows_drive_separator():
+    """Windows drive paths match Claude Code's project-directory slug."""
+    with patch.object(Path, "resolve", return_value=PureWindowsPath(r"C:\Code\fp-loom")):
+        assert project_slug(Path("unused")) == "C--Code-fp-loom"
 
 
 def test_project_slug_defaults_to_cwd(tmp_path):
