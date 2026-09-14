@@ -4,6 +4,17 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.25.1] — 2026-09-14
+
+Patch release for Windows Recall project discovery and build-receipt
+compatibility.
+
+- **Windows Recall discovery:** normalize the drive separator while deriving
+  Claude Code project slugs, so `C:\\Code\\fp-loom` resolves to
+  `C--Code-fp-loom` rather than the nonexistent `C:-Code-fp-loom` directory.
+- **Build receipts:** tolerate index objects that predate optional skip and
+  warning metadata instead of failing the build after indexing completes.
+
 ## [0.25.0] — 2026-09-10
 
 Minor release. 164 commits across 68 first-parent merges since 0.24.2 (66 pull
