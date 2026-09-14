@@ -261,7 +261,7 @@ def test_project_slug_converts_path(tmp_path):
     test_dir = tmp_path / "Development" / "synapse"
     test_dir.mkdir(parents=True)
     slug = project_slug(test_dir)
-    expected = str(test_dir.resolve()).replace("\\", "/").replace("/", "-")
+    expected = str(test_dir.resolve()).replace("\\", "/").replace(":", "/").replace("/", "-")
     assert slug == expected
 
 
@@ -275,7 +275,7 @@ def test_project_slug_defaults_to_cwd(tmp_path):
     """project_slug uses cwd when no argument given."""
     with patch("synapt.recall.core.Path.cwd", return_value=tmp_path):
         slug = project_slug()
-    assert slug == str(tmp_path).replace("\\", "/").replace("/", "-")
+    assert slug == str(tmp_path).replace("\\", "/").replace(":", "/").replace("/", "-")
 
 
 def test_project_index_dir_returns_in_project_path(tmp_path):
@@ -298,7 +298,7 @@ def test_project_transcript_dir_finds_transcripts(tmp_path):
     """project_transcript_dir finds the matching Claude Code project dir."""
     myproject = tmp_path / "myproject"
     myproject.mkdir()
-    slug = str(myproject.resolve()).replace("\\", "/").replace("/", "-")
+    slug = project_slug(myproject)
     proj_dir = tmp_path / ".claude" / "projects" / slug
     proj_dir.mkdir(parents=True)
     (proj_dir / "session.jsonl").write_text("{}")
@@ -328,7 +328,7 @@ def test_cmd_setup_orchestrates_all_steps(tmp_path):
     # Create a fake project with transcripts
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("\\", "/").replace("/", "-")
+    slug = project_slug(project_dir)
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -635,7 +635,7 @@ def test_cmd_rebuild_archives_and_builds(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("\\", "/").replace("/", "-")
+    slug = project_slug(project_dir)
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -667,7 +667,7 @@ def test_cmd_rebuild_with_sync_skips_when_no_config(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("\\", "/").replace("/", "-")
+    slug = project_slug(project_dir)
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -735,7 +735,7 @@ def test_recall_setup_mcp_tool(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("\\", "/").replace("/", "-")
+    slug = project_slug(project_dir)
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
@@ -780,7 +780,7 @@ def test_recall_setup_no_hook(tmp_path):
 
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
-    slug = str(project_dir).replace("\\", "/").replace("/", "-")
+    slug = project_slug(project_dir)
 
     transcript_dir = tmp_path / ".claude" / "projects" / slug
     transcript_dir.mkdir(parents=True)
