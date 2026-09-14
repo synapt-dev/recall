@@ -4952,15 +4952,16 @@ def project_slug(project_dir: Path | None = None) -> str:
     """Convert a project path to Claude Code's directory slug format.
 
     Claude Code stores per-project data at ~/.claude/projects/<slug>/
-    where the slug is the absolute path with ``/`` replaced by ``-``.
+    where the slug is the absolute path with path separators replaced by
+    ``-``. Windows drive separators are normalized as path separators too.
 
     Examples:
         /Users/me/Development/synapse → -Users-me-Development-synapse
+        C:\\Code\\fp-loom → C--Code-fp-loom
     """
     p = (project_dir or Path.cwd()).resolve()
-    # Use PurePosixPath to normalise Windows backslashes before slugifying.
-    # On Unix this is a no-op; on Windows it converts C:\Users\... → C:/Users/...
-    return str(p).replace("\\", "/").replace("/", "-")
+    # Normalize Windows separators before deriving Claude Code's slug.
+    return str(p).replace("\\", "/").replace(":", "/").replace("/", "-")
 
 
 def _worktree_name(project_dir: Path | None = None) -> str:

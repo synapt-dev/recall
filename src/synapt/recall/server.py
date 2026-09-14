@@ -1338,13 +1338,13 @@ def _run_build_job(project: Path, receipt: dict, incremental: bool) -> None:
         # store whose only source content is one oversize file still needs
         # its skip on the receipt, not just a silent zero-chunk result.
         receipt["skipped_oversize"] = (
-            final_index.skipped_oversize if final_index is not None else []
+            getattr(final_index, "skipped_oversize", []) if final_index is not None else []
         )
         receipt["config_warnings"] = (
-            final_index.config_warnings if final_index is not None else []
+            getattr(final_index, "config_warnings", []) if final_index is not None else []
         )
         receipt["skipped_lines"] = (
-            final_index.skipped_lines if final_index is not None else []
+            getattr(final_index, "skipped_lines", []) if final_index is not None else []
         )
     except BaseException as exc:
         receipt["state"] = "failed"
