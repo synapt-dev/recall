@@ -14,6 +14,7 @@ Schema:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -605,8 +606,82 @@ class RecallDB:
     def __init__(self, db_path: Path | str):
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = self._connect()
-        self._ensure_schema()
+        self._open_with_race_retry()
+
+    def _open_with_race_retry(self) -> None:
+        """Open + schema, tolerating concurrent openers.
+
+        The common path (schema already current, no contention) runs exactly
+        once, lock-free, unchanged. When another process is setting the same
+        store up at the same instant — fleet boot, a fresh gripspace, N desks
+        respawning — the open path used to die most races out with three
+        benign-race errors: ``duplicate column name`` (check-then-ALTER
+        migrations), ``table ... already exists`` (check-then-CREATE FTS5
+        virtual tables, which cannot use IF NOT EXISTS), and a bare
+        ``database is locked`` the busy handler does not mask. Measured
+        2026-09-16; the retry alone flips the witness red (Stromus M2/M3),
+        the filelock additionally prevents DDL interleaving.
+
+        The retry spans the WHOLE open — connection included — because the
+        ``journal_mode=WAL`` PRAGMA in ``_connect`` can itself return an
+        immediate (unretried) SQLITE_BUSY racing the opener that is switching
+        the fresh store into WAL. That shape never manifested on local macOS
+        runs but failed 1/8 writers on CI ubuntu 3.10; the witness test
+        covers it because a racing first-writer exercises the connect too.
+
+        On a benign-race error the opener re-runs connect + schema under
+        recall's inter-process filelock, bounded at 30 attempts 25 ms apart
+        (the winner's first attempt is UNlocked, so the sleeper yields to it
+        between rounds). Every statement in the section is idempotent, so a
+        full re-run converges once the winner has finished. Anything else
+        (corrupt file, disk full) re-raises untouched.
+        """
+        from synapt.recall._filelock import lock_exclusive
+
+        last_exc: sqlite3.OperationalError | None = None
+        # first attempt: exactly the pre-fix path, zero locks
+        try:
+            self._conn = self._connect()
+            self._ensure_schema()
+            return
+        except sqlite3.OperationalError as exc:
+            if not self._is_benign_schema_race(exc):
+                raise
+            last_exc = exc
+        lock_path = self._path.parent / (self._path.name + ".schema.lock")
+        for _attempt in range(30):
+            conn = getattr(self, "_conn", None)
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+                self._conn = None
+            with open(lock_path, "a+") as lock_file:
+                lock_exclusive(lock_file)
+                try:
+                    self._conn = self._connect()
+                    self._ensure_schema()
+                    return
+                except sqlite3.OperationalError as exc:
+                    if not self._is_benign_schema_race(exc):
+                        raise
+                    last_exc = exc
+            # release the filelock before yielding: the statement we lost to
+            # may be another process's UNLOCKED first attempt, still in flight
+            time.sleep(0.025)
+        assert last_exc is not None
+        raise last_exc
+
+    @staticmethod
+    def _is_benign_schema_race(exc: Exception) -> bool:
+        """Errors that mean 'another opener won this statement; try again
+        serialized' — as opposed to anything that means the store is broken."""
+        msg = str(exc).lower()
+        return (
+            "already exists" in msg
+            or "duplicate column name" in msg
+            or "database is locked" in msg
+            or "database table is locked" in msg
+        )
 
     # -- connection --------------------------------------------------------
 
@@ -652,68 +727,6 @@ class RecallDB:
         return obj
 
     def _ensure_schema(self) -> None:
-        """Create the schema, tolerating concurrent openers.
-
-        (The defect report for this race is tracked privately and deliberately
-        not linked from this public tree; the measurements below stand on
-        their own.)
-
-        The common path (schema already current) runs exactly once, lock-free,
-        unchanged. When another process is setting the same store up at the
-        same instant — fleet boot, a fresh gripspace, N desks respawning —
-        this method used to die 7 opens out of 8 with three benign-race
-        errors: ``duplicate column name`` (check-then-ALTER migrations),
-        ``table ... already exists`` (check-then-CREATE FTS5 virtual tables,
-        which cannot use IF NOT EXISTS), and a bare ``database is locked``
-        the busy handler does not mask. Measured 2026-09-16.
-
-        On a benign-race error the caller takes recall's inter-process
-        filelock and re-runs the whole section: every statement in it is
-        idempotent (IF NOT EXISTS tables, check-then-create FTS, check-then-
-        ALTER migrations), so a full re-run converges once the winner has
-        finished. A bounded retry loop tolerates a second unmasked lock
-        error while the first winner is still mid-DDL. Anything else
-        (corrupt file, disk full) re-raises untouched.
-        """
-        try:
-            self._ensure_schema_unlocked()
-            return
-        except sqlite3.OperationalError as exc:
-            if not self._is_benign_schema_race(exc):
-                raise
-        from synapt.recall._filelock import lock_exclusive
-
-        lock_path = self._path.parent / (self._path.name + ".schema.lock")
-        last_exc: sqlite3.OperationalError | None = None
-        for attempt in range(30):
-            with open(lock_path, "a+") as lock_file:
-                lock_exclusive(lock_file)
-                try:
-                    self._ensure_schema_unlocked()
-                    return
-                except sqlite3.OperationalError as exc:
-                    if not self._is_benign_schema_race(exc):
-                        raise
-                    last_exc = exc
-            # release the filelock before yielding: the statement we lost to
-            # may be another process's UNLOCKED first attempt, still in flight
-            time.sleep(0.025)
-        assert last_exc is not None
-        raise last_exc
-
-    @staticmethod
-    def _is_benign_schema_race(exc: Exception) -> bool:
-        """Errors that mean 'another opener won this statement; try again
-        serialized' — as opposed to anything that means the store is broken."""
-        msg = str(exc).lower()
-        return (
-            "already exists" in msg
-            or "duplicate column name" in msg
-            or "database is locked" in msg
-            or "database table is locked" in msg
-        )
-
-    def _ensure_schema_unlocked(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.executescript(_QUERY_TAIL_SCHEMA_SQL)
         self._conn.executescript(_SHARD_OVERVIEW_CACHE_SCHEMA_SQL)
