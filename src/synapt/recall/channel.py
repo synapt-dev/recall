@@ -3423,39 +3423,63 @@ def _migrate_cursors(
 # ---------------------------------------------------------------------------
 
 def _open_state_db(state_db: Path) -> sqlite3.Connection:
-    """Open or create the global _state.db with WAL mode."""
+    """Open or create the global _state.db with serialized WAL setup."""
     # Caller-supplied path, same shape as an explicit channels_dir: it reaches
     # around resolution entirely, so it is guarded in its own right. This one
     # can land inside the global store, unlike the per-gripspace channels.db.
     _guard_store_path("open_state_db", state_db)
+    from synapt.recall._filelock import lock_exclusive
+
     state_db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(state_db))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS claims ("
-        "org_id TEXT NOT NULL, "
-        "project_id TEXT NOT NULL, "
-        "channel TEXT NOT NULL, "
-        "message_id TEXT NOT NULL, "
-        "claimed_by TEXT NOT NULL, "
-        "display_name TEXT NOT NULL, "
-        "claimed_at TEXT NOT NULL, "
-        "PRIMARY KEY (org_id, project_id, channel, message_id))"
-    )
-    # Ensure cursors table exists too
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS cursors ("
-        "agent_id TEXT NOT NULL, "
-        "org_id TEXT NOT NULL, "
-        "project_id TEXT NOT NULL, "
-        "channel TEXT NOT NULL, "
-        "cursor_value TEXT NOT NULL, "
-        "last_read_at TEXT NOT NULL, "
-        "PRIMARY KEY (agent_id, org_id, project_id, channel))"
-    )
-    return conn
+    lock_path = state_db.with_name(state_db.name + ".schema.lock")
+    deadline = time.monotonic() + 5.0
+    last_exc: sqlite3.OperationalError | None = None
+    while True:
+        with open(lock_path, "a+") as lock_file:
+            lock_exclusive(lock_file)
+            conn: sqlite3.Connection | None = None
+            try:
+                state_db.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(state_db), timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=30000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS claims ("
+                    "org_id TEXT NOT NULL, "
+                    "project_id TEXT NOT NULL, "
+                    "channel TEXT NOT NULL, "
+                    "message_id TEXT NOT NULL, "
+                    "claimed_by TEXT NOT NULL, "
+                    "display_name TEXT NOT NULL, "
+                    "claimed_at TEXT NOT NULL, "
+                    "PRIMARY KEY (org_id, project_id, channel, message_id))"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS cursors ("
+                    "agent_id TEXT NOT NULL, "
+                    "org_id TEXT NOT NULL, "
+                    "project_id TEXT NOT NULL, "
+                    "channel TEXT NOT NULL, "
+                    "cursor_value TEXT NOT NULL, "
+                    "last_read_at TEXT NOT NULL, "
+                    "PRIMARY KEY (agent_id, org_id, project_id, channel))"
+                )
+                return conn
+            except sqlite3.OperationalError as exc:
+                if conn is not None:
+                    conn.close()
+                if not any(
+                    marker in str(exc).lower()
+                    for marker in ("database is locked", "database table is locked")
+                ):
+                    raise
+                last_exc = exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            assert last_exc is not None
+            raise last_exc
+        time.sleep(min(0.025, remaining))
 
 
 def global_claim(

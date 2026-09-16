@@ -39,6 +39,9 @@ EMBEDDING_DIM = 384
 _EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
 _EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
 
+_SCHEMA_OPEN_RETRY_SECONDS = 5.0
+_SCHEMA_OPEN_RETRY_INTERVAL_SECONDS = 0.025
+
 # FTS5 column weights for bm25():
 #   user_text, assistant_text, tools_used, files_touched, tool_content, date_text
 _FTS_WEIGHTS = "1.0, 1.5, 2.0, 2.0, 1.5, 3.0"
@@ -629,27 +632,20 @@ class RecallDB:
         runs but failed 1/8 writers on CI ubuntu 3.10; the witness test
         covers it because a racing first-writer exercises the connect too.
 
-        On a benign-race error the opener re-runs connect + schema under
-        recall's inter-process filelock, bounded at 30 attempts 25 ms apart
-        (the winner's first attempt is UNlocked, so the sleeper yields to it
-        between rounds). Every statement in the section is idempotent, so a
-        full re-run converges once the winner has finished. Anything else
-        (corrupt file, disk full) re-raises untouched.
+        Every connect + schema operation runs under recall's inter-process
+        filelock, so the WAL transition and DDL cannot interleave between
+        openers. A benign SQLite race is retried until an elapsed five-second
+        budget expires, rather than a fixed number of attempts. Every
+        statement in the section is idempotent, so a full re-run converges
+        once the winner has finished. Anything else (corrupt file, disk full)
+        re-raises untouched.
         """
         from synapt.recall._filelock import lock_exclusive
 
-        last_exc: sqlite3.OperationalError | None = None
-        # first attempt: exactly the pre-fix path, zero locks
-        try:
-            self._conn = self._connect()
-            self._ensure_schema()
-            return
-        except sqlite3.OperationalError as exc:
-            if not self._is_benign_schema_race(exc):
-                raise
-            last_exc = exc
         lock_path = self._path.parent / (self._path.name + ".schema.lock")
-        for _attempt in range(30):
+        deadline = time.monotonic() + _SCHEMA_OPEN_RETRY_SECONDS
+        last_exc: sqlite3.OperationalError | None = None
+        while True:
             conn = getattr(self, "_conn", None)
             if conn is not None:
                 with contextlib.suppress(Exception):
@@ -665,9 +661,12 @@ class RecallDB:
                     if not self._is_benign_schema_race(exc):
                         raise
                     last_exc = exc
-            # release the filelock before yielding: the statement we lost to
-            # may be another process's UNLOCKED first attempt, still in flight
-            time.sleep(0.025)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Release the filelock before yielding so another opener can
+            # finish its transaction before this process retries.
+            time.sleep(min(_SCHEMA_OPEN_RETRY_INTERVAL_SECONDS, remaining))
         assert last_exc is not None
         raise last_exc
 
