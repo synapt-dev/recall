@@ -279,6 +279,35 @@ class ShardedRecallDB:
             return self._merge_overlay_chunks(all_chunks)
         return self._merge_overlay_chunks(self._index.load_chunk_headers())
 
+    def distinct_tools_files(self) -> tuple[set[str], set[str]]:
+        """Distinct tools/files over the visible chunk population, no hydration.
+
+        Parity with load_chunk_headers' merged view: base rows from the
+        shards (or the monolithic index db), filtered IN SQL by suppressed
+        sessions and by chunk ids the query-tail overlay replaces, then the
+        overlay chunks' own tools/files unioned on top. Excluding in SQL
+        rather than subtracting sets is load-bearing: a tool present in
+        both an excluded and a kept chunk must survive, and subtraction
+        would drop it.
+        """
+        overlay = self._index.load_query_tail_chunks()
+        overlay_ids = {chunk.id for chunk in overlay}
+        suppressed = self._suppressed_base_sessions()
+        sources = self._data_dbs if self._data_dbs else [self._index]
+        tools: set[str] = set()
+        files: set[str] = set()
+        for db in sources:
+            t, f = db.distinct_tools_files(
+                exclude_sessions=suppressed or None,
+                exclude_chunk_ids=overlay_ids or None,
+            )
+            tools |= t
+            files |= f
+        for chunk in overlay:
+            tools.update(chunk.tools_used)
+            files.update(chunk.files_touched)
+        return tools, files
+
     def load_chunk_by_rowid(self, rowid: int):  # noqa: ANN201
         """Load one chunk by shard-qualified rowid."""
         if rowid < 0:
