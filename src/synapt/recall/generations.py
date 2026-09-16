@@ -166,7 +166,7 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
         # behind for an old reader's glob to pick up.
         for old_path in list_shards(index_dir):
             if old_path.name not in new_names:
-                for suffix in ("", "-wal", "-shm"):
+                for suffix in ("", "-wal", "-shm", ".schema.lock"):
                     p = old_path.parent / (old_path.name + suffix)
                     p.unlink(missing_ok=True)
     except OSError:
