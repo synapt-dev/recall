@@ -1622,6 +1622,67 @@ class RecallDB:
             byte_length=r["byte_length"] if r["byte_length"] is not None else 0,
         )
 
+    def distinct_tools_files(
+        self,
+        exclude_sessions: set[str] | None = None,
+        exclude_chunk_ids: set[str] | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """Distinct tools/files across all chunks without hydrating bodies.
+
+        tools_used / files_touched are stored as JSON arrays
+        (json.dumps at write), so the distinct sets aggregate in SQLite via
+        json_each -- no row bodies fetched, no Python objects built. The
+        CASE guard keeps non-array column values (empty-string defaults,
+        legacy rows) out of json_each, which would raise on malformed
+        JSON. Exclusions are applied IN SQL, not by set subtraction: a tool
+        present in both an excluded and a kept chunk must survive, and only
+        per-row filtering gives that.
+        """
+        tools: set[str] = set()
+        files: set[str] = set()
+        where = []
+        params: list = []
+        if exclude_sessions:
+            sessions = sorted(exclude_sessions)
+            where.append(
+                f"session_id NOT IN ({','.join('?' * len(sessions))})"
+            )
+            params.extend(sessions)
+        if exclude_chunk_ids:
+            ids = sorted(exclude_chunk_ids)
+            where.append(f"id NOT IN ({','.join('?' * len(ids))})")
+            params.extend(ids)
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+        for col, out in (("tools_used", tools), ("files_touched", files)):
+            try:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT je.value FROM chunks, json_each("
+                    f"CASE WHEN substr(chunks.{col}, 1, 1) = '[' "
+                    f"THEN chunks.{col} END) je{where_sql}",
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # json1 unavailable on this build: fall back to decoding
+                # just the two small columns in Python (still far under a
+                # full-body hydration pass).
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT {col} FROM chunks{where_sql}",
+                    params,
+                ).fetchall()
+                import json as _json  # fallback decode path only
+                for (raw,) in rows:
+                    if isinstance(raw, str) and raw.startswith("["):
+                        try:
+                            out.update(v for v in _json.loads(raw) if v)
+                        except ValueError:
+                            continue
+                continue
+            out.update(
+                r[0] for r in rows
+                if isinstance(r[0], str) and r[0]
+            )
+        return tools, files
+
     def load_chunks_by_rowids(self, rowids: list[int]) -> dict[int, TranscriptChunk]:
         """Load multiple chunks by rowid with bounded SQL query count."""
         if not rowids:

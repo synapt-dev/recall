@@ -4589,6 +4589,24 @@ class TranscriptIndex:
             return {"chunk_count": 0, "session_count": 0}
 
         timestamps = [c.timestamp for c in self.chunks if c.timestamp]
+        if self._db is not None:
+            # Aggregate in SQL over the stored JSON-array
+            # columns. The two set-comprehensions here previously each
+            # triggered a full _materialize_all_chunks() hydration pass
+            # (the triple materialization: cmd_stats's load + both of
+            # these) -- 92% of cmd_stats cumulative time on the shared
+            # -chunk index. The SQL path fetches no chunk bodies; suppressed
+            # sessions and query-tail overlay replacement are handled at
+            # the db layer for parity with the visible-chunk population.
+            tools, files = self._db.distinct_tools_files()
+        else:
+            # No db (memory/JSONL path): chunks are fully loaded; one
+            # fused pass replaces the two separate materializations.
+            tools = set()
+            files = set()
+            for c in self.chunks:
+                tools.update(c.tools_used)
+                files.update(c.files_touched)
         return {
             "chunk_count": len(self.chunks),
             "session_count": len(self.sessions),
@@ -4597,12 +4615,8 @@ class TranscriptIndex:
                 "latest": max(timestamps) if timestamps else "",
             },
             "avg_chunks_per_session": len(self.chunks) / max(len(self.sessions), 1),
-            "total_tools_used": len(set(
-                t for c in self._materialize_all_chunks() for t in c.tools_used
-            )),
-            "total_files_touched": len(set(
-                f for c in self._materialize_all_chunks() for f in c.files_touched
-            )),
+            "total_tools_used": len(tools),
+            "total_files_touched": len(files),
             "embeddings_active": (
                 self._embeddings is not None
                 or (self._db is not None and self._db.has_embeddings())
