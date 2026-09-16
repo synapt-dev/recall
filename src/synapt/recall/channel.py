@@ -3432,7 +3432,7 @@ def _open_state_db(state_db: Path) -> sqlite3.Connection:
 
     state_db.parent.mkdir(parents=True, exist_ok=True)
     lock_path = state_db.with_name(state_db.name + ".schema.lock")
-    deadline = time.monotonic() + 5.0
+    deadline: float | None = None
     last_exc: sqlite3.OperationalError | None = None
     while True:
         with open(lock_path, "a+") as lock_file:
@@ -3475,6 +3475,9 @@ def _open_state_db(state_db: Path) -> sqlite3.Connection:
                 ):
                     raise
                 last_exc = exc
+                if deadline is None:
+                    deadline = time.monotonic() + 5.0
+        assert deadline is not None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             assert last_exc is not None

@@ -615,7 +615,8 @@ class RecallDB:
         """Open + schema, tolerating concurrent openers.
 
         The common path (schema already current, no contention) runs exactly
-        once, lock-free, unchanged. When another process is setting the same
+        once under the schema lock, with no retry-clock bookkeeping. When
+        another process is setting the same
         store up at the same instant — fleet boot, a fresh gripspace, N desks
         respawning — the open path used to die most races out with three
         benign-race errors: ``duplicate column name`` (check-then-ALTER
@@ -643,7 +644,7 @@ class RecallDB:
         from synapt.recall._filelock import lock_exclusive
 
         lock_path = self._path.parent / (self._path.name + ".schema.lock")
-        deadline = time.monotonic() + _SCHEMA_OPEN_RETRY_SECONDS
+        deadline: float | None = None
         last_exc: sqlite3.OperationalError | None = None
         while True:
             conn = getattr(self, "_conn", None)
@@ -661,6 +662,9 @@ class RecallDB:
                     if not self._is_benign_schema_race(exc):
                         raise
                     last_exc = exc
+                    if deadline is None:
+                        deadline = time.monotonic() + _SCHEMA_OPEN_RETRY_SECONDS
+            assert deadline is not None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
