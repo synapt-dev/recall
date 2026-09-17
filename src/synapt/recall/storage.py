@@ -14,6 +14,7 @@ Schema:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -37,6 +38,9 @@ logger = logging.getLogger("synapt.recall.storage")
 EMBEDDING_DIM = 384
 _EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
 _EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
+
+_SCHEMA_OPEN_RETRY_SECONDS = 5.0
+_SCHEMA_OPEN_RETRY_INTERVAL_SECONDS = 0.025
 
 # FTS5 column weights for bm25():
 #   user_text, assistant_text, tools_used, files_touched, tool_content, date_text
@@ -605,16 +609,93 @@ class RecallDB:
     def __init__(self, db_path: Path | str):
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = self._connect()
-        self._ensure_schema()
+        self._open_with_race_retry()
+
+    def _open_with_race_retry(self) -> None:
+        """Open + schema, tolerating concurrent openers.
+
+        The common path (schema already current, no contention) runs exactly
+        once under the schema lock, with no retry-clock bookkeeping. When
+        another process is setting the same
+        store up at the same instant — fleet boot, a fresh gripspace, N desks
+        respawning — the open path used to die most races out with three
+        benign-race errors: ``duplicate column name`` (check-then-ALTER
+        migrations), ``table ... already exists`` (check-then-CREATE FTS5
+        virtual tables, which cannot use IF NOT EXISTS), and a bare
+        ``database is locked`` the busy handler does not mask. Measured
+        2026-09-16; the retry alone flips the witness red (Stromus M2/M3),
+        the filelock additionally prevents DDL interleaving.
+
+        The retry spans the WHOLE open — connection included — because the
+        ``journal_mode=WAL`` PRAGMA in ``_connect`` can itself return an
+        immediate (unretried) SQLITE_BUSY racing the opener that is switching
+        the fresh store into WAL. That shape never manifested on local macOS
+        runs but failed 1/8 writers on CI ubuntu 3.10; the witness test
+        covers it because a racing first-writer exercises the connect too.
+
+        Every connect + schema operation runs under recall's inter-process
+        filelock, so the WAL transition and DDL cannot interleave between
+        openers. A benign SQLite race is retried until an elapsed five-second
+        budget expires, rather than a fixed number of attempts. Every
+        statement in the section is idempotent, so a full re-run converges
+        once the winner has finished. Anything else (corrupt file, disk full)
+        re-raises untouched.
+        """
+        from synapt.recall._filelock import lock_exclusive
+
+        lock_path = self._path.parent / (self._path.name + ".schema.lock")
+        deadline: float | None = None
+        last_exc: sqlite3.OperationalError | None = None
+        while True:
+            conn = getattr(self, "_conn", None)
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+                self._conn = None
+            with open(lock_path, "a+") as lock_file:
+                lock_exclusive(lock_file)
+                try:
+                    self._conn = self._connect()
+                    self._ensure_schema()
+                    return
+                except sqlite3.OperationalError as exc:
+                    if not self._is_benign_schema_race(exc):
+                        raise
+                    last_exc = exc
+                    if deadline is None:
+                        deadline = time.monotonic() + _SCHEMA_OPEN_RETRY_SECONDS
+            assert deadline is not None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Release the filelock before yielding so another opener can
+            # finish its transaction before this process retries.
+            time.sleep(min(_SCHEMA_OPEN_RETRY_INTERVAL_SECONDS, remaining))
+        assert last_exc is not None
+        raise last_exc
+
+    @staticmethod
+    def _is_benign_schema_race(exc: Exception) -> bool:
+        """Errors that mean 'another opener won this statement; try again
+        serialized' — as opposed to anything that means the store is broken."""
+        msg = str(exc).lower()
+        return (
+            "already exists" in msg
+            or "duplicate column name" in msg
+            or "database is locked" in msg
+            or "database table is locked" in msg
+        )
 
     # -- connection --------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), timeout=5.0)
+        # busy_timeout FIRST: the journal_mode PRAGMA below can return an
+        # immediate (unretried) SQLITE_BUSY on a store another process is
+        # setting up, and it must wait like every other statement does.
+        conn.execute("PRAGMA busy_timeout=30000")  # 30s — builds can be slow
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")  # 30s — builds can be slow
         conn.row_factory = sqlite3.Row
         return conn
 
