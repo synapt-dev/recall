@@ -166,6 +166,8 @@ class SourceScanReceipt:
     documents_seen: int | None = None
     units_published: int | None = None
     documents_reused: int | None = None
+    units_attempted: int | None = None
+    parser_units: int | None = None
 
 
 class SourceAdapter(Protocol):
@@ -716,7 +718,12 @@ def sync_source(
             return SourceScanReceipt(scan_id, "iterator_failed")
         total_units += len(units)
         if total_units > limits.parser_units:
-            return SourceScanReceipt(scan_id, "parser_limit_exceeded")
+            return SourceScanReceipt(
+                scan_id,
+                "parser_limit_exceeded",
+                units_attempted=total_units,
+                parser_units=limits.parser_units,
+            )
         staged[document.relative_path] = (document, units)
 
     if not _authorized(admission, authorize):
