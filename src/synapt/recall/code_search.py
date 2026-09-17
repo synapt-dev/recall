@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import re
+from pathlib import Path
 from typing import Callable
 
 from synapt.recall.code_index import find_symbols
@@ -173,8 +174,6 @@ _FOREIGN_DIR_NAMES = frozenset(
 def _git_top(path) -> "Path | None":
     """Walk up from ``path`` to the nearest ancestor containing ``.git``, or
     None if no ancestor has one. Bounded so a bad path can't spin forever."""
-    from pathlib import Path
-
     current = Path(path).resolve()
     for _ in range(64):
         if (current / ".git").exists():
@@ -209,8 +208,6 @@ def _is_foreign_path(repo_root, rel_path: str, home_git_top, cache: dict) -> boo
         return True
     if home_git_top is None:
         return False
-    from pathlib import Path
-
     hit_dir = (Path(repo_root) / rel_path).parent
     if hit_dir in cache:
         return cache[hit_dir]
@@ -252,6 +249,25 @@ def _name_match_ratio(name: str, query_words: set) -> float:
         return 0.0
     covered = sum(1 for w in words if w in query_words)
     return covered / len(words)
+
+
+def _path_match_ratio(path: str, query_words: set) -> float:
+    """Measure how much of the query names a hit's module path.
+
+    This is intentionally a path-class signal, not a fuzzy retrieval score:
+    it splits path components and the module basename into the same word form
+    used for symbol names. A question naming ``storage`` can therefore prefer
+    ``storage.py`` over a peer whose symbol happens to contain only the broad
+    scope word ``recall``.
+    """
+    if not query_words:
+        return 0.0
+    words = {
+        _stem(word, bare_e=True)
+        for word in _name_words(path.replace("/", "_"))
+        if word not in _STOPWORDS
+    }
+    return sum(1 for word in query_words if word in words) / len(query_words)
 
 
 def _is_test_path(path: str) -> bool:
@@ -307,7 +323,8 @@ def recall_code(
         {
             "query": str,
             "symbols": [{name, kind, path, line_start, line_end, signature,
-                         matched_token, match_kind, token_coverage, is_test,
+                         matched_token, match_kind, token_coverage,
+                         path_match_ratio, is_test,
                          annotation?, annotation_error?}],
             "has_code_hit": bool,
             "has_memory_hit": bool,
@@ -372,10 +389,12 @@ def recall_code(
             repo_root, hit["path"], home_git_top, git_top_cache
         )
         hit["name_match_ratio"] = _name_match_ratio(hit["name"], query_words_set)
+        hit["path_match_ratio"] = _path_match_ratio(hit["path"], query_words_set)
     candidates.sort(
         key=lambda h: (
             h["is_foreign"],
             h["is_test"],
+            -h["path_match_ratio"],
             -h["token_coverage"],
             -h["name_match_ratio"],
             _MATCH_KIND_RANK[h["match_kind"]],
