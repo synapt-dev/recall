@@ -50,6 +50,7 @@ def _assert_former_all(full: set[str]) -> None:
 def test_server_closure_stays_installable_without_model_or_provider_stacks() -> None:
     assert _BASE == ["mcp[cli]==1.28.1"]
     assert _EXTRAS["server"] == ["mcp[cli]==1.28.1"]
+    assert _EXTRAS["source-render"] == ["tiktoken>=0.12,<1"]
     assert set(_EXTRAS["full-runtime"]) == {
         "sentence-transformers>=2.0",
         "mlx-lm>=0.10; sys_platform == 'darwin' and platform_machine == 'arm64'",

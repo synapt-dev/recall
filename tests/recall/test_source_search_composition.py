@@ -5,6 +5,7 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
+import tiktoken
 
 from synapt.recall import server
 from synapt.recall.source_index import (
@@ -282,3 +283,43 @@ def test_zero_token_search_never_invokes_registered_source(
     server.recall_search("projection", max_tokens=0)
 
     assert calls == []
+
+
+def test_source_render_respects_its_real_token_share(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The wake-path source share is a real o200k token ceiling, not chars/4."""
+    punctuation_heavy = "[]{}()<>:;|/\\\\" * 260
+
+    class Provider:
+        def search(self, request: SourceSearchRequest):
+            return [
+                SourceSearchResult(
+                    content=punctuation_heavy,
+                    structural_address="Budget [1]",
+                    lifecycle="current",
+                    revision_token="r",
+                    observed_at="2026-09-16T00:00:00+00:00",
+                )
+            ]
+
+    register_source_search_provider("real-token-budget", Provider())
+    monkeypatch.setattr(server, "_get_index", lambda: None)
+    _silence_live_and_freshness(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_query_freshness_line", lambda _path: "\nFooter token token token")
+
+    source_renders: list[str] = []
+    original_truncate = server._truncate_source_to_tokens
+
+    def capture_source_render(text: str, max_tokens: int) -> str:
+        truncated = original_truncate(text, max_tokens)
+        source_renders.append(truncated)
+        return truncated
+
+    monkeypatch.setattr(server, "_truncate_source_to_tokens", capture_source_render)
+
+    rendered = server.recall_search("budget", max_tokens=1500)
+
+    assert len(source_renders) == 1
+    assert len(tiktoken.get_encoding("o200k_base").encode(source_renders[0])) <= 500
+    assert len(tiktoken.get_encoding("o200k_base").encode(rendered)) > 500

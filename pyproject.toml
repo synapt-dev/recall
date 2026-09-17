@@ -40,6 +40,9 @@ Repository = "https://github.com/synapt-dev/recall"
 # stacks to be present.
 [project.optional-dependencies]
 server = ["mcp[cli]==1.28.1"]
+# Source-result rendering is optional at install time, but fails closed when
+# invoked without its exact-token counter rather than reverting to chars/4.
+source-render = ["tiktoken>=0.12,<1"]
 full-runtime = [
     "sentence-transformers>=2.0",
     "mlx-lm>=0.10; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -86,6 +89,7 @@ all = [
     "synapt-extract>=0.6.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.7",
+    "tiktoken>=0.12,<1",
 ]
 # `all` keeps the historical broad installation shape. `full` is the explicit
 # spelling for callers that want every runtime and integration capability.
@@ -112,6 +116,7 @@ full = [
     "synapt-extract>=0.6.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.7",
+    "tiktoken>=0.12,<1",
 ]
 dev = ["watchfiles>=0.20"]
 test = [
@@ -129,6 +134,7 @@ test = [
     "synapt-extract>=0.6.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.7",
+    "tiktoken>=0.12,<1",
 ]
 
 [project.scripts]

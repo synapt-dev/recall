@@ -36,6 +36,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import synapt.recall as _synapt_pkg
 from synapt.recall.config import load_config
@@ -66,6 +67,25 @@ def _cap_tokens(requested: int) -> int:
     """Apply the user-configured max_tokens cap."""
     limit = load_config().get_max_tokens()
     return min(requested, limit)
+
+
+@functools.cache
+def _source_token_encoding() -> Any:
+    try:
+        import tiktoken
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "source rendering requires synapt[source-render] for exact o200k token budgeting"
+        ) from exc
+    return tiktoken.get_encoding("o200k_base")
+
+
+def _truncate_source_to_tokens(text: str, max_tokens: int) -> str:
+    """Return a source render whose o200k token count cannot exceed its share."""
+    tokens = _source_token_encoding().encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return _source_token_encoding().decode(tokens[:max_tokens])
 
 # ---------------------------------------------------------------------------
 # MCP instructions — shared with the unified server (synapt.server)
@@ -496,9 +516,8 @@ def recall_search(
         )
         if source_results:
             source_budget = min(500, max_tokens // 3)
-            source_result = _tw(
-                render_source_results(source_results),
-                max(1, source_budget * 4),
+            source_result = _truncate_source_to_tokens(
+                render_source_results(source_results), source_budget
             )
     index = _get_index()
 
