@@ -280,6 +280,27 @@ class TestSyncClaudeMemorySourceOnStartup:
         assert "2 file(s)" in err
         assert "generation 1" in err
 
+    def test_parser_limit_receipt_log_names_attempted_units_and_knob(
+        self, monkeypatch, capsys
+    ):
+        from synapt.recall import server
+        from synapt.recall.source_index import SourceScanReceipt
+
+        monkeypatch.setattr(
+            "synapt.recall.claude_memory_source.admit_and_index_claude_memory",
+            lambda: SourceScanReceipt(
+                scan_id="scan_test",
+                state="parser_limit_exceeded",
+                documents_seen=691,
+                units_attempted=1_730,
+                parser_units=1_000,
+            ),
+        )
+        server._sync_claude_memory_source_on_startup()
+        err = capsys.readouterr().err
+        assert "parser_limit_exceeded" in err
+        assert "1730 units attempted vs parser_units=1000" in err
+
     def test_admission_exception_never_raises_or_blocks_startup(
         self, monkeypatch, capsys
     ):

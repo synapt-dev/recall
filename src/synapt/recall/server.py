@@ -3556,10 +3556,16 @@ def _sync_claude_memory_source_on_startup() -> None:
         receipt = admit_and_index_claude_memory()
         if receipt is not None:
             elapsed_ms = int((time.monotonic() - started) * 1000)
+            limit_detail = ""
+            if receipt.state == "parser_limit_exceeded":
+                limit_detail = (
+                    f", {receipt.units_attempted or 0} units attempted "
+                    f"vs parser_units={receipt.parser_units or 0}"
+                )
             print(
                 f"[claude_memory] {receipt.state}: "
                 f"{receipt.documents_seen or 0} file(s), "
-                f"generation {receipt.generation}, {elapsed_ms}ms",
+                f"generation {receipt.generation}{limit_detail}, {elapsed_ms}ms",
                 file=sys.stderr,
             )
     except Exception:
