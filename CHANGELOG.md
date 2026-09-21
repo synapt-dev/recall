@@ -4,11 +4,58 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
-- **Windows Recall discovery:** normalize the drive separator while deriving
-  Claude Code project slugs, so `C:\\Code\\fp-loom` resolves to
-  `C--Code-fp-loom` rather than the nonexistent `C:-Code-fp-loom` directory.
+## [0.25.1] — 2026-09-21
+
+Patch release. 45 commits across 18 first-parent merges since 0.25.0 (counted
+with `git log --first-parent --merges 2ece8b3..dev`; all 18 are pull-request
+merges, #1186 through #1206). The headline is search quality: saved knowledge
+searches semantically (#1203), `recall_code` ranks by module path (#1200) and
+stems inflected queries (#1191), and the co-retrieval contradiction detector
+gates its queue on a measured similarity floor (#1206). Several fixes make
+first-run behavior honest on Windows and on a bare install.
+
+### Features
+
+- **Semantic knowledge search:** a knowledge-only store searches its saved
+  knowledge semantically when a provider resolves; base installs stay BM25-only
+  and say so (#1203).
+- **`synapt pack`:** seal closed transcript sessions into a content-addressed
+  pack (#1189), with push/fetch to a directory remote (#1192).
+- **Agent quickstart:** the README names when to save, update, correct, and
+  forget (#1201).
+
+### Fixes
+
+- **Windows:** drive separators normalize while deriving project slugs
+  (`C:\Code\fp-loom` resolves to `C--Code-fp-loom`, not the nonexistent
+  `C:-Code-fp-loom`, #1204); the CURRENT-pointer replace retries on Windows
+  PermissionError instead of failing (#1186).
+- **Co-retrieval contradictions:** one similarity floor (embedding cosine
+  ≥ 0.40) gates both the pending queue and the banner, so unrelated
+  low-overlap pairs stop flagging; within-batch dedup keeps overlapping nodes
+  from queueing one contradiction twice (#1206).
+- **Silent un-retract refused:** updating a retracted knowledge node answers
+  with the restore path instead of silently reviving a buried fact; `stats`
+  lists only models whose stack resolves in this process; the README names all
+  eleven knowledge categories plus the silent default (#1205).
+- **Code search:** module-path matches outrank shallower hits (#1200); the
+  stemmer strips a trailing silent "e" so inflected query words meet a
+  symbol's bare form (#1191); the ambiguity guard checks any depth, not just
+  direct children (#1190); an ambiguous multi-repo root is refused in one
+  sentence instead of guessing (#1188).
+- **Source parsing:** parser-limit refusals name what to do (#1199); source
+  render honors its token budget (#1198).
+- **Stats performance:** tool and file counts come from SQL aggregates,
+  ending the triple full pass over the store (#1196).
+- **Schema setup:** setup is serialized and stale schema-lock companions are
+  cleaned (#1195).
+- **Memory sources:** `claude_memory_source` registers per-root, not on a
+  fixed name (#1187).
+- **Scrubbing:** bare-value coverage for Supabase, npm, and RunPod token
+  prefixes (#1193).
 - **Build receipts:** tolerate index objects that predate optional skip and
-  warning metadata instead of failing the build after indexing completes.
+  warning metadata instead of failing the build after indexing completes
+  (#1204).
 
 ## [0.25.0] — 2026-09-10
 
