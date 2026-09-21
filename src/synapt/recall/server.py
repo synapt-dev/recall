@@ -660,6 +660,22 @@ def recall_quick(query: str) -> str:
     Args:
         query: Natural language query or keywords to search for.
     """
+    # The tool's contract includes the knowledge-semantic fallback (measured
+    # live: a paraphrase query misses keyword-wise and only the embeddings
+    # reach the saved fact). The grep-intercept hook calls the same body
+    # through _recall_quick_impl with semantic_fallback=False — it runs
+    # inside a 500 ms budget and must never start a model load on a miss.
+    return _recall_quick_impl(query, semantic_fallback=True)
+
+
+def _bind_quick_no_fallback():
+    """The grep-intercept hook's recall binding: the same quick body with the
+    knowledge-semantic fallback OFF (it runs inside a 500 ms budget and must
+    never start a model load on a keyword miss)."""
+    return functools.partial(_recall_quick_impl, semantic_fallback=False)
+
+
+def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
     index_dir = project_index_dir()
     freshness_line = _query_freshness_line(index_dir)
     quick_budget = _cap_tokens(500)
@@ -696,6 +712,31 @@ def recall_quick(query: str) -> str:
         )
         if result:
             return _with_query_freshness(result, freshness_line)
+        # The cheap keyword pass found nothing. recall_quick stays
+        # keyword-only for its fast path, but recall_save embeds every
+        # knowledge node regardless, so the store may hold knowledge
+        # embeddings the keyword pass cannot reach (measured live: a
+        # paraphrase query misses keyword-wise but sits next to the saved
+        # fact in vector space). Retry once through an embeddings-enabled
+        # index. If that also finds nothing, the miss is reported from THAT
+        # index, so "semantic search was also used" reflects what ran.
+        sem_index = (
+            _get_index(use_embeddings=True) if semantic_fallback else None
+        )
+        if sem_index is not None and sem_index is not index:
+            result = sem_index.lookup(
+                query,
+                max_chunks=5,
+                max_tokens=quick_budget,
+                half_life=params.get("half_life"),
+                depth=depth,
+                threshold_ratio=0.2,
+                knowledge_boost=params.get("knowledge_boost"),
+                max_knowledge=params.get("max_knowledge"),
+            )
+            if result:
+                return _with_query_freshness(result, freshness_line)
+            index = sem_index
         diag = index._last_diagnostics
         if diag:
             sessions = f"{diag.total_sessions} session"

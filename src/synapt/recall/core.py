@@ -1310,16 +1310,44 @@ class TranscriptIndex:
                 if self._db is None or self._idx_to_rowid:
                     self._load_or_build_embeddings(cache_dir)
 
-                # If the index has no chunk embeddings yet, keep CLI/server
-                # search on the fast BM25 path instead of paying model load for
-                # knowledge-only semantic lookup. A later build can populate
-                # embeddings in the DB, but this TranscriptIndex instance stays
-                # BM25-only until the next fresh load.
+                # If the index has no chunk embeddings yet, keep the fast
+                # BM25 path for CHUNK search — but a store may still hold
+                # KNOWLEDGE embeddings the save path wrote: recall_save
+                # embeds every knowledge node regardless of transcript
+                # chunks, so a knowledge-only store (zero chunks — the shape
+                # any harness without transcript hooks has) carries vectors
+                # its search path could never reach. When those vectors
+                # exist, create the provider here; the model loads lazily on
+                # the first query that uses them, so a store with neither
+                # chunk nor knowledge embeddings keeps the BM25-only fast
+                # path and pays nothing.
                 if not has_chunk_embeddings:
-                    self._embedding_reason = (
-                        "Chunk embeddings are not available for this index yet; "
-                        "using BM25-only search."
-                    )
+                    has_knowledge_embeddings = bool(
+                        self._db.get_knowledge_embeddings()
+                    ) if self._db is not None else False
+                    if has_knowledge_embeddings:
+                        from synapt.recall.embeddings import get_embedding_provider
+                        provider = get_embedding_provider()
+                        if provider:
+                            self._embed_provider = provider
+                            self._embedding_status = "active"
+                            self._embedding_reason = (
+                                "Knowledge-only semantic search: this store has no "
+                                "transcript chunks, so saved knowledge is searched "
+                                "through its embeddings."
+                            )
+                        else:
+                            self._embedding_status = "unavailable"
+                            self._embedding_reason = (
+                                "No embedding provider found. "
+                                "Install sentence-transformers for semantic search: "
+                                "pip install sentence-transformers"
+                            )
+                    else:
+                        self._embedding_reason = (
+                            "Chunk embeddings are not available for this index yet; "
+                            "using BM25-only search."
+                        )
                 else:
                     from synapt.recall.embeddings import get_embedding_provider
                     provider = get_embedding_provider()
@@ -2500,7 +2528,14 @@ class TranscriptIndex:
 
         top = [(i, s) for i, s in candidates[:max_chunks * 2] if s > 0]
 
-        has_emb = bool(self._embed_provider and self._all_embeddings)
+        # Embeddings "available" must cover the knowledge-only store: the
+        # provider may be active with knowledge embeddings and zero chunk
+        # embeddings, and a miss that reports "semantic search unavailable"
+        # tells an agent to install what it already has (measured: the line told an agent to install what it already has).
+        has_emb = bool(
+            self._embed_provider
+            and (self._all_embeddings or self._knowledge_embeddings)
+        )
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "fts_global",
             date_filter_active=date_filter is not None,
@@ -3188,7 +3223,29 @@ class TranscriptIndex:
             # overlap (e.g. a person's name) is a meaningful signal.
             query_tokens = set(_tokenize(query))
             min_matches = max(1, round(len(query_tokens) * 0.2))
-            emb_rowids = {r for r, s in emb_hits if s > 0.4}
+            # Coverage gate: with keyword hits present, only a strong
+            # embedding match (>0.4) bypasses the token-overlap requirement —
+            # the merged ranking has keyword context, so weak semantic extras
+            # are noise risk. On the semantic-only path (FTS found nothing —
+            # the knowledge-only store a docs-only agent has), NO absolute
+            # number separates related from unrelated: MiniLM's bands overlap
+            # (measured pairs: a question-versus-fact pair can score
+            # 0.307 while an unrelated pair scores 0.293 and a second
+            # unrelated pair 0.225-0.213). The gate there is therefore
+            # RELATIVE beside the absolute one: an emb-only hit must clear
+            # 0.25 AND sit within 0.10 of the top hit — a strong hit pushes
+            # near-miss noise out, and when nothing strong exists the
+            # absolute floor keeps the weakest band out. Measured on the probe
+            # pair: top 0.416 drops 0.293; a lone 0.307 top stands alone;
+            # tops of 0.225 stay under the floor.
+            if fts_hits:
+                emb_rowids = {r for r, s in emb_hits if s > 0.4}
+            else:
+                top_sim = max(s for _, s in emb_hits) if emb_hits else 0.0
+                emb_rowids = {
+                    r for r, s in emb_hits
+                    if s > 0.25 and s >= top_sim - 0.10
+                }
 
             # Entity extraction: boost knowledge nodes mentioning query entities
             if query_entities is None:

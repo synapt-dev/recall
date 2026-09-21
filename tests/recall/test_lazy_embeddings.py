@@ -273,7 +273,13 @@ class TestShardedColdStartEmbeddingGate(unittest.TestCase):
             files_touched=[],
         )
 
-    def test_sharded_lookup_skips_provider_when_chunk_embeddings_missing(self):
+    def test_sharded_lookup_creates_provider_when_knowledge_embeddings_exist(self):
+        """Updated for finding 0 (2026-09-21): this store holds a KNOWLEDGE
+        embedding the save path wrote, so the provider is now created and
+        knowledge semantic search is reachable; the BM25 fast path still
+        serves the CHUNK half (no chunk embeddings). The original assertion —
+        provider stays None on a cold-start store — moves to the store with
+        no embeddings at all (next test), which is where it survives."""
         from synapt.recall.core import TranscriptIndex
 
         index_db = RecallDB(self.index_dir / "index.db")
@@ -301,6 +307,50 @@ class TestShardedColdStartEmbeddingGate(unittest.TestCase):
             }
         ])
         index_db.save_knowledge_embeddings({1: _make_embedding(0.5)})
+        index_db.close()
+        data_db.close()
+
+        with patch("synapt.recall.embeddings.get_embedding_provider") as mock_get:
+            index = TranscriptIndex.load(self.index_dir, use_embeddings=True)
+            result = index.lookup("cold start fact", max_chunks=3, max_tokens=200)
+
+        self.assertIn("cold start fact", result)
+        self.assertIsNotNone(index._embed_provider)
+        self.assertIn("Knowledge-only semantic search", index._embedding_reason)
+        mock_get.assert_called()
+
+
+    def test_sharded_lookup_skips_provider_when_no_embeddings_exist(self):
+        """The original cold-start contract, where it still holds: a store
+        with neither chunk nor knowledge embeddings creates no provider and
+        never touches get_embedding_provider — BM25-only, zero model load."""
+        from synapt.recall.core import TranscriptIndex
+
+        index_db = RecallDB(self.index_dir / "index.db")
+        data_db = RecallDB(self.index_dir / "data_001.db")
+        data_db.save_chunks([self._make_chunk()])
+        index_db.save_knowledge_nodes([
+            {
+                "id": "kn-1",
+                "content": "cold start fact",
+                "category": "workflow",
+                "confidence": 0.9,
+                "source_sessions": [],
+                "source_turns": [],
+                "source_offsets": [],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "status": "active",
+                "superseded_by": "",
+                "contradiction_note": "",
+                "tags": [],
+                "valid_from": None,
+                "valid_until": None,
+                "version": 1,
+                "lineage_id": "",
+            }
+        ])
+        # NO save_knowledge_embeddings call — nothing semantic is reachable.
         index_db.close()
         data_db.close()
 
