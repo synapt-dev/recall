@@ -206,7 +206,15 @@ class TestOllamaProbeLadder:
 
     def test_refused_port_is_false(self):
         # Control: a closed port answers by refusing → URLError → False
-        # ("not installed"), the measured (False, 0.0s) shape.
+        # ("not installed"), the measured (False, 0.0s) shape.  On CI runners
+        # whose firewall DROPS packets to closed ports instead of refusing
+        # (measured: Windows runners, macOS 3.10/3.12 runners), the same
+        # closed port behaves as a silent server and the probe correctly
+        # returns None (unknown) — that is the platform's honest answer, not
+        # a probe defect.  The discriminating witness for unknown-vs-
+        # not-installed is test_silent_server_is_unknown (a socket that
+        # ACCEPTS and never answers); this control proves the probe neither
+        # raises nor hangs on a dead port.
         import socket
         from unittest.mock import patch as _patch
         from synapt.recall import cli as cli_mod
@@ -218,7 +226,8 @@ class TestOllamaProbeLadder:
             model = "probe-model"
         with _patch.object(cli_mod, "_OLLAMA_PROBE_TIMEOUT", 0.3), \
              _patch("synapt.recall.embeddings.OllamaEmbeddings", _Stub):
-            assert cli_mod._ollama_reachable() is False
+            result = cli_mod._ollama_reachable()
+        assert result in (False, None), f"dead port: expected not-serving, got {result!r}"
 
 
 class TestBackendRow:
