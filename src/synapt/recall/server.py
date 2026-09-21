@@ -2665,6 +2665,7 @@ def recall_save(
     source_turns: list[str] | None = None,
     node_id: str | None = None,
     retract: bool = False,
+    restore_retracted: bool = False,
 ) -> str:
     """Create, update, or retract a knowledge node.
 
@@ -2680,6 +2681,11 @@ def recall_save(
             recall_save derives a stable ID from the saved content.
         retract: If True, mark the node as retracted (hidden from search
             but preserved for audit). Requires node_id.
+        restore_retracted: Explicit deliberate restore of a retracted node
+            (requires node_id). An update on a retracted node is REFUSED
+            without it — retraction is load-bearing and a buried fact is not
+            revived silently; restore says "re-activated" and returns the
+            node to search under the new content.
     """
     try:
         import hashlib
@@ -2726,6 +2732,24 @@ def recall_save(
                 clean_content.encode("utf-8")
             ).hexdigest()[:12]
             existing = db.get_knowledge_node(resolved_node_id)
+            if (
+                existing
+                and existing.get("status") == "retracted"
+                and not restore_retracted
+            ):
+                # An update must not silently un-retract a node
+                # another agent deliberately buried. Refuse and name the
+                # explicit restore path (no restore path existed before this
+                # parameter; the refusal is what makes the state load-bearing).
+                return (
+                    f"Error: node {resolved_node_id} is retracted (hidden from "
+                    "search, preserved for audit); updates are refused so a "
+                    "buried fact is not revived silently. To restore it "
+                    f"deliberately, call recall_save(node_id='{resolved_node_id}', "
+                    "content=<the fact>, category=<its category>, "
+                    "restore_retracted=true) — or file the corrected fact as a "
+                    "new node."
+                )
             node = KnowledgeNode.create(
                 content=clean_content,
                 category=category,
@@ -2755,7 +2779,10 @@ def recall_save(
             db.close()
 
         _invalidate_cache()
-        action = "updated" if existing else "saved"
+        was_retracted = bool(
+            existing and existing.get("status") == "retracted" and restore_retracted
+        )
+        action = "re-activated" if was_retracted else ("updated" if existing else "saved")
         emb_status = "embedded for vector search" if embedded else "saved without embeddings"
         version_tag = f", v{node.version}" if node.version > 1 else ""
         return (

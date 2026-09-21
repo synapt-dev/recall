@@ -78,6 +78,7 @@ from synapt.recall.core import (
     _extract_assistant_content,
 )
 from synapt.recall.chatgpt import parse_chatgpt_archive
+from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.journal import (
     latest_transcript_path,
     extract_session_id,
@@ -1882,6 +1883,141 @@ def cmd_pack(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def resolve_model_states() -> list[tuple[str, str, str]]:
+    """Resolve each configured model to (key, model_name, state).
+
+    The stats display must agree with what the runtime actually
+    resolves. State is "active", "not installed", or "unknown: Ollama did
+    not answer in Ns". Probed cheaply (no model is loaded to answer a stats
+    question):
+
+    - embedding: the same resolution the search runtime uses
+      (get_embedding_provider — sentence-transformers import or a reachable
+      Ollama); None means the BM25-only line the runtime prints is true and
+      the row must say so;
+    - reranker: the sentence-transformers stack (reranker.py's CrossEncoder
+      import);
+    - summarization: its encoder-decoder chain (a converted ONNX model, or
+      the transformers import, or a decoder-only fallback stack);
+    - enrichment / consolidation: their decoder-only stacks (mlx-lm, or a
+      reachable Ollama server).
+    """
+    cfg = _load_config_safe()
+    provider = get_embedding_provider()
+    ollama = _ollama_reachable()
+    st = _stack_importable("sentence_transformers")
+    mlx = _stack_importable("mlx_lm")
+    transformers = _stack_importable("transformers")
+    onnx_model = _onnx_model_available(cfg.get_model("summarization"))
+
+    ollama_state = "active" if ollama is True else (
+        f"unknown (Ollama did not answer in {_OLLAMA_PROBE_TIMEOUT:g}s)"
+        if ollama is None else "not installed"
+    )
+    rows: list[tuple[str, str, str]] = []
+    for key in ("embedding", "summarization", "enrichment", "consolidation", "reranker"):
+        model = cfg.get_model(key)
+        if key == "embedding":
+            state = "active" if provider is not None else "not installed"
+        elif key == "reranker":
+            state = "active" if st else "not installed"
+        elif key == "summarization":
+            state = (
+                "active"
+                if (onnx_model or transformers or mlx or ollama is True)
+                else ollama_state if ollama is None else "not installed"
+            )
+        else:  # decoder-only tasks: MLX -> Ollama (plugin backends not probed)
+            state = (
+                "active" if (mlx or ollama is True)
+                else ollama_state if ollama is None
+                else "not installed"
+            )
+        rows.append((key, model, state))
+    return rows
+
+
+_OLLAMA_PROBE_TIMEOUT = 2.0
+
+
+def _ollama_reachable() -> bool | None:
+    """Can an Ollama server actually serve? The runtime's own probe shape
+    (OllamaEmbeddings.embed, keep_alive=0 — nothing stays resident), BOUNDED:
+    a bare TCP connect would call a reachable-but-empty server usable, which
+    is the overclaim this display exists to kill. Returns True (serves), None
+    (did not answer inside the probe timeout — the display says "unknown"),
+    or False (answered and refused — no usable model)."""
+    import urllib.request
+    from synapt.recall.embeddings import OllamaEmbeddings
+    api_url = OllamaEmbeddings().api_url
+    payload = json.dumps({
+        "model": OllamaEmbeddings().model,
+        "input": ["model-status probe"],
+        "keep_alive": "0",
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        api_url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_OLLAMA_PROBE_TIMEOUT) as resp:
+            json.loads(resp.read())
+        return True
+    except TimeoutError:
+        # A server that ACCEPTS and never answers inside the bound raises a
+        # bare TimeoutError from getresponse (urllib does not wrap it in
+        # URLError): that is "unknown", not "not installed" — a cold Ollama
+        # loading its embed model is exactly this case.
+        return None
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), TimeoutError) or "timed out" in str(e).lower():
+            return None
+        return False
+    except Exception:
+        return False
+
+
+def print_model_status(
+    rows: list[tuple[str, str, str]], backend: str | None = None
+) -> None:
+    """Print the model table honestly: the header says Active
+    Models only when at least one provider resolved; otherwise the section is
+    Configured models and every row says it is not installed — agreeing with
+    the "No embedding provider found" line the same run prints. A row whose
+    Ollama probe timed out says unknown, never active. A configured backend
+    override (not auto) is kept as its own row (R2 A5: kept from the old
+    display)."""
+    any_active = any(state == "active" for _, _, state in rows)
+    print()
+    print("Active Models" if any_active else "Configured models (none installed in this environment)")
+    print("-" * 40)
+    for key, model, state in rows:
+        print(f"  {key:16s}  {model}  [{state}]")
+    if backend and backend != "auto":
+        print(f"  {'backend':16s}  {backend}")
+
+
+def _load_config_safe():
+    from synapt.recall.config import load_config
+    return load_config()
+
+
+def _stack_importable(module_name: str) -> bool:
+    """Cheap provider-stack probe: importable in THIS process, no model load."""
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def _onnx_model_available(model_name: str) -> bool:
+    """Is a converted ONNX model present for this model? Disk check only."""
+    try:
+        from synapt._models.onnx_client import OnnxClient
+        return OnnxClient.is_available(model_name)
+    except Exception:
+        return False
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show index statistics."""
     from synapt.recall.sharding import is_sharded
@@ -1944,20 +2080,15 @@ def cmd_stats(args: argparse.Namespace) -> None:
         if n_clusters > 0:
             print(f"  Clusters:         {n_clusters}")
 
-    # Active model configuration
+    # Model configuration — resolved, not wished-for: a model is
+    # listed active only when its provider resolves in this process; the
+    # display agrees with the "No embedding provider found" line the same
+    # run prints.
     try:
-        from synapt.recall.config import load_config
-        cfg = load_config()
-        models = cfg.active_models()
-        print()
-        print("Active Models")
-        print("-" * 40)
-        for key, model in models.items():
-            print(f"  {key:16s}  {model}")
-        if cfg.backend != "auto":
-            print(f"  {'backend':16s}  {cfg.backend}")
+        cfg = _load_config_safe()
+        print_model_status(resolve_model_states(), backend=cfg.backend)
     except Exception as e:
-        logger.debug("Failed to load model config: %s", e)
+        logger.debug("Failed to resolve model status: %s", e)
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:
