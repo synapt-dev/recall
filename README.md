@@ -50,7 +50,7 @@ Agent skill files for repository-native use live in:
 For the default Claude Code path:
 
 ```bash
-pip install synapt
+pip install "synapt[all]"
 claude mcp add synapt -- synapt server
 synapt init
 ```
@@ -61,6 +61,31 @@ That gives you:
 - Claude hooks for automatic archive/build flow
 - the published Codex `dev-loop` skill installed into `${CODEX_HOME:-~/.codex}/skills/dev-loop/`
 
+### If you are an AI agent setting this up
+
+```bash
+pip install "synapt[all]"   # full install: embedding provider, integrations, code index (several GB)
+synapt init                 # run once, in the project root
+```
+
+(`pip install synapt` alone is small, but its search is keyword-only.)
+Start the MCP server with `synapt server` (stdio). Then:
+
+| When | Call |
+|---|---|
+| You learn a durable fact, decision, or preference | `recall_save(content=…, category="fact" \| "preference" \| "decision")` and keep the returned node id |
+| Before answering anything about the past | `recall_quick(query=…)`; use `recall_search` when you need more |
+| A saved fact changed | `recall_save(node_id=<id>, content=<the new fact>, category=<same category>)`; do not save a second node |
+| Two saved facts disagree | `recall_contradict(action="correct", old_node_id=<id>, new_content=…, reason=…)` |
+| The user asks you to forget something | `recall_save(node_id=<id>, retract=true)`; it no longer appears in search |
+| End of a working session | `recall_journal(action="write", focus=…, done=…, decisions=…, next_steps=…)` |
+
+Save facts in the words a later question will use: search matches a saved
+fact by the words it was saved in, so "The billing service uses Postgres 14"
+is found by a question that says "billing service", not only by one that
+says "invoice data". If a search finds nothing, say you do not know.
+A fresh project has an empty index until the first save; that is normal.
+
 ## Platform setup
 
 ### Claude Code
@@ -68,7 +93,7 @@ That gives you:
 Recommended:
 
 ```bash
-pip install synapt
+pip install "synapt[all]"
 claude mcp add synapt -- synapt server
 synapt init
 ```
@@ -78,7 +103,7 @@ synapt init
 Install:
 
 ```bash
-pip install synapt
+pip install "synapt[all]"
 ```
 
 Add to `~/.codex/config.toml`:
@@ -368,12 +393,12 @@ from synapt.integrations.anthropic import SynaptMemoryTool
 tool = SynaptMemoryTool()
 ```
 
-Every `create`, `view`, `str_replace`, and `search` call now goes through recall: files are persisted, content is enriched, and search returns semantically relevant results across sessions. No configuration needed; `pip install synapt` includes everything.
+Every `create`, `view`, `str_replace`, and `search` call now goes through recall: files are persisted, content is enriched, and search returns semantically relevant results across sessions. No configuration needed; `pip install "synapt[all]"` includes everything.
 
 For MCP-based recall (search, journals, channels, 20+ tools):
 
 ```bash
-pip install synapt
+pip install "synapt[all]"
 claude mcp add synapt -- synapt server
 synapt init
 ```
@@ -401,7 +426,7 @@ for the marketplace and plugin consent, then keeps the plugin updated.
 Install synapt and register the MCP server:
 
 ```bash
-pip install synapt
+pip install "synapt[all]"
 ```
 
 Add to `~/.codex/config.toml`:
