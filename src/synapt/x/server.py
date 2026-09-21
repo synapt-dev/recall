@@ -410,8 +410,25 @@ def x_search(query: str, max_results: int = 10) -> str:
 # ---------------------------------------------------------------------------
 
 
+def x_configured() -> bool:
+    """The X integration is configured only when all four credentials are
+    present. An unconfigured server must not advertise the X tools: a tool
+    in the list tells an agent it can post."""
+    import os
+
+    return all(
+        os.environ.get(k, "").strip()
+        for k in ("X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET")
+    )
+
+
 def register_tools(mcp: Any) -> None:
-    """Register X/Twitter tools on the given FastMCP server instance."""
+    """Register X/Twitter tools on the given FastMCP server instance —
+    only when the X credentials are configured. Unconfigured, none of the
+    eight tools is advertised (the tool list is what an agent reads; a
+    listed tool implies a usable capability)."""
+    if not x_configured():
+        return
     mcp.tool()(x_post)
     mcp.tool()(x_reply)
     mcp.tool()(x_thread)
