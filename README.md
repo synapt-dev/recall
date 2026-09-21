@@ -73,12 +73,19 @@ Start the MCP server with `synapt server` (stdio). Then:
 
 | When | Call |
 |---|---|
-| You learn a durable fact, decision, or preference | `recall_save(content=…, category="fact" \| "preference" \| "decision")` and keep the returned node id |
+| You learn a durable fact, decision, or preference | `recall_save(content=…, category=<one of the categories below>)` and keep the returned node id |
 | Before answering anything about the past | `recall_quick(query=…)`; use `recall_search` when you need more |
 | A saved fact changed | `recall_save(node_id=<id>, content=<the new fact>, category=<same category>)`; do not save a second node |
 | Two saved facts disagree | `recall_contradict(action="correct", old_node_id=<id>, new_content=…, reason=…)` |
 | The user asks you to forget something | `recall_save(node_id=<id>, retract=true)`; it no longer appears in search |
+| You need a retracted fact back deliberately | `recall_save(node_id=<id>, content=<the fact>, category=<its category>, restore_retracted=true)`; updating a retracted node is otherwise refused — retraction is not silently undone |
 | End of a working session | `recall_journal(action="write", focus=…, done=…, decisions=…, next_steps=…)` |
+
+`category` is validated on call and accepts exactly: `architecture`,
+`collection`, `convention`, `debugging`, `decision`, `fact`, `infrastructure`,
+`lesson-learned`, `preference`, `tooling`, `workflow`. Omitting it saves as
+`workflow`. An unrecognized category is refused with the list; nothing is
+written.
 
 Save facts in the words a later question will use: search matches a saved
 fact by the words it was saved in, so "The billing service uses Postgres 14"
