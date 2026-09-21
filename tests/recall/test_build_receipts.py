@@ -129,6 +129,34 @@ def test_receipt_surfaces_skipped_lines_alongside_config_warnings(monkeypatch, t
     ]
 
 
+def test_receipt_accepts_index_without_optional_build_metadata(monkeypatch, tmp_path):
+    """Older index objects must not make the build receipt fail."""
+    from synapt.recall import cli, server
+
+    class _IndexWithoutBuildMetadata:
+        chunks = [object()]
+
+        @staticmethod
+        def stats() -> dict:
+            return {"chunk_count": 1, "session_count": 1}
+
+    def fake_build(project, *, use_embeddings, incremental, progress):
+        progress("parsing")
+        return _IndexWithoutBuildMetadata()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_archive_and_build", fake_build)
+    monkeypatch.setattr(server, "_invalidate_cache", lambda: None)
+
+    response = server.recall_build(incremental=False)
+    build_id = _build_id(response)
+    completed = _wait_status(server, build_id, "completed")
+
+    assert completed["skipped_oversize"] == []
+    assert completed["config_warnings"] == []
+    assert completed["skipped_lines"] == []
+
+
 def test_same_process_status_does_not_reprobe_its_own_marker(monkeypatch, tmp_path):
     from synapt.recall import cli, server
 
