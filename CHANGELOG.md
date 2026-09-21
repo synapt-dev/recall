@@ -6,9 +6,11 @@ All notable changes to synapt are documented here.
 
 ## [0.25.1] — 2026-09-21
 
-Patch release. 45 commits across 18 first-parent merges since 0.25.0 (counted
-with `git log --first-parent --merges 2ece8b3..dev`; all 18 are pull-request
-merges, #1186 through #1206). The headline is search quality: saved knowledge
+Patch release. 47 commits across 19 first-parent merges since 0.25.0 (counted
+with `git log --first-parent --merges 2ece8b3..dev` at the final dev tip:
+18 pull-request merges, #1186 through #1206 less #1194 and #1197, which never
+landed on dev, and #1202, which landed on main directly, plus the
+version-bump merge #1207). The headline is search quality: saved knowledge
 searches semantically (#1203), `recall_code` ranks by module path (#1200) and
 stems inflected queries (#1191), and the co-retrieval contradiction detector
 gates its queue on a measured similarity floor (#1206). Several fixes make
