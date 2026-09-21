@@ -2541,6 +2541,35 @@ class RecallDB:
                 continue
         return result
 
+    def get_knowledge_embeddings_by_ids(
+        self, node_ids: list[str]
+    ) -> dict[str, list[float]]:
+        """Load embeddings for the NAMED active knowledge nodes only.
+
+        Same shape as get_knowledge_embeddings_by_id, but bounded by the
+        requested ids: the co-retrieval detector asks for just its candidate
+        pairs' nodes, not every active node's embedding, so the read scales
+        with the candidate set rather than the store. Nodes without a stored
+        embedding are absent from the result; the caller treats a missing id
+        as an unmeasurable pair.
+        """
+        if not node_ids:
+            return {}
+        result: dict[str, list[float]] = {}
+        placeholders = ",".join("?" * len(node_ids))
+        rows = self._conn.execute(
+            f"SELECT id, embedding FROM knowledge "
+            f"WHERE embedding IS NOT NULL AND status = 'active' "
+            f"AND id IN ({placeholders})",
+            list(node_ids),
+        ).fetchall()
+        for r in rows:
+            try:
+                result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+            except struct.error:
+                continue
+        return result
+
     def save_knowledge_embeddings(self, embeddings: dict[int, list[float]]) -> None:
         """Store embedding BLOBs for knowledge nodes by rowid."""
         cur = self._conn.cursor()

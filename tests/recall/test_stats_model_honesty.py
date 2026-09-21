@@ -204,7 +204,7 @@ class TestOllamaProbeLadder:
         assert result is None, result
         assert elapsed < 1.5, f"probe took {elapsed:.2f}s — the bound did not hold"
 
-    def test_refused_port_is_false(self):
+    def test_dead_port_is_not_serving(self):
         # Control: a closed port answers by refusing → URLError → False
         # ("not installed"), the measured (False, 0.0s) shape.  On CI runners
         # whose firewall DROPS packets to closed ports instead of refusing

@@ -30,6 +30,12 @@ from synapt.recall.core import TranscriptChunk, TranscriptIndex
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _pad_floor_vec(x: list[float]) -> list[float]:
+    """Pad a 2-D signal vector to the storage layer's 384-dim width; the
+    pairwise cosine is unchanged by the zero padding."""
+    return x + [0.0] * (384 - len(x))
+
+
 def _make_db(tmp_path) -> RecallDB:
     return RecallDB(tmp_path / "test.db")
 
@@ -2068,18 +2074,26 @@ class TestCoRetrievalConflictDetection:
         return index, db
 
     def test_detects_conflict_same_category_low_overlap(self, tmp_path):
-        """Two active nodes, same category, divergent content → queued."""
+        """Two active nodes, same category, divergent content, floor-clearing
+        embeddings → queued. Updated for the A-PLUS floor: without embeddings
+        a co-retrieval pair is neither queued nor bannered (no measurable
+        cosine), so this test stores embeddings first."""
         index, db = self._make_index_with_db(tmp_path)
-        results = [
-            _make_knowledge_node(
-                node_id="n1", content="always use unittest for Python testing",
-                category="tooling", confidence=0.7,
-            ),
-            _make_knowledge_node(
-                node_id="n2", content="prefer pytest with fixtures and markers",
-                category="tooling", confidence=0.8,
-            ),
-        ]
+        n1 = _make_knowledge_node(
+            node_id="n1", content="always use unittest for Python testing",
+            category="tooling", confidence=0.7,
+        )
+        n2 = _make_knowledge_node(
+            node_id="n2", content="prefer pytest with fixtures and markers",
+            category="tooling", confidence=0.8,
+        )
+        db.save_knowledge_nodes([dict(n1), dict(n2)])
+        for nid, vec in (("n1", _pad_floor_vec([1.0, 0.0])),
+                         ("n2", _pad_floor_vec([0.95, 0.312]))):
+            rowid = db.get_knowledge_rowid(nid)
+            assert rowid is not None
+            db.save_knowledge_embeddings({rowid: vec})
+        results = [n1, n2]
 
         index._detect_co_retrieval_conflicts(results)
 
@@ -2228,7 +2242,10 @@ class TestCoRetrievalConflictDetection:
         assert db.pending_contradiction_count() == 0
 
     def test_returns_detected_pairs(self, tmp_path):
-        """_detect_co_retrieval_conflicts returns (old, new) tuples."""
+        """_detect_co_retrieval_conflicts returns (old, new) tuples — for a
+        pair that clears the similarity floor. Updated for the A-PLUS floor:
+        with no embeddings in the store, a co-retrieval pair is neither queued
+        nor returned (the floor requires a measurable cosine)."""
         index, db = self._make_index_with_db(tmp_path)
         results = [
             {"id": "n1", "content": "deploy on tuesday", "category": "workflow",
@@ -2236,6 +2253,30 @@ class TestCoRetrievalConflictDetection:
             {"id": "n2", "content": "never use feature flags", "category": "workflow",
              "status": "active", "confidence": 0.9, "lineage_id": ""},
         ]
+        detected = index._detect_co_retrieval_conflicts(results)
+        # No embeddings → nothing measurable → no pair, no row (the cold-pass
+        # fix: two unrelated facts on a BM25-only store are no longer
+        # conflicts).
+        assert detected == []
+        assert db.pending_contradiction_count() == 0
+
+    def test_returns_detected_pairs_above_floor(self, tmp_path):
+        """_detect_co_retrieval_conflicts returns (old, new) tuples for a
+        floor-clearing pair — embeddings present, cosine ≥ 0.40."""
+        index, db = self._make_index_with_db(tmp_path)
+        results = [
+            {"id": "n1", "content": "deploy on tuesday", "category": "workflow",
+             "status": "active", "confidence": 0.6, "lineage_id": ""},
+            {"id": "n2", "content": "never use feature flags", "category": "workflow",
+             "status": "active", "confidence": 0.9, "lineage_id": ""},
+        ]
+        # Save the nodes so they have rowids, then store their embeddings.
+        db.save_knowledge_nodes([dict(r) for r in results])
+        for nid, vec in (("n1", _pad_floor_vec([1.0, 0.0])),
+                         ("n2", _pad_floor_vec([0.95, 0.312]))):
+            rowid = db.get_knowledge_rowid(nid)
+            assert rowid is not None
+            db.save_knowledge_embeddings({rowid: vec})
         detected = index._detect_co_retrieval_conflicts(results)
         assert len(detected) == 1
         old, new = detected[0]
