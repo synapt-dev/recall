@@ -166,20 +166,20 @@ def count_related_conversations(recall_output: str) -> int:
 
 
 def _load_recall_quick_impl() -> RecallQuick:
-    """Resolve the real recall_quick implementation.
+    """Resolve the recall_quick implementation the hook runs.
 
-    Broken out as its own function so it is a monkeypatchable seam: a test can
-    replace this attribute to simulate a slow or fake import without touching
-    ``sys.modules``. Importing ``synapt.recall.server`` pulls in the full
-    server stack; measured in isolation at 0.08-0.29s (disk-cache-state
-    dependent), a cost that must never compete with the query itself for the
-    hook's small per-call timeout. ``_resolve_recall_quick`` below calls this
-    in the calling thread, before ``_bounded_recall`` starts its clock -- not
-    inside the timed worker.
+    Bound to ``server._recall_quick_impl`` with the knowledge-semantic
+    fallback OFF: the hook calls recall under a 500 ms budget, and the
+    fallback starts an embeddings index and a model load on a keyword miss —
+    measured on the review probe: 0.09 s miss on the keyword-only path, 0.52 s
+    with the fallback, plus a worker still loading after the budget cut it.
+    The MCP tool's contract keeps the fallback; the hook's does not.
     """
-    from synapt.recall.server import recall_quick
+    from functools import partial
 
-    return recall_quick
+    from synapt.recall import server
+
+    return server._bind_quick_no_fallback()
 
 
 def _default_recall_quick(query: str) -> str:

@@ -24,7 +24,7 @@ a path-only defect" reading was withdrawn once the clean-index baseline
 showed most of the defect was the ranking signal, not path alone, and a
 path-only fix was judged not to be the fruit a reader needs.
 
-On THIS hermetic fixture, that breaks down as: 2 deterministically RIGHT
+On THIS hermetic fixture, the baseline broke down as: 2 deterministically RIGHT
 (Q7, Q9, plain assertions below); 5 deterministically WRONG, pinned as
 xfail(strict=True) with the specific residual defect each demonstrates --
 not left silently passing on the wrong answer, since an accidental future
@@ -193,7 +193,7 @@ def _top(grip: Path, db: Path, query: str) -> tuple[str, str, str] | None:
     return top["path"], top["name"], top["kind"]
 
 
-# --- The nine replayed questions, RIGHT (2/9, measured 2026-09-09) ---
+# --- The nine replayed questions, RIGHT after path-class ranking ---
 
 def test_q7_enrich_module_resolves_inside_enrich_py(gripspace: tuple[Path, Path]) -> None:
     grip, db = gripspace
@@ -216,22 +216,8 @@ def test_q9_channel_post_logic_resolves_to_channel_post(gripspace: tuple[Path, P
     assert name == "channel_post"
 
 
-# --- The remaining seven, WRONG as measured -- pinned, not silently green ---
+# --- The remaining baseline misses ---
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "recall_channel (server.py, an MCP wrapper) substring-matches BOTH "
-        "'recall' and 'channel', so raw token_coverage (2) beats a real "
-        "channel.py symbol matching only 'channel' (1) -- the repo's own "
-        "product name, appearing in the query as scope-context ('...in "
-        "recall'), gets credited as a second distinguishing content word. "
-        "Out of this lane's two named signals (path affinity, definition "
-        "preference); token_coverage's own primacy is a separate, "
-        "incident-justified invariant (2026-09-02 crowding fix) this lane "
-        "was not asked to touch."
-    ),
-)
 def test_q1_channel_class_resolves_to_channel_py(gripspace: tuple[Path, Path]) -> None:
     grip, db = gripspace
     path, _name, _kind = _top(grip, db, "Where is the Channel class defined in recall")
@@ -285,9 +271,16 @@ def _assert_undiscriminated_tie(grip: Path, db: Path, query: str) -> None:
     )
 
 
-def test_q2_hybrid_search_module_is_an_undiscriminated_tie(gripspace: tuple[Path, Path]) -> None:
+def test_q2_hybrid_search_module_prefers_its_home_path(gripspace: tuple[Path, Path]) -> None:
     grip, db = gripspace
-    _assert_undiscriminated_tie(grip, db, "What does the hybrid search module do")
+    result = recall_code(
+        "What does the hybrid search module do",
+        db_path=str(db), repo=REPO_NAME, repo_root=str(grip),
+        max_symbols=10, max_chunks=0,
+    )
+    searches = [s for s in result["symbols"] if s["name"] == "search"]
+    assert searches[0]["path"].endswith("recall/hybrid.py")
+    assert searches[0]["path_match_ratio"] > searches[1]["path_match_ratio"]
 
 
 def test_q10_search_ranking_is_an_undiscriminated_tie(gripspace: tuple[Path, Path]) -> None:
@@ -423,30 +416,12 @@ def test_q3_mcp_entry_point_resolves_to_server_py(gripspace: tuple[Path, Path]) 
     assert "server.py" in path
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "RecallConfig, RecallDB (in storage.py), and RecallTask-shaped "
-        "peers all cover exactly 'recall' (cov=1) with an identical "
-        "name_match_ratio (0.5) and kind (class) -- the query's actual "
-        "distinguishing word ('storage') lives only in the FILE's own "
-        "module name, never in any candidate's own symbol name, so "
-        "name_match_ratio has nothing to discriminate on and alphabetical "
-        "order decides. A path/module-name matching signal would fix this "
-        "but is a third mechanism beyond the two this lane was scoped to."
-    ),
-)
 def test_q4_recall_core_storage_resolves_to_storage_py(gripspace: tuple[Path, Path]) -> None:
     grip, db = gripspace
     path, _name, _kind = _top(grip, db, "How does recall core storage work")
     assert "storage.py" in path
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Same defect as Q4: 'storage' is a path/module word, not a name word, "
-    "on every tied cov=1 production class candidate.",
-)
 def test_q8_storage_backend_resolves_to_storage_py(gripspace: tuple[Path, Path]) -> None:
     grip, db = gripspace
     path, _name, _kind = _top(grip, db, "What storage backend does recall use")
@@ -469,15 +444,130 @@ def test_q6_recall_cli_resolves_to_cli_py(gripspace: tuple[Path, Path]) -> None:
     assert "cli.py" in path
 
 
-# The bar, stated as one number: on this hermetic fixture, 2 of the nine
-# resolve correctly and deterministically (Q7, Q9, asserted above as plain
-# passes); 5 resolve wrong deterministically (Q1, Q3, Q4, Q6, Q8, pinned as
-# strict xfail above -- an accidental future fix flips one to an unexpected
-# pass, which fails the suite and forces a deliberate update); and 2 are
-# genuine, undiscriminated ties whose specific winner depends on
+# The bar after this path-class proof: 6 of the nine resolve correctly and
+# deterministically (Q1, Q2, Q4, Q7, Q8, Q9, with Q2's formerly equal search
+# methods now distinguished by the queried hybrid module path); 2 resolve
+# wrong deterministically (Q3 and Q6, pinned as strict xfail); and Q10 is a
+# genuine, undiscriminated tie whose specific winner depends on
 # find_symbols' row order (itself dependent on an unsorted os.walk in
 # code_index.py, measured to differ between two runs on the same machine),
 # asserted above as tie-existence rather than a specific winner so this
 # suite does not become the thing that is flaky. No single integer speaks
 # for all nine without erasing that last distinction; that is why there is
 # no test asserting a single overall count here.
+
+
+# --- Stem asymmetry between a query's inflected word and a symbol's bare
+# present-tense/noun form (measured 2026-09-11 against this repo's own
+# code_search.py and code index -- a real query, not a synthetic one;
+# BEFORE/AFTER top-3 recorded in the PR body) ---
+#
+# _stem strips one of ing/ed/es/s and nothing else, so an inflected query
+# word and the symbol's own bare form only converge when the symbol form
+# itself ALSO ends in one of those four suffixes. A verb whose bare form
+# ends in a silent "e" (tokenize, acquire, merge, score) never does:
+# "tokenizes"/"tokenized"/"tokenizing" already correctly stem to
+# "tokeniz" (the "es"/"ed"/"ing" rule fires), but bare "tokenize" stems
+# to "tokenize" -- nothing strips it, since none of the four suffixes
+# match a lone trailing "e". name_match_ratio then compares "tokenize"
+# (symbol) against "tokeniz" (query's stem of "tokenized") and finds no
+# overlap: the real answer's own name explains 0% of itself in the
+# query's terms, while an unrelated symbol whose bare name is a
+# generic word the query also happens to contain outright ("text")
+# scores a non-zero ratio and wins the tie-break the coverage stage
+# left open.
+#
+# Measured against this repo's OWN real index (not a fixture) before
+# choosing the fixture shape below: "how is text tokenized" returned
+# ``_TextHolder``/``_bounded_text``/``TEXT_BYTES`` (ratio 0.5 each,
+# matching only "text") as its top-3 -- ``_tokenize`` (the actual
+# tokenizer bm25.py calls) was ABSENT from the top 5 entirely. After
+# the fix, all three real ``_tokenize`` definitions (bm25.py,
+# working_memory.py, evaluation/recall-validation/retrieval.py) reach
+# ratio 1.0 and take the top 3 slots outright.
+def test_query_verb_meets_symbols_bare_present_tense_form(isolated) -> None:
+    """Real shape: "how is text tokenized" should land on the function
+    that actually tokenizes (tokenize), not on an unrelated symbol whose
+    name merely contains the generic word "text" -- which ties on
+    token_coverage (each contains exactly one query word, same as
+    "tokenize") and then wins on name_match_ratio pre-fix because its
+    own name needs no stemming to already partially equal a query
+    word, while "tokenize" needs stemming it doesn't get."""
+    grip, db = isolated({
+        "home/src/pkg/bm25.py": (
+            "def tokenize(text):\n"
+            "    \"\"\"Split text into BM25 tokens.\"\"\"\n"
+        ),
+        "home/src/pkg/checkpoint.py": (
+            "TEXT_BYTES = 1 << 20\n"
+            "\"\"\"An unrelated constant, decoy for the tie.\"\"\"\n"
+        ),
+        "home/src/pkg/compaction.py": (
+            "def _bounded_text(value, limit):\n"
+            "    \"\"\"An unrelated helper, decoy for the tie.\"\"\"\n"
+        ),
+    })
+    r = _top_n(grip, db, "how is text tokenized", n=1)
+    assert r and r[0][1] == "tokenize", r
+
+
+def test_control_query_with_no_bare_e_word_is_unaffected(isolated) -> None:
+    """Control for the test above: a query whose real answer already wins
+    purely on token_coverage (two literal substring hits, "build" and
+    "lock", neither ending in a bare "e") must rank first before AND
+    after any stem change -- this is the second, real query the fix must
+    NOT move. Mirrors this repo's own _acquire_build_lock/
+    _archive_and_build_locked/_release_build_lock shape."""
+    grip, db = isolated({
+        "home/src/pkg/cli.py": (
+            "def _acquire_build_lock(data_dir, timeout=60.0):\n"
+            "    \"\"\"Acquire the build lock.\"\"\"\n\n\n"
+            "def _archive_and_build_locked(data_dir):\n"
+            "    \"\"\"Archive while the build lock is held.\"\"\"\n\n\n"
+            "def _release_build_lock(fd):\n"
+            "    \"\"\"Release the build lock.\"\"\"\n"
+        ),
+    })
+    r = _top_n(grip, db, "where is the build lock acquired", n=1)
+    assert r and r[0][1] == "_acquire_build_lock", r
+
+
+# --- The bare-"e" stem must never widen token_coverage's own SUBSTRING
+# check, only name_match_ratio's WORD-LEVEL equality check (measured
+# 2026-09-11, a real regression against this repo's own index caught
+# before the fix above shipped) ---
+#
+# Applying bare_e stemming to the COVERAGE side too turns "state" into
+# "stat" -- which is a literal substring of the unrelated symbol "stats"
+# (stat + s). "where is session state saved" then ranked stats/stats/
+# stats/stats ahead of every real session_* symbol, because token_coverage
+# checks substring containment against the RAW symbol name, and a shorter
+# stem only ever WIDENS that surface. name_match_ratio's own check is
+# WORD-LEVEL equality (covered/len(words)), where widening the stem
+# narrows false mismatches instead -- the same operation is safe on one
+# side and unsafe on the other, which is why bare_e is a per-call-site
+# opt-in, not a global default.
+def test_bare_e_stem_does_not_widen_coverage_into_false_substrings(isolated) -> None:
+    """Real shape, matching the actual regression exactly: the query's
+    domain word ("state") never appears literally in ANY candidate's own
+    name -- not the real answer's either, same as the real repo's
+    session_activity/session_count/session_overview, none of which
+    contain "state". So both the real answer (matching only "session",
+    coverage 1) and the decoy (matching only the FALSE "stat" substring
+    of "stats" once "state" is stemmed to "stat", coverage 1) tie on raw
+    coverage, isolating exactly the signal a coverage-side bare_e leak
+    would corrupt. A fixture where the real answer's OWN name also
+    happens to contain "state" (coverage 3 regardless) would mask the
+    defect entirely, which is why this one deliberately does not."""
+    grip, db = isolated({
+        "home/src/pkg/session.py": (
+            "def session_activity(session_id):\n"
+            "    \"\"\"Read a session's own recorded activity.\"\"\"\n"
+        ),
+        "home/src/pkg/core.py": (
+            "def stats():\n"
+            "    \"\"\"An unrelated stats summary, decoy for the false substring.\"\"\"\n"
+        ),
+    })
+    r = _top_n(grip, db, "how is state persisted across sessions", n=1)
+    assert r and r[0][1] == "session_activity", r

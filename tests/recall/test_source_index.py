@@ -147,6 +147,33 @@ def test_unchanged_second_scan_reuses_document_without_parsing(tmp_path: Path) -
     assert second.units_published == 0
 
 
+def test_parser_limit_receipt_reports_attempted_units_and_parser_units_knob(
+    tmp_path: Path,
+) -> None:
+    """An aggregate parser refusal tells the operator what was attempted and
+    exactly which limit to inspect, without changing atomic publication."""
+    root = tmp_path / "memory"
+    root.mkdir()
+    (root / "oversized.md").write_text(
+        "# First unit\n\nOne.\n\n# Second unit\n\nTwo.\n", encoding="utf-8"
+    )
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        receipt = sync_source(
+            _admission(root_fd),
+            DescriptorSourceAdapter(),
+            _opener(tmp_path / "private-source.db"),
+            lambda _candidate: True,
+            limits=SourceLimits(parser_units=1),
+        )
+    finally:
+        os.close(root_fd)
+
+    assert receipt.state == "parser_limit_exceeded"
+    assert receipt.units_attempted == 2
+    assert receipt.parser_units == 1
+
+
 def test_unauthorized_calls_open_nothing_and_return_no_corpus_metadata(
     tmp_path: Path,
 ) -> None:

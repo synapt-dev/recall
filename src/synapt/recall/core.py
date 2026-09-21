@@ -41,6 +41,30 @@ from synapt.recall.sharded_db import ShardedRecallDB
 # Multiplier for knowledge nodes whose content matches query entities
 ENTITY_BOOST = 1.5
 
+# Co-retrieval contradiction floor (companion fix to the public recall#683
+# issue): a co-retrieved pair is a contradiction candidate only when its
+# embedding cosine clears this — the measured bands from the
+# knowledge-semantic work put an unrelated pair at 0.293 and a related pair
+# at 0.416; 0.40 shares the same value the keyword-hit coverage gate uses.
+# One floor gates both the queue insert and the search banner; each gate is
+# its own check at its own site.
+CO_RETRIEVAL_SIMILARITY_FLOOR = 0.40
+
+
+def _cosine(u: list[float], v: list[float]) -> float:
+    """Plain cosine between two equal-length vectors (no numpy dependency)."""
+    num = sum(a * b for a, b in zip(u, v))
+    den_u = math.sqrt(sum(a * a for a in u))
+    den_v = math.sqrt(sum(b * b for b in v))
+    if not den_u or not den_v:
+        return 0.0
+    return num / (den_u * den_v)
+
+
+def _pair_clears_floor(vec_a: list[float], vec_b: list[float]) -> bool:
+    """The co-retrieval floor: cos(a, b) >= CO_RETRIEVAL_SIMILARITY_FLOOR."""
+    return _cosine(vec_a, vec_b) >= CO_RETRIEVAL_SIMILARITY_FLOOR
+
 # Category-intent alignment map: which knowledge node categories are most
 # relevant for each query intent. Used to boost aligned nodes by 1.5×.
 _CAT_INTENT_MAP: dict[str, set[str]] = {
@@ -1310,16 +1334,44 @@ class TranscriptIndex:
                 if self._db is None or self._idx_to_rowid:
                     self._load_or_build_embeddings(cache_dir)
 
-                # If the index has no chunk embeddings yet, keep CLI/server
-                # search on the fast BM25 path instead of paying model load for
-                # knowledge-only semantic lookup. A later build can populate
-                # embeddings in the DB, but this TranscriptIndex instance stays
-                # BM25-only until the next fresh load.
+                # If the index has no chunk embeddings yet, keep the fast
+                # BM25 path for CHUNK search — but a store may still hold
+                # KNOWLEDGE embeddings the save path wrote: recall_save
+                # embeds every knowledge node regardless of transcript
+                # chunks, so a knowledge-only store (zero chunks — the shape
+                # any harness without transcript hooks has) carries vectors
+                # its search path could never reach. When those vectors
+                # exist, create the provider here; the model loads lazily on
+                # the first query that uses them, so a store with neither
+                # chunk nor knowledge embeddings keeps the BM25-only fast
+                # path and pays nothing.
                 if not has_chunk_embeddings:
-                    self._embedding_reason = (
-                        "Chunk embeddings are not available for this index yet; "
-                        "using BM25-only search."
-                    )
+                    has_knowledge_embeddings = bool(
+                        self._db.get_knowledge_embeddings()
+                    ) if self._db is not None else False
+                    if has_knowledge_embeddings:
+                        from synapt.recall.embeddings import get_embedding_provider
+                        provider = get_embedding_provider()
+                        if provider:
+                            self._embed_provider = provider
+                            self._embedding_status = "active"
+                            self._embedding_reason = (
+                                "Knowledge-only semantic search: this store has no "
+                                "transcript chunks, so saved knowledge is searched "
+                                "through its embeddings."
+                            )
+                        else:
+                            self._embedding_status = "unavailable"
+                            self._embedding_reason = (
+                                "No embedding provider found. "
+                                "Install sentence-transformers for semantic search: "
+                                "pip install sentence-transformers"
+                            )
+                    else:
+                        self._embedding_reason = (
+                            "Chunk embeddings are not available for this index yet; "
+                            "using BM25-only search."
+                        )
                 else:
                     from synapt.recall.embeddings import get_embedding_provider
                     provider = get_embedding_provider()
@@ -2500,7 +2552,14 @@ class TranscriptIndex:
 
         top = [(i, s) for i, s in candidates[:max_chunks * 2] if s > 0]
 
-        has_emb = bool(self._embed_provider and self._all_embeddings)
+        # Embeddings "available" must cover the knowledge-only store: the
+        # provider may be active with knowledge embeddings and zero chunk
+        # embeddings, and a miss that reports "semantic search unavailable"
+        # tells an agent to install what it already has (measured: the line told an agent to install what it already has).
+        has_emb = bool(
+            self._embed_provider
+            and (self._all_embeddings or self._knowledge_embeddings)
+        )
         top = self._apply_threshold_with_diagnostics(
             top, threshold_ratio, "fts_global",
             date_filter_active=date_filter is not None,
@@ -3188,7 +3247,29 @@ class TranscriptIndex:
             # overlap (e.g. a person's name) is a meaningful signal.
             query_tokens = set(_tokenize(query))
             min_matches = max(1, round(len(query_tokens) * 0.2))
-            emb_rowids = {r for r, s in emb_hits if s > 0.4}
+            # Coverage gate: with keyword hits present, only a strong
+            # embedding match (>0.4) bypasses the token-overlap requirement —
+            # the merged ranking has keyword context, so weak semantic extras
+            # are noise risk. On the semantic-only path (FTS found nothing —
+            # the knowledge-only store a docs-only agent has), NO absolute
+            # number separates related from unrelated: MiniLM's bands overlap
+            # (measured pairs: a question-versus-fact pair can score
+            # 0.307 while an unrelated pair scores 0.293 and a second
+            # unrelated pair 0.225-0.213). The gate there is therefore
+            # RELATIVE beside the absolute one: an emb-only hit must clear
+            # 0.25 AND sit within 0.10 of the top hit — a strong hit pushes
+            # near-miss noise out, and when nothing strong exists the
+            # absolute floor keeps the weakest band out. Measured on the probe
+            # pair: top 0.416 drops 0.293; a lone 0.307 top stands alone;
+            # tops of 0.225 stay under the floor.
+            if fts_hits:
+                emb_rowids = {r for r, s in emb_hits if s > 0.4}
+            else:
+                top_sim = max(s for _, s in emb_hits) if emb_hits else 0.0
+                emb_rowids = {
+                    r for r, s in emb_hits
+                    if s > 0.25 and s >= top_sim - 0.10
+                }
 
             # Entity extraction: boost knowledge nodes mentioning query entities
             if query_entities is None:
@@ -3348,17 +3429,37 @@ class TranscriptIndex:
                 nid = node.get("id", "")
                 token_cache[nid] = set(_tokenize(node.get("content", "")))
 
+            # Companion fix to the public recall#683 issue: ONE similarity
+            # floor gates BOTH the queue insert and the search banner, so
+            # the two surfaces stay one population. A co-retrieval pair is a
+            # candidate contradiction only when its embedding cosine clears
+            # the floor (the measured bands from the knowledge-semantic
+            # work: unrelated pair 0.293, related pair 0.416, the same 0.4
+            # value the keyword-hit coverage gate uses). Below the floor, or
+            # on a store with no embeddings (BM25-only), the pair is neither
+            # queued nor bannered: strictly a reduction of what gets
+            # flagged, no new heuristic. Explicit contradictions (the
+            # contradict tool's manual inserts, consolidation-detected rows)
+            # are untouched.
+            # Pass 1: token candidates only — no embeddings touched yet; the
+            # detector reads embeddings only for the ids that survive this
+            # filter. A pair whose either node lacks a stored embedding is
+            # skipped, so a store saved mostly before embeddings existed
+            # gets almost no co-retrieval flags until its nodes are
+            # re-embedded.
             # Load all pending old_node_ids in one query
-            pending_ids = {
+            pre_pending = {
                 p["old_node_id"]
                 for p in self._db.list_pending_contradictions()
             }
+            pending_ids = set(pre_pending)
 
             # Group by category
             by_cat: dict[str, list[dict]] = {}
             for node in active:
                 by_cat.setdefault(node.get("category", ""), []).append(node)
 
+            candidates: list[tuple[dict, dict, float]] = []
             for cat_nodes in by_cat.values():
                 if len(cat_nodes) < 2:
                     continue
@@ -3380,27 +3481,61 @@ class TranscriptIndex:
                         jaccard = len(kw_a & kw_b) / len(kw_a | kw_b)
                         if jaccard >= 0.3:
                             continue  # Similar enough — not a conflict
-                        # Check dedup: skip if already pending for either node
-                        if id_a in pending_ids or id_b in pending_ids:
+                        # Check dedup against PRE-EXISTING pendings only in
+                        # pass 1 (a pair queued this batch adds its old id in
+                        # pass 2, the same as the pre-floor shape).
+                        if id_a in pre_pending or id_b in pre_pending:
                             continue
-                        # Queue the lower-confidence node as the "old" one
-                        if a.get("confidence", 0) >= b.get("confidence", 0):
-                            old, new = b, a
-                        else:
-                            old, new = a, b
-                        self._db.add_pending_contradiction(
-                            old_node_id=old["id"],
-                            new_content=new.get("content", ""),
-                            category=old.get("category", ""),
-                            reason=f"Co-retrieved with conflicting node [{new['id']}]",
-                            detected_by="co-retrieval",
-                        )
-                        detected.append((old, new))
-                        pending_ids.add(old["id"])  # Prevent further dups this batch
-                        logger.debug(
-                            "Co-retrieval conflict: [%s] vs [%s] (jaccard=%.2f)",
-                            old["id"], new["id"], jaccard,
-                        )
+                        # Token candidate (pass 1): embeddings are only
+                        # read for ids that get this far.
+                        candidates.append((a, b, jaccard))
+
+            if not candidates:
+                return detected
+
+            # Pass 2: embeddings for the candidate ids only.
+            cand_ids = sorted({n["id"] for pair in candidates for n in (pair[0], pair[1])})
+            emb_by_id = self._db.get_knowledge_embeddings_by_ids(cand_ids)
+
+            for a, b, jaccard in candidates:
+                # Within-batch dedup: a node queued this batch must not pair
+                # again — add_pending_contradiction does not dedup, so three
+                # floor-clearing nodes would queue the same old node more
+                # than once without this check.
+                if a["id"] in pending_ids or b["id"] in pending_ids:
+                    continue
+                vec_a = emb_by_id.get(a["id"])
+                vec_b = emb_by_id.get(b["id"])
+                if vec_a is None or vec_b is None:
+                    continue  # unmeasurable — neither queued nor bannered
+                # Queue the lower-confidence node as the "old" one
+                if a.get("confidence", 0) >= b.get("confidence", 0):
+                    old, new = b, a
+                else:
+                    old, new = a, b
+                # Banner gate — the similarity floor: the banner lists
+                # only floor-clearing pairs.
+                if _pair_clears_floor(vec_a, vec_b):
+                    detected.append((old, new))
+                # Queue insert — the same floor, its own gate at its
+                # own site: dropping this one reds the no-row
+                # witnesses while the no-banner witness stays green
+                # (the pair of facts that proves the floor sits on
+                # both).
+                if not _pair_clears_floor(vec_a, vec_b):
+                    continue
+                self._db.add_pending_contradiction(
+                    old_node_id=old["id"],
+                    new_content=new.get("content", ""),
+                    category=old.get("category", ""),
+                    reason=f"Co-retrieved with conflicting node [{new['id']}]",
+                    detected_by="co-retrieval",
+                )
+                pending_ids.add(old["id"])  # Prevent further dups this batch
+                logger.debug(
+                    "Co-retrieval conflict: [%s] vs [%s] (jaccard=%.2f)",
+                    old["id"], new["id"], jaccard,
+                )
         except Exception:
             pass  # Best-effort — never disrupt search
         return detected
@@ -4589,6 +4724,24 @@ class TranscriptIndex:
             return {"chunk_count": 0, "session_count": 0}
 
         timestamps = [c.timestamp for c in self.chunks if c.timestamp]
+        if self._db is not None:
+            # Aggregate in SQL over the stored JSON-array
+            # columns. The two set-comprehensions here previously each
+            # triggered a full _materialize_all_chunks() hydration pass
+            # (the triple materialization: cmd_stats's load + both of
+            # these) -- 92% of cmd_stats cumulative time on the shared
+            # -chunk index. The SQL path fetches no chunk bodies; suppressed
+            # sessions and query-tail overlay replacement are handled at
+            # the db layer for parity with the visible-chunk population.
+            tools, files = self._db.distinct_tools_files()
+        else:
+            # No db (memory/JSONL path): chunks are fully loaded; one
+            # fused pass replaces the two separate materializations.
+            tools = set()
+            files = set()
+            for c in self.chunks:
+                tools.update(c.tools_used)
+                files.update(c.files_touched)
         return {
             "chunk_count": len(self.chunks),
             "session_count": len(self.sessions),
@@ -4597,12 +4750,8 @@ class TranscriptIndex:
                 "latest": max(timestamps) if timestamps else "",
             },
             "avg_chunks_per_session": len(self.chunks) / max(len(self.sessions), 1),
-            "total_tools_used": len(set(
-                t for c in self._materialize_all_chunks() for t in c.tools_used
-            )),
-            "total_files_touched": len(set(
-                f for c in self._materialize_all_chunks() for f in c.files_touched
-            )),
+            "total_tools_used": len(tools),
+            "total_files_touched": len(files),
             "embeddings_active": (
                 self._embeddings is not None
                 or (self._db is not None and self._db.has_embeddings())
@@ -4881,15 +5030,16 @@ def project_slug(project_dir: Path | None = None) -> str:
     """Convert a project path to Claude Code's directory slug format.
 
     Claude Code stores per-project data at ~/.claude/projects/<slug>/
-    where the slug is the absolute path with ``/`` replaced by ``-``.
+    where the slug is the absolute path with path separators replaced by
+    ``-``. Windows drive separators are normalized as path separators too.
 
     Examples:
         /Users/me/Development/synapse → -Users-me-Development-synapse
+        C:\\Code\\fp-loom → C--Code-fp-loom
     """
     p = (project_dir or Path.cwd()).resolve()
-    # Use PurePosixPath to normalise Windows backslashes before slugifying.
-    # On Unix this is a no-op; on Windows it converts C:\Users\... → C:/Users/...
-    return str(p).replace("\\", "/").replace("/", "-")
+    # Normalize Windows separators before deriving Claude Code's slug.
+    return str(p).replace("\\", "/").replace(":", "/").replace("/", "-")
 
 
 def _worktree_name(project_dir: Path | None = None) -> str:

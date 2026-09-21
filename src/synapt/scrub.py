@@ -22,6 +22,22 @@ PATTERNS: list[re.Pattern] = [
     re.compile(r"ak-[A-Za-z0-9_-]{20,}"),
     re.compile(r"pypi-[A-Za-z0-9_]{50,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    # bare-value coverage (no NAME= context needed) for three more
+    # vendor families, from each vendor's own public documentation only.
+    #   Supabase personal access token: sbp_ + 40 hex chars, per
+    #   supabase.com/docs/reference/cli's own masked example
+    #   (sbp_ followed by 40 asterisks) -- an exact documented length.
+    re.compile(r"sbp_[a-f0-9]{40}"),
+    #   npm access token: npm_ prefix is documented (github.blog's 2021
+    #   announcement of npm's new token format); no primary source commits to
+    #   an exact total length or a single confirmed charset, so this uses the
+    #   same open-floor convention as hf_/ghp_ above rather than inventing one.
+    re.compile(r"npm_[A-Za-z0-9]{20,}"),
+    #   RunPod scoped API key: rpa_ prefix, documented at
+    #   runpod.io/blog/scoped-api-keys-runpod for NEW keys only -- RunPod's
+    #   own post states legacy (pre-scoped-key) keys "remain in their legacy
+    #   format," which is undocumented and NOT matched by this pattern.
+    re.compile(r"rpa_[A-Za-z0-9]{15,}"),
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
     re.compile(
         r"Authorization:\s*(?:Bearer|Key|Basic|Token)\s+[A-Za-z0-9._/+:=-]{8,}",

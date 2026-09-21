@@ -36,6 +36,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import synapt.recall as _synapt_pkg
 from synapt.recall.config import load_config
@@ -66,6 +67,25 @@ def _cap_tokens(requested: int) -> int:
     """Apply the user-configured max_tokens cap."""
     limit = load_config().get_max_tokens()
     return min(requested, limit)
+
+
+@functools.cache
+def _source_token_encoding() -> Any:
+    try:
+        import tiktoken
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "source rendering requires synapt[source-render] for exact o200k token budgeting"
+        ) from exc
+    return tiktoken.get_encoding("o200k_base")
+
+
+def _truncate_source_to_tokens(text: str, max_tokens: int) -> str:
+    """Return a source render whose o200k token count cannot exceed its share."""
+    tokens = _source_token_encoding().encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return _source_token_encoding().decode(tokens[:max_tokens])
 
 # ---------------------------------------------------------------------------
 # MCP instructions — shared with the unified server (synapt.server)
@@ -496,9 +516,8 @@ def recall_search(
         )
         if source_results:
             source_budget = min(500, max_tokens // 3)
-            source_result = _tw(
-                render_source_results(source_results),
-                max(1, source_budget * 4),
+            source_result = _truncate_source_to_tokens(
+                render_source_results(source_results), source_budget
             )
     index = _get_index()
 
@@ -641,6 +660,22 @@ def recall_quick(query: str) -> str:
     Args:
         query: Natural language query or keywords to search for.
     """
+    # The tool's contract includes the knowledge-semantic fallback (measured
+    # live: a paraphrase query misses keyword-wise and only the embeddings
+    # reach the saved fact). The grep-intercept hook calls the same body
+    # through _recall_quick_impl with semantic_fallback=False — it runs
+    # inside a 500 ms budget and must never start a model load on a miss.
+    return _recall_quick_impl(query, semantic_fallback=True)
+
+
+def _bind_quick_no_fallback():
+    """The grep-intercept hook's recall binding: the same quick body with the
+    knowledge-semantic fallback OFF (it runs inside a 500 ms budget and must
+    never start a model load on a keyword miss)."""
+    return functools.partial(_recall_quick_impl, semantic_fallback=False)
+
+
+def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
     index_dir = project_index_dir()
     freshness_line = _query_freshness_line(index_dir)
     quick_budget = _cap_tokens(500)
@@ -677,6 +712,31 @@ def recall_quick(query: str) -> str:
         )
         if result:
             return _with_query_freshness(result, freshness_line)
+        # The cheap keyword pass found nothing. recall_quick stays
+        # keyword-only for its fast path, but recall_save embeds every
+        # knowledge node regardless, so the store may hold knowledge
+        # embeddings the keyword pass cannot reach (measured live: a
+        # paraphrase query misses keyword-wise but sits next to the saved
+        # fact in vector space). Retry once through an embeddings-enabled
+        # index. If that also finds nothing, the miss is reported from THAT
+        # index, so "semantic search was also used" reflects what ran.
+        sem_index = (
+            _get_index(use_embeddings=True) if semantic_fallback else None
+        )
+        if sem_index is not None and sem_index is not index:
+            result = sem_index.lookup(
+                query,
+                max_chunks=5,
+                max_tokens=quick_budget,
+                half_life=params.get("half_life"),
+                depth=depth,
+                threshold_ratio=0.2,
+                knowledge_boost=params.get("knowledge_boost"),
+                max_knowledge=params.get("max_knowledge"),
+            )
+            if result:
+                return _with_query_freshness(result, freshness_line)
+            index = sem_index
         diag = index._last_diagnostics
         if diag:
             sessions = f"{diag.total_sessions} session"
@@ -808,16 +868,58 @@ def recall_code(
     Args:
         query: Plain-language question or a symbol name.
         repo_root: Repository to index and search. Defaults to the current
-            working directory.
+            working directory -- which, for an MCP server whose cwd is a
+            gripspace root (every live caller on this host), IS a
+            multi-repo container: the call refuses and names the member
+            repos rather than silently merging them. Pass repo_root
+            pointing at one specific repo instead.
         max_symbols: Maximum code symbols to return.
         max_chunks: Maximum memory chunks to return.
     """
-    from synapt.recall.code_index import index_repo
+    from synapt.recall.code_index import SKIP_DIRS, index_repo
     from synapt.recall.code_search import recall_code as _recall_code
 
     root = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
     if not root.is_dir():
         return f"Repo root not found: {root}"
+    # An ambiguous root -- not itself a git repo, and containing more than
+    # one member repo ANYWHERE below it -- must never be walked and
+    # indexed as one undifferentiated tree. That merges every member
+    # repo's symbols under one "repo" tag: any query becomes answerable
+    # from any member (a synapt question answered from a client checkout,
+    # or a gitgrip Rust file), and the tag itself is unstable across calls
+    # whose effective root varies, which defeats the content-hash re-index
+    # cache -- the same root cause underlies both symptoms. The walk below
+    # mirrors index_repo's own (same SKIP_DIRS, so a repo hidden inside a
+    # vendor tree never counted for indexing doesn't count for ambiguity
+    # either) and stops as soon as a second member repo is found -- the
+    # question is only ever "one or more than one," never a full census.
+    if not (root / ".git").exists():
+        member_repos: list[str] = []
+        for dirpath, dirnames, _filenames in os.walk(root):
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in SKIP_DIRS
+                and not d.startswith(".")
+                and not os.path.islink(os.path.join(dirpath, d))
+            ]
+            for d in list(dirnames):
+                if (Path(dirpath) / d / ".git").exists():
+                    member_repos.append(
+                        str((Path(dirpath) / d).relative_to(root))
+                    )
+                    dirnames.remove(d)  # a repo's own internals are never walked
+                    if len(member_repos) > 1:
+                        break
+            if len(member_repos) > 1:
+                break
+        if len(member_repos) > 1:
+            return (
+                f"Repo root {root} is not itself a git repository and contains "
+                f"member repos including ({', '.join(sorted(member_repos))}, "
+                "and possibly more). "
+                "Pass repo_root pointing at exactly one of them."
+            )
     db = project_data_dir(root) / "code_index.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1236,13 +1338,13 @@ def _run_build_job(project: Path, receipt: dict, incremental: bool) -> None:
         # store whose only source content is one oversize file still needs
         # its skip on the receipt, not just a silent zero-chunk result.
         receipt["skipped_oversize"] = (
-            final_index.skipped_oversize if final_index is not None else []
+            getattr(final_index, "skipped_oversize", []) if final_index is not None else []
         )
         receipt["config_warnings"] = (
-            final_index.config_warnings if final_index is not None else []
+            getattr(final_index, "config_warnings", []) if final_index is not None else []
         )
         receipt["skipped_lines"] = (
-            final_index.skipped_lines if final_index is not None else []
+            getattr(final_index, "skipped_lines", []) if final_index is not None else []
         )
     except BaseException as exc:
         receipt["state"] = "failed"
@@ -2563,6 +2665,7 @@ def recall_save(
     source_turns: list[str] | None = None,
     node_id: str | None = None,
     retract: bool = False,
+    restore_retracted: bool = False,
 ) -> str:
     """Create, update, or retract a knowledge node.
 
@@ -2578,6 +2681,11 @@ def recall_save(
             recall_save derives a stable ID from the saved content.
         retract: If True, mark the node as retracted (hidden from search
             but preserved for audit). Requires node_id.
+        restore_retracted: Explicit deliberate restore of a retracted node
+            (requires node_id). An update on a retracted node is REFUSED
+            without it — retraction is load-bearing and a buried fact is not
+            revived silently; restore says "re-activated" and returns the
+            node to search under the new content.
     """
     try:
         import hashlib
@@ -2624,6 +2732,24 @@ def recall_save(
                 clean_content.encode("utf-8")
             ).hexdigest()[:12]
             existing = db.get_knowledge_node(resolved_node_id)
+            if (
+                existing
+                and existing.get("status") == "retracted"
+                and not restore_retracted
+            ):
+                # An update must not silently un-retract a node
+                # another agent deliberately buried. Refuse and name the
+                # explicit restore path (no restore path existed before this
+                # parameter; the refusal is what makes the state load-bearing).
+                return (
+                    f"Error: node {resolved_node_id} is retracted (hidden from "
+                    "search, preserved for audit); updates are refused so a "
+                    "buried fact is not revived silently. To restore it "
+                    f"deliberately, call recall_save(node_id='{resolved_node_id}', "
+                    "content=<the fact>, category=<its category>, "
+                    "restore_retracted=true) — or file the corrected fact as a "
+                    "new node."
+                )
             node = KnowledgeNode.create(
                 content=clean_content,
                 category=category,
@@ -2653,7 +2779,10 @@ def recall_save(
             db.close()
 
         _invalidate_cache()
-        action = "updated" if existing else "saved"
+        was_retracted = bool(
+            existing and existing.get("status") == "retracted" and restore_retracted
+        )
+        action = "re-activated" if was_retracted else ("updated" if existing else "saved")
         emb_status = "embedded for vector search" if embedded else "saved without embeddings"
         version_tag = f", v{node.version}" if node.version > 1 else ""
         return (
@@ -3495,10 +3624,16 @@ def _sync_claude_memory_source_on_startup() -> None:
         receipt = admit_and_index_claude_memory()
         if receipt is not None:
             elapsed_ms = int((time.monotonic() - started) * 1000)
+            limit_detail = ""
+            if receipt.state == "parser_limit_exceeded":
+                limit_detail = (
+                    f", {receipt.units_attempted or 0} units attempted "
+                    f"vs parser_units={receipt.parser_units or 0}"
+                )
             print(
                 f"[claude_memory] {receipt.state}: "
                 f"{receipt.documents_seen or 0} file(s), "
-                f"generation {receipt.generation}, {elapsed_ms}ms",
+                f"generation {receipt.generation}{limit_detail}, {elapsed_ms}ms",
                 file=sys.stderr,
             )
     except Exception:

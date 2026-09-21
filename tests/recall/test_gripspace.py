@@ -652,8 +652,8 @@ class TestProjectTranscriptDirsGripspace:
 
         # Create fake Claude Code transcript dirs
         fake_home = tmp_path / "home"
-        slug_a = str(repo_a).replace("\\", "/").replace("/", "-")
-        slug_b = str(repo_b).replace("\\", "/").replace("/", "-")
+        slug_a = project_slug(repo_a)
+        slug_b = project_slug(repo_b)
         td_a = fake_home / ".claude" / "projects" / slug_a
         td_b = fake_home / ".claude" / "projects" / slug_b
         td_a.mkdir(parents=True)
@@ -673,7 +673,7 @@ class TestProjectTranscriptDirsGripspace:
         repo = _make_git_repo(grip, "my-repo")
 
         fake_home = tmp_path / "home"
-        slug = str(repo).replace("\\", "/").replace("/", "-")
+        slug = project_slug(repo)
         td = fake_home / ".claude" / "projects" / slug
         td.mkdir(parents=True)
         (td / "session.jsonl").write_text("{}")
@@ -707,13 +707,13 @@ class TestProjectTranscriptDirsGripspace:
 
         fake_home = tmp_path / "home"
         # Create transcript dir for the gripspace root itself
-        slug_root = str(grip).replace("\\", "/").replace("/", "-")
+        slug_root = project_slug(grip)
         td_root = fake_home / ".claude" / "projects" / slug_root
         td_root.mkdir(parents=True)
         (td_root / "session-root.jsonl").write_text("{}")
 
         # And for the sub-repo
-        slug_repo = str(repo).replace("\\", "/").replace("/", "-")
+        slug_repo = project_slug(repo)
         td_repo = fake_home / ".claude" / "projects" / slug_repo
         td_repo.mkdir(parents=True)
         (td_repo / "session-repo.jsonl").write_text("{}")
@@ -736,7 +736,7 @@ class TestProjectTranscriptDirsGripspace:
         (linked / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'atlas'}\n")
 
         fake_home = tmp_path / "home"
-        slug_linked = str(linked).replace("\\", "/").replace("/", "-")
+        slug_linked = project_slug(linked)
         td_linked = fake_home / ".claude" / "projects" / slug_linked
         td_linked.mkdir(parents=True)
         (td_linked / "session-linked.jsonl").write_text("{}")
@@ -757,7 +757,7 @@ class TestProjectTranscriptDirsGripspace:
         )
 
         fake_home = tmp_path / "home"
-        slug_sibling = str(sibling).replace("\\", "/").replace("/", "-")
+        slug_sibling = project_slug(sibling)
         td_sibling = fake_home / ".claude" / "projects" / slug_sibling
         td_sibling.mkdir(parents=True)
         (td_sibling / "session-sibling.jsonl").write_text("{}")

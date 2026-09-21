@@ -405,13 +405,17 @@ def _connect(db_path: Path | str) -> sqlite3.Connection:
 
 
 def _iter_source_files(root: Path) -> Iterator[Path]:
-    """Yield indexable files, skipping vendor trees and symlinked directories."""
+    """Yield indexable files, skipping vendor trees, symlinked directories,
+    and scratch review clones (any subtree carrying the ``.review-clone``
+    marker ``review-clone.sh`` writes as its last step -- a review clone is
+    a disposable cut for one R1/R2 gate, not a member of this repo)."""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             d for d in dirnames
             if d not in SKIP_DIRS
             and not d.startswith(".")
             and not os.path.islink(os.path.join(dirpath, d))
+            and not (Path(dirpath) / d / ".review-clone").exists()
         ]
         for filename in filenames:
             if Path(filename).suffix.lower() in EXT_TO_LANG:

@@ -14,6 +14,7 @@ Schema:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -37,6 +38,9 @@ logger = logging.getLogger("synapt.recall.storage")
 EMBEDDING_DIM = 384
 _EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
 _EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
+
+_SCHEMA_OPEN_RETRY_SECONDS = 5.0
+_SCHEMA_OPEN_RETRY_INTERVAL_SECONDS = 0.025
 
 # FTS5 column weights for bm25():
 #   user_text, assistant_text, tools_used, files_touched, tool_content, date_text
@@ -605,16 +609,93 @@ class RecallDB:
     def __init__(self, db_path: Path | str):
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = self._connect()
-        self._ensure_schema()
+        self._open_with_race_retry()
+
+    def _open_with_race_retry(self) -> None:
+        """Open + schema, tolerating concurrent openers.
+
+        The common path (schema already current, no contention) runs exactly
+        once under the schema lock, with no retry-clock bookkeeping. When
+        another process is setting the same
+        store up at the same instant — fleet boot, a fresh gripspace, N desks
+        respawning — the open path used to die most races out with three
+        benign-race errors: ``duplicate column name`` (check-then-ALTER
+        migrations), ``table ... already exists`` (check-then-CREATE FTS5
+        virtual tables, which cannot use IF NOT EXISTS), and a bare
+        ``database is locked`` the busy handler does not mask. Measured
+        2026-09-16; the retry alone flips the witness red (Stromus M2/M3),
+        the filelock additionally prevents DDL interleaving.
+
+        The retry spans the WHOLE open — connection included — because the
+        ``journal_mode=WAL`` PRAGMA in ``_connect`` can itself return an
+        immediate (unretried) SQLITE_BUSY racing the opener that is switching
+        the fresh store into WAL. That shape never manifested on local macOS
+        runs but failed 1/8 writers on CI ubuntu 3.10; the witness test
+        covers it because a racing first-writer exercises the connect too.
+
+        Every connect + schema operation runs under recall's inter-process
+        filelock, so the WAL transition and DDL cannot interleave between
+        openers. A benign SQLite race is retried until an elapsed five-second
+        budget expires, rather than a fixed number of attempts. Every
+        statement in the section is idempotent, so a full re-run converges
+        once the winner has finished. Anything else (corrupt file, disk full)
+        re-raises untouched.
+        """
+        from synapt.recall._filelock import lock_exclusive
+
+        lock_path = self._path.parent / (self._path.name + ".schema.lock")
+        deadline: float | None = None
+        last_exc: sqlite3.OperationalError | None = None
+        while True:
+            conn = getattr(self, "_conn", None)
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+                self._conn = None
+            with open(lock_path, "a+") as lock_file:
+                lock_exclusive(lock_file)
+                try:
+                    self._conn = self._connect()
+                    self._ensure_schema()
+                    return
+                except sqlite3.OperationalError as exc:
+                    if not self._is_benign_schema_race(exc):
+                        raise
+                    last_exc = exc
+                    if deadline is None:
+                        deadline = time.monotonic() + _SCHEMA_OPEN_RETRY_SECONDS
+            assert deadline is not None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Release the filelock before yielding so another opener can
+            # finish its transaction before this process retries.
+            time.sleep(min(_SCHEMA_OPEN_RETRY_INTERVAL_SECONDS, remaining))
+        assert last_exc is not None
+        raise last_exc
+
+    @staticmethod
+    def _is_benign_schema_race(exc: Exception) -> bool:
+        """Errors that mean 'another opener won this statement; try again
+        serialized' — as opposed to anything that means the store is broken."""
+        msg = str(exc).lower()
+        return (
+            "already exists" in msg
+            or "duplicate column name" in msg
+            or "database is locked" in msg
+            or "database table is locked" in msg
+        )
 
     # -- connection --------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), timeout=5.0)
+        # busy_timeout FIRST: the journal_mode PRAGMA below can return an
+        # immediate (unretried) SQLITE_BUSY on a store another process is
+        # setting up, and it must wait like every other statement does.
+        conn.execute("PRAGMA busy_timeout=30000")  # 30s — builds can be slow
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")  # 30s — builds can be slow
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1622,6 +1703,67 @@ class RecallDB:
             byte_length=r["byte_length"] if r["byte_length"] is not None else 0,
         )
 
+    def distinct_tools_files(
+        self,
+        exclude_sessions: set[str] | None = None,
+        exclude_chunk_ids: set[str] | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """Distinct tools/files across all chunks without hydrating bodies.
+
+        tools_used / files_touched are stored as JSON arrays
+        (json.dumps at write), so the distinct sets aggregate in SQLite via
+        json_each -- no row bodies fetched, no Python objects built. The
+        CASE guard keeps non-array column values (empty-string defaults,
+        legacy rows) out of json_each, which would raise on malformed
+        JSON. Exclusions are applied IN SQL, not by set subtraction: a tool
+        present in both an excluded and a kept chunk must survive, and only
+        per-row filtering gives that.
+        """
+        tools: set[str] = set()
+        files: set[str] = set()
+        where = []
+        params: list = []
+        if exclude_sessions:
+            sessions = sorted(exclude_sessions)
+            where.append(
+                f"session_id NOT IN ({','.join('?' * len(sessions))})"
+            )
+            params.extend(sessions)
+        if exclude_chunk_ids:
+            ids = sorted(exclude_chunk_ids)
+            where.append(f"id NOT IN ({','.join('?' * len(ids))})")
+            params.extend(ids)
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+        for col, out in (("tools_used", tools), ("files_touched", files)):
+            try:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT je.value FROM chunks, json_each("
+                    f"CASE WHEN substr(chunks.{col}, 1, 1) = '[' "
+                    f"THEN chunks.{col} END) je{where_sql}",
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # json1 unavailable on this build: fall back to decoding
+                # just the two small columns in Python (still far under a
+                # full-body hydration pass).
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT {col} FROM chunks{where_sql}",
+                    params,
+                ).fetchall()
+                import json as _json  # fallback decode path only
+                for (raw,) in rows:
+                    if isinstance(raw, str) and raw.startswith("["):
+                        try:
+                            out.update(v for v in _json.loads(raw) if v)
+                        except ValueError:
+                            continue
+                continue
+            out.update(
+                r[0] for r in rows
+                if isinstance(r[0], str) and r[0]
+            )
+        return tools, files
+
     def load_chunks_by_rowids(self, rowids: list[int]) -> dict[int, TranscriptChunk]:
         """Load multiple chunks by rowid with bounded SQL query count."""
         if not rowids:
@@ -2391,6 +2533,35 @@ class RecallDB:
         rows = self._conn.execute(
             "SELECT id, embedding FROM knowledge "
             "WHERE embedding IS NOT NULL AND status = 'active'"
+        ).fetchall()
+        for r in rows:
+            try:
+                result[r[0]] = list(struct.unpack(_EMBEDDING_FMT, r[1]))
+            except struct.error:
+                continue
+        return result
+
+    def get_knowledge_embeddings_by_ids(
+        self, node_ids: list[str]
+    ) -> dict[str, list[float]]:
+        """Load embeddings for the NAMED active knowledge nodes only.
+
+        Same shape as get_knowledge_embeddings_by_id, but bounded by the
+        requested ids: the co-retrieval detector asks for just its candidate
+        pairs' nodes, not every active node's embedding, so the read scales
+        with the candidate set rather than the store. Nodes without a stored
+        embedding are absent from the result; the caller treats a missing id
+        as an unmeasurable pair.
+        """
+        if not node_ids:
+            return {}
+        result: dict[str, list[float]] = {}
+        placeholders = ",".join("?" * len(node_ids))
+        rows = self._conn.execute(
+            f"SELECT id, embedding FROM knowledge "
+            f"WHERE embedding IS NOT NULL AND status = 'active' "
+            f"AND id IN ({placeholders})",
+            list(node_ids),
         ).fetchall()
         for r in rows:
             try:

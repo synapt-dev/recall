@@ -78,6 +78,7 @@ from synapt.recall.core import (
     _extract_assistant_content,
 )
 from synapt.recall.chatgpt import parse_chatgpt_archive
+from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.journal import (
     latest_transcript_path,
     extract_session_id,
@@ -1788,6 +1789,235 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         print(f"  Total queries: {len(queries) * iterations}")
 
 
+def cmd_pack(args: argparse.Namespace) -> None:
+    """Seal every CLOSED transcript session of the current project into a
+    content-addressed pack + idx under the index. Loose bytes are never
+    truncated or deleted -- a pack is an additional, verifiable receipt."""
+    from synapt.recall import transcript_pack as tp
+    from synapt.recall.core import project_transcript_dir
+
+    index_dir = _resolve_index_dir(args)
+
+    # push/fetch, like --verify, only ever touch index_dir and (for push) the
+    # remote directory -- neither needs a project transcript directory, so
+    # this must run before that resolution too.
+    verb = getattr(args, "verb", None)
+    if verb in ("push", "fetch"):
+        from synapt.recall import transcript_pack_origin as tpo
+
+        remote = getattr(args, "remote", None)
+        if not remote:
+            print(f"Error: pack {verb} needs a remote directory argument", file=sys.stderr)
+            sys.exit(2)
+        remote_dir = Path(remote)
+        if verb == "push":
+            result = tpo.push_to_remote(index_dir, remote_dir)
+            for sha in result.transferred:
+                print(f"push {sha[:12]}")
+            print(
+                f"pushed {result.transferred_count} segment(s) to {remote_dir}; "
+                f"{len(result.already_present)} already present"
+            )
+        else:
+            try:
+                result = tpo.fetch_from_remote(remote_dir, index_dir)
+            except (tpo.RemoteSegmentCorrupt, tpo.RemoteNotFound) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            for sha in result.transferred:
+                print(f"fetch {sha[:12]}")
+            print(
+                f"fetched {result.transferred_count} segment(s) from {remote_dir}; "
+                f"{len(result.already_present)} already present"
+            )
+        return
+
+    # --verify only ever reads the existing pack + idx under index_dir; it
+    # has no dependency on a project transcript directory, so the project-dir
+    # resolution below (and its "no transcript directory" refusal) must not
+    # run first -- a caller re-verifying an index from a cwd with no
+    # transcripts of its own must not be refused before verification starts.
+    if getattr(args, "verify", False):
+        result = tp.verify_pack(index_dir)
+        for session_id in result.ok:
+            print(f"verify {session_id[:8]} OK")
+        for session_id in result.sha_mismatch:
+            print(f"verify {session_id[:8]} SHA_MISMATCH", file=sys.stderr)
+        for session_id in result.length_mismatch:
+            print(f"verify {session_id[:8]} LENGTH_MISMATCH", file=sys.stderr)
+        for session_id in result.boundary_violation:
+            print(f"verify {session_id[:8]} BOUNDARY_VIOLATION", file=sys.stderr)
+        print(f"Verified {len(result.ok)} OK, {len(result.sha_mismatch) + len(result.length_mismatch) + len(result.boundary_violation)} failed.")
+        if not result.all_ok:
+            sys.exit(1)
+        return
+
+    project_dir = project_transcript_dir(Path.cwd())
+    if project_dir is None or not project_dir.exists():
+        print("Error: no transcript directory found for this project", file=sys.stderr)
+        sys.exit(1)
+
+    # The runtime that invoked this command names itself in its env (same
+    # convention as cmd_startup): without it the seal cannot exclude the
+    # live, still-growing transcript.
+    current_session_id = (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CODEX_THREAD_ID")
+        or os.environ.get("SYNAPT_SESSION_ID")
+        or None
+    )
+
+    result = tp.seal_closed_sessions(project_dir, index_dir, live_session_id=current_session_id)
+    for receipt in result.receipts:
+        print(tp.format_seal_receipt(receipt))
+    if result.skipped_already_packed:
+        print(f"skipped {len(result.skipped_already_packed)} already-packed session(s)")
+    print(
+        f"Sealed {result.sealed_count} session(s): "
+        f"{result.total_raw_bytes:,} bytes -> {result.total_compressed_bytes:,} compressed."
+    )
+    failed = [r for r in result.receipts if not r.verified]
+    if failed:
+        for r in failed:
+            print(f"seal {r.session_id[:8]} verify=FAILED", file=sys.stderr)
+        sys.exit(1)
+
+
+def resolve_model_states() -> list[tuple[str, str, str]]:
+    """Resolve each configured model to (key, model_name, state).
+
+    The stats display must agree with what the runtime actually
+    resolves. State is "active", "not installed", or "unknown: Ollama did
+    not answer in Ns". Probed cheaply (no model is loaded to answer a stats
+    question):
+
+    - embedding: the same resolution the search runtime uses
+      (get_embedding_provider — sentence-transformers import or a reachable
+      Ollama); None means the BM25-only line the runtime prints is true and
+      the row must say so;
+    - reranker: the sentence-transformers stack (reranker.py's CrossEncoder
+      import);
+    - summarization: its encoder-decoder chain (a converted ONNX model, or
+      the transformers import, or a decoder-only fallback stack);
+    - enrichment / consolidation: their decoder-only stacks (mlx-lm, or a
+      reachable Ollama server).
+    """
+    cfg = _load_config_safe()
+    provider = get_embedding_provider()
+    ollama = _ollama_reachable()
+    st = _stack_importable("sentence_transformers")
+    mlx = _stack_importable("mlx_lm")
+    transformers = _stack_importable("transformers")
+    onnx_model = _onnx_model_available(cfg.get_model("summarization"))
+
+    ollama_state = "active" if ollama is True else (
+        f"unknown (Ollama did not answer in {_OLLAMA_PROBE_TIMEOUT:g}s)"
+        if ollama is None else "not installed"
+    )
+    rows: list[tuple[str, str, str]] = []
+    for key in ("embedding", "summarization", "enrichment", "consolidation", "reranker"):
+        model = cfg.get_model(key)
+        if key == "embedding":
+            state = "active" if provider is not None else "not installed"
+        elif key == "reranker":
+            state = "active" if st else "not installed"
+        elif key == "summarization":
+            state = (
+                "active"
+                if (onnx_model or transformers or mlx or ollama is True)
+                else ollama_state if ollama is None else "not installed"
+            )
+        else:  # decoder-only tasks: MLX -> Ollama (plugin backends not probed)
+            state = (
+                "active" if (mlx or ollama is True)
+                else ollama_state if ollama is None
+                else "not installed"
+            )
+        rows.append((key, model, state))
+    return rows
+
+
+_OLLAMA_PROBE_TIMEOUT = 2.0
+
+
+def _ollama_reachable() -> bool | None:
+    """Can an Ollama server actually serve? The runtime's own probe shape
+    (OllamaEmbeddings.embed, keep_alive=0 — nothing stays resident), BOUNDED:
+    a bare TCP connect would call a reachable-but-empty server usable, which
+    is the overclaim this display exists to kill. Returns True (serves), None
+    (did not answer inside the probe timeout — the display says "unknown"),
+    or False (answered and refused — no usable model)."""
+    import urllib.request
+    from synapt.recall.embeddings import OllamaEmbeddings
+    api_url = OllamaEmbeddings().api_url
+    payload = json.dumps({
+        "model": OllamaEmbeddings().model,
+        "input": ["model-status probe"],
+        "keep_alive": "0",
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        api_url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_OLLAMA_PROBE_TIMEOUT) as resp:
+            json.loads(resp.read())
+        return True
+    except TimeoutError:
+        # A server that ACCEPTS and never answers inside the bound raises a
+        # bare TimeoutError from getresponse (urllib does not wrap it in
+        # URLError): that is "unknown", not "not installed" — a cold Ollama
+        # loading its embed model is exactly this case.
+        return None
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), TimeoutError) or "timed out" in str(e).lower():
+            return None
+        return False
+    except Exception:
+        return False
+
+
+def print_model_status(
+    rows: list[tuple[str, str, str]], backend: str | None = None
+) -> None:
+    """Print the model table honestly: the header says Active
+    Models only when at least one provider resolved; otherwise the section is
+    Configured models and every row says it is not installed — agreeing with
+    the "No embedding provider found" line the same run prints. A row whose
+    Ollama probe timed out says unknown, never active. A configured backend
+    override (not auto) is kept as its own row (R2 A5: kept from the old
+    display)."""
+    any_active = any(state == "active" for _, _, state in rows)
+    print()
+    print("Active Models" if any_active else "Configured models (none installed in this environment)")
+    print("-" * 40)
+    for key, model, state in rows:
+        print(f"  {key:16s}  {model}  [{state}]")
+    if backend and backend != "auto":
+        print(f"  {'backend':16s}  {backend}")
+
+
+def _load_config_safe():
+    from synapt.recall.config import load_config
+    return load_config()
+
+
+def _stack_importable(module_name: str) -> bool:
+    """Cheap provider-stack probe: importable in THIS process, no model load."""
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def _onnx_model_available(model_name: str) -> bool:
+    """Is a converted ONNX model present for this model? Disk check only."""
+    try:
+        from synapt._models.onnx_client import OnnxClient
+        return OnnxClient.is_available(model_name)
+    except Exception:
+        return False
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show index statistics."""
     from synapt.recall.sharding import is_sharded
@@ -1850,20 +2080,15 @@ def cmd_stats(args: argparse.Namespace) -> None:
         if n_clusters > 0:
             print(f"  Clusters:         {n_clusters}")
 
-    # Active model configuration
+    # Model configuration — resolved, not wished-for: a model is
+    # listed active only when its provider resolves in this process; the
+    # display agrees with the "No embedding provider found" line the same
+    # run prints.
     try:
-        from synapt.recall.config import load_config
-        cfg = load_config()
-        models = cfg.active_models()
-        print()
-        print("Active Models")
-        print("-" * 40)
-        for key, model in models.items():
-            print(f"  {key:16s}  {model}")
-        if cfg.backend != "auto":
-            print(f"  {'backend':16s}  {cfg.backend}")
+        cfg = _load_config_safe()
+        print_model_status(resolve_model_states(), backend=cfg.backend)
     except Exception as e:
-        logger.debug("Failed to load model config: %s", e)
+        logger.debug("Failed to resolve model status: %s", e)
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:
@@ -4390,6 +4615,23 @@ def make_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument("--queries", default=None, help="Semicolon-separated queries (default: built-in set)")
     benchmark_parser.add_argument("--iterations", type=int, default=5, help="Iterations per query (default: 5)")
 
+    # Pack
+    pack_parser = subparsers.add_parser(
+        "pack", help="Seal closed transcript sessions into a content-addressed pack + idx"
+    )
+    pack_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
+    pack_parser.add_argument(
+        "--verify", action="store_true", help="Re-verify every existing packed segment instead of sealing"
+    )
+    pack_parser.add_argument(
+        "verb", nargs="?", default=None, choices=["push", "fetch"],
+        help="push to or fetch from a directory remote instead of sealing/verifying",
+    )
+    pack_parser.add_argument(
+        "remote", nargs="?", default=None,
+        help="directory remote path, required with push/fetch",
+    )
+
     # Stats
     stats_parser = subparsers.add_parser("stats", help="Show index statistics")
     stats_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
@@ -4680,6 +4922,8 @@ def main():
         cmd_search(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
+    elif args.command == "pack":
+        cmd_pack(args)
     elif args.command == "stats":
         cmd_stats(args)
     elif args.command == "sessions":
