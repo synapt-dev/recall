@@ -34,8 +34,16 @@ figure above is stable under any further edit to this entry.
   Known gap, stated rather than left to be found: the design called for gating
   on the `x` extra being installed *and* credentials being present. The
   implementation gates on credentials only, and the `tweepy` import is lazy, so
-  the extra half is not enforced. Behaviour is correct either way; the
-  condition is narrower than the design specified.
+  the extra half is not enforced. The observable consequence, measured on both
+  0.25.1 and 0.25.2: a server with all four credentials set but without the `x`
+  extra installed still advertises all eight tools, and every call comes back as
+  an ordinary successful result whose text reports the failure, for example
+  `Failed to post: tweepy is required for X/Twitter tools: pip install tweepy`.
+  The tools catch the exception, so a caller sees no error and no traceback -
+  only a result that says it did not work. Install the extra with
+  `pip install "synapt[x]"`. This behaviour is unchanged by this release - the
+  only thing 0.25.2 changes is that an UNCONFIGURED server no longer advertises
+  the tools at all.
 
 ### Features
 
