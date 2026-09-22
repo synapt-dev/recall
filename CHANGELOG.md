@@ -4,6 +4,64 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-09-22
+
+Patch release. Two substantive changes, both in the MCP server surface, both
+about what an agent is told it can do. Five files of code and tests changed
+across `v0.25.1..v0.25.2`: 298 insertions, 10 deletions, carrying #1209 and
+#1210 plus the version bump.
+
+That figure excludes this changelog entry on purpose. A count that includes its
+own document changes every time the document is edited, so it cannot be made
+correct by writing it - only by writing it last and measuring afterwards. The
+figure above is stable under any further edit to this entry.
+
+### Changed
+
+- **An unconfigured server no longer advertises the X/Twitter tools.**
+  `register_tools` now returns early unless all four X credentials
+  (`X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`) are
+  present, so a server without them lists none of the eight `x_*` tools
+  instead of all eight (#1209).
+
+  **This is visible to anyone upgrading.** Before 0.25.2 the tools were
+  advertised whether or not they could work, and a listed tool tells an agent
+  it has that capability - it would attempt a post and fail at call time.
+  After 0.25.2 an unconfigured install does not offer them at all. If your
+  agents were seeing the `x_*` tools without credentials configured, they will
+  stop seeing them; set the four variables to get them back.
+
+  Known gap, stated rather than left to be found: the design called for gating
+  on the `x` extra being installed *and* credentials being present. The
+  implementation gates on credentials only, and the `tweepy` import is lazy, so
+  the extra half is not enforced. The observable consequence, measured on both
+  0.25.1 and 0.25.2: a server with all four credentials set but without the `x`
+  extra installed still advertises all eight tools, and every call comes back as
+  an ordinary successful result whose text reports the failure, for example
+  `Failed to post: tweepy is required for X/Twitter tools: pip install tweepy`.
+  The tools catch the exception, so a caller sees no error and no traceback -
+  only a result that says it did not work. Install the extra with
+  `pip install "synapt[x]"`. This behaviour is unchanged by this release - the
+  only thing 0.25.2 changes is that an UNCONFIGURED server no longer advertises
+  the tools at all.
+
+### Features
+
+- **Server text for a first-time agent:** the MCP server's tool instructions
+  now name the knowledge lifecycle explicitly - save a durable fact and keep
+  the returned node id, update in place with that id rather than saving a
+  second node for the same fact, and retract on request so the node is hidden
+  from retrieval (#1209). Until now the text described how to *search* memory
+  and said nothing about maintaining it, so an agent reading only the tool
+  instructions would save a second node for a fact it already held, and had no
+  way to learn that retraction exists. A contract test asserts the text names
+  each operation, so the instructions cannot silently drift from the tools they
+  describe.
+
+### Fixes
+
+- The 0.25.1 changelog count now states the measured final state (#1210).
+
 ## [0.25.1] — 2026-09-21
 
 Patch release. 47 commits across 19 first-parent merges since 0.25.0 (counted

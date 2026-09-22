@@ -126,6 +126,21 @@ MCP_INSTRUCTIONS = (
     "- Use detail='high' or 'max' only when you need the full picture (e.g. catching up after being away).\n"
     "- Pins are large — they contain full benchmark tables. Read them once at session start with detail='high', then poll with 'low'.\n"
     "- Prefer pin=False for routine posts. Reserve pins for durable reference material."
+    "\n"
+    "\n"
+    "KNOWLEDGE (persistent facts across sessions):\n"
+    "- When you learn a durable fact, decision, or preference -> recall_save(content=…, "
+    "category=<fact|preference|decision|workflow|tooling|…>) and KEEP the returned node id.\n"
+    "- Update in place: recall_save(node_id=<id>, content=<the new fact>, category=<its category>); "
+    "do not save a second node for the same fact.\n"
+    "- Retract on request: recall_save(node_id=<id>, retract=true) — the node becomes hidden from "
+    "search, preserved for audit.\n"
+    "- An update on a retracted node is REFUSED so a buried fact is not revived silently; "
+    "restore it deliberately with restore_retracted=true (recall_save(node_id=<id>, "
+    "content=<the fact>, restore_retracted=true)) or file the corrected fact as a new node.\n"
+    "- Two saved facts disagree: recall_contradict(action='correct', old_node_id=<id>, new_content=…).\n"
+    "- Save facts in the words a later question will use: search matches a saved fact by the words "
+    "it was saved in."
 )
 
 # ---------------------------------------------------------------------------
@@ -761,15 +776,31 @@ def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
                     if diag.semantic_search_used
                     else "semantic search was not used"
                 )
-                return _with_query_freshness((
-                    f"No prior keyword match found for '{query}'.\n"
-                    f"The keyword check {coverage}; {semantic_note}.\n"
-                    "Proceeding fresh is reasonable after this keyword check."
-                ), freshness_line)
+                return _with_query_freshness(
+                    no_match_message(query, coverage, semantic_note),
+                    freshness_line,
+                )
             return _with_query_freshness(diag.format_message(), freshness_line)
         return _with_query_freshness("No results found.", freshness_line)
     except Exception as exc:
         return _with_query_freshness(f"Search failed: {exc}", freshness_line)
+
+
+def no_match_message(
+    query: str, coverage: str, semantic_note: str,
+) -> str:
+    """The no-match answer for a saved-knowledge query, composed separately so
+    it is testable without touching a store. The last line tells a fresh agent
+    what makes the next search useful (cold-pass finding: 'No results found'
+    gave no next step)."""
+    return (
+        f"No prior keyword match found for '{query}'.\n"
+        f"The keyword check {coverage}; {semantic_note}.\n"
+        "Proceeding fresh is reasonable after this keyword check.\n"
+        "If you expected a saved fact here, the index may be fresh: search only "
+        "sees what was saved. Persist durable facts with recall_save(content=…, "
+        "category=…) — a fresh index is normal, and saving is what makes this useful."
+    )
 
 
 def recall_files(
@@ -2658,7 +2689,7 @@ def recall_journal(
 @_memory_op_tap("mem_write")
 def recall_save(
     content: str = "",
-    category: str = "workflow",
+    category: str | None = None,
     confidence: float = 0.8,
     tags: list[str] | None = None,
     source_sessions: list[str] | None = None,
@@ -2673,6 +2704,9 @@ def recall_save(
         content: Durable fact, convention, or decision to save.
             Required for create/update, ignored for retract.
         category: Knowledge category (workflow, tooling, decision, etc.).
+            Omitted on an update keeps the node's existing category (an
+            omitted category is not "workflow"); on a create it defaults to
+            "workflow". An explicit category always wins.
         confidence: Confidence score from 0.0 to 1.0.
         tags: Optional search tags.
         source_sessions: Optional originating session IDs.
@@ -2695,7 +2729,7 @@ def recall_save(
         from synapt.recall.sharding import live_store_path
         from synapt.recall.storage import RecallDB
 
-        if not retract and category not in VALID_CATEGORIES:
+        if not retract and category is not None and category not in VALID_CATEGORIES:
             return (
                 f"Error: unrecognized category {category!r}. "
                 f"Valid categories: {', '.join(sorted(VALID_CATEGORIES))}."
@@ -2732,6 +2766,15 @@ def recall_save(
                 clean_content.encode("utf-8")
             ).hexdigest()[:12]
             existing = db.get_knowledge_node(resolved_node_id)
+            # Omitted is not "workflow": an update keeps the node's own
+            # category instead of re-filing it under the signature default;
+            # a create with no category defaults to "workflow".
+            if category is None:
+                category = (
+                    existing.get("category", "workflow")
+                    if existing and existing.get("category")
+                    else "workflow"
+                )
             if (
                 existing
                 and existing.get("status") == "retracted"
@@ -3640,12 +3683,38 @@ def _sync_claude_memory_source_on_startup() -> None:
         pass  # best-effort startup indexing; never block server start
 
 
+_PRODUCT_VERSION = ""
+
+
+def _product_version() -> str:
+    """The synapt product version for serverInfo — not the MCP SDK's
+    (cold-pass finding 5: the SDK reports pkg_version("mcp"), so a cold
+    agent's serverInfo said "1.28.1" while stderr said the product's)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("synapt")
+    except PackageNotFoundError:
+        from synapt.recall import __version__
+
+        return __version__
+
+
+try:
+    _PRODUCT_VERSION = _product_version()
+except Exception:  # pragma: no cover - never block server start on a version probe
+    _PRODUCT_VERSION = ""
+
+
 def main():
     """Entry point for standalone synapt-recall-server."""
     server = _build_validating_fastmcp_class()(
         "synapt-recall",
         instructions=MCP_INSTRUCTIONS,
     )
+    # serverInfo.version: the lowlevel Server falls back to pkg_version("mcp")
+    # when its version is unset, which reported the SDK's version, not ours.
+    server._mcp_server.version = _PRODUCT_VERSION or _product_version()
     register_tools(server)
     _sync_claude_memory_source_on_startup()
     server.run()
