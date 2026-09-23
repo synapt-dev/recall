@@ -647,7 +647,12 @@ class TestRecallContradict:
         assert "use pytest instead" in result
         assert "use unittest" in result
 
-    def test_resolve_confirmed_supersedes(self, tmp_path):
+    def test_resolve_confirmed_supersedes(self, tmp_path, monkeypatch):
+        # The supersession now writes the jsonl as well as SQLite, so this test must
+        # declare the store it writes to: SYNAPT_RECALL_ROOT is what _knowledge_path()
+        # honours, and without it the write resolves the ambient store and the recall
+        # isolation guard refuses it (which is how this surfaced).
+        monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
         from synapt.recall.server import recall_contradict
         db = _make_db(tmp_path)
         node = _make_knowledge_node(node_id="old-1", content="use unittest")
@@ -737,7 +742,12 @@ class TestRecallContradict:
             result = recall_contradict(action="list")
         assert "No index" in result
 
-    def test_chain_supersession_propagates_lineage(self, tmp_path):
+    def test_chain_supersession_propagates_lineage(self, tmp_path, monkeypatch):
+        # The supersession now writes the jsonl as well as SQLite, so this test must
+        # declare the store it writes to: SYNAPT_RECALL_ROOT is what _knowledge_path()
+        # honours, and without it the write resolves the ambient store and the recall
+        # isolation guard refuses it (which is how this surfaced).
+        monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
         """v1→v2→v3 chain: lineage_id propagates through all versions."""
         from synapt.recall.server import recall_contradict
         db = _make_db(tmp_path)
@@ -1896,7 +1906,12 @@ class TestConsolidationContradictQueuing:
         assert pending[0]["valid_from"] is None
         assert pending[0]["valid_until"] == "2025-04-30"  # candidate's bound, in the payload
 
-    def test_confirm_carries_queued_bound_onto_materialized_node(self, tmp_path):
+    def test_confirm_carries_queued_bound_onto_materialized_node(self, tmp_path, monkeypatch):
+        # The supersession now writes the jsonl as well as SQLite, so this test must
+        # declare the store it writes to: SYNAPT_RECALL_ROOT is what _knowledge_path()
+        # honours, and without it the write resolves the ambient store and the recall
+        # isolation guard refuses it (which is how this surfaced).
+        monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
         """BLOCKER 2 fix, the FULL round trip: queue (with a bound) -> confirm -> materialize,
         through the REAL recall_contradict MCP tool (not a hand-duplicated resolve). Before this
         fix, _apply_supersession hardcoded valid_from=now/valid_until=None on confirm, so even a
@@ -1947,7 +1962,12 @@ class TestConsolidationContradictQueuing:
         assert active[0]["content"] == "the API key expires 2025-04-30"
         assert active[0]["valid_until"] == "2025-04-30"  # candidate's bound survived to the DB
 
-    def test_apply_supersession_rejects_malformed_bounds_defensively(self, tmp_path):
+    def test_apply_supersession_rejects_malformed_bounds_defensively(self, tmp_path, monkeypatch):
+        # The supersession now writes the jsonl as well as SQLite, so this test must
+        # declare the store it writes to: SYNAPT_RECALL_ROOT is what _knowledge_path()
+        # honours, and without it the write resolves the ambient store and the recall
+        # isolation guard refuses it (which is how this surfaced).
+        monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
         """Bug found by adversarial verification workflow (2026-07-15): _apply_supersession is
         the ONE bound-consuming site in this feature with no _validate_iso_date guard of its own
         — every other site (consolidate.py's corroborate/contradict branches) validates before
@@ -1979,7 +1999,12 @@ class TestConsolidationContradictQueuing:
             assert len(active) == 1  # the replacement WAS created — no partial write
             assert active[0]["valid_until"] is None  # malformed input never persists verbatim
 
-    def test_apply_supersession_still_carries_a_valid_bound(self, tmp_path):
+    def test_apply_supersession_still_carries_a_valid_bound(self, tmp_path, monkeypatch):
+        # The supersession now writes the jsonl as well as SQLite, so this test must
+        # declare the store it writes to: SYNAPT_RECALL_ROOT is what _knowledge_path()
+        # honours, and without it the write resolves the ambient store and the recall
+        # isolation guard refuses it (which is how this surfaced).
+        monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
         # regression guard: the defensive validation must not break the real, valid-bound path.
         from synapt.recall.server import _apply_supersession
 
@@ -1996,7 +2021,12 @@ class TestConsolidationContradictQueuing:
         active = [n for n in db.load_knowledge_nodes() if n["status"] == "active"]
         assert active[0]["valid_until"] == "2025-04-30"
 
-    def test_confirm_falls_back_to_now_when_queued_bound_is_none(self, tmp_path):
+    def test_confirm_falls_back_to_now_when_queued_bound_is_none(self, tmp_path, monkeypatch):
+        # The supersession now writes the jsonl as well as SQLite, so this test must
+        # declare the store it writes to: SYNAPT_RECALL_ROOT is what _knowledge_path()
+        # honours, and without it the write resolves the ambient store and the recall
+        # isolation guard refuses it (which is how this surfaced).
+        monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
         # regression guard: the EXISTING fallback (valid_from=now when nothing was queued) must
         # survive this fix unchanged, for contradictions that carry no temporal information.
         from synapt.recall.knowledge import KnowledgeNode
