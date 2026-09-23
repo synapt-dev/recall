@@ -2603,3 +2603,50 @@ class TestRecallSyncMemory:
             assert "memory.md" in nodes[0]["tags"]
         finally:
             db.close()
+
+
+def test_two_supersessions_leave_unique_lineage_versions(tmp_path, monkeypatch):
+    """A -> B -> C by two REAL supersessions: the lineage versions stay [1, 2, 3].
+
+    `version` on a node is its LINEAGE POSITION — the successor takes old+1 and
+    `knowledge_lineage` orders by it. A dedup-ordering bump on the SUPERSEDED
+    node therefore made predecessor and successor share a number (measured on
+    the first cut of the supersession dual-write range: A v2, B v3, C v3, where
+    base dev reads 1, 2, 3). The newest-record question belongs to `revision`;
+    `version` stays the lineage's.
+    """
+    monkeypatch.setenv("SYNAPT_RECALL_ROOT", str(tmp_path))
+    from synapt.recall.server import recall_contradict
+
+    db = _make_db(tmp_path)
+    db.save_knowledge_nodes([
+        _make_knowledge_node(
+            node_id="a", content="fact A", lineage_id="L", version=1,
+        )
+    ])
+
+    index = TranscriptIndex.__new__(TranscriptIndex)
+    index._db = db
+    index.chunks = []
+    index.sessions = {}
+
+    def _resolve(old_id: str, text: str) -> None:
+        cid = db.add_pending_contradiction(old_id, text, category="workflow", reason="probe")
+        with patch("synapt.recall.server._get_index", return_value=index):
+            with patch("synapt.recall.server._invalidate_cache"):
+                recall_contradict(action="resolve", contradiction_id=cid, resolution="confirmed")
+
+    _resolve("a", "fact B")
+    active = [n for n in db.load_knowledge_nodes() if n["status"] == "active"]
+    assert len(active) == 1, "precondition: one active node after the first resolve"
+    _resolve(active[0]["id"], "fact C")
+
+    rows = db.knowledge_lineage("L")
+    versions = [n["version"] for n in rows]
+    assert len(rows) == 3, f"expected the whole lineage, got {len(rows)}"
+    assert len(set(versions)) == len(versions), (
+        f"the lineage carries duplicate version numbers: {versions} — a "
+        "predecessor and its successor share a number, so `version` no longer "
+        "reads as a position"
+    )
+    assert sorted(versions) == [1, 2, 3], versions

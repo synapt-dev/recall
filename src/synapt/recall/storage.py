@@ -2432,6 +2432,11 @@ class RecallDB:
         for col, default in [
             ("valid_from", None), ("valid_until", None),
             ("version", 1), ("lineage_id", ""),
+            # `revision` has no column: it is the dedup ordering key and dedup
+            # runs over the JSONL. The fallback keeps a DB-derived dict the same
+            # SHAPE as one read from the file, so a round-trip through the DB
+            # cannot silently drop the key and re-tie the record at 0.
+            ("revision", 0),
         ]:
             try:
                 d[col] = r[col]

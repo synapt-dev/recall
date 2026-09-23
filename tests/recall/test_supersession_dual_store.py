@@ -182,8 +182,8 @@ class TestSupersessionDualStore:
         )
 
 
-class TestDedupOrdersByVersionNotClock:
-    def test_a_future_stamped_lower_version_record_does_not_win(self):
+class TestDedupOrdersByRevisionNotClock:
+    def test_a_future_stamped_lower_revision_record_does_not_win(self):
         """Probed on the retract read: a record stamped
         in the future — clock skew, a migrated or synthesized record, an eval
         adapter import — beat the newer transition because dedup compared
@@ -201,7 +201,8 @@ class TestDedupOrdersByVersionNotClock:
                 "created_at": now.isoformat(),
                 "updated_at": now.isoformat(),
                 "status": "retracted",
-                "version": 2,
+                "revision": 1,
+                "version": 1,
             }
         )
         future = KnowledgeNode.from_dict(
@@ -213,7 +214,8 @@ class TestDedupOrdersByVersionNotClock:
                 "created_at": now.isoformat(),
                 "updated_at": (now + timedelta(minutes=5)).isoformat(),
                 "status": "active",
-                "version": 1,
+                "revision": 0,
+                "version": 9,
             }
         )
 
@@ -230,7 +232,7 @@ class TestDedupOrdersByVersionNotClock:
         # answer, so the result is a property of the records and not of order.
         assert _dedup_nodes([transition, future])[0].status == "retracted"
 
-    def test_equal_versions_still_resolve_last_in_file(self):
+    def test_equal_revisions_still_resolve_last_in_file(self):
         """The tie-break the old `>=` provided must survive: on equal versions
         the last appended record wins, which is what makes append-only updates
         readable."""
@@ -240,16 +242,16 @@ class TestDedupOrdersByVersionNotClock:
         first = KnowledgeNode.from_dict(
             {"id": "dup2", "content": "x", "category": "fact",
                 "confidence": 0.5,
-             "created_at": now, "updated_at": now, "status": "active", "version": 1}
+             "created_at": now, "updated_at": now, "status": "active", "revision": 1}
         )
         second = KnowledgeNode.from_dict(
             {"id": "dup2", "content": "x", "category": "fact",
                 "confidence": 0.5,
-             "created_at": now, "updated_at": now, "status": "retracted", "version": 1}
+             "created_at": now, "updated_at": now, "status": "retracted", "revision": 1}
         )
         assert _dedup_nodes([first, second])[0].status == "retracted"
 
-    def test_legacy_records_without_a_version_field_still_dedup(self):
+    def test_legacy_records_without_a_revision_field_still_dedup(self):
         """Migration: a record written before `version` existed must not be lost
         or win unconditionally. Missing version reads as the model default (1),
         so legacy files behave exactly as they did."""
@@ -264,9 +266,9 @@ class TestDedupOrdersByVersionNotClock:
         newer = KnowledgeNode.from_dict(
             {"id": "dup3", "content": "x", "category": "fact",
                 "confidence": 0.5,
-             "created_at": now, "updated_at": now, "status": "retracted", "version": 2}
+             "created_at": now, "updated_at": now, "status": "retracted", "revision": 2}
         )
-        assert legacy.version == 1, "the model default is the migration story"
+        assert legacy.revision == 0, "the model default is the migration story"
         assert _dedup_nodes([legacy, newer])[0].status == "retracted"
         assert _dedup_nodes([newer, legacy])[0].status == "retracted"
 

@@ -65,7 +65,13 @@ class KnowledgeNode:
     tags: list[str] = field(default_factory=list)
     valid_from: str | None = None        # ISO 8601: when this became true
     valid_until: str | None = None       # ISO 8601: when this stopped being true
-    version: int = 1                     # Increments on supersession
+    version: int = 1                     # Increments on supersession — the LINEAGE position
+    # Separate from `version`, which is the lineage position: the successor gets
+    # old+1 and `knowledge_lineage` orders by it, so the predecessor of a
+    # supersession shares a number with its successor. `revision` answers the
+    # other question — which record for THIS id is newest — and is what dedup
+    # orders by. A clock must not decide that; see `_dedup_nodes`.
+    revision: int = 0                    # Increments on every appended transition
     lineage_id: str = ""                 # Shared ID across versions of same fact
     # Fix B (internal design spec, section 3):
     # the node's TRUE source chronology, distinct from created_at/updated_at (consolidation
@@ -237,16 +243,20 @@ def _dedup_nodes(nodes: list[KnowledgeNode]) -> list[KnowledgeNode]:
     retraction or a supersession. ``version`` is stamped by the transition
     itself and cannot be forged by a clock.
 
-    Uses ``>=`` on the version so ties still resolve to the *last* entry in the
+    Uses ``>=`` on the revision so ties still resolve to the *last* entry in the
     file, which is the append-only property ``update_node`` relies on. Records
-    written before the field existed read as ``KnowledgeNode``'s default (1),
-    so legacy files dedup exactly as they did and a versioned transition always
-    beats them.
+    written before the field existed read as ``KnowledgeNode``'s default (0), so
+    legacy files dedup exactly as they did and any stamped transition beats them.
+
+    ``version`` is deliberately NOT consulted: it is the lineage position, and a
+    supersession's predecessor shares a number with its successor, so ordering
+    by it would turn "which transition is newer" into "which of two equal numbers
+    came last".
     """
     best: dict[str, KnowledgeNode] = {}
     for node in nodes:
         existing = best.get(node.id)
-        if existing is None or node.version >= existing.version:
+        if existing is None or node.revision >= existing.revision:
             best[node.id] = node
     return list(best.values())
 
@@ -278,6 +288,11 @@ def update_node(
     d = target.to_dict()
     d.update(updates)
     d["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # Every appended version is a NEW revision. This writer is the single place
+    # that knows an existing id is being re-written, so the bump lives here
+    # rather than at each of its callers — the same reason the field exists:
+    # the newest record for an id has to be identifiable without a clock.
+    d["revision"] = int(d.get("revision", 0) or 0) + 1
     updated = KnowledgeNode.from_dict(d)
     append_node(updated, path)
     return True
@@ -309,6 +324,9 @@ def batch_update_nodes(
         d = target.to_dict()
         d.update(fields)
         d["updated_at"] = now
+        # Same rule as update_node: an appended version is a new revision, and
+        # this is the other writer that appends one for an existing id.
+        d["revision"] = int(d.get("revision", 0) or 0) + 1
         to_append.append(KnowledgeNode.from_dict(d))
     if not to_append:
         return 0

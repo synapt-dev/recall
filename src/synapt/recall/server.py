@@ -2205,8 +2205,12 @@ def _apply_supersession(
         "contradiction_note": reason,
         "updated_at": now,
         "superseded_by": new_id,
-        "version": old_version + 1,
     }
+    # `version` is left ALONE: it is the node's LINEAGE position (the successor
+    # below takes old_version + 1, and `knowledge_lineage` orders by it), so
+    # bumping the predecessor here would make the two share a number and the
+    # lineage would read A v2, B v3, C v3 instead of 1, 2, 3. The newest-record
+    # question is `revision`'s job, and `update_node` owns that bump.
     old_node.update(updates)
     db.upsert_knowledge_node(old_node)
 
@@ -2224,6 +2228,12 @@ def _apply_supersession(
         # that return silently left the transition in SQLite only, where the next
         # sync decides by the jsonl and cannot see the node at all. Append the
         # full record instead of returning False's version of success.
+        #
+        # It carries a revision because it is a transition: at revision 0 it
+        # would tie with any legacy record for the same id and let file position
+        # decide, which is the question this range exists to take away from
+        # position.
+        old_node["revision"] = int(old_node.get("revision", 0) or 0) + 1
         append_node(KnowledgeNode.from_dict(old_node), kn_path)
 
     # Create replacement node
