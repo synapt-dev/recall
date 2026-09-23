@@ -20,6 +20,7 @@ import secrets
 import sqlite3
 import stat
 import struct
+import sys
 import threading
 import unicodedata
 import uuid
@@ -102,11 +103,47 @@ class SourceAdmission:
 class SourceLimits:
     file_bytes: int = 4 * 1024 * 1024
     scan_bytes: int = 16 * 1024 * 1024
-    parser_units: int = 1_000
+    # The default ceiling admits a coordinator-scale memory directory: the
+    # measured representative input parses into 1,730 units, which the original
+    # default of 1,000 refused atomically before the source index could publish
+    # anything (recall#1197). The refusal itself is unchanged -- a caller that
+    # passes its own SourceLimits still gets the same atomic
+    # `parser_limit_exceeded` receipt -- and this stays a size, not a policy:
+    # a corpus past it is refused rather than half-published.
+    parser_units: int = 5_000
 
     def __post_init__(self) -> None:
         if min(self.file_bytes, self.scan_bytes, self.parser_units) < 1:
             raise ValueError("source limits must be positive")
+
+
+def _source_parser_units() -> tuple[int, str | None]:
+    """The parser ceiling a scan uses when its caller passes no ``limits``.
+
+    The dataclass default (``SourceLimits.parser_units``) stays the ratified
+    number; this is the operator's override on top of it, in the same shape the
+    transcript ceilings already use (``core._int_env_override``) -- an operator
+    with a corpus past the ceiling otherwise has no recourse short of editing
+    code. A malformed value falls back to the default AND returns a warning, so
+    it never vanishes silently.
+    """
+    from synapt.recall.core import _int_env_override
+
+    value, warning = _int_env_override(
+        "SYNAPT_SOURCE_PARSER_UNITS", SourceLimits.parser_units
+    )
+    if warning:
+        return value, warning
+    if value < 1:
+        # A non-positive ceiling is not usable, and `SourceLimits` refuses it
+        # at construction -- which, on the startup path, is swallowed by the
+        # best-effort wrapper and leaves the source index silently absent with
+        # nothing said. Fall back and name the value instead.
+        return SourceLimits.parser_units, (
+            f"SYNAPT_SOURCE_PARSER_UNITS={value} is not a usable ceiling "
+            f"(must be at least 1); using default {SourceLimits.parser_units}"
+        )
+    return value, None
 
 
 @dataclass(frozen=True)
@@ -681,7 +718,11 @@ def sync_source(
     """
 
     scan_id = f"scan_{uuid.uuid4().hex[:12]}"
-    limits = limits or SourceLimits()
+    if limits is None:
+        _units, _units_warning = _source_parser_units()
+        if _units_warning:
+            print(f"[source_index] {_units_warning}", file=sys.stderr)
+        limits = SourceLimits(parser_units=_units)
     if not _authorized(admission, authorize):
         return SourceScanReceipt(scan_id, "unauthorized")
     connection = open_store()

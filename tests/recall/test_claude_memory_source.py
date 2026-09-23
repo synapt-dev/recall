@@ -335,3 +335,58 @@ class TestSyncClaudeMemorySourceOnStartup:
 
         server.register_tools(_FakeMCP())
         assert called == []
+
+
+def _write_coordinator_scale_memory(home: Path, gripspace_root: Path) -> int:
+    """Lay down a memory directory that parses into the measured 1,730 units.
+
+    Same location contract as ``_write_memory_files`` (the path Claude Code
+    itself would use for this gripspace root, under a fake home). The unit
+    count is DERIVED from the real parser so fixture drift cannot pass
+    silently.
+    """
+    from synapt.recall.core import project_slug
+    from synapt.recall.source_index import parse_markdown
+
+    memory_dir = home / ".claude" / "projects" / project_slug(gripspace_root) / "memory"
+    memory_dir.mkdir(parents=True)
+    total = 0
+    for i in range(173):  # x 10 headings = the measured aggregate
+        body = "".join(
+            f"# Section {i}.{j}\n\nBody text for unit {i}.{j}.\n\n" for j in range(1, 11)
+        )
+        (memory_dir / f"mem-{i:03d}.md").write_text(body, encoding="utf-8")
+        total += len(parse_markdown(body.encode("utf-8")))
+    return total
+
+
+def test_production_caller_admits_a_coordinator_scale_memory_dir(
+    tmp_path, monkeypatch
+):
+    """recall#1197 through the USER's path, not the API's.
+
+    ``admit_and_index_claude_memory`` is the only production caller of
+    ``sync_source`` and it passes no ``limits`` -- so this asserts the exact
+    thing a coordinator meets at startup: their own memory directory, at the
+    measured size, admitted with no configuration and no override.
+    """
+    from synapt.recall.claude_memory_source import admit_and_index_claude_memory
+
+    grip = _make_gripspace(tmp_path)
+    home = tmp_path / "home"
+    units = _write_coordinator_scale_memory(home, grip)
+    assert units == 1_730, f"fixture drift: parser reports {units} units"
+
+    monkeypatch.chdir(grip)
+    monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    receipt = admit_and_index_claude_memory()
+    assert receipt is not None
+    assert receipt.state == "complete", (
+        f"the production caller's default refused a real coordinator-scale "
+        f"memory dir: state={receipt.state!r} "
+        f"units_attempted={receipt.units_attempted} "
+        f"parser_units={receipt.parser_units}"
+    )
+    assert receipt.units_published == 1_730
