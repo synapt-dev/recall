@@ -2183,15 +2183,55 @@ def _apply_supersession(
     lineage_id = old_node.get("lineage_id", "") or old_node["id"]
     old_version = old_node.get("version", 1)
 
-    # Mark old node as contradicted — also backfill lineage_id if bootstrapping
-    old_node["lineage_id"] = lineage_id
-    old_node["status"] = "contradicted"
-    old_node["valid_until"] = now
-    old_node["contradiction_note"] = reason
-    old_node["updated_at"] = now
+    # Mark old node as contradicted — also backfill lineage_id if bootstrapping.
+    #
+    # DUAL-WRITE, ONE DICT (the dual-store resurrection class, tracked
+    # privately). This used to write SQLite only, and
+    # knowledge.jsonl is the store the next `_sync_knowledge_to_db` treats as
+    # authoritative, so the ordinary background sync read the node's still-active
+    # jsonl record and reverted the supersession — for every node superseded.
+    # Same class and same seam as the retract branch (recall PR #1215) and the
+    # contest path: one update dict applied to both stores, so they cannot drift.
+    #
+    # The transition also BUMPS THE NODE'S OWN `version`, which is what makes the
+    # change survive dedup by construction rather than by append position: the
+    # contradicted record is a strictly newer version of this node id, so no
+    # ordering question arises even if the records are ever read out of order.
     new_id = uuid.uuid4().hex[:12]
-    old_node["superseded_by"] = new_id
+    updates = {
+        "lineage_id": lineage_id,
+        "status": "contradicted",
+        "valid_until": now,
+        "contradiction_note": reason,
+        "updated_at": now,
+        "superseded_by": new_id,
+    }
+    # `version` is left ALONE: it is the node's LINEAGE position (the successor
+    # below takes old_version + 1, and `knowledge_lineage` orders by it), so
+    # bumping the predecessor here would make the two share a number and the
+    # lineage would read A v2, B v3, C v3 instead of 1, 2, 3. The newest-record
+    # question is `revision`'s job, and `update_node` owns that bump.
+    old_node.update(updates)
     db.upsert_knowledge_node(old_node)
+
+    from synapt.recall.knowledge import (
+        KnowledgeNode,
+        _knowledge_path,
+        append_node,
+        update_node,
+    )
+
+    kn_path = _knowledge_path()
+    if not update_node(old_node_id, updates, kn_path):
+        # `update_node` returns False for a node the jsonl does not carry — a
+        # db-only node (`_create_knowledge_from_claim` produces them). Ignoring
+        # that return silently left the transition in SQLite only, where the next
+        # sync decides by the jsonl and cannot see the node at all. Append the
+        # full record instead of returning False's version of success.
+        #
+        # `append_node` stamps the revision from the file, so this transition
+        # does not set one itself.
+        append_node(KnowledgeNode.from_dict(old_node), kn_path)
 
     # Create replacement node
     new_node = {
@@ -2212,6 +2252,11 @@ def _apply_supersession(
         "lineage_id": lineage_id,
     }
     db.upsert_knowledge_node(new_node)
+    # The replacement is a NEW node the jsonl has never carried, so it needs an
+    # append rather than an update. Leaving it db-only would repeat the defect
+    # from the other direction: the sync would not carry it, and the successor
+    # would be invisible to every jsonl-derived reader.
+    append_node(KnowledgeNode.from_dict(new_node), kn_path)
 
 
 def _apply_contest_resolution(

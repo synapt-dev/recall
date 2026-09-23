@@ -65,7 +65,13 @@ class KnowledgeNode:
     tags: list[str] = field(default_factory=list)
     valid_from: str | None = None        # ISO 8601: when this became true
     valid_until: str | None = None       # ISO 8601: when this stopped being true
-    version: int = 1                     # Increments on supersession
+    version: int = 1                     # Increments on supersession — the LINEAGE position
+    # Separate from `version`, which is the lineage position: the successor gets
+    # old+1 and `knowledge_lineage` orders by it, so the predecessor of a
+    # supersession shares a number with its successor. `revision` answers the
+    # other question — which record for THIS id is newest — and is what dedup
+    # orders by. A clock must not decide that; see `_dedup_nodes`.
+    revision: int = 0                    # Increments on every appended transition
     lineage_id: str = ""                 # Shared ID across versions of same fact
     # Fix B (internal design spec, section 3):
     # the node's TRUE source chronology, distinct from created_at/updated_at (consolidation
@@ -127,17 +133,81 @@ def compute_confidence(source_count: int, age_days: float = 0.0) -> float:
     return base * decay
 
 
-def append_node(node: KnowledgeNode, path: Path | None = None) -> Path:
-    """Append a knowledge node to the JSONL file.
+def _max_revision_for_id(node_id: str, path: Path) -> int | None:
+    """The highest ``revision`` the file already carries for one id, or None.
 
-    Uses exclusive file locking (same pattern as journal.py).
+    Read from the FILE and never from SQLite: the knowledge table has no
+    revision column, so a value taken from the DB would always read as 0 and the
+    bump would silently do nothing.
+    """
+    if not path.exists():
+        return None
+    best: int | None = None
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            # cheap pre-filter before parsing: most lines are other ids
+            if not line or node_id not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("id") != node_id:
+                continue
+            revision = record.get("revision", 0)
+            revision = revision if isinstance(revision, int) else 0
+            best = revision if best is None else max(best, revision)
+    return best
+
+
+def _next_revision(prior: int | None) -> int:
+    """The revision a new record for an id takes, given the file's current max.
+
+    One authority for the numbering, so ``append_node`` and the batch pass
+    cannot drift apart: a first record is 0, every later one is prior + 1.
+    """
+    return 0 if prior is None else prior + 1
+
+
+def append_node(node: KnowledgeNode, path: Path | None = None) -> Path:
+    """Append a knowledge node to the JSONL file, stamping its ``revision``.
+
+    THE REVISION IS STAMPED BY THE APPENDER, not by the callers, because a
+    caller's bump is a bump this function cannot see. Every path that appends
+    stamps, and all of them take the number from ``_next_revision`` so the
+    arithmetic has one authority even though there are two appliers:
+    ``append_node`` (``save_knowledge_node``'s create and restore paths, the
+    supersession fallback, and ``update_node``, which has read the file already)
+    and ``batch_update_nodes``, which writes its records inline under a single
+    lock and stamps from the deduped target it is already holding. Putting the
+    bump in the update paths alone left ``recall_save(restore_retracted=True)``
+    appending at revision 0, which loses the dedup to the retract's revision 1:
+    the tool said "re-activated" while the file's current record stayed
+    retracted, and the next sync buried it again.
+
+    It is computed from the highest revision already on disk for this id, so the
+    number is monotone per id no matter which path writes. A new id gets 0.
+
+    Cost, named rather than hidden: this reads the file to find the id's current
+    maximum, so an append is now a scan (measured at 10 ms against 0.1 ms per
+    append at 20k records). ``update_node`` already read the file before
+    appending; the create and restore paths did not. If that ever matters, a
+    cached per-id maximum is the follow-on, not a smaller guarantee.
+
+    Uses exclusive file locking (same pattern as journal.py). Two writers can
+    still read the same maximum and append the same revision — they then tie, and
+    ``_dedup_nodes`` resolves ties by file position, which is the later write.
     """
     path = path or _knowledge_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    prior = _max_revision_for_id(node.id, path)
+    record = node.to_dict()
+    record["revision"] = _next_revision(prior)
     from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
         lock_exclusive(f)
-        f.write(json.dumps(node.to_dict()) + "\n")
+        f.write(json.dumps(record) + "\n")
         f.flush()
     return path
 
@@ -226,16 +296,38 @@ def read_nodes(
 
 
 def _dedup_nodes(nodes: list[KnowledgeNode]) -> list[KnowledgeNode]:
-    """Keep only the latest version of each node (by id, latest updated_at).
+    """Keep only the latest version of each node (by id, highest ``version``).
 
-    Uses ``>=`` so that when timestamps tie (Windows datetime resolution
-    is ~15 ms) the *last* entry in the file wins — which is always the
-    most-recently appended version from ``update_node``.
+    ORDERED BY THE NODE'S MONOTONE ``version``, NOT BY WALL-CLOCK ``updated_at``
+    (the dual-store resurrection class, tracked privately). A timestamp was the
+    wrong authority for this store: other
+    writers reach it (migrations, synthesized or imported records, an eval
+    adapter), and a record stamped in the FUTURE beat the newer transition, so
+    the next read — and therefore ``_sync_knowledge_to_db`` — reverted a
+    retraction or a supersession. ``version`` is stamped by the transition
+    itself and cannot be forged by a clock.
+
+    Uses ``>=`` on the revision so ties still resolve to the *last* entry in the
+    file, which is the append-only property ``update_node`` relies on.
+
+    A record written before the field existed reads as ``KnowledgeNode``'s default
+    (0), so a stamped transition always beats it. Among LEGACY records only —
+    which all read 0 and therefore all tie — the winner is the file's last entry,
+    and that is NOT always what the previous rule chose: the old comparison was
+    ``updated_at``, so a file whose records were written out of timestamp order
+    (an import, a migration, a clock that stepped) can resolve to a different
+    record than it used to. The claim is "legacy records tie and position
+    decides", not "legacy files dedup exactly as they did".
+
+    ``version`` is deliberately NOT consulted: it is the lineage position, and a
+    supersession's predecessor shares a number with its successor, so ordering
+    by it would turn "which transition is newer" into "which of two equal numbers
+    came last".
     """
     best: dict[str, KnowledgeNode] = {}
     for node in nodes:
         existing = best.get(node.id)
-        if existing is None or node.updated_at >= existing.updated_at:
+        if existing is None or node.revision >= existing.revision:
             best[node.id] = node
     return list(best.values())
 
@@ -267,6 +359,8 @@ def update_node(
     d = target.to_dict()
     d.update(updates)
     d["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # `revision` is NOT stamped here: append_node stamps it from the file, so
+    # this path and every other appender share one authority.
     updated = KnowledgeNode.from_dict(d)
     append_node(updated, path)
     return True
@@ -298,6 +392,13 @@ def batch_update_nodes(
         d = target.to_dict()
         d.update(fields)
         d["updated_at"] = now
+        # Stamped here, inline, because this pass writes under its own lock
+        # rather than through append_node. `target` is the deduped record, so
+        # its revision IS the id's current maximum: no scan needed, and the
+        # number stays monotone against the append_node path. Without this the
+        # file reads [0, 1, 1] after create/update/batch and the batch's record
+        # only wins by the tie-break, which the docstring says it does not.
+        d["revision"] = _next_revision(target.revision)
         to_append.append(KnowledgeNode.from_dict(d))
     if not to_append:
         return 0
