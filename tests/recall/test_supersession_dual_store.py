@@ -320,3 +320,99 @@ class TestSupersedingADbOnlyNode:
         )
         _sync_knowledge_to_db(None, kn_path)
         assert _db_node(store, node.id)["status"] == "contradicted"
+
+
+class TestRestoreSurvivesTheDedup:
+    """`recall_save(restore_retracted=True)` appends through save_knowledge_node.
+
+    Before the revision stamp moved into `append_node`, that path wrote revision
+    0 while the retract had written revision 1 — so the restore LOST the dedup,
+    the tool reported success, the file's current record stayed retracted, and
+    the next sync buried the node again. The assertion is on the DEDUPED read,
+    because the dedup is what decides which record is current.
+    """
+
+    def _current(self, kn_path, node_id):
+        from synapt.recall.knowledge import read_nodes
+
+        for node in read_nodes(kn_path):
+            if node.id == node_id:
+                return node
+        return None
+
+    def _save(self, **kwargs):
+        from unittest.mock import patch
+
+        from synapt.recall.server import recall_save
+
+        with patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            return recall_save(**kwargs)
+
+    def test_restore_is_current_in_the_jsonl_and_survives_a_resync(
+        self, tmp_path, monkeypatch
+    ):
+        from synapt.recall.consolidate import _sync_knowledge_to_db
+        from synapt.recall.core import project_data_dir
+        from synapt.recall.sharding import live_store_path
+        from synapt.recall.storage import RecallDB
+        from synapt.recall.core import project_index_dir
+        import hashlib
+        from unittest.mock import patch
+
+        kn_path, store = _isolate(tmp_path, monkeypatch)
+        content = "restore probe: a fact that gets retracted and re-activated"
+        node_id = hashlib.sha1(content.encode()).hexdigest()[:12]
+        with patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            self._save(content=content, category="fact")
+        self._save(node_id=node_id, retract=True)
+        assert self._current(kn_path, node_id).status == "retracted", "precondition"
+
+        result = self._save(node_id=node_id, content=content, restore_retracted=True)
+        assert "re-activated" in str(result) or "restored" in str(result).lower(), (
+            f"the tool did not report a restore: {result!r}"
+        )
+
+        current = self._current(kn_path, node_id)
+        assert current.status == "active", (
+            "the tool reported a restore but the jsonl's CURRENT record is "
+            f"{current.status!r}: the restore lost the dedup"
+        )
+
+        _sync_knowledge_to_db(None, kn_path)
+        assert _db_node(store, node_id)["status"] == "active", (
+            "a resync buried the restored node again"
+        )
+
+    def test_retract_update_restore_all_survive(self, tmp_path, monkeypatch):
+        """The second route: retract, then an update, then the restore. Each is
+        an append for the same id, so each must out-rank the one before it."""
+        from synapt.recall.core import project_data_dir
+        from synapt.recall.knowledge import update_node
+        import hashlib
+
+        kn_path, _ = _isolate(tmp_path, monkeypatch)
+        content = "restore probe 2: retract, update, restore"
+        node_id = hashlib.sha1(content.encode()).hexdigest()[:12]
+        self._save(content=content, category="fact")
+        self._save(node_id=node_id, retract=True)
+        update_node(node_id, {"contradiction_note": "an intervening update"}, kn_path)
+        assert self._current(kn_path, node_id).status == "retracted", (
+            "precondition: the update must not change the status"
+        )
+
+        self._save(node_id=node_id, content=content, restore_retracted=True)
+        current = self._current(kn_path, node_id)
+        assert current.status == "active", (
+            f"the restore lost the dedup after an update: {current.status!r}"
+        )
+        assert current.valid_until is None, (
+            "a restored node must not still carry the retraction's valid_until"
+        )
+        # OBSERVED, NOT ASSERTED: the restore re-saves the fact from its own
+        # arguments, so a field an intervening update set (here
+        # `contradiction_note`) resets to the model default rather than being
+        # carried forward. That is the re-save path's existing behaviour and not
+        # this range's seam — named in the freeze post rather than pinned here,
+        # because pinning it would freeze a behaviour nobody has decided on.
