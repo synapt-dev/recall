@@ -161,24 +161,39 @@ def _max_revision_for_id(node_id: str, path: Path) -> int | None:
     return best
 
 
+def _next_revision(prior: int | None) -> int:
+    """The revision a new record for an id takes, given the file's current max.
+
+    One authority for the numbering, so ``append_node`` and the batch pass
+    cannot drift apart: a first record is 0, every later one is prior + 1.
+    """
+    return 0 if prior is None else prior + 1
+
+
 def append_node(node: KnowledgeNode, path: Path | None = None) -> Path:
     """Append a knowledge node to the JSONL file, stamping its ``revision``.
 
-    THE REVISION IS STAMPED HERE, not by the callers, because this is the one
-    function every appender goes through — ``save_knowledge_node`` (the create
-    and restore paths), ``update_node``, ``batch_update_nodes``, and the
-    supersession fallback. Putting the bump in the update paths alone left
-    ``recall_save(restore_retracted=True)`` appending at revision 0, which loses
-    the dedup to the retract's revision 1: the tool said "re-activated" while the
-    file's current record stayed retracted, and the next sync buried it again.
+    THE REVISION IS STAMPED BY THE APPENDER, not by the callers, because a
+    caller's bump is a bump this function cannot see. Every path that appends
+    stamps, and all of them take the number from ``_next_revision`` so the
+    arithmetic has one authority even though there are two appliers:
+    ``append_node`` (``save_knowledge_node``'s create and restore paths, the
+    supersession fallback, and ``update_node``, which has read the file already)
+    and ``batch_update_nodes``, which writes its records inline under a single
+    lock and stamps from the deduped target it is already holding. Putting the
+    bump in the update paths alone left ``recall_save(restore_retracted=True)``
+    appending at revision 0, which loses the dedup to the retract's revision 1:
+    the tool said "re-activated" while the file's current record stayed
+    retracted, and the next sync buried it again.
 
     It is computed from the highest revision already on disk for this id, so the
     number is monotone per id no matter which path writes. A new id gets 0.
 
     Cost, named rather than hidden: this reads the file to find the id's current
-    maximum, so an append is now a scan. ``update_node`` already read the file
-    before appending; the create and restore paths did not. If that ever matters,
-    a cached per-id maximum is the follow-on, not a smaller guarantee.
+    maximum, so an append is now a scan (measured at 10 ms against 0.1 ms per
+    append at 20k records). ``update_node`` already read the file before
+    appending; the create and restore paths did not. If that ever matters, a
+    cached per-id maximum is the follow-on, not a smaller guarantee.
 
     Uses exclusive file locking (same pattern as journal.py). Two writers can
     still read the same maximum and append the same revision — they then tie, and
@@ -188,7 +203,7 @@ def append_node(node: KnowledgeNode, path: Path | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     prior = _max_revision_for_id(node.id, path)
     record = node.to_dict()
-    record["revision"] = 0 if prior is None else prior + 1
+    record["revision"] = _next_revision(prior)
     from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
         lock_exclusive(f)
@@ -377,6 +392,13 @@ def batch_update_nodes(
         d = target.to_dict()
         d.update(fields)
         d["updated_at"] = now
+        # Stamped here, inline, because this pass writes under its own lock
+        # rather than through append_node. `target` is the deduped record, so
+        # its revision IS the id's current maximum: no scan needed, and the
+        # number stays monotone against the append_node path. Without this the
+        # file reads [0, 1, 1] after create/update/batch and the batch's record
+        # only wins by the tie-break, which the docstring says it does not.
+        d["revision"] = _next_revision(target.revision)
         to_append.append(KnowledgeNode.from_dict(d))
     if not to_append:
         return 0

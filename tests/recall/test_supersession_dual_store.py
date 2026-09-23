@@ -416,3 +416,108 @@ class TestRestoreSurvivesTheDedup:
         # carried forward. That is the re-save path's existing behaviour and not
         # this range's seam — named in the freeze post rather than pinned here,
         # because pinning it would freeze a behaviour nobody has decided on.
+
+
+class TestBatchUpdateStampsRevisionInline:
+    """`batch_update_nodes` writes under its own lock, so it stamps its own.
+
+    It does not go through `append_node` (it appends every record of the batch in
+    ONE open handle, which is the point of the batch). Before this stamp, the
+    file read `[0, 1, 1]` after create/update/batch: the batch's record carried
+    the revision of the record it replaced, so it was current only by
+    `_dedup_nodes`' last-in-file tie-break — while the docstring and the commit
+    said every appender stamps and the numbering is monotone per id. Correct by
+    accident is not the same as correct, and the tie-break it leaned on is the
+    one an out-of-order write breaks.
+
+    The caller is `consolidate` (the pending-updates pass); the test calls the
+    same function with the same signature the producer calls it with.
+    """
+
+    def _current(self, kn_path, node_id):
+        from synapt.recall.knowledge import read_nodes
+
+        for node in read_nodes(kn_path):
+            if node.id == node_id:
+                return node
+        return None
+
+    def _revisions(self, kn_path, node_id):
+        """Every revision on disk for the id, in file order."""
+        out = []
+        for line in kn_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("id") == node_id:
+                out.append(record.get("revision", 0))
+        return out
+
+    def _save(self, **kwargs):
+        from unittest.mock import patch
+
+        from synapt.recall.server import recall_save
+
+        with patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            return recall_save(**kwargs)
+
+    def test_create_update_batch_reads_zero_one_two(self, tmp_path, monkeypatch):
+        import hashlib
+
+        from synapt.recall.knowledge import batch_update_nodes, update_node
+
+        kn_path, _ = _isolate(tmp_path, monkeypatch)
+        content = "batch stamp probe: create, update, batch"
+        node_id = hashlib.sha1(content.encode()).hexdigest()[:12]
+
+        self._save(content=content, category="fact")
+        update_node(node_id, {"confidence": 0.6}, kn_path)
+        batch_update_nodes({node_id: {"confidence": 0.9}}, kn_path)
+
+        assert self._revisions(kn_path, node_id) == [0, 1, 2], (
+            "each appender must take the next revision: the batch record "
+            f"inherited its predecessor's. on disk: {self._revisions(kn_path, node_id)}"
+        )
+
+        current = self._current(kn_path, node_id)
+        assert current.confidence == 0.9, (
+            f"the batch's update is not current: confidence={current.confidence!r}"
+        )
+
+    def test_the_batch_record_wins_by_revision_not_by_file_position(
+        self, tmp_path, monkeypatch
+    ):
+        """The stamp is what makes it current; move the record and it still wins.
+
+        The tie-break resolves equal revisions by position, which is exactly the
+        accident this range removes — so the witness has to fail if the batch
+        record is reordered, and that only holds while its revision is higher.
+        """
+        from synapt.recall.knowledge import _dedup_nodes, _read_all_nodes, batch_update_nodes
+        import hashlib
+
+        kn_path, _ = _isolate(tmp_path, monkeypatch)
+        content = "batch stamp probe: position independence"
+        node_id = hashlib.sha1(content.encode()).hexdigest()[:12]
+        self._save(content=content, category="fact")
+        batch_update_nodes({node_id: {"confidence": 0.42}}, kn_path)
+
+        records = _read_all_nodes(kn_path)
+        mine = [r for r in records if r.id == node_id]
+        assert len(mine) == 2, f"expected the create and the batch: {len(mine)}"
+        assert mine[0].revision == 0 and mine[1].revision == 1, (
+            f"revisions on disk: {[r.revision for r in mine]}"
+        )
+
+        # Same two records, reversed: the higher revision must still win.
+        reordered = list(reversed(records))
+        winner = next(n for n in _dedup_nodes(reordered) if n.id == node_id)
+        assert winner.confidence == 0.42, (
+            "the newer record loses once it is not last in the file — the "
+            "ordering that decided it was position, not revision"
+        )
