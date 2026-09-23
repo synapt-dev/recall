@@ -119,7 +119,17 @@ Add to `~/.codex/config.toml`:
 [mcp_servers.synapt]
 command = "synapt"
 args = ["server"]
+
+[mcp_servers.synapt.env]
+# Codex does not pass shell-inherited environment variables to MCP server
+# processes. Set here anything the synapt server must see (for example a
+# non-default store root).
 ```
+
+Note: Codex does not pass shell-inherited environment variables to MCP
+server processes. If the synapt server must see any environment variable
+(a non-default store root, an agent id), set it inside
+`[mcp_servers.synapt.env]` in the config above, not in your shell.
 
 Then initialize the project:
 
@@ -442,7 +452,17 @@ Add to `~/.codex/config.toml`:
 [mcp_servers.synapt]
 command = "synapt"
 args = ["server"]
+
+[mcp_servers.synapt.env]
+# Codex does not pass shell-inherited environment variables to MCP server
+# processes. Set here anything the synapt server must see (for example a
+# non-default store root).
 ```
+
+Note: Codex does not pass shell-inherited environment variables to MCP
+server processes. If the synapt server must see any environment variable
+(a non-default store root, an agent id), set it inside
+`[mcp_servers.synapt.env]` in the config above, not in your shell.
 
 Then initialize the project:
 
