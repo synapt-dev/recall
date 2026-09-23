@@ -5188,6 +5188,7 @@ def _gripspace_has_registered_repo(root: Path) -> bool:
 
 
 _INVERTED_MARKER_WARNED: set[str] = set()
+_REBIND_REFUSAL_WARNED: set[str] = set()
 
 
 def _griptree_worktree_is_live(griptree_path: Path) -> bool:
@@ -5321,7 +5322,30 @@ def _persist_shared_gripspace_root(resolved: Path, env_var: str) -> None:
     entire function (named intent, never ambient) -- see the caller.
     """
     self_root = _find_gripspace_root(Path.cwd())
-    if self_root is None or self_root == resolved:
+    if self_root is None:
+        return
+    if self_root == resolved:
+        # SELF-BINDING (P2): an env-bound call whose root IS the caller's own
+        # gripspace is the strongest first-binding signal there is -- bind
+        # the root to itself if no marker exists, so a root is bound first by
+        # an agent physically inside it, not by a caller whose env names
+        # another root and not by a hand-written file. A gripspace with no
+        # marker is otherwise bound by the FIRST read from a caller naming a
+        # different root (the marker's content cannot distinguish a legitimate
+        # sibling desk's binding from a different-root one without an identity
+        # signal). Narrowed to
+        # PHYSICAL PRESENCE (cwd IS the root): a call from a linked child
+        # whose walk-up resolves UP to this root is a call from a DIFFERENT
+        # gripspace, and it must not write into the parent's marker dir.
+        if Path.cwd().resolve() == self_root:
+            marker = self_root / _GRIPSPACE_ROOT_MARKER_RELPATH
+            if not marker.is_file():
+                _guard_data_root("gripspace_root_marker", marker)
+                try:
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    marker.write_text(f"{resolved}\n")
+                except OSError:
+                    pass
         return
     if not _gripspace_has_registered_repo(self_root):
         import sys
@@ -5350,6 +5374,46 @@ def _persist_shared_gripspace_root(resolved: Path, env_var: str) -> None:
         return
     marker = self_root / _GRIPSPACE_ROOT_MARKER_RELPATH
     _guard_data_root("gripspace_root_marker", marker)
+    # FIRST BINDING WINS (a live instance, 2026-09-23 04:12): the marker
+    # this gripspace already carries may name a DIFFERENT live gripspace (a
+    # self-binding, or a binding made by an earlier env-bound call), and an
+    # env var in THIS process's shell is ambient evidence from a caller
+    # whose cwd is here, not authority to rebind it. The live instance: a
+    # process whose GRIPSPACE_ROOT named a different populated gripspace ran
+    # a read from inside this one; both existing refusals passed, and the
+    # read REWROTE this root's own marker -- every env-less call from that
+    # cwd then resolved the other root's store for as long as the rewrite
+    # stood. So: an existing marker naming a different LIVE gripspace is not
+    # replaced. A STALE marker (recorded target gone) may still be rebound:
+    # that is the recovery path the staleness machinery exists for, and the
+    # env-bound call is the only caller that can perform it.
+    if marker.is_file():
+        try:
+            existing = Path(marker.read_text().strip())
+        except OSError:
+            existing = None
+        if (
+            existing is not None
+            and existing.is_dir()
+            and _is_gripspace_root_marker_dir(existing)
+            and existing.resolve() != resolved
+        ):
+            import sys
+
+            _key = f"{marker}=>{resolved}"
+            if _key in _REBIND_REFUSAL_WARNED:
+                return
+            _REBIND_REFUSAL_WARNED.add(_key)
+            print(
+                f"[recall] refusing to rebind the shared-gripspace-root "
+                f"marker at {marker}: it already names the live gripspace "
+                f"{existing}, and {resolved} (from {env_var}) is a different "
+                f"live root. First binding wins; a rebind is an explicit act "
+                f"-- set SYNAPT_RECALL_ROOT for a one-shot override, or "
+                f"remove the marker by hand to rebind this gripspace.",
+                file=sys.stderr,
+            )
+            return
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(f"{resolved}\n")
