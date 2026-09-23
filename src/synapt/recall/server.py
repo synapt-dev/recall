@@ -2749,10 +2749,25 @@ def recall_save(
                 if not existing:
                     return f"Error: node {node_id} not found."
                 now = datetime.now(timezone.utc).isoformat()
-                existing["status"] = "retracted"
-                existing["valid_until"] = now
-                existing["updated_at"] = now
+                # DUAL STORE. The retract branch used to write SQLite
+                # only, and `_sync_knowledge_to_db` treats knowledge.jsonl as
+                # authoritative and writes it over SQLite for every node it carries --
+                # so the next ordinary consolidation sync put the node back in search.
+                # Measured: after this branch returned, db=retracted and
+                # jsonl=active; after a sync, db=active again. Deterministic, no
+                # crash window. The SAME class was fixed on the contest path
+                # (_apply_contest_resolution, PR#903) by applying ONE update dict to
+                # both stores so the two writes cannot drift -- that is copied here
+                # rather than restated, and the dict is what both writes read.
+                updates = {
+                    "status": "retracted",
+                    "valid_until": now,
+                    "updated_at": now,
+                }
+                existing.update(updates)
                 db.upsert_knowledge_node(existing)
+                from synapt.recall.knowledge import update_node, _knowledge_path
+                update_node(node_id, updates, _knowledge_path())
                 # db.close() handled by finally below
                 _invalidate_cache()
                 return f"Knowledge node retracted: {node_id}. Hidden from search, preserved for audit."
