@@ -1585,6 +1585,7 @@ from synapt.recall.core import (  # noqa: E402
     _marker_target_is_own_child,
     _GRIPSPACE_ROOT_MARKER_RELPATH,
     _INVERTED_MARKER_WARNED,
+    _REBIND_REFUSAL_WARNED,
 )
 
 
@@ -1693,6 +1694,132 @@ class TestInvertedGripspaceRootMarker:
         _persist_shared_gripspace_root(grip_b.resolve(), "GRIPSPACE_ROOT")
         marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
         assert marker.is_file()
+        assert marker.read_text().strip() == str(grip_b.resolve())
+
+
+# ---------------------------------------------------------------------------
+# First-binding-wins rebind guard (a live instance, 2026-09-23 04:12):
+# _persist_shared_gripspace_root overwrote this gripspace's existing marker
+# (which named the root itself) because a process whose GRIPSPACE_ROOT named
+# a different populated gripspace ran a read from inside this one; every
+# existing refusal (populated, own-child) passed for that root. For ~7
+# minutes every env-less call from the affected cwd resolved the other
+# root's store. The rule the fix encodes: a read path never REPLACES an
+# existing marker that still names a live gripspace; first binding wins, a
+# rebind is an explicit act. A STALE marker (recorded target no longer
+# exists) may still be rebound -- that is the recovery path the staleness
+# machinery exists for.
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerRebindFirstBinding:
+    def setup_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+        _REBIND_REFUSAL_WARNED.clear()
+
+    def teardown_method(self):
+        _gripspace_cache.clear()
+        _INVERTED_MARKER_WARNED.clear()
+        _REBIND_REFUSAL_WARNED.clear()
+
+    def _clear_env(self, monkeypatch):
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+
+    # WITNESS 1 (the live instance, direct call): an existing marker naming a
+    # different LIVE gripspace is not replaced by an env-bound call naming a
+    # third root; the caller is told why and what the explicit path is.
+    def test_write_refuses_to_replace_a_live_unrelated_marker(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        grip_b = _make_populated_gripspace(tmp_path, "desk-b")
+        grip_c = _make_populated_gripspace(tmp_path, "desk-c")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{grip_b.resolve()}\n")  # an existing LIVE binding
+        before = marker.read_bytes()
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(grip_c.resolve(), "GRIPSPACE_ROOT")
+        assert marker.read_bytes() == before, (
+            "an env-bound call replaced an existing marker that named a "
+            "different live gripspace -- a read path must not rebind"
+        )
+        err = capsys.readouterr().err
+        assert "refusing to rebind" in err
+        assert str(grip_c.resolve()) in err
+
+    # WITNESS 2 (the live instance, end to end through the READ path): a
+    # process whose GRIPSPACE_ROOT names a different populated gripspace
+    # runs a resolve in a gripspace whose marker names itself, and the
+    # marker afterwards is byte-identical.
+    def test_env_read_from_another_root_leaves_the_marker_byte_identical(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        grip_other = _make_populated_gripspace(tmp_path, "other-gripspace")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{grip_a.resolve()}\n")  # the self-binding
+        before = marker.read_bytes()
+        monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+        monkeypatch.setenv("GRIPSPACE_ROOT", str(grip_other))
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        resolved, source = _resolve_root_and_source()
+        assert resolved == grip_other.resolve()
+        assert source == "env:GRIPSPACE_ROOT"
+        assert marker.read_bytes() == before, (
+            "a read from another root rewrote an existing marker naming a live "
+            "gripspace -- the marker must stay byte-identical"
+        )
+        assert "refusing to rebind" in capsys.readouterr().err
+
+    # WITNESS 2b (P2, self-binding): an env-bound call whose root IS the
+    # caller's own gripspace binds the root to itself when no marker exists,
+    # so a root is bound first by its own agents structurally.
+    def test_self_binding_writes_a_self_naming_marker(self, tmp_path, monkeypatch):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(grip_a.resolve(), "GRIPSPACE_ROOT")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
+        assert marker.is_file()
+        assert marker.read_text().strip() == str(grip_a.resolve())
+        # and the designed no-rewrite case: a second self-binding call leaves
+        # the marker byte-identical (it already names this root).
+        before = marker.read_bytes()
+        _persist_shared_gripspace_root(grip_a.resolve(), "GRIPSPACE_ROOT")
+        assert marker.read_bytes() == before
+
+    # WITNESS 3 (the recovery path is preserved): a STALE marker (recorded
+    # target no longer exists) is still rebound by an env-bound call.
+    def test_a_stale_marker_is_still_rebindable(self, tmp_path, monkeypatch, capsys):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        grip_b = _make_populated_gripspace(tmp_path, "desk-b")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{tmp_path / 'deleted-gripspace'}\n")  # stale target
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(grip_b.resolve(), "GRIPSPACE_ROOT")
+        assert marker.read_text().strip() == str(grip_b.resolve())
+
+    # WITNESS 4 (no-marker case unchanged): a gripspace with no marker at all
+    # still converges on the env-bound call's coordinate (recall#936's design).
+    def test_no_existing_marker_still_persists(self, tmp_path, monkeypatch):
+        grip_a = _make_populated_gripspace(tmp_path, "desk-a")
+        grip_b = _make_populated_gripspace(tmp_path, "desk-b")
+        self._clear_env(monkeypatch)
+        monkeypatch.chdir(grip_a)
+        _gripspace_cache.clear()
+        _persist_shared_gripspace_root(grip_b.resolve(), "GRIPSPACE_ROOT")
+        marker = grip_a / _GRIPSPACE_ROOT_MARKER_RELPATH
         assert marker.read_text().strip() == str(grip_b.resolve())
 
 

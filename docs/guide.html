@@ -218,7 +218,11 @@ synapt init</code></pre>
     <p>Add to <code>~/.codex/config.toml</code>:</p>
     <pre><code>[mcp_servers.synapt]
 command = "synapt"
-args = ["server"]</code></pre>
+args = ["server"]
+
+[mcp_servers.synapt.env]
+# Codex does not pass shell-inherited environment variables to MCP
+# server processes. Set here anything the synapt server must see.</code></pre>
     <p>Then run <code>synapt init</code>. This also deploys the packaged <code>dev-loop</code> skill into your Codex home.</p>
 
     <h3>OpenCode</h3>
