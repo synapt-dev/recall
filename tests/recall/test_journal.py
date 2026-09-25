@@ -991,3 +991,116 @@ class TestCarryForwardAgingAndBound(unittest.TestCase):
         self.assertIn("Carry-forward: 0 carried, 0 retired by done, 0 withheld", text0)
         # no report supplied (legacy callers): no counts line at all
         self.assertNotIn("Carry-forward:", format_write_confirmation(entry, explicit_next_steps=["mine"]))
+
+
+    def test_same_session_write_does_not_resurrect_a_step_its_own_session_retired(self):
+        """(Client finding, reported by a client.) A step retired by ``done`` in
+        one write is RESURRECTED by the next write in the SAME session.
+
+        Why: ``read_previous_meaningful(current_session_id=S)`` skips
+        same-session entries by design (a session must not carry forward its own
+        next steps), so write 2 compares against the entry from BEFORE the
+        session -- whose carried step is still there -- and the retirement made
+        in write 1 is invisible to it. The step then rides into the next session
+        and keeps instructing its reader. Two writes per session is the normal
+        close routine, which is what makes retirement look irreversible.
+
+        The client's shape, three writes: the step is carried in, write 1 retires
+        it, write 2 in the SAME session must not bring it back, and the next
+        session must not inherit it."""
+        import tempfile
+        from synapt.recall.journal import (
+            append_entry,
+            merge_carried_forward_with_report,
+            read_previous_meaningful,
+            session_done_items,
+            _step_key,
+        )
+        STEP = "point the carried step at the void SHA"
+        # A carried step is stamped "[carried since YYYY-MM-DD]", so asserting on the
+        # raw element can never see a resurrection: the resurrected step is a
+        # DIFFERENT string. Compare normalized keys, which ignore the stamp.
+        _KEY = _step_key(STEP)
+        path = Path(tempfile.mkdtemp()) / "journal.jsonl"
+        append_entry(JournalEntry(timestamp="2026-09-24T10:00:00+00:00", session_id="PRIOR",
+                                  focus="prior work", next_steps=[STEP]), path)
+
+        def write(session_id, ts, done, focus):
+            entry = JournalEntry(timestamp=ts, session_id=session_id, focus=focus, done=list(done))
+            previous = read_previous_meaningful(entry.session_id, path)
+            merged, report = merge_carried_forward_with_report(
+                entry.next_steps, entry.done, previous,
+                same_session_done=session_done_items(entry.session_id, path),
+            )
+            entry.next_steps = merged
+            append_entry(entry, path)
+            return entry, report
+
+        w1, r1 = write("S", "2026-09-25T09:00:00+00:00", [STEP], "first write")
+        self.assertEqual(r1.retired_by_done, 1, "write 1 must retire the carried step")
+        self.assertNotIn(STEP, w1.next_steps)
+
+        w2, _ = write("S", "2026-09-25T09:30:00+00:00", [], "second write")
+        self.assertNotIn(
+            _KEY, [_step_key(step) for step in w2.next_steps],
+            "the second write of the SAME session resurrected a step its own session had retired",
+        )
+
+        w3, _ = write("T", "2026-09-25T11:00:00+00:00", [], "next session")
+        self.assertNotIn(_KEY, [_step_key(step) for step in w3.next_steps],
+                         "the retired step rode into the next session")
+
+
+    def test_write_path_retirement_holds_within_one_session(self):
+        """The REAL path (client finding): `recall_journal(action="write")` called
+        twice in one session. The unit witness above pins the merge function; this
+        one travels the handler the client actually calls, because a witness that
+        calls the predicate directly would stay green if the callers never supply
+        the union.
+
+        Inputs are stubbed (the journal path, the transcript-derived entry) so the
+        session id and the carried step are controlled; everything else -- the
+        reader, the merge, the append, the confirmation -- is the shipped code."""
+        import tempfile
+        from unittest.mock import patch
+        from synapt.recall.journal import append_entry, read_entries, _step_key
+        from synapt.recall.server import recall_journal
+
+        STEP = "point the carried step at the void SHA"
+        path = Path(tempfile.mkdtemp()) / "journal.jsonl"
+        append_entry(JournalEntry(timestamp="2026-09-24T10:00:00+00:00", session_id="PRIOR",
+                                  focus="prior work", next_steps=[STEP]), path)
+
+        def stub():
+            return JournalEntry(timestamp="2026-09-25T09:00:00+00:00", session_id="SAME", focus="write")
+
+        with patch("synapt.recall.journal._journal_path", return_value=path), \
+             patch("synapt.recall.journal.auto_extract_entry", side_effect=lambda **kw: stub()), \
+             patch("synapt.recall.journal.latest_transcript_path", return_value=None):
+            first = recall_journal(action="write", focus="first", done=STEP)
+            second = recall_journal(action="write", focus="second")
+
+        self.assertIn("1 retired by done", first, first)
+        latest = read_entries(path, n=1)[0]
+        self.assertNotIn(_step_key(STEP), [_step_key(step) for step in latest.next_steps],
+                         "the handler's second write in the same session resurrected the step")
+        self.assertNotIn(STEP, second, "the second write's confirmation still lists the retired step")
+
+
+    def test_both_write_paths_supply_the_same_session_union(self):
+        """WIRING GUARD, not a behaviour witness.
+
+        The behaviour is witnessed through the MCP path above. The CLI path
+        carries the same two lines, and nothing reds if one of them is dropped --
+        driving the CLI's write flow needs argparse plumbing that a unit test
+        should not fake. So this asserts the wiring in both files BY NAME, and it
+        says plainly what it is: a text guard that can only fail when a call site
+        changes, never when the behaviour regresses."""
+        import synapt.recall as pkg
+        root = Path(pkg.__file__).parent
+        for name in ("cli.py", "server.py"):
+            source = (root / name).read_text()
+            self.assertIn(
+                "same_session_done=session_done_items(entry.session_id),", source,
+                f"{name} does not supply this session's own retired steps to the carry merge",
+            )
