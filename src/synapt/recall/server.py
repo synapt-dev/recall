@@ -120,27 +120,11 @@ MCP_INSTRUCTIONS = (
     "and takes <100ms. Missing relevant past context costs far more in wasted work "
     "and repeated mistakes. Err on the side of searching too much, not too little.\n"
     "\n"
-    "CONTEXT BUDGET:\n"
-    "- recall_channel has a `detail` parameter: max/high/medium/low/min.\n"
-    "- Use detail='low' or 'min' for monitoring loops and periodic polling.\n"
-    "- Use detail='high' or 'max' only when you need the full picture (e.g. catching up after being away).\n"
-    "- Pins are large — they contain full benchmark tables. Read them once at session start with detail='high', then poll with 'low'.\n"
-    "- Prefer pin=False for routine posts. Reserve pins for durable reference material."
-    "\n"
-    "\n"
     "KNOWLEDGE (persistent facts across sessions):\n"
-    "- When you learn a durable fact, decision, or preference -> recall_save(content=…, "
-    "category=<fact|preference|decision|workflow|tooling|…>) and KEEP the returned node id.\n"
-    "- Update in place: recall_save(node_id=<id>, content=<the new fact>, category=<its category>); "
-    "do not save a second node for the same fact.\n"
-    "- Retract on request: recall_save(node_id=<id>, retract=true) — the node becomes hidden from "
-    "search, preserved for audit.\n"
-    "- An update on a retracted node is REFUSED so a buried fact is not revived silently; "
-    "restore it deliberately with restore_retracted=true (recall_save(node_id=<id>, "
-    "content=<the fact>, restore_retracted=true)) or file the corrected fact as a new node.\n"
-    "- Two saved facts disagree: recall_contradict(action='correct', old_node_id=<id>, new_content=…).\n"
-    "- Save facts in the words a later question will use: search matches a saved fact by the words "
-    "it was saved in."
+    "- Save durable facts, decisions, and preferences with recall_save. Keep the returned node id.\n"
+    "- Use recall_save to update an existing node rather than saving a duplicate. Use it to retract on request.\n"
+    "- For disagreeing saved facts, use recall_contradict.\n"
+    "- Save facts in the words a later question will use."
 )
 
 # ---------------------------------------------------------------------------
@@ -3261,7 +3245,8 @@ def recall_channel(
         to: Target agent for "directive" action.
         target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
         limit: Max messages to return for "read" action (default 20).
-        pin: If True with "post" action, also pin the message.
+        pin: If True with "post" action, also pin the message. Use pin=False
+             for routine posts. Reserve pins for durable reference material.
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
         attachments: Semicolon-separated file paths to attach (copied into channel store on post).
         msg_type: Message type for "post" (status, claim, pr, code, message) or filter for "read".
