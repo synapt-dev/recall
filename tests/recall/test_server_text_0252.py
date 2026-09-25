@@ -23,23 +23,32 @@ import pytest
 
 # --- Item 1: the instructions teach the knowledge-write verbs -------------
 
-def test_instructions_teach_save_update_retract():
+MCP_INSTRUCTION_CAP = 2048
+
+
+def _delivered_instructions(text: str) -> str:
+    """Claude Code receives only this prefix of MCP instruction text."""
+    return text[:MCP_INSTRUCTION_CAP]
+
+
+def test_instructions_teach_knowledge_lifecycle_within_delivery_cap():
+    """Mechanics stay in tool descriptions because delivered text is the contract."""
     from synapt.recall.server import MCP_INSTRUCTIONS
 
-    text = MCP_INSTRUCTIONS
+    assert len(MCP_INSTRUCTIONS) <= MCP_INSTRUCTION_CAP
+    text = _delivered_instructions(MCP_INSTRUCTIONS)
     assert "recall_save" in text, "the instructions never name the save verb"
     # the three states of a node, in the words the refusals use
     assert "update" in text and "retract" in text
-    # restore_retracted is the only deliberate un-retract path (#1205);
-    # the instructions must teach it in the refusal's own words
-    assert "restore_retracted" in text, (
-        "the instructions must name restore_retracted: an update on a "
-        "retracted node is refused, and restore is the deliberate path"
-    )
-    assert "hidden from" in text, (
-        "the instructions must say what retraction does (hidden from "
-        "search, preserved for audit) in the retract message's own words"
-    )
+    assert "recall_contradict" in text
+
+
+def test_delivery_prefix_control_rejects_a_lifecycle_term_after_the_cap():
+    """This control fails if delivery is accidentally changed to whole-source text."""
+    source_text = "x" * MCP_INSTRUCTION_CAP + " recall_save"
+
+    assert "recall_save" not in _delivered_instructions(source_text)
+    assert "recall_save" in source_text
 
 
 # --- Item 2: the empty-index message says what to do next ------------------
