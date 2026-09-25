@@ -3935,11 +3935,40 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # resolution.
             _refuse_if_index_disagrees_with_source(args, precompact_index_dir, project)
             _configure_codex_cwd_cache(precompact_index_dir)
-            final_index = _archive_and_build(project, use_embeddings=False, incremental=True)
-            if final_index:
-                stats = final_index.stats()
-                print(f"synapt: rebuilt index ({stats['chunk_count']} chunks)", file=sys.stderr)
-            _sync_after_rebuild(project)
+            # The rebuild is the memory consumer here (measured at 1.58 GB in 2.5
+            # minutes, which took free+inactive to 3.63 GB and held off another
+            # build), so it is gated on host memory and limited to one host-wide,
+            # the same way cmd_catchup gates its tail. The journal write below is
+            # deliberately OUTSIDE both gates: crash-recovery state is why this
+            # hook exists, so it must survive a refusal.
+            verdict, numbers = _host_memory_verdict()
+            if verdict == "refuse":
+                print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers})",
+                      file=sys.stderr)
+            else:
+                if verdict == "cannot_measure":
+                    print(f"[precompact] memory gate could not measure ({numbers}); "
+                          "rebuilding, because an unreadable instrument is not a "
+                          "memory verdict", file=sys.stderr)
+                host_fd = _acquire_build_lock(
+                    _host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK
+                )
+                if host_fd is None:
+                    print(f"[precompact] rebuild skipped: {_HOST_BUILD_LOCK} is held "
+                          f"({_build_lock_busy_message(_host_synapt_dir(), name=_HOST_BUILD_LOCK)})",
+                          file=sys.stderr)
+                else:
+                    try:
+                        final_index = _archive_and_build(
+                            project, use_embeddings=False, incremental=True
+                        )
+                        if final_index:
+                            stats = final_index.stats()
+                            print(f"synapt: rebuilt index ({stats['chunk_count']} chunks)",
+                                  file=sys.stderr)
+                        _sync_after_rebuild(project)
+                    finally:
+                        _release_build_lock(host_fd)
             # Write an interim journal entry so mid-session state is captured
             # even when SessionEnd never fires (crash, kill, etc.).
             _precompact_journal_write(project)
@@ -4625,9 +4654,9 @@ def cmd_catchup(args: argparse.Namespace) -> None:
             return
 
         # This tail is the memory consumer (measured at 1.52 GB in 2.5 minutes, and
-        # 5.9 GB before the 2026-09-25 host crash), and every server start runs this
-        # catchup, so it is gated on host memory and limited to one host-wide. The
-        # gate is placed here rather than over the whole of catchup because
+        # 5.9 GB after a fleet restart on 2026-09-25), and every server start runs
+        # this catchup, so it is gated on host memory and limited to one host-wide.
+        # The gate is placed here rather than over the whole of catchup because
         # everything above it is legitimately per-seat work.
         verdict, numbers = _host_memory_verdict()
         if verdict == "cannot_measure":
