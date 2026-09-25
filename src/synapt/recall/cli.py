@@ -2877,10 +2877,12 @@ def cmd_consolidate(args: argparse.Namespace) -> None:
             print(format_knowledge_for_display(other))
         return
 
-    from synapt.recall.consolidate import consolidate
+    from synapt.recall.consolidate import consolidate, _resolve_consolidation_model
 
     project = Path.cwd().resolve()
-    model = args.model
+    # Resolve here rather than passing None through, so the line below prints the model
+    # that will actually be used instead of "None" when the flag is omitted.
+    model = _resolve_consolidation_model(args.model)
 
     print(f"[consolidate] Analyzing journal entries with {model} ...")
 
@@ -4731,8 +4733,10 @@ def make_parser() -> argparse.ArgumentParser:
         "consolidate", aliases=["sleep"],
         help="Extract durable knowledge from journal entries",
     )
-    consolidate_parser.add_argument("--model", default="mlx-community/Ministral-3-3B-Instruct-2512-4bit",
-                                     help="MLX model to use")
+    consolidate_parser.add_argument("--model", default=None,
+                                     help="Model to use. Default: the configured consolidation "
+                                          "model (env SYNAPT_CONSOLIDATION_MODEL, then the config "
+                                          "file, then the built-in default)")
     consolidate_parser.add_argument("--dry-run", action="store_true",
                                      help="Show what would be consolidated without doing it")
     consolidate_parser.add_argument("--force", action="store_true",
