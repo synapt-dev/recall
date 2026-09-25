@@ -65,6 +65,11 @@ class TestRecallConfig:
         cfg = RecallConfig()
         assert cfg.get_model("reranker") == "custom/reranker"
 
+    def test_env_override_consolidation(self, monkeypatch):
+        monkeypatch.setenv("SYNAPT_CONSOLIDATION_MODEL", "custom/consolidation")
+        cfg = RecallConfig()
+        assert cfg.get_model("consolidation") == "custom/consolidation"
+
     def test_active_models_includes_all(self):
         cfg = RecallConfig()
         models = cfg.active_models()
@@ -193,6 +198,48 @@ class TestLoadConfig:
         cfg = load_config()
         # Env var wins
         assert cfg.get_model("summarization") == "env-model"
+
+    def test_every_model_role_has_an_env_override(self):
+        """The set-level invariant, so a sixth role cannot be added silently.
+
+        No test referenced `_ENV_MAP`/`_KEY_TO_ENV` at all before this: the per-role
+        witnesses would stay green while a new role in DEFAULTS had no override, which
+        is precisely how consolidation sat without one. Both directions are asserted --
+        every role has a var, and no var names a role that does not exist."""
+        from synapt.recall.config import _ENV_MAP
+
+        roles = set(DEFAULTS)
+        mapped = set(_ENV_MAP.values())
+        assert mapped == roles, (
+            f"roles without an env override: {sorted(roles - mapped)}; "
+            f"overrides naming unknown roles: {sorted(mapped - roles)}"
+        )
+
+    def test_consolidation_precedence_default_then_file_then_env(self, tmp_path, monkeypatch):
+        """The three precedence levels for the consolidation role, the fifth role.
+
+        The default level is read from DEFAULTS rather than restated as a literal, so
+        this witness keeps its meaning if the default itself changes for platform
+        reasons; what it pins is the precedence, not the model name.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
+        monkeypatch.chdir(tmp_path)
+
+        # 1. nothing set -> the default
+        assert load_config().get_model("consolidation") == DEFAULTS["consolidation"]
+
+        # 2. the config file wins over the default
+        config_dir = tmp_path / ".synapt"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(json.dumps({
+            "models": {"consolidation": "file-model"}
+        }))
+        assert load_config().get_model("consolidation") == "file-model"
+
+        # 3. the env var wins over the file
+        monkeypatch.setenv("SYNAPT_CONSOLIDATION_MODEL", "env-model")
+        assert load_config().get_model("consolidation") == "env-model"
 
     def test_backend_from_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))

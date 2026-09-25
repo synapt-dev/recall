@@ -2681,6 +2681,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         read_entries,
         read_latest,
         read_previous_meaningful,
+        session_done_items,
     )
 
     if args.read:
@@ -2778,6 +2779,10 @@ def cmd_journal(args: argparse.Namespace) -> None:
         entry.next_steps,
         entry.done,
         previous_entry,
+        same_session_done=session_done_items(entry.session_id),
+        # What THIS session already retired in earlier writes: previous_entry is
+        # from before the session by design, so without this a step retired
+        # minutes ago comes back on the next write.
     )
 
     # Clear auto flag if user provided rich content
@@ -2872,10 +2877,12 @@ def cmd_consolidate(args: argparse.Namespace) -> None:
             print(format_knowledge_for_display(other))
         return
 
-    from synapt.recall.consolidate import consolidate
+    from synapt.recall.consolidate import consolidate, _resolve_consolidation_model
 
     project = Path.cwd().resolve()
-    model = args.model
+    # Resolve here rather than passing None through, so the line below prints the model
+    # that will actually be used instead of "None" when the flag is omitted.
+    model = _resolve_consolidation_model(args.model)
 
     print(f"[consolidate] Analyzing journal entries with {model} ...")
 
@@ -3928,11 +3935,40 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # resolution.
             _refuse_if_index_disagrees_with_source(args, precompact_index_dir, project)
             _configure_codex_cwd_cache(precompact_index_dir)
-            final_index = _archive_and_build(project, use_embeddings=False, incremental=True)
-            if final_index:
-                stats = final_index.stats()
-                print(f"synapt: rebuilt index ({stats['chunk_count']} chunks)", file=sys.stderr)
-            _sync_after_rebuild(project)
+            # The rebuild is the memory consumer here (measured at 1.58 GB in 2.5
+            # minutes, which took free+inactive to 3.63 GB and held off another
+            # build), so it is gated on host memory and limited to one host-wide,
+            # the same way cmd_catchup gates its tail. The journal write below is
+            # deliberately OUTSIDE both gates: crash-recovery state is why this
+            # hook exists, so it must survive a refusal.
+            verdict, numbers = _host_memory_verdict()
+            if verdict == "refuse":
+                print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers})",
+                      file=sys.stderr)
+            else:
+                if verdict == "cannot_measure":
+                    print(f"[precompact] memory gate could not measure ({numbers}); "
+                          "rebuilding, because an unreadable instrument is not a "
+                          "memory verdict", file=sys.stderr)
+                host_fd = _acquire_build_lock(
+                    _host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK
+                )
+                if host_fd is None:
+                    print(f"[precompact] rebuild skipped: {_HOST_BUILD_LOCK} is held "
+                          f"({_build_lock_busy_message(_host_synapt_dir(), name=_HOST_BUILD_LOCK)})",
+                          file=sys.stderr)
+                else:
+                    try:
+                        final_index = _archive_and_build(
+                            project, use_embeddings=False, incremental=True
+                        )
+                        if final_index:
+                            stats = final_index.stats()
+                            print(f"synapt: rebuilt index ({stats['chunk_count']} chunks)",
+                                  file=sys.stderr)
+                        _sync_after_rebuild(project)
+                    finally:
+                        _release_build_lock(host_fd)
             # Write an interim journal entry so mid-session state is captured
             # even when SessionEnd never fires (crash, kill, etc.).
             _precompact_journal_write(project)
@@ -4454,6 +4490,126 @@ def cmd_maintain(args: argparse.Namespace) -> None:
             )
 
 
+# --- the pre-build memory gate and the host-wide build lock -------------------
+
+# TWO FLOORS, TWO PURPOSES -- do not merge them. A SUITE runs under 4 GB free+inactive
+# (the long-standing floor for heavy local runs generally). A BUILD is gated here at
+# 6 GB, because it is measured in gigabytes of RSS and the incident this exists for
+# started on a host that still had 4.89 GB free+inactive -- the 4 GB number would have
+# allowed it.
+#
+# SWAP PERCENT IS NOT A THRESHOLD HERE, and that is deliberate. On macOS allocated
+# swap is held rather than released, so swap % does not track pressure: measured
+# 2026-09-25, a large process quitting raised free+inactive 4.89 -> 6.50 GB while swap
+# ROSE 80.1% -> 84.3%. A swap arm would have been a coin flip against the very thing
+# it guarded, and it would have deferred builds on busy-but-safe hosts. Swap is
+# reported as context on every defer, never thresholded.
+BUILD_MIN_FREE_INACTIVE_GB = 6.0
+
+# One build host-wide. The existing locks are all per-project -- `build.lock` and
+# `catchup.lock` live in `<root>/.synapt/recall/`, and every seat has its own root --
+# so N server starts take N different locks and start N builds. Only a lock under the
+# host-level `~/.synapt/` can be the one that is shared.
+_HOST_BUILD_LOCK = "recall-build.lock"
+
+
+def _host_synapt_dir() -> Path:
+    """The host-level ``~/.synapt`` directory (host channels already live here)."""
+    return Path.home() / ".synapt"
+
+
+class FakeMeasurements:
+    """The seam that forces a memory verdict in tests, named and owned here.
+
+    It replaces the host gate's own override name: that name belonged to another
+    tool, and a seam one repository injects through should carry that repository's
+    name. Same format -- ``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``.
+    """
+
+    ENV = "SYNAPT_RECALL_MEM_FAKE"
+
+
+def _build_min_free_gb() -> float:
+    """The free+inactive floor a build needs, overridable by environment.
+
+    A named constant behind one env var so a permanent change of the number after a
+    reboot is a one-constant change rather than a re-review, and so a test can pin it
+    the same way it pins the measurements.
+    """
+    import math
+
+    raw = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return BUILD_MIN_FREE_INACTIVE_GB
+        # A value the gate cannot use must fall back to the constant rather than
+        # become a verdict. Measured on the first version of this: `0` and `-1` set a
+        # floor no host can miss, `inf` never opens the gate, and **`nan` compares
+        # False against every reading**, so it silently disabled the gate while
+        # looking like a configured number.
+        if math.isfinite(value) and value > 0:
+            return value
+    return BUILD_MIN_FREE_INACTIVE_GB
+
+
+def _host_memory_verdict() -> "tuple[str, str]":
+    """``("pass"|"refuse"|"cannot_measure", numbers)`` for a heavy local step.
+
+    The gate is FREE+INACTIVE ALONE, at ``BUILD_MIN_FREE_INACTIVE_GB`` (6 GB), which is
+    NOT the 4 GB used as the floor for heavy local runs generally: the incident this
+    exists for started on a host that still read 4.89 GB free+inactive, so 4 GB is not
+    a gate against it. Two floors, two purposes -- keep them apart. Swap percent is
+    reported and never thresholded, because on this platform allocated swap is held
+    rather than released and the percentage does not track pressure.
+
+    CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an
+    instrument failure, and an earlier misread of one stopped real maintenance work
+    for two nights, so a missing instrument must not stop a build here either -- the
+    caller warns and proceeds. ``SYNAPT_RECALL_MEM_FAKE``
+    (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``) forces a verdict
+    deterministically.
+    """
+    import re
+    import subprocess as _sp
+
+    floor = _build_min_free_gb()
+    fake = os.environ.get(FakeMeasurements.ENV)
+    if fake:
+        try:
+            used, total, free_gb = (float(x) for x in fake.split(":")[:3])
+        except (ValueError, IndexError):
+            return "cannot_measure", f"SYNAPT_RECALL_MEM_FAKE={fake!r} is not three numbers"
+    elif sys.platform != "darwin":
+        # The thresholds mirror a macOS host gate, so elsewhere the gate is inert
+        # rather than unreadable: PASS with a reason and no warning, because a line
+        # on every session start on every non-darwin desk would be noise about a
+        # condition that is not a failure.
+        return "pass", f"gate not applicable on {sys.platform!r}"
+    else:
+        try:
+            swap = _sp.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"],
+                           capture_output=True, text=True, timeout=10).stdout
+            used = float(re.search(r"used\s*=\s*([\d.]+)M", swap).group(1))
+            total = float(re.search(r"total\s*=\s*([\d.]+)M", swap).group(1))
+            vm = _sp.run(["/usr/bin/vm_stat"], capture_output=True, text=True,
+                         timeout=10).stdout
+            page = int(re.search(r"page size of (\d+)", vm).group(1))
+            free = int(re.search(r"Pages free:\s+(\d+)", vm).group(1))
+            inactive = int(re.search(r"Pages inactive:\s+(\d+)", vm).group(1))
+            free_gb = (free + inactive) * page / 1024 ** 3
+        except Exception as exc:  # noqa: BLE001 -- an unreadable instrument, not a verdict
+            return "cannot_measure", f"{type(exc).__name__}: {exc}"
+
+    pct = (used / total * 100) if total else 0.0
+    numbers = (f"free_inactive_gb={free_gb:.2f} floor_gb={floor:.1f} "
+               f"swap_used_pct={pct:.1f} (context, not a gate)")
+    if free_gb < floor:
+        return "refuse", numbers
+    return "pass", numbers
+
+
 def cmd_catchup(args: argparse.Namespace) -> None:
     """Everything the session-start hook defers, in one detached process.
 
@@ -4496,25 +4652,50 @@ def cmd_catchup(args: argparse.Namespace) -> None:
             print(f"[catchup] journal: compacted ({removed} duplicate(s) removed)", file=sys.stderr)
         if getattr(args, "no_build", False) or not dirs:
             return
-        subprocess.run(
-            [sys.executable, "-m", "synapt.recall.cli", "build", "--incremental"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        try:
-            from synapt.recall.query_freshness import (
-                catchup_oversize_transcripts,
-                format_query_freshness,
-            )
 
-            for result in catchup_oversize_transcripts(project, project_index_dir(project)):
-                print(f"[catchup] oversize: {format_query_freshness(result)}", file=sys.stderr)
-        except Exception as exc:
-            print(f"[catchup] oversize catchup step failed: {type(exc).__name__}: {exc}",
+        # This tail is the memory consumer (measured at 1.52 GB in 2.5 minutes, and
+        # 5.9 GB after a fleet restart on 2026-09-25), and every server start runs
+        # this catchup, so it is gated on host memory and limited to one host-wide.
+        # The gate is placed here rather than over the whole of catchup because
+        # everything above it is legitimately per-seat work.
+        verdict, numbers = _host_memory_verdict()
+        if verdict == "cannot_measure":
+            print(f"[catchup] memory gate could not measure ({numbers}); proceeding, "
+                  "because an unreadable instrument is not a memory verdict",
                   file=sys.stderr)
-        subprocess.run(
-            [sys.executable, "-m", "synapt.recall.cli", "enrich", "--max-entries", "1"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        elif verdict == "refuse":
+            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
+                  "next session-start catchup retries", file=sys.stderr)
+            return
+
+        host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)
+        if host_fd is None:
+            print(f"[catchup] build skipped: {_HOST_BUILD_LOCK} is held "
+                  f"({_build_lock_busy_message(_host_synapt_dir(), name=_HOST_BUILD_LOCK)})",
+                  file=sys.stderr)
+            return
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "synapt.recall.cli", "build", "--incremental"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                from synapt.recall.query_freshness import (
+                    catchup_oversize_transcripts,
+                    format_query_freshness,
+                )
+
+                for result in catchup_oversize_transcripts(project, project_index_dir(project)):
+                    print(f"[catchup] oversize: {format_query_freshness(result)}", file=sys.stderr)
+            except Exception as exc:
+                print(f"[catchup] oversize catchup step failed: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+            subprocess.run(
+                [sys.executable, "-m", "synapt.recall.cli", "enrich", "--max-entries", "1"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        finally:
+            _release_build_lock(host_fd)
     finally:
         _release_build_lock(fd)
 
@@ -4726,8 +4907,10 @@ def make_parser() -> argparse.ArgumentParser:
         "consolidate", aliases=["sleep"],
         help="Extract durable knowledge from journal entries",
     )
-    consolidate_parser.add_argument("--model", default="mlx-community/Ministral-3-3B-Instruct-2512-4bit",
-                                     help="MLX model to use")
+    consolidate_parser.add_argument("--model", default=None,
+                                     help="Model to use. Default: the configured consolidation "
+                                          "model (env SYNAPT_CONSOLIDATION_MODEL, then the config "
+                                          "file, then the built-in default)")
     consolidate_parser.add_argument("--dry-run", action="store_true",
                                      help="Show what would be consolidated without doing it")
     consolidate_parser.add_argument("--force", action="store_true",

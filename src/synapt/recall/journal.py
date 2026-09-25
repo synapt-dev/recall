@@ -653,10 +653,38 @@ class CarryReport:
     oldest_since: str | None = None
 
 
+def session_done_items(session_id: str, path: Path | None = None) -> list[str]:
+    """Every ``done`` item this session has already written to the journal.
+
+    The retirement predicate below sees only the CURRENT write's ``done``. That
+    is enough when the previous entry comes from an earlier session, but not when
+    this write skips its own session's entries -- ``read_previous_meaningful``
+    does, by design, so that a session does not carry forward its own next steps.
+    A step retired by write 1 is still present in the pre-session entry that
+    write 2 compares against, so without this union write 2 resurrects it and the
+    step keeps instructing the next session's reader. Reported by a client.
+
+    The RAW entries are read, not ``read_entries``: that view dedupes to one
+    entry per session, so the session's own earlier writes would be missing from
+    it and the union would silently equal the newest entry -- the defect wearing
+    the fix's clothes.
+    """
+    path = path or _journal_path()
+    if not session_id or not path.exists():
+        return []
+    items: list[str] = []
+    for entry in _read_all_entries(path):
+        if entry.session_id != session_id:
+            continue
+        items.extend(entry.done or [])
+    return items
+
+
 def merge_carried_forward_with_report(
     current_next_steps: list[str],
     current_done: list[str],
     previous_entry: JournalEntry | None,
+    same_session_done: list[str] | None = None,
 ) -> tuple[list[str], CarryReport]:
     """Merge unresolved prior-session next steps into the current entry.
 
@@ -678,6 +706,13 @@ def merge_carried_forward_with_report(
     # Matching still uses the RAW done list: a collapsed value recorded there
     # by repair_journal is exactly what marks the original step resolved.
     done = {_step_key(item) for item in current_done if item and item.strip()}
+    for item in same_session_done or []:
+        if item and item.strip():
+            done.add(_step_key(item))
+    # Plus what this session retired in its EARLIER writes: the
+    # previous entry this write compares against is from before the session, so
+    # without them a retirement made minutes ago is invisible and the step comes
+    # back. One predicate, two sources -- never a second retirement rule.
 
     if not previous_entry or not previous_entry.next_steps:
         return merged, report

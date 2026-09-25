@@ -4,6 +4,87 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.25.4] - 2026-09-25
+
+Patch release. Six fixes, all in the paths a session start, a compaction and a
+knowledge write run through. A session-start catchup build on a low-memory host
+now defers instead of running, and only one build runs per host.
+
+Sixteen files changed across `v0.25.3..dev`, excluding this entry: 916
+insertions, 64 deletions, carrying #1221, #1222, #1223, #1224, #1225 and #1226
+plus the version bump. The figure covers the whole range including the version
+files' own two-line change, and excludes this changelog entry on purpose, the
+same way the 0.25.2 entry does: a count that includes its own document changes
+every time the document is edited.
+
+### Fixed
+
+- **A step retired under `done` no longer returns on the session's own second
+  journal write.** The previous-entry lookup skipped the session's own writes;
+  `session_done_items` unions the session's own retirements into the one
+  predicate, on both write paths (#1221).
+
+- **The consolidation model override reaches inference.** `get_model
+  ("consolidation")` returned the configured value while the pipeline handed a
+  hardcoded constant to the client, so `SYNAPT_CONSOLIDATION_MODEL` and the
+  config file changed what was reported and nothing that ran. The model is
+  resolved where it is consumed, and the CLI's `--model` default is no longer a
+  caller that always chooses (#1222).
+
+- **MCP guidance is kept within the delivery cap.** The instruction text
+  measured past the 2,048-character default cap Claude Code applies, so the tail
+  of it was not delivered. It is now 1,954 characters, with the budget and pin
+  guidance moved onto the `detail` and `pin` parameters they describe (#1223).
+
+- **A session start's catchup build is gated on host memory, and there is one
+  per host.** The build ran unconditionally on every session start on every
+  desk, and one was measured at 1.52 GB in two and a half minutes. It now defers on
+  a refusal from the free+inactive gate (6 GB floor for a build,
+  `SYNAPT_BUILD_MIN_FREE_GB` to override) and takes a lock in `~/.synapt/`, so a
+  second session start joins or skips instead of spawning its own. Swap
+  percentage is deliberately not a gate: measured the same morning, free+inactive
+  rose 4.89 to 6.50 GB while swap also rose 80.1 to 84.3 percent, so a swap rule
+  would have refused a host that had just become usable. The override is
+  validated in the same release: `0`, `-1` and `nan` no longer become the floor,
+  and the test seam a suite injects through carries this repository's name so the
+  host gate's own variable cannot force a pass on a real build (#1224, #1225).
+
+- **A compaction's rebuild is gated on host memory, and shares the one build per
+  host.** The PreCompact hook rebuilt the index in-process on every compaction
+  with no memory gate and no host-wide limit; its per-project lock bounded
+  concurrency within one project and waited up to 60 seconds, which is the wrong
+  instrument for a host running several desks. One such rebuild was measured at
+  1.58 GB in two and a half minutes, taking free+inactive to 3.63 GB. The hook
+  now consults the same free+inactive gate and takes the same host-wide lock, so
+  one build runs across both hooks rather than one per hook; a refusal skips the
+  rebuild and the sync, and an unreadable instrument rebuilds with a line saying
+  so. The journal write and the heartbeat stay outside both gates, because
+  crash-recovery state is why the hook exists (#1226).
+
+## [0.25.3] - 2026-09-23
+
+Patch release. Four fixes in the storage and resolution paths an agent's memory
+runs through, and one documentation change. Fifteen files changed across
+`v0.25.2..v0.25.3`: 1,448 insertions, 33 deletions, carrying #1214, #1215,
+#1216, #1217 and #1218 plus the version bump.
+
+### Fixed
+
+- A read no longer replaces a live gripspace-root marker: the first binding
+  wins, and a rebind is an explicit act (#1214).
+- A retraction is written to both stores, so the next sync cannot put the
+  retracted node back into search (#1215).
+- A supersession is written to both stores, and dedup orders by a per-record
+  `revision` rather than a timestamp, so a record stamped in the future can no
+  longer revert it (#1218).
+- The source-index parser ceiling defaults to 5,000 units and is settable from
+  outside the process with `SYNAPT_SOURCE_PARSER_UNITS` (#1216).
+
+### Docs
+
+- Codex MCP config now documents its env block: Codex does not pass
+  shell-inherited environment variables to MCP server processes (#1217).
+
 ## [0.25.2] - 2026-09-22
 
 Patch release. Two substantive changes, both in the MCP server surface, both

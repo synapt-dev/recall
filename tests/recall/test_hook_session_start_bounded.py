@@ -662,6 +662,9 @@ class TestProvenanceBanner:
 class TestCatchupCommand:
     def test_runs_archive_journal_compact_build_enrich_in_order(self, owned_recall_root, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
+        # catchup's heavy tail is host-gated now, so a healthy host is pinned here;
+        # this test is about the ORDER of the steps, not about the gate.
+        monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9")
         order: list[str] = []
 
         def rec(name):
