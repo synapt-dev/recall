@@ -4461,6 +4461,106 @@ def cmd_maintain(args: argparse.Namespace) -> None:
             )
 
 
+# --- the pre-build memory gate and the host-wide build lock -------------------
+
+# TWO FLOORS, TWO PURPOSES -- do not merge them. A SUITE runs under 4 GB free+inactive
+# (the long-standing floor for heavy local runs generally). A BUILD is gated here at
+# 6 GB, because it is measured in gigabytes of RSS and the incident this exists for
+# started on a host that still had 4.89 GB free+inactive -- the 4 GB number would have
+# allowed it.
+#
+# SWAP PERCENT IS NOT A THRESHOLD HERE, and that is deliberate. On macOS allocated
+# swap is held rather than released, so swap % does not track pressure: measured
+# 2026-09-25, a large process quitting raised free+inactive 4.89 -> 6.50 GB while swap
+# ROSE 80.1% -> 84.3%. A swap arm would have been a coin flip against the very thing
+# it guarded, and it would have deferred builds on busy-but-safe hosts. Swap is
+# reported as context on every defer, never thresholded.
+BUILD_MIN_FREE_INACTIVE_GB = 6.0
+
+# One build host-wide. The existing locks are all per-project -- `build.lock` and
+# `catchup.lock` live in `<root>/.synapt/recall/`, and every seat has its own root --
+# so N server starts take N different locks and start N builds. Only a lock under the
+# host-level `~/.synapt/` can be the one that is shared.
+_HOST_BUILD_LOCK = "recall-build.lock"
+
+
+def _host_synapt_dir() -> Path:
+    """The host-level ``~/.synapt`` directory (host channels already live here)."""
+    return Path.home() / ".synapt"
+
+
+def _build_min_free_gb() -> float:
+    """The free+inactive floor a build needs, overridable by environment.
+
+    A named constant behind one env var so a permanent change of the number after a
+    reboot is a one-constant change rather than a re-review, and so a test can pin it
+    the same way it pins the measurements.
+    """
+    raw = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return BUILD_MIN_FREE_INACTIVE_GB
+
+
+def _host_memory_verdict() -> "tuple[str, str]":
+    """``("pass"|"refuse"|"cannot_measure", numbers)`` for a heavy local step.
+
+    The gate is FREE+INACTIVE ALONE, at ``BUILD_MIN_FREE_INACTIVE_GB`` (6 GB), which is
+    NOT the 4 GB used as the floor for heavy local runs generally: the incident this
+    exists for started on a host that still read 4.89 GB free+inactive, so 4 GB is not
+    a gate against it. Two floors, two purposes -- keep them apart. Swap percent is
+    reported and never thresholded, because on this platform allocated swap is held
+    rather than released and the percentage does not track pressure.
+
+    CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an
+    instrument failure, and an earlier misread of one stopped real maintenance work
+    for two nights, so a missing instrument must not stop a build here either -- the
+    caller warns and proceeds. ``MEM_CHECK_FAKE``
+    (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``) forces a verdict
+    deterministically.
+    """
+    import re
+    import subprocess as _sp
+
+    floor = _build_min_free_gb()
+    fake = os.environ.get("MEM_CHECK_FAKE")
+    if fake:
+        try:
+            used, total, free_gb = (float(x) for x in fake.split(":")[:3])
+        except (ValueError, IndexError):
+            return "cannot_measure", f"MEM_CHECK_FAKE={fake!r} is not three numbers"
+    elif sys.platform != "darwin":
+        # The thresholds mirror a macOS host gate, so elsewhere the gate is inert
+        # rather than unreadable: PASS with a reason and no warning, because a line
+        # on every session start on every non-darwin desk would be noise about a
+        # condition that is not a failure.
+        return "pass", f"gate not applicable on {sys.platform!r}"
+    else:
+        try:
+            swap = _sp.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"],
+                           capture_output=True, text=True, timeout=10).stdout
+            used = float(re.search(r"used\s*=\s*([\d.]+)M", swap).group(1))
+            total = float(re.search(r"total\s*=\s*([\d.]+)M", swap).group(1))
+            vm = _sp.run(["/usr/bin/vm_stat"], capture_output=True, text=True,
+                         timeout=10).stdout
+            page = int(re.search(r"page size of (\d+)", vm).group(1))
+            free = int(re.search(r"Pages free:\s+(\d+)", vm).group(1))
+            inactive = int(re.search(r"Pages inactive:\s+(\d+)", vm).group(1))
+            free_gb = (free + inactive) * page / 1024 ** 3
+        except Exception as exc:  # noqa: BLE001 -- an unreadable instrument, not a verdict
+            return "cannot_measure", f"{type(exc).__name__}: {exc}"
+
+    pct = (used / total * 100) if total else 0.0
+    numbers = (f"free_inactive_gb={free_gb:.2f} floor_gb={floor:.1f} "
+               f"swap_used_pct={pct:.1f} (context, not a gate)")
+    if free_gb < floor:
+        return "refuse", numbers
+    return "pass", numbers
+
+
 def cmd_catchup(args: argparse.Namespace) -> None:
     """Everything the session-start hook defers, in one detached process.
 
@@ -4503,25 +4603,50 @@ def cmd_catchup(args: argparse.Namespace) -> None:
             print(f"[catchup] journal: compacted ({removed} duplicate(s) removed)", file=sys.stderr)
         if getattr(args, "no_build", False) or not dirs:
             return
-        subprocess.run(
-            [sys.executable, "-m", "synapt.recall.cli", "build", "--incremental"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        try:
-            from synapt.recall.query_freshness import (
-                catchup_oversize_transcripts,
-                format_query_freshness,
-            )
 
-            for result in catchup_oversize_transcripts(project, project_index_dir(project)):
-                print(f"[catchup] oversize: {format_query_freshness(result)}", file=sys.stderr)
-        except Exception as exc:
-            print(f"[catchup] oversize catchup step failed: {type(exc).__name__}: {exc}",
+        # This tail is the memory consumer (measured at 1.52 GB in 2.5 minutes, and
+        # 5.9 GB before the 2026-09-25 host crash), and every server start runs this
+        # catchup, so it is gated on host memory and limited to one host-wide. The
+        # gate is placed here rather than over the whole of catchup because
+        # everything above it is legitimately per-seat work.
+        verdict, numbers = _host_memory_verdict()
+        if verdict == "cannot_measure":
+            print(f"[catchup] memory gate could not measure ({numbers}); proceeding, "
+                  "because an unreadable instrument is not a memory verdict",
                   file=sys.stderr)
-        subprocess.run(
-            [sys.executable, "-m", "synapt.recall.cli", "enrich", "--max-entries", "1"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        elif verdict == "refuse":
+            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
+                  "next session-start catchup retries", file=sys.stderr)
+            return
+
+        host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)
+        if host_fd is None:
+            print(f"[catchup] build skipped: {_HOST_BUILD_LOCK} is held "
+                  f"({_build_lock_busy_message(_host_synapt_dir(), name=_HOST_BUILD_LOCK)})",
+                  file=sys.stderr)
+            return
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "synapt.recall.cli", "build", "--incremental"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                from synapt.recall.query_freshness import (
+                    catchup_oversize_transcripts,
+                    format_query_freshness,
+                )
+
+                for result in catchup_oversize_transcripts(project, project_index_dir(project)):
+                    print(f"[catchup] oversize: {format_query_freshness(result)}", file=sys.stderr)
+            except Exception as exc:
+                print(f"[catchup] oversize catchup step failed: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+            subprocess.run(
+                [sys.executable, "-m", "synapt.recall.cli", "enrich", "--max-entries", "1"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        finally:
+            _release_build_lock(host_fd)
     finally:
         _release_build_lock(fd)
 
