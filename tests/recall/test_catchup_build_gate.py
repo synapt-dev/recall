@@ -79,7 +79,7 @@ def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch):
     """W2: under a REFUSE verdict, no build process is launched and one line says so."""
     # low swap on purpose: the floor is the only arm, so a refusal here cannot be
     # the swap arm doing the work.
-    monkeypatch.setenv("MEM_CHECK_FAKE", "100:4096:5.9:9")  # 5.9 GB free+inactive
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.9:9")  # 5.9 GB free+inactive
     cli.cmd_catchup(_args())
     assert catchup_env.builds == [], (
         f"a build was launched under a REFUSE verdict: {catchup_env.builds}"
@@ -88,7 +88,7 @@ def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch):
 
 def test_gate_pass_starts_exactly_one_build(catchup_env, monkeypatch):
     """Control for W2: a PASS verdict and no other holder starts exactly one build."""
-    monkeypatch.setenv("MEM_CHECK_FAKE", "100:7168:20.0:9")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:7168:20.0:9")
     cli.cmd_catchup(_args())
     assert len(catchup_env.builds) == 1, (
         f"expected exactly one build under PASS, got {catchup_env.builds}"
@@ -97,7 +97,7 @@ def test_gate_pass_starts_exactly_one_build(catchup_env, monkeypatch):
 
 def test_second_start_skips_the_build_while_the_host_lock_is_held(catchup_env, monkeypatch):
     """W1: one build host-wide — a start that finds the host lock held does not launch one."""
-    monkeypatch.setenv("MEM_CHECK_FAKE", "100:7168:20.0:9")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:7168:20.0:9")
     held = cli._acquire_build_lock(cli._host_synapt_dir(), timeout=0, name=cli._HOST_BUILD_LOCK)
     assert held is not None, "could not take the host lock for the witness"
     try:
@@ -118,7 +118,7 @@ def test_cannot_measure_still_builds_and_says_so(catchup_env, monkeypatch, capsy
     instrument must not stop a build here either. The verdict is a warning, not a
     deferral.
     """
-    monkeypatch.setenv("MEM_CHECK_FAKE", "not:a:measurement")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "not:a:measurement")
     cli.cmd_catchup(_args())
     assert len(catchup_env.builds) == 1, (
         "an unmeasurable host deferred the build; that is the false-REFUSE shape "
@@ -137,7 +137,7 @@ def test_other_platforms_are_inert_and_do_not_warn(catchup_env, monkeypatch, cap
     Not a deferral and not a warning: the condition is that the gate is not
     applicable there, and a line on every session start on every non-darwin desk
     would be noise dressed as diligence."""
-    monkeypatch.delenv("MEM_CHECK_FAKE", raising=False)
+    monkeypatch.delenv("SYNAPT_RECALL_MEM_FAKE", raising=False)
     monkeypatch.setattr(cli.sys, "platform", "linux")
     cli.cmd_catchup(_args())
     assert len(catchup_env.builds) == 1, (
@@ -155,7 +155,7 @@ def test_swap_percent_is_not_a_gate(catchup_env, monkeypatch):
     does not track pressure: measured 2026-09-25, a large process quitting raised
     free+inactive 4.89 -> 6.50 GB while swap ROSE 80.1% -> 84.3%. Thresholding it
     would defer builds on busy-but-safe hosts, so it is reported and not gated."""
-    monkeypatch.setenv("MEM_CHECK_FAKE", "3727:4096:6.5:9")  # swap 91%, 6.5 GB free
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "3727:4096:6.5:9")  # swap 91%, 6.5 GB free
     cli.cmd_catchup(_args())
     assert len(catchup_env.builds) == 1, (
         f"a high swap reading deferred a build on a host with 6.5 GB free: "
@@ -168,7 +168,7 @@ def test_the_floor_defers_a_host_that_would_have_taken_the_incident(catchup_env,
 
     The incident this exists for started on a host that still read 4.89 GB
     free+inactive, so a 4 GB floor is not a gate against it. 6 GB is."""
-    monkeypatch.setenv("MEM_CHECK_FAKE", "100:4096:5.9:9")  # 5.9 GB, low swap
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.9:9")  # 5.9 GB, low swap
     cli.cmd_catchup(_args())
     assert catchup_env.builds == [], (
         f"a host at 5.9 GB free+inactive started a build: {catchup_env.builds}"
@@ -180,8 +180,56 @@ def test_the_floor_is_overridable_by_env(catchup_env, monkeypatch):
     number is a one-constant change rather than a re-review -- and a host at 5.9 GB
     builds when the floor is lowered to 3."""
     monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", "3.0")
-    monkeypatch.setenv("MEM_CHECK_FAKE", "100:4096:5.9:9")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.9:9")
     cli.cmd_catchup(_args())
     assert len(catchup_env.builds) == 1, (
         f"the env override did not lower the floor: {catchup_env.builds}"
+    )
+
+
+class TestFloorValidation:
+    """The env override must accept only a positive, finite float.
+
+    Every case below was measured on the merged bytes before this change: `0` and
+    `-1` set a floor that no host can miss, `nan` compares False against everything
+    so it disables the gate while looking configured, and `inf` never opens it. A
+    number the gate cannot use must fall back to the constant, not become a verdict.
+    """
+
+        # "6" is deliberately NOT in this list: falling back to the constant gives the
+    # same value, so that case would pass whether or not the validation ran.
+    @pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "-inf", "abc", ""])
+    def test_a_number_the_gate_cannot_use_falls_back_to_the_constant(self, raw, monkeypatch):
+        monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", raw)
+        got = cli._build_min_free_gb()
+        assert got == cli.BUILD_MIN_FREE_INACTIVE_GB, (
+            f"SYNAPT_BUILD_MIN_FREE_GB={raw!r} produced floor={got!r}; a value the "
+            "gate cannot use must fall back to the constant"
+        )
+
+    @pytest.mark.parametrize("raw,expected", [("2.5", 2.5), ("6.0", 6.0), ("12", 12.0)])
+    def test_a_usable_number_is_honoured(self, raw, expected, monkeypatch):
+        monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", raw)
+        assert cli._build_min_free_gb() == expected
+
+    def test_a_disabling_override_cannot_switch_the_gate_off(self, catchup_env, monkeypatch):
+        """The end-to-end consequence, not just the helper's return."""
+        for raw in ("0", "-1", "nan"):
+            monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", raw)
+            monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.0:9")
+            catchup_env.calls.clear()
+            cli.cmd_catchup(_args())
+            assert catchup_env.builds == [], (
+                f"SYNAPT_BUILD_MIN_FREE_GB={raw!r} let a 5.0 GB host start a build"
+            )
+
+
+def test_the_fake_seam_is_recall_owned(catchup_env, monkeypatch):
+    """One name, owned by this repository: the old one was the host gate's."""
+    monkeypatch.delenv("SYNAPT_RECALL_MEM_FAKE", raising=False)
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.0:9")
+    cli.cmd_catchup(_args())
+    assert catchup_env.builds == [], (
+        "SYNAPT_RECALL_MEM_FAKE did not force a verdict, so the seam is not wired "
+        "to the name this repository owns"
     )

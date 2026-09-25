@@ -286,7 +286,7 @@ def test_cmd_catchup_calls_oversize_catchup_between_build_and_enrich(tmp_path, m
     (tmp_path / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
     # catchup's heavy tail is host-gated now, so a healthy host is pinned here; this
     # test is about the ORDER of build -> oversize -> enrich, not about the gate.
-    monkeypatch.setenv("MEM_CHECK_FAKE", "100:4096:20.0:9")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9")
 
     order: list[str] = []
 

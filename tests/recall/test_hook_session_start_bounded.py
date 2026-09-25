@@ -664,7 +664,7 @@ class TestCatchupCommand:
         monkeypatch.chdir(tmp_path)
         # catchup's heavy tail is host-gated now, so a healthy host is pinned here;
         # this test is about the ORDER of the steps, not about the gate.
-        monkeypatch.setenv("MEM_CHECK_FAKE", "100:4096:20.0:9")
+        monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9")
         order: list[str] = []
 
         def rec(name):
