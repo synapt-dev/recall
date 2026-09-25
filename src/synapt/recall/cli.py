@@ -4489,6 +4489,17 @@ def _host_synapt_dir() -> Path:
     return Path.home() / ".synapt"
 
 
+class FakeMeasurements:
+    """The seam that forces a memory verdict in tests, named and owned here.
+
+    It replaces the host gate's own override name: that name belonged to another
+    tool, and a seam one repository injects through should carry that repository's
+    name. Same format -- ``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``.
+    """
+
+    ENV = "SYNAPT_RECALL_MEM_FAKE"
+
+
 def _build_min_free_gb() -> float:
     """The free+inactive floor a build needs, overridable by environment.
 
@@ -4496,12 +4507,21 @@ def _build_min_free_gb() -> float:
     reboot is a one-constant change rather than a re-review, and so a test can pin it
     the same way it pins the measurements.
     """
+    import math
+
     raw = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
     if raw:
         try:
-            return float(raw)
+            value = float(raw)
         except ValueError:
-            pass
+            return BUILD_MIN_FREE_INACTIVE_GB
+        # A value the gate cannot use must fall back to the constant rather than
+        # become a verdict. Measured on the first version of this: `0` and `-1` set a
+        # floor no host can miss, `inf` never opens the gate, and **`nan` compares
+        # False against every reading**, so it silently disabled the gate while
+        # looking like a configured number.
+        if math.isfinite(value) and value > 0:
+            return value
     return BUILD_MIN_FREE_INACTIVE_GB
 
 
@@ -4518,7 +4538,7 @@ def _host_memory_verdict() -> "tuple[str, str]":
     CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an
     instrument failure, and an earlier misread of one stopped real maintenance work
     for two nights, so a missing instrument must not stop a build here either -- the
-    caller warns and proceeds. ``MEM_CHECK_FAKE``
+    caller warns and proceeds. ``SYNAPT_RECALL_MEM_FAKE``
     (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``) forces a verdict
     deterministically.
     """
@@ -4526,12 +4546,12 @@ def _host_memory_verdict() -> "tuple[str, str]":
     import subprocess as _sp
 
     floor = _build_min_free_gb()
-    fake = os.environ.get("MEM_CHECK_FAKE")
+    fake = os.environ.get(FakeMeasurements.ENV)
     if fake:
         try:
             used, total, free_gb = (float(x) for x in fake.split(":")[:3])
         except (ValueError, IndexError):
-            return "cannot_measure", f"MEM_CHECK_FAKE={fake!r} is not three numbers"
+            return "cannot_measure", f"SYNAPT_RECALL_MEM_FAKE={fake!r} is not three numbers"
     elif sys.platform != "darwin":
         # The thresholds mirror a macOS host gate, so elsewhere the gate is inert
         # rather than unreadable: PASS with a reason and no warning, because a line
