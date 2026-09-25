@@ -921,3 +921,41 @@ def test_run_extract_path_dense_cluster_scaled_budget_reaches_the_real_client(tm
         f"action-decision call requested only {requested_budget} tokens for a {n}-candidate "
         "cluster — the scaled budget did not reach the real client through _run_extract_path"
     )
+
+
+def test_consolidation_env_override_reaches_the_model_the_pipeline_uses(tmp_path, monkeypatch):
+    """The env override must reach INFERENCE, not only ``config.get_model()``.
+
+    A witness asserting ``get_model("consolidation")`` pins the layer that already
+    worked, and is blind to the failure this exists for: a resolved value that
+    nothing consumes. So the assertion here is on the ``model=`` the pipeline hands
+    to the client -- the value inference actually uses. Same class of gap as the
+    dense-cluster budget test above, one layer up."""
+    from synapt.recall.consolidate import consolidate
+    from synapt.recall.journal import JournalEntry, append_entry, _journal_path
+
+    jpath = _journal_path(tmp_path)
+    for sid, ts, done in [
+        ("s1", "2026-07-13T10:00:00Z", ["wired extract_batch into consolidate step three"]),
+        ("s2", "2026-07-13T11:00:00Z", ["tested extract_batch count invariance in consolidate"]),
+        ("s3", "2026-07-13T12:00:00Z", ["extract_batch consolidate wiring behind the flag"]),
+    ]:
+        append_entry(JournalEntry(timestamp=ts, session_id=sid, done=done), jpath)
+
+    fake = _RoutingFakeClient(
+        extract_completion=_ok_envelope("recall#875 wired extract_batch"),
+        action_completion='{"actions": [{"index": 0, "action": "create"}]}',
+    )
+    monkeypatch.setattr(
+        "synapt.recall.consolidate._get_consolidation_client", lambda *a, **k: fake
+    )
+    monkeypatch.setenv("SYNAPT_USE_EXTRACT", "1")
+    monkeypatch.setenv("SYNAPT_CONSOLIDATION_MODEL", "custom/consolidation")
+
+    consolidate(project_dir=tmp_path, force=True, min_entries=3)
+
+    used = {c["model"] for c in fake.calls}
+    assert used == {"custom/consolidation"}, (
+        f"the pipeline called the model with {sorted(used)}: the env override reached "
+        "config.get_model() but did not reach the value inference uses"
+    )

@@ -45,6 +45,7 @@ _ENV_MAP = {
     "SYNAPT_ENRICHMENT_MODEL": "enrichment",
     "SYNAPT_RERANKER_MODEL": "reranker",
     "SYNAPT_EMBEDDING_MODEL": "embedding",
+    "SYNAPT_CONSOLIDATION_MODEL": "consolidation",
 }
 
 # Default query parameters

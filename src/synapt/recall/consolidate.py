@@ -2601,6 +2601,22 @@ _EXTRACT_PRODUCED_BY = "recall://consolidate"
 _EXTRACT_CAPABILITIES = ["facts", "decisions", "temporal_refs"]
 
 
+def _resolve_consolidation_model(model: str | None) -> str:
+    """The model consolidation inference actually uses.
+
+    ``None`` means the caller did not choose one, and that is resolved through config so
+    that BOTH override paths -- the env var and the config file -- reach inference. Those
+    paths were inert here before this: ``get_model("consolidation")`` returned the
+    configured value while the pipeline handed a hardcoded constant to the client, so the
+    reported value and the used value disagreed and nothing consumed the override. An
+    explicit value always wins, on every platform."""
+    if model:
+        return model
+    from synapt.recall.config import load_config
+
+    return load_config().get_model("consolidation")
+
+
 def _get_consolidation_client(max_tokens: int = MIN_RESPONSE_TOKENS):
     """Get a model client via the router (MLX -> Modal -> Ollama), with an MLX fallback.
 
@@ -4171,7 +4187,7 @@ def _rejoin_create_actions(
 
 def consolidate(
     project_dir: Path | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     dry_run: bool = False,
     force: bool = False,
     min_entries: int = 3,
@@ -4184,7 +4200,9 @@ def consolidate(
 
     Args:
         project_dir: Project root. Default: cwd.
-        model: MLX model for knowledge extraction.
+        model: Model for knowledge extraction. Default: the configured consolidation
+            model (env `SYNAPT_CONSOLIDATION_MODEL`, then the config file, then the
+            built-in default).
         dry_run: Show what would happen without making changes.
         force: Ignore last_consolidation_ts, reprocess all entries.
         min_entries: Minimum enriched journal entries to trigger consolidation.
@@ -4195,6 +4213,7 @@ def consolidate(
     Returns:
         Summary of what was created/corroborated/contradicted.
     """
+    model = _resolve_consolidation_model(model)
     project_dir = (project_dir or Path.cwd()).resolve()
     journal_path = explicit_journal_path or _journal_path(project_dir)
     kn_path = explicit_knowledge_path or _knowledge_path(project_dir)
@@ -4495,7 +4514,7 @@ def consolidate(
 
 def extract_collections(
     project_dir: Path | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     adapter_path: str = "",
 ) -> int:
     """Extract entity-collection knowledge nodes from existing knowledge.
@@ -4506,6 +4525,7 @@ def extract_collections(
 
     Returns number of collection nodes created.
     """
+    model = _resolve_consolidation_model(model)
     if _env_flag("SYNAPT_DISABLE_ENTITY_COLLECTION"):
         return 0
 

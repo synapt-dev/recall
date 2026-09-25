@@ -1298,3 +1298,41 @@ def test_cmd_migrate_channels_missing_org_exits(tmp_path):
     with patch("synapt.recall.cli._resolve_org_id_for_cli", return_value=None), \
          pytest.raises(SystemExit):
         cmd_migrate_channels(args)
+
+
+def test_cli_consolidate_resolves_the_configured_model_not_a_literal(tmp_path, monkeypatch, capsys):
+    """The CLI must not shadow the configured model with an argparse literal default.
+
+    Drives the REAL parser, not a hand-built Namespace: constructing the Namespace
+    directly bypasses the default entirely, and a witness that skips the layer under
+    test passes while the literal is back (measured -- the first version of this test
+    did exactly that under the re-added-literal mutation). So: parse real argv, then
+    assert both the parsed default and the model the command passes on."""
+    import argparse
+    from synapt.recall import cli
+    import synapt.recall.consolidate as consolidate_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SYNAPT_CONSOLIDATION_MODEL", "custom/consolidation")
+
+    parser = cli.make_parser()
+    args = parser.parse_args(["consolidate", "--dry-run"])
+    assert args.model is None, (
+        f"the consolidate subparser defaults --model to {args.model!r}; an argparse "
+        "default is a caller that always chooses, so the configured model can never win"
+    )
+
+    seen = {}
+
+    def _fake_consolidate(**kwargs):
+        seen.update(kwargs)
+        return consolidate_mod.ConsolidationResult()
+
+    monkeypatch.setattr(consolidate_mod, "consolidate", _fake_consolidate)
+    cli.cmd_consolidate(args)
+
+    assert seen.get("model") == "custom/consolidation", (
+        f"cmd_consolidate passed model={seen.get('model')!r}; the configured model did "
+        "not reach the call"
+    )
+    assert "custom/consolidation" in capsys.readouterr().out
