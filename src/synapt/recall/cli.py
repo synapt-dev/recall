@@ -2681,6 +2681,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         read_entries,
         read_latest,
         read_previous_meaningful,
+        session_done_items,
     )
 
     if args.read:
@@ -2778,6 +2779,10 @@ def cmd_journal(args: argparse.Namespace) -> None:
         entry.next_steps,
         entry.done,
         previous_entry,
+        same_session_done=session_done_items(entry.session_id),
+        # What THIS session already retired in earlier writes: previous_entry is
+        # from before the session by design, so without this a step retired
+        # minutes ago comes back on the next write.
     )
 
     # Clear auto flag if user provided rich content

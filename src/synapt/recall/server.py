@@ -2664,6 +2664,7 @@ def recall_journal(
             read_entries,
             read_latest,
             read_previous_meaningful,
+            session_done_items,
             split_journal_field,
         )
 
@@ -2708,6 +2709,11 @@ def recall_journal(
                 entry.next_steps,
                 entry.done,
                 previous_entry,
+                same_session_done=session_done_items(entry.session_id),
+                # What this session already retired in its earlier writes
+                # previous_entry is from before the session by
+                # design, so without this a step retired earlier in the same
+                # session comes back on the next write.
             )
 
             # Clear auto flag when user provides rich content
