@@ -5071,6 +5071,15 @@ def make_parser() -> argparse.ArgumentParser:
         "--project", default=None,
         help="Project ID (auto-detected from gripspace manifest if not set)",
     )
+
+    comms_parser = subparsers.add_parser("comms", help="Agent communications receipts (proof transport)")
+    comms_subparsers = comms_parser.add_subparsers(dest="comms_command", required=True)
+    comms_send_parser = comms_subparsers.add_parser("send", help="Send a file through the declared pane transport")
+    comms_send_parser.add_argument("to", help="Declared recipient address")
+    comms_send_parser.add_argument("file", help="UTF-8 message file")
+    comms_send_parser.add_argument("--from-agent", required=True, help="Stable sending agent id")
+    comms_ledger_parser = comms_subparsers.add_parser("ledger", help="List proof receipt rows")
+    comms_ledger_parser.add_argument("--to", default=None, help="Recipient id filter")
     return parser
 
 
@@ -5150,6 +5159,14 @@ def main():
         cmd_rescrub(args)
     elif args.command == "migrate":
         cmd_migrate_channels(args)
+    elif args.command == "comms":
+        from synapt.recall.comms import ledger, read_body, send
+        if args.comms_command == "send":
+            receipt = send(args.to, read_body(args.file), from_agent=args.from_agent)
+            print(f"receipt {receipt.message_id or '-'} state={receipt.state}: {receipt.detail}")
+        else:
+            for receipt in ledger(args.to):
+                print(f"receipt {receipt.message_id or '-'} state={receipt.state}: {receipt.detail}")
 
 
 if __name__ == "__main__":
