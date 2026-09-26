@@ -74,12 +74,17 @@ def _verify_submitted(target: str, needle: str) -> bool:
     A negative capture is intentionally ``unknown``.  The hardening path will
     port the verifier's bounded-region and capture-adequacy distinctions.
     """
-    result = subprocess.run(
-        ["tmux", "capture-pane", "-J", "-p", "-S", "-", "-t", target],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    if not needle:
+        return False
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-J", "-p", "-S", "-", "-t", target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return result.returncode == 0 and needle in result.stdout
 
 
@@ -104,8 +109,14 @@ def send(to: str, body: str, *, from_agent: str) -> Receipt:
     if not delivery.delivered:
         state = "undeliverable" if "can't find" in delivery.detail else "unknown"
         return _record_receipt(Receipt(message.message_id, state, delivery.detail), to=recipient.agent_id)
+    needle = next((line for line in reversed(body.splitlines()) if line.strip()), None)
+    if needle is None:
+        return _record_receipt(
+            Receipt(message.message_id, "refused", "empty body: no non-blank needle to witness"),
+            to=recipient.agent_id,
+        )
     time.sleep(1)
-    if _verify_submitted(pane.target, body.splitlines()[-1]):
+    if _verify_submitted(pane.target, needle):
         return _record_receipt(Receipt(message.message_id, "submitted", f"{pane.target}; {delivery.detail}"), to=recipient.agent_id)
     return _record_receipt(Receipt(message.message_id, "unknown", f"{pane.target}; paste ran but rendered receipt was absent"), to=recipient.agent_id)
 
