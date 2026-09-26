@@ -3857,13 +3857,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
             except Exception:
                 pass
 
-        # 1. ONE detached process for everything unbounded: archive, journal
-        #    catch-up, journal compaction, incremental build, one enrich.
-        #    Sequenced inside `catchup` under its own lock so they cannot
-        #    fight each other (or a manual build) for the build lock.
+        # 1. ONE detached process for archive, journal catch-up, and journal
+        #    compaction. The incremental build and enrich tail is deferred to
+        #    explicit maintenance, so a session start cannot launch it.
         with run.phase("spawn_catchup"):
             try:
-                _spawn_session_start_catchup(project)
+                if _spawn_session_start_catchup(project):
+                    banners.append(
+                        "INFO: session-start catchup deferred the incremental build; "
+                        "archive and journal maintenance continue."
+                    )
             except Exception:
                 banners.append("WARNING: could not spawn `synapt recall catchup`; index and journal will not update this session.")
 
@@ -5009,9 +5012,9 @@ def make_parser() -> argparse.ArgumentParser:
 
     catchup_parser = subparsers.add_parser(
         "catchup",
-        help="Run the session-start hook's deferred maintenance: archive, journal "
-             "catch-up, compaction, incremental build, one enrich. The hook spawns "
-             "this detached; run it by hand to catch up now.",
+        help="Run archive, journal catch-up, compaction, incremental build, and enrich. "
+             "The session-start hook runs archive and journal work only; run this by hand "
+             "to include the build tail.",
     )
     catchup_parser.add_argument(
         "--no-build", action="store_true",

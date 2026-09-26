@@ -654,6 +654,12 @@ class TestProvenanceBanner:
         assert "resolution blew up" not in out
 
 
+class TestSessionStartCatchupBanner:
+    def test_rendered_wake_names_the_build_deferral(self, monkeypatch, tmp_path):
+        out, _ = _run_hook(monkeypatch, tmp_path, context_lines=["Next steps:\n  - x"])
+        assert "session-start catchup deferred the incremental build" in out
+
+
 # ---------------------------------------------------------------------------
 # catchup — the deferred half, sequenced under one lock
 # ---------------------------------------------------------------------------
