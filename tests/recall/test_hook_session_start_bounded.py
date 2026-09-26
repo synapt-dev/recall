@@ -267,7 +267,7 @@ class TestHookDoesNoUnboundedWorkInline:
         assert len(calls) == 1, calls
         argv = calls[0]
         assert argv[:3] == [sys.executable, "-m", "synapt.recall.cli"]
-        assert argv[3] == "catchup"
+        assert argv[3:] == ["catchup", "--no-build"]
         # The old shape spawned build AND enrich separately; both are now
         # sequenced inside catchup so they cannot fight for the lock.
         assert "build" not in argv and "enrich" not in argv
@@ -684,7 +684,7 @@ class TestCatchupCommand:
             cli.cmd_catchup(argparse.Namespace())
         assert order == ["catchup", "catchup", "compact", "build --incremental", "enrich --max-entries 1"]
 
-    def test_no_build_flag_skips_build_and_enrich(self, owned_recall_root, monkeypatch, tmp_path):
+    def test_no_build_flag_skips_build_and_enrich(self, owned_recall_root, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
         order: list[str] = []
         with patch.object(cli, "project_transcript_dirs", return_value=[tmp_path]), \
@@ -693,6 +693,7 @@ class TestCatchupCommand:
              patch.object(cli.subprocess, "run", lambda argv, **k: order.append(" ".join(argv[3:]))):
             cli.cmd_catchup(argparse.Namespace(no_build=True))
         assert order == ["catchup", "compact"]
+        assert "build deferred: session-start policy" in capsys.readouterr().err
 
     def test_second_concurrent_catchup_yields(self, owned_recall_root, monkeypatch, tmp_path, capsys):
         """Two catchups at once would double-journal and fight for the build

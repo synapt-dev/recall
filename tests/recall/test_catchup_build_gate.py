@@ -95,6 +95,28 @@ def test_gate_pass_starts_exactly_one_build(catchup_env, monkeypatch):
     )
 
 
+def test_session_start_no_build_marker_defers_under_a_stubbed_pass_gauge(
+    catchup_env, monkeypatch, capsys
+):
+    """The session-start marker, not gauge arithmetic, decides this boundary.
+
+    The detached-worker argv is pinned separately in
+    ``test_exactly_one_detached_catchup_is_spawned``. Here the gauge is held
+    at PASS in both arms so it cannot explain the result: manual catchup keeps
+    its build, while session-start's ``--no-build`` defers it. This deliberately
+    does not exercise host-memory measurement.
+    """
+    monkeypatch.setattr(cli, "_host_memory_verdict", lambda: ("pass", "stubbed-pass"))
+
+    cli.cmd_catchup(_args(no_build=False))
+    assert len(catchup_env.builds) == 1
+
+    catchup_env.calls.clear()
+    cli.cmd_catchup(_args(no_build=True))
+    assert catchup_env.builds == []
+    assert "build deferred: session-start policy" in capsys.readouterr().err
+
+
 def test_second_start_skips_the_build_while_the_host_lock_is_held(catchup_env, monkeypatch):
     """W1: one build host-wide — a start that finds the host lock held does not launch one."""
     monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:7168:20.0:9")

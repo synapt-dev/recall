@@ -3770,7 +3770,7 @@ def _spawn_session_start_catchup(project: Path) -> bool:
     if not project_transcript_dirs(project):
         return False
     subprocess.Popen(
-        [sys.executable, "-m", "synapt.recall.cli", "catchup"],
+        [sys.executable, "-m", "synapt.recall.cli", "catchup", "--no-build"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -4650,7 +4650,11 @@ def cmd_catchup(args: argparse.Namespace) -> None:
         removed = compact_journal()
         if removed:
             print(f"[catchup] journal: compacted ({removed} duplicate(s) removed)", file=sys.stderr)
-        if getattr(args, "no_build", False) or not dirs:
+        if getattr(args, "no_build", False):
+            print("[catchup] build deferred: session-start policy keeps archive and journal catch-up only",
+                  file=sys.stderr)
+            return
+        if not dirs:
             return
 
         # This tail is the memory consumer (measured at 1.52 GB in 2.5 minutes, and
