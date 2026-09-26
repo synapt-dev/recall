@@ -70,16 +70,18 @@ def test_trailing_blank_body_uses_last_non_blank_line(monkeypatch):
 
 def test_empty_body_returns_refused_receipt(monkeypatch):
     monkeypatch.setattr(comms, "_record_receipt", lambda receipt, **_: receipt)
-    recipient = comms.direct.RegisteredRecipient("atlas-001", "synapt", "atlas")
-    message = comms.direct.DirectMessage("dm_test", "fathom-001", "atlas-001", "now", "")
-    pane = comms.direct.PaneTarget("synapt:atlas", "claude")
-    delivery = comms.direct.TmuxDelivery(True, "synapt:atlas", 2, "pasted")
-    monkeypatch.setattr(comms.direct, "resolve_registered_recipient", lambda _: recipient)
-    monkeypatch.setattr(comms.direct, "load_pane_map", lambda: {"atlas": {"target": "synapt:atlas", "runtime": "claude"}})
-    monkeypatch.setattr(comms.direct, "send_message", lambda **_: message)
-    monkeypatch.setattr(comms.direct, "deliver_via_tmux", lambda *_: delivery)
+    monkeypatch.setattr(
+        comms.direct,
+        "send_message",
+        lambda **_: (_ for _ in ()).throw(AssertionError("empty body must not be written")),
+    )
+    monkeypatch.setattr(
+        comms.direct,
+        "deliver_via_tmux",
+        lambda *_: (_ for _ in ()).throw(AssertionError("empty body must not be pasted")),
+    )
     receipt = comms.send("atlas", "", from_agent="fathom-001")
-    assert receipt == comms.Receipt("dm_test", "refused", "empty body: no non-blank needle to witness")
+    assert receipt == comms.Receipt(None, "refused", "empty body: no non-blank needle to witness")
 
 
 def test_capture_timeout_returns_unknown_receipt(monkeypatch):

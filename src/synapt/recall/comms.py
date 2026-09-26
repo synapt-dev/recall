@@ -93,6 +93,12 @@ def send(to: str, body: str, *, from_agent: str) -> Receipt:
     guessed = _GUESSED_TIME.search(body)
     if guessed:
         return _record_receipt(Receipt(None, "refused", f"guessed time label: {guessed.group(0)}"), to=to)
+    needle = next((line for line in reversed(body.splitlines()) if line.strip()), None)
+    if needle is None:
+        return _record_receipt(
+            Receipt(None, "refused", "empty body: no non-blank needle to witness"),
+            to=to,
+        )
 
     recipient = direct.resolve_registered_recipient(to)
     pane = direct.resolve_pane(recipient.agent_id, direct.load_pane_map())
@@ -109,12 +115,6 @@ def send(to: str, body: str, *, from_agent: str) -> Receipt:
     if not delivery.delivered:
         state = "undeliverable" if "can't find" in delivery.detail else "unknown"
         return _record_receipt(Receipt(message.message_id, state, delivery.detail), to=recipient.agent_id)
-    needle = next((line for line in reversed(body.splitlines()) if line.strip()), None)
-    if needle is None:
-        return _record_receipt(
-            Receipt(message.message_id, "refused", "empty body: no non-blank needle to witness"),
-            to=recipient.agent_id,
-        )
     time.sleep(1)
     if _verify_submitted(pane.target, needle):
         return _record_receipt(Receipt(message.message_id, "submitted", f"{pane.target}; {delivery.detail}"), to=recipient.agent_id)
