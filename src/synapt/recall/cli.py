@@ -4660,9 +4660,10 @@ def cmd_catchup(args: argparse.Namespace) -> None:
         if not dirs:
             return
 
-        # This tail is the memory consumer (measured at 1.52 GB in 2.5 minutes, and
-        # 5.9 GB after a fleet restart on 2026-09-25), and every server start runs
-        # this catchup, so it is gated on host memory and limited to one host-wide.
+        # This explicit-catchup tail is the memory consumer (measured at 1.52 GB in
+        # 2.5 minutes, and 5.9 GB after a fleet restart on 2026-09-25). Session
+        # start invokes --no-build, so this tail is gated on host memory and limited
+        # to one host-wide when an operator runs catchup explicitly.
         # The gate is placed here rather than over the whole of catchup because
         # everything above it is legitimately per-seat work.
         verdict, numbers = _host_memory_verdict()
@@ -4672,7 +4673,7 @@ def cmd_catchup(args: argparse.Namespace) -> None:
                   file=sys.stderr)
         elif verdict == "refuse":
             print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
-                  "next session-start catchup retries", file=sys.stderr)
+                  "next explicit catchup or precompact rebuild retries", file=sys.stderr)
             return
 
         host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)

@@ -75,7 +75,7 @@ def _args(**kw):
     return a
 
 
-def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch):
+def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch, capsys):
     """W2: under a REFUSE verdict, no build process is launched and one line says so."""
     # low swap on purpose: the floor is the only arm, so a refusal here cannot be
     # the swap arm doing the work.
@@ -84,6 +84,9 @@ def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch):
     assert catchup_env.builds == [], (
         f"a build was launched under a REFUSE verdict: {catchup_env.builds}"
     )
+    err = capsys.readouterr().err
+    assert "next session-start catchup" not in err
+    assert "next explicit catchup or precompact rebuild retries" in err
 
 
 def test_gate_pass_starts_exactly_one_build(catchup_env, monkeypatch):
