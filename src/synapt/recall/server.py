@@ -2856,16 +2856,28 @@ def recall_save(
                 node.created_at = existing.get("created_at", node.created_at)
                 node.version = existing.get("version", 1) + 1
                 node.lineage_id = existing.get("lineage_id", "") or existing["id"]
+            # COMPUTE THE VECTOR FIRST. The embedding is the step
+            # that fails: a provider whose width is not the store's raises, and so
+            # does any provider error. The node write below cannot be undone, so
+            # doing the failure-prone work BEFORE the irreversible one is what makes
+            # a save that reports failure leave no node behind. Measured before
+            # this change: the save returned "Knowledge save failed: pack expected
+            # 384 items for packing (got 1024)" and recall_search still found the
+            # row. The vector needs only the content, not the rowid, so nothing
+            # depends on the node having landed.
+            provider = get_embedding_provider()
+            embedding = None
+            if provider:
+                embedding = provider.embed_single(node.content[:500])
+
             save_knowledge_node(
                 node, project_data_dir(project) / "knowledge.jsonl", project_index_dir(project)
             )
 
             embedded = False
-            provider = get_embedding_provider()
-            if provider:
+            if embedding is not None:
                 rowid = db.get_knowledge_rowid(node.id)
                 if rowid is not None:
-                    embedding = provider.embed_single(node.content[:500])
                     db.save_knowledge_embeddings({rowid: embedding})
                     embedded = True
         finally:
