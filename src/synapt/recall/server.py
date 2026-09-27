@@ -2872,7 +2872,37 @@ def recall_save(
             provider = get_embedding_provider()
             embedding = None
             if provider:
-                embedding = provider.embed_single(node.content[:500])
+                # A TRANSIENT PROVIDER FAILURE MUST NOT LOSE THE KNOWLEDGE.
+                # An unreachable Ollama, a timeout, or a model being pulled is a
+                # temporary condition; failing the save over it discards a fact
+                # the caller asked to keep. Degrade instead: the node lands with
+                # no vector and the save reports "saved without embeddings".
+                #
+                # THE VECTOR STAYS EMPTY, AND NOTHING HERE CLAIMS OTHERWISE.
+                # _build_knowledge_embeddings can fill such a row, but its only
+                # caller is the background chunk-embedding build, which does not
+                # run on a store that has no chunk embeddings -- so on a fresh
+                # first-user store no later pass fills this vector. Measured in a
+                # two-process probe: two later runs with a healthy provider left
+                # the vector absent, twice. A bounded backfill on a healthy save
+                # is a follow-on, not a property of this path.
+                #
+                # THE PACK STAYS OUTSIDE THIS try, DELIBERATELY. A provider that
+                # succeeds but returns the wrong WIDTH is not a transient
+                # condition, and that is the case the pack rejects; folding it in
+                # here would silently degrade it instead.
+                try:
+                    embedding = provider.embed_single(node.content[:500])
+                except Exception as exc:  # noqa: BLE001 - see above
+                    logging.getLogger("synapt.recall").warning(
+                        "Knowledge node %s saved WITHOUT an embedding: the provider "
+                        "failed transiently (%s: %s). The node is saved and keyword "
+                        "search finds it; vector search does not see it.",
+                        node.id, type(exc).__name__, exc,
+                    )
+                    embedding = None
+
+            if embedding is not None:
                 pack_embedding(embedding)
 
             save_knowledge_node(
