@@ -39,6 +39,20 @@ EMBEDDING_DIM = 384
 _EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
 _EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
 
+
+def pack_embedding(embedding: "list[float]") -> bytes:
+    """Pack ONE embedding into the store's fixed-width blob.
+
+    THE SINGLE PLACE THE WIDTH IS APPLIED. Every write path goes through here,
+    so the width a store can hold is expressed once instead of restated at each
+    call site -- which is what let a second write path keep its own copy.
+
+    Raises ``struct.error`` when the vector is not EMBEDDING_DIM wide. That is
+    the failure a caller validating BEFORE an irreversible write depends on: an
+    embedding provider whose width is not the store's SUCCEEDS at producing a
+    vector, so this is the step that has to reject it.
+    """
+    return struct.pack(_EMBEDDING_FMT, *embedding)
 _SCHEMA_OPEN_RETRY_SECONDS = 5.0
 _SCHEMA_OPEN_RETRY_INTERVAL_SECONDS = 0.025
 
@@ -2338,7 +2352,7 @@ class RecallDB:
         """Store embedding BLOBs for specific rowids."""
         cur = self._conn.cursor()
         for rowid, emb in embeddings.items():
-            blob = struct.pack(_EMBEDDING_FMT, *emb)
+            blob = pack_embedding(emb)
             cur.execute("UPDATE chunks SET embedding = ? WHERE rowid = ?", (blob, rowid))
         self._conn.commit()
 
@@ -2626,7 +2640,7 @@ class RecallDB:
         """Store embedding BLOBs for knowledge nodes by rowid."""
         cur = self._conn.cursor()
         for rowid, emb in embeddings.items():
-            blob = struct.pack(_EMBEDDING_FMT, *emb)
+            blob = pack_embedding(emb)
             cur.execute(
                 "UPDATE knowledge SET embedding = ? WHERE rowid = ?",
                 (blob, rowid),

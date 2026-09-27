@@ -2867,15 +2867,13 @@ def recall_save(
             # be undone. The result is discarded ON PURPOSE: this is the same
             # operation the store will run, executed early. Do not remove it as an
             # unused value.
-            import struct as _struct
-
-            from synapt.recall.storage import _EMBEDDING_FMT
+            from synapt.recall.storage import pack_embedding
 
             provider = get_embedding_provider()
             embedding = None
             if provider:
                 embedding = provider.embed_single(node.content[:500])
-                _struct.pack(_EMBEDDING_FMT, *embedding)
+                pack_embedding(embedding)
 
             save_knowledge_node(
                 node, project_data_dir(project) / "knowledge.jsonl", project_index_dir(project)
