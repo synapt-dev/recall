@@ -2856,19 +2856,26 @@ def recall_save(
                 node.created_at = existing.get("created_at", node.created_at)
                 node.version = existing.get("version", 1) + 1
                 node.lineage_id = existing.get("lineage_id", "") or existing["id"]
-            # COMPUTE THE VECTOR FIRST. The embedding is the step
-            # that fails: a provider whose width is not the store's raises, and so
-            # does any provider error. The node write below cannot be undone, so
-            # doing the failure-prone work BEFORE the irreversible one is what makes
-            # a save that reports failure leave no node behind. Measured before
-            # this change: the save returned "Knowledge save failed: pack expected
-            # 384 items for packing (got 1024)" and recall_search still found the
-            # row. The vector needs only the content, not the rowid, so nothing
-            # depends on the node having landed.
+            # COMPUTE AND PACK THE VECTOR BEFORE THE NODE IS COMMITTED.
+            # The operation that FAILS is the PACK, not the embed: on a width
+            # mismatch embed() SUCCEEDS and returns a vector of the wrong width,
+            # and struct.pack against this store's fixed-width format is what
+            # raises ("pack expected 384 items for packing (got 1024)"). That pack
+            # lives inside save_knowledge_embeddings, which runs AFTER
+            # save_knowledge_node, so a failure there leaves the node behind.
+            # Packing here moves the real failure ahead of the write that cannot
+            # be undone. The result is discarded ON PURPOSE: this is the same
+            # operation the store will run, executed early. Do not remove it as an
+            # unused value.
+            import struct as _struct
+
+            from synapt.recall.storage import _EMBEDDING_FMT
+
             provider = get_embedding_provider()
             embedding = None
             if provider:
                 embedding = provider.embed_single(node.content[:500])
+                _struct.pack(_EMBEDDING_FMT, *embedding)
 
             save_knowledge_node(
                 node, project_data_dir(project) / "knowledge.jsonl", project_index_dir(project)

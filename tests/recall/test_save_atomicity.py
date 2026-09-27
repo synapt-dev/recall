@@ -23,10 +23,33 @@ from synapt.recall.embeddings import EmbeddingProvider
 MARKER = "save-atomicity-witness-marker"
 
 
-class _BoomyProvider(EmbeddingProvider):
-    """A provider that answers the store's width and then fails on the embed.
+class _WrongWidthProvider(EmbeddingProvider):
+    """A provider that SUCCEEDS and returns the WRONG WIDTH.
 
-    This is the shape of the real failure: the write is attempted and raises.
+    THIS IS THE REAL SHAPE, and the first version of this test got it wrong: it
+    used a provider that RAISED inside embed(), which is the one shape an
+    early-embed reorder does fix. Against a real Ollama the embed succeeds and
+    returns 1024 values; the raise is `struct.pack` against the store's
+    fixed-width format, inside the store call. A witness whose fake raises in
+    embed() cannot see that, so it certified a fix that did not exist.
+    """
+
+    def __init__(self, width: int = 1024) -> None:
+        self._width = width
+
+    @property
+    def dim(self):
+        return self._width
+
+    def embed(self, texts):
+        return [[0.0] * self._width for _ in texts]
+
+
+class _RaisingProvider(EmbeddingProvider):
+    """The SECOND row: a provider that raises inside embed().
+
+    Kept because it is a shape that can occur, and because it is the one the
+    wrong version of this test covered. It must also leave no node.
     """
 
     @property
@@ -36,7 +59,7 @@ class _BoomyProvider(EmbeddingProvider):
         return EMBEDDING_DIM
 
     def embed(self, texts):
-        raise RuntimeError("pack expected 384 items for packing (got 1024)")
+        raise RuntimeError("provider exploded")
 
 
 def _store_holds(marker: str, root) -> bool:
@@ -47,27 +70,38 @@ def _store_holds(marker: str, root) -> bool:
     return False
 
 
-def test_failed_embedding_leaves_no_node_behind(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "provider_name,provider",
+    [
+        ("wrong-width (THE REAL SHAPE: embed succeeds at 1024)", _WrongWidthProvider()),
+        ("raising (embed() itself raises)", _RaisingProvider()),
+    ],
+)
+def test_failed_embedding_leaves_no_node_behind(
+    tmp_path, monkeypatch, provider_name, provider
+):
     """THE WITNESS. Pre-fix: the node lands and this fails."""
     monkeypatch.setenv("GRIPSPACE_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     import synapt.recall.server as server
 
-    monkeypatch.setattr(server, "get_embedding_provider", lambda: _BoomyProvider())
+    monkeypatch.setattr(server, "get_embedding_provider", lambda: provider)
 
     result = server.recall_save(content=MARKER, category="decision")
 
     assert result.startswith("Knowledge save failed"), (
-        f"the save must report the failure it hit; got {result[:120]!r}"
+        f"[{provider_name}] the save must report the failure it hit; "
+        f"got {result[:120]!r}"
     )
     assert not _store_holds(MARKER, tmp_path), (
-        "a save that reported failure left the node in the store: the node row "
-        "is committed before the step that can fail, and nothing undoes it"
+        f"[{provider_name}] a save that reported failure left the node in the "
+        "store: the node row is committed before the step that can fail, and "
+        "nothing undoes it"
     )
     # AND THE OTHER HALF OF THE SYMPTOM: search must not report FOUND either.
     found = server.recall_search(MARKER, include_historical=True, min_score=0.0)
     assert MARKER not in found, (
-        "search reported FOUND after a save that failed: "
+        f"[{provider_name}] search reported FOUND after a save that failed: "
         f"{found[:160]!r}"
     )
 
@@ -134,7 +168,7 @@ def test_mutation_moving_the_embedding_back_reddens_the_witness(tmp_path):
     # text leaves the 12 spaces of indentation in src[:i] and the
     # replacement adds 12 more -- an IndentationError that masquerades as
     # the mutation working.
-    marker = "            # COMPUTE THE VECTOR FIRST."
+    marker = "            # COMPUTE AND PACK THE VECTOR BEFORE THE NODE IS COMMITTED."
     assert src.count(marker) == 1, (
         f"the reorder must be present exactly once to mutate away from, got "
         f"{src.count(marker)}"
