@@ -341,3 +341,106 @@ def test_cross_org_isolation_holds_with_hybrid_search_on(tmp_path: Path) -> None
     assert "roster" in conversa_results[0].content.lower()
     assert len(synapt_results) == 1
     assert "renewal" in synapt_results[0].content.lower()
+
+
+# ---------------------------------------------------------------------------
+# WIDTH MISMATCH: a query whose width differs from the STORED rows.
+#
+# The store keeps `dim` per row and is deliberately width-agnostic, so a
+# provider swap leaves rows written at the old width in place -- the
+# incrementality reuses unchanged documents rather than re-embedding them.
+# That is how these two widths meet in practice.
+#
+# Hand-computable, same vectors as above: query [0.8, 0.6], target.md [1, 0],
+# so the true cosine is 0.8. The WIDE query below is the same direction with a
+# third component, [0.8, 0.6, 0.6], whose norm is sqrt(1.36) = 1.166190. A
+# `zip`-truncating cosine therefore scores target.md 0.8 / 1.166190 = 0.685994
+# -- which is under a 0.7 floor, so the row vanishes; and over a 0.4 floor, so
+# the row is returned carrying a number that is simply wrong.
+# ---------------------------------------------------------------------------
+
+_WIDE_QUERY_VECTOR = [0.8, 0.6, 0.6]
+
+
+class _WideProvider(_FakeProvider):
+    """Indexes at width 2 but embeds the QUERY at width 3."""
+
+    dim = 3
+
+    def __init__(self):
+        super().__init__(_PARAPHRASE_VECTORS)
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] * 3 for _ in texts]
+
+    def embed_single(self, text: str) -> list[float]:
+        return list(_WIDE_QUERY_VECTOR)
+
+
+def test_cosine_refuses_a_width_mismatch() -> None:
+    """The root fix: `_cosine` raises rather than truncating the dot product."""
+    from synapt.recall.source_index import _cosine
+
+    with pytest.raises(ValueError, match="width mismatch"):
+        _cosine([1.0] * 3, [1.0] * 2)
+    # CONTROL, without which a blanket refusal would pass: matched widths still
+    # score, and the wrong-width call is the ONLY one that raises.
+    assert _cosine([1.0, 1.0], [1.0, 1.0]) == pytest.approx(1.0)
+
+
+def test_a_width_mismatch_is_skipped_and_counted_not_scored(
+    tmp_path: Path, caplog
+) -> None:
+    """THE WITNESS. On the pre-fix code this test fails on BOTH assertions.
+
+    A row that IS returned at matched width must not be scored against a query of
+    another width, and the skip must be COUNTED AND LOGGED rather than silent.
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="synapt.recall")
+
+    root = _two_doc_root(tmp_path)
+    db_path = tmp_path / "store.db"
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        admission = _admission("src-a", fd)
+        sync_source(
+            admission, DescriptorSourceAdapter(), _opener(db_path), _authorize_only(CAP),
+            embed_provider=_FakeProvider(_PARAPHRASE_VECTORS),
+        )
+
+        # CONTROL: at MATCHED width both rows are found at their true,
+        # hand-computable scores. Without this, "no results" below would be
+        # satisfied by a search that finds nothing at all.
+        matched = search_source(
+            admission, _opener(db_path), _authorize_only(CAP), PARAPHRASE_QUERY,
+            embed_provider=_FakeProvider(_PARAPHRASE_VECTORS),
+            similarity_floor=0.4,
+        )
+        by_path = {r.relative_path: r for r in matched}
+        assert by_path["target.md"].similarity == pytest.approx(0.8)
+        assert by_path["decoy.md"].similarity == pytest.approx(0.6)
+
+        caplog.clear()
+
+        # THE SUBJECT. Floor 0.4 is ABOVE the truncated 0.685994, so the pre-fix
+        # code RETURNS target.md carrying that wrong score; the fix skips it.
+        results = search_source(
+            admission, _opener(db_path), _authorize_only(CAP), PARAPHRASE_QUERY,
+            embed_provider=_WideProvider(), similarity_floor=0.4,
+        )
+        assert results == [], (
+            "a query of a different width than the stored rows must not produce "
+            f"results -- it cannot compare them; got {results!r}"
+        )
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "skipped" in logged, (
+            "the skip must be counted and logged, not silent: "
+            f"{[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert "2 vs 3" in logged, (
+            f"the log must name BOTH widths so the reader can act on it; got {logged!r}"
+        )
+    finally:
+        os.close(fd)

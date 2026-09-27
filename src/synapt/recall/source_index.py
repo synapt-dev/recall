@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -688,6 +689,28 @@ def _unpack_vector(blob: bytes, dim: int) -> list[float]:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two vectors, which must be the SAME width.
+
+    A width mismatch RAISES rather than scoring. It used to score: the dot
+    product below sums over ``zip(a, b)``, which stops at the shorter vector,
+    while both norms sum over the FULL vectors -- so the numerator was truncated
+    and the denominator was not, and a mismatched pair returned a
+    plausible-looking number that was simply wrong. Measured on this store: a
+    2-wide row whose true similarity to the query is 0.8 scores 0.686 against a
+    3-wide query, and a wider query deflates further until rows fall under
+    ``DEFAULT_SOURCE_SIMILARITY_FLOOR`` and drop out of the results with no error
+    anywhere.
+
+    Refusing is the invariant the write side already holds (recall#1003: a
+    provider whose width is not the store's must not produce a blob either). A
+    width mismatch must not produce a VALUE. The caller decides what to do about
+    it; see the skip-and-count at ``search_source``.
+    """
+    if len(a) != len(b):
+        raise ValueError(
+            f"embedding width mismatch: {len(a)} != {len(b)} -- refusing to score "
+            "vectors of different widths"
+        )
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = sum(x * x for x in a) ** 0.5
     norm_b = sum(y * y for y in b) ** 0.5
@@ -1115,10 +1138,34 @@ def search_source(
 
     query_vector = embed_provider.embed_single(query)
     cosine_by_unit_id: dict[str, float] = {}
+    width_skipped = 0
+    stored_width = 0
     for row in embedding_rows:
         vector = _unpack_vector(row["vector"], row["dim"])
+        # A ROW WHOSE WIDTH DIFFERS FROM THE QUERY'S IS SKIPPED, NOT SCORED.
+        # `_cosine` refuses such a pair outright, so the choice here is only what
+        # to do instead of scoring it. Skip, not raise: the stored width is a
+        # property of when each row was written, so a store mid-migration would
+        # otherwise turn one stale row into a total search outage for the rows
+        # that ARE comparable. Skipping keeps that query working and loses only
+        # what could not be compared.
+        #
+        # AND IT IS COUNTED, because the defect this closes was that the loss was
+        # silent: before, the row was scored at a deflated value and dropped
+        # under the similarity floor with nothing said anywhere.
+        if len(vector) != len(query_vector):
+            width_skipped += 1
+            stored_width = stored_width or len(vector)
+            continue
         cosine_by_unit_id[row["unit_id"]] = _cosine(query_vector, vector)
         row_by_unit_id.setdefault(row["unit_id"], row)
+    if width_skipped:
+        logging.getLogger("synapt.recall").warning(
+            "source_index: skipped %d of %d embedded rows whose width is not the "
+            "query's (%d vs %d). Those rows cannot be compared against this "
+            "query; re-index the source with the current embedding provider.",
+            width_skipped, len(embedding_rows), stored_width, len(query_vector),
+        )
 
     bm25_ranked = [(row["unit_id"], 0.0) for row in bm25_rows]
     emb_ranked = [
