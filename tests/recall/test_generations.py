@@ -3,6 +3,7 @@ fixes save_chunks()'s non-atomic full-rebuild (R3.1, PR two)."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from synapt.recall.core import TranscriptChunk
@@ -258,6 +259,162 @@ def test_gc_keeps_only_current_and_previous_generation(tmp_path):
     )
     current = read_current_generation(tmp_path)
     assert current in remaining, "CURRENT itself must never be GC'd"
+
+
+def test_gc_prunes_cached_overview_rows_for_collected_generations(tmp_path):
+    """The symmetric claim to the test above, and the one that was missing.
+
+    ``shard_overview_cache`` is keyed on the generation NAME, so bounding the
+    generation DIRECTORIES does not bound the rows: without the prune, one dead
+    generation's rows survive every rebuild, and a rebuild happens every session
+    start. Measured 2026-09-27 (R3.1): five rebuilds left two directories and
+    five generation names in the cache, three of them gone.
+    """
+    # index.db and its schema, as the build path creates it. The cache table
+    # lives here, not inside any generation -- and without index.db the cache
+    # write is a silent best-effort no-op, which would make this pass for the
+    # wrong reason.
+    store = RecallDB(tmp_path / "index.db")
+    store.close()
+
+    for i in range(4):
+        rebuild_and_publish(tmp_path, [_chunk(f"round{i}", 0, f"round {i}")])
+        db = ShardedRecallDB.open(tmp_path)
+        try:
+            db.session_overview()  # what a session start does
+        finally:
+            db.close()
+
+    live = {p.name for p in generations_root(tmp_path).iterdir() if p.is_dir()}
+    assert len(live) <= 2, (
+        f"premise: gc must bound the generation directories first, found {sorted(live)}"
+    )
+
+    con = sqlite3.connect(tmp_path / "index.db")
+    try:
+        named = {
+            row[0]
+            for row in con.execute(
+                "SELECT DISTINCT generation_name FROM shard_overview_cache"
+            )
+        }
+    finally:
+        con.close()
+
+    # Controls, so this cannot pass on an untested path: a table empty for both
+    # live and dead proves nothing, and neither does one that never cached the
+    # generation still on disk.
+    assert named, "control: the cache must hold rows at all, or this proves nothing"
+    assert named & live, f"control: the live generation must be cached, named={sorted(named)}"
+
+    assert named <= live, (
+        f"shard_overview_cache names generation(s) that no longer exist on disk: "
+        f"{sorted(named - live)} -- gc collected the directories and left the rows"
+    )
+
+
+def test_prune_survives_an_index_db_that_is_not_a_database(tmp_path):
+    """A file that is not a database at all raises ``DatabaseError``, which is
+    the PARENT of ``OperationalError`` -- so a handler scoped to the child lets
+    the raise escape and breaks the docstring's "never to an error in the
+    caller". Reported in review and measured here.
+
+    Reachable on the product path, not only here: the prune runs inside
+    ``rebuild_and_publish`` AFTER the generation is published, so an escaping
+    raise surfaces on a build whose new generation is already live.
+    """
+    from synapt.recall.storage import prune_cached_shard_overviews
+
+    index_db = tmp_path / "index.db"
+    index_db.write_bytes(b"<!DOCTYPE html>\nnot a database at all\n")
+
+    # Control, and it is the load-bearing one: the file must ACTUALLY raise, and
+    # raise the parent rather than the child. If it raised an OperationalError
+    # the old child-scoped handler would already have caught it, and this test
+    # would pass without proving anything about the fix.
+    raised: BaseException | None = None
+    try:
+        con = sqlite3.connect(index_db)
+        try:
+            con.execute(
+                "DELETE FROM shard_overview_cache WHERE generation_name IN (?)",
+                ["gen-dead"],
+            )
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raised = exc
+    assert raised is not None, "control: a non-database index.db must raise"
+    assert isinstance(raised, sqlite3.DatabaseError), (
+        f"control: expected DatabaseError, got {type(raised).__name__}"
+    )
+    assert not isinstance(raised, sqlite3.OperationalError), (
+        "control: an OperationalError here would be caught by the OLD handler, "
+        "so this witness could not tell the fix from the bug it fixes"
+    )
+
+    # The claim: the prune is a courtesy and degrades to 0, never raises.
+    assert prune_cached_shard_overviews(index_db, ["gen-dead"]) == 0
+    # And the empty-list short circuit, which returns before opening anything.
+    assert prune_cached_shard_overviews(index_db, []) == 0
+
+
+def test_cache_write_accessor_survives_an_index_db_that_is_not_a_database(tmp_path):
+    """The write accessor opens its OWN short-lived connection, so it reaches the
+    same non-database file the prune does, and ``executescript`` validates the
+    header -- raising ``DatabaseError``, the PARENT of ``OperationalError``,
+    which a child-scoped handler lets escape.
+
+    NOT asserted here: the READ accessor's handler was widened on the same class
+    argument, but its exposure was not reproduced -- it queries through the
+    already-open ``self._conn``, whose page cache serves the row, so the raise
+    was never reached in this shape. That line is precautionary and labelled so.
+    """
+    idx = tmp_path / "index.db"
+    RecallDB(idx).close()
+
+    db = RecallDB(idx)
+    try:
+        # Control: the write path WORKS on a valid index.db, so a later
+        # non-raise is the handler and not a method that never did anything.
+        db.set_cached_shard_overview("gen-ok", "shard", 1, {"s1": {"activity": (1, "0001"), "agent_ids": frozenset()}})
+        assert db.get_cached_shard_overview("gen-ok", "shard", 1) is not None, (
+            "control: the write/read round trip must work before corruption"
+        )
+
+        idx.write_bytes(b"<!DOCTYPE html>\ncorrupted under the open store\n")
+
+        # Control: the file really is unreadable now, and it raises the PARENT.
+        raised: BaseException | None = None
+        c = None
+        try:
+            c = sqlite3.connect(idx)
+            c.executescript("CREATE TABLE IF NOT EXISTS probe (a TEXT)")
+        except sqlite3.Error as exc:
+            raised = exc
+        finally:
+            if c is not None:
+                try:
+                    c.close()
+                except sqlite3.Error:
+                    pass
+        assert raised is not None, "control: a non-database index.db must raise"
+        assert isinstance(raised, sqlite3.DatabaseError), (
+            f"control: expected DatabaseError, got {type(raised).__name__}"
+        )
+        assert not isinstance(raised, sqlite3.OperationalError), (
+            "control: an OperationalError here would be caught by the OLD handler, "
+            "so this witness could not tell the fix from the bug it fixes"
+        )
+
+        # The claim: the cache write is a courtesy and degrades, never raises.
+        db.set_cached_shard_overview("gen-dead", "shard", 1, {"s1": {"activity": (1, "0001"), "agent_ids": frozenset()}})
+    finally:
+        try:
+            db.close()
+        except sqlite3.Error:
+            # Closing a deliberately corrupted store is not the claim under test.
+            pass
 
 
 def test_real_concurrent_build_and_search_across_two_processes(tmp_path):

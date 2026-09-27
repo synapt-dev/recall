@@ -315,7 +315,17 @@ def rebuild_and_publish(
 
         if publish_generation(index_dir, new_name, expected_parent=parent):
             keep = {new_name} | ({parent} if parent else set())
-            gc_old_generations(index_dir, keep=keep)
+            removed = gc_old_generations(index_dir, keep=keep)
+            if removed:
+                # Cached shard-overview rows are keyed on the generation NAME, so
+                # collecting a generation's directory leaves its rows behind and
+                # one dead generation's worth survives every rebuild. This call
+                # is the only place that knows which generations just died, so it
+                # is where the prune belongs. Function-local import to match the
+                # other storage import below and keep the module graph flat.
+                from synapt.recall.storage import prune_cached_shard_overviews
+
+                prune_cached_shard_overviews(index_dir / "index.db", removed)
             return new_name
 
         # Lost the race: CURRENT moved since `parent` was read. Our
