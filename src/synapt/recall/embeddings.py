@@ -198,6 +198,9 @@ def _resolve_provider(prefer_local: bool) -> Optional[EmbeddingProvider]:
     """Resolve the embedding provider without caching."""
     import logging
     log = logging.getLogger(__name__)
+    # Local import: storage does not import embeddings, and the width this store
+    # can hold is storage's constant, so it is read from its one home.
+    from synapt.recall.storage import EMBEDDING_DIM
 
     if prefer_local:
         try:
@@ -213,8 +216,27 @@ def _resolve_provider(prefer_local: bool) -> Optional[EmbeddingProvider]:
 
     try:
         provider = OllamaEmbeddings()
-        # Verify Ollama is reachable
-        provider.embed(["test"])
+        # Verify Ollama is reachable, and reuse the SAME probe to check the WIDTH
+        # of what it actually serves. The store's blob column is a fixed-width
+        # format derived from storage.EMBEDDING_DIM, so a provider of any other
+        # width cannot be written at all: struct.pack raises, the node has
+        # already landed, and the save reports failure over a row that search
+        # still finds. Two hardcoded constants disagreeing.
+        probe = provider.embed(["test"])
+        width = len(probe[0]) if probe else 0
+        if width != EMBEDDING_DIM:
+            # VISIBLE BY DESIGN: a provider silently ignored leaves a user
+            # wondering why their working Ollama is not being used. Name the
+            # model and both widths, once, at the point of refusal.
+            log.warning(
+                "Ollama embeddings model %r returns %d dimensions but this store "
+                "holds %d; REFUSING it so the store is never handed an "
+                "unwritable vector (search falls back to BM25 keyword matching). "
+                "Pull a %d-dimension model, or install sentence-transformers for "
+                "hybrid semantic search.",
+                provider.model, width, EMBEDDING_DIM, EMBEDDING_DIM,
+            )
+            return None
         return provider
     except Exception:
         log.info("Ollama embeddings unavailable (server not running or model not pulled)")
