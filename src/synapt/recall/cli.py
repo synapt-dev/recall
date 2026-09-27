@@ -3770,7 +3770,7 @@ def _spawn_session_start_catchup(project: Path) -> bool:
     if not project_transcript_dirs(project):
         return False
     subprocess.Popen(
-        [sys.executable, "-m", "synapt.recall.cli", "catchup"],
+        [sys.executable, "-m", "synapt.recall.cli", "catchup", "--no-build"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -3857,13 +3857,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
             except Exception:
                 pass
 
-        # 1. ONE detached process for everything unbounded: archive, journal
-        #    catch-up, journal compaction, incremental build, one enrich.
-        #    Sequenced inside `catchup` under its own lock so they cannot
-        #    fight each other (or a manual build) for the build lock.
+        # 1. ONE detached process for archive, journal catch-up, and journal
+        #    compaction. The incremental build and enrich tail is deferred to
+        #    explicit maintenance, so a session start cannot launch it.
         with run.phase("spawn_catchup"):
             try:
-                _spawn_session_start_catchup(project)
+                if _spawn_session_start_catchup(project):
+                    banners.append(
+                        "INFO: session-start catchup deferred the incremental build; "
+                        "archive and journal maintenance continue."
+                    )
             except Exception:
                 banners.append("WARNING: could not spawn `synapt recall catchup`; index and journal will not update this session.")
 
@@ -4650,12 +4653,17 @@ def cmd_catchup(args: argparse.Namespace) -> None:
         removed = compact_journal()
         if removed:
             print(f"[catchup] journal: compacted ({removed} duplicate(s) removed)", file=sys.stderr)
-        if getattr(args, "no_build", False) or not dirs:
+        if getattr(args, "no_build", False):
+            print("[catchup] build deferred: session-start policy keeps archive and journal catch-up only",
+                  file=sys.stderr)
+            return
+        if not dirs:
             return
 
-        # This tail is the memory consumer (measured at 1.52 GB in 2.5 minutes, and
-        # 5.9 GB after a fleet restart on 2026-09-25), and every server start runs
-        # this catchup, so it is gated on host memory and limited to one host-wide.
+        # This explicit-catchup tail is the memory consumer (measured at 1.52 GB in
+        # 2.5 minutes, and 5.9 GB after a fleet restart on 2026-09-25). Session
+        # start invokes --no-build, so this tail is gated on host memory and limited
+        # to one host-wide when an operator runs catchup explicitly.
         # The gate is placed here rather than over the whole of catchup because
         # everything above it is legitimately per-seat work.
         verdict, numbers = _host_memory_verdict()
@@ -4665,7 +4673,7 @@ def cmd_catchup(args: argparse.Namespace) -> None:
                   file=sys.stderr)
         elif verdict == "refuse":
             print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
-                  "next session-start catchup retries", file=sys.stderr)
+                  "next explicit catchup or precompact rebuild retries", file=sys.stderr)
             return
 
         host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)
@@ -5005,9 +5013,9 @@ def make_parser() -> argparse.ArgumentParser:
 
     catchup_parser = subparsers.add_parser(
         "catchup",
-        help="Run the session-start hook's deferred maintenance: archive, journal "
-             "catch-up, compaction, incremental build, one enrich. The hook spawns "
-             "this detached; run it by hand to catch up now.",
+        help="Run archive, journal catch-up, compaction, incremental build, and enrich. "
+             "The session-start hook runs archive and journal work only; run this by hand "
+             "to include the build tail.",
     )
     catchup_parser.add_argument(
         "--no-build", action="store_true",
