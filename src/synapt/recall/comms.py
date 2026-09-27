@@ -8,7 +8,6 @@ what the pane transport could actually observe.
 from __future__ import annotations
 
 import re
-import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
@@ -48,6 +47,18 @@ def _record_receipt(receipt: Receipt, *, to: str) -> Receipt:
     finally:
         conn.close()
     return receipt
+
+
+def _record_refusal(receipt: Receipt, *, to: str) -> Receipt:
+    """Persist a refusal under the stable recipient id when the target resolves."""
+    try:
+        recipient = direct.resolve_registered_recipient(to)
+    except ValueError:
+        return _record_receipt(
+            Receipt(receipt.message_id, receipt.state, f"{receipt.detail}; unresolved recipient: {to}"),
+            to=to,
+        )
+    return _record_receipt(receipt, to=recipient.agent_id)
 
 
 def ledger(to: str | None = None) -> list[Receipt]:
@@ -92,10 +103,13 @@ def send(to: str, body: str, *, from_agent: str) -> Receipt:
     """Write durable-first, paste once into a declared pane, then measure it."""
     guessed = _GUESSED_TIME.search(body)
     if guessed:
-        return _record_receipt(Receipt(None, "refused", f"guessed time label: {guessed.group(0)}"), to=to)
+        return _record_refusal(
+            Receipt(None, "refused", f"guessed time label: {guessed.group(0)}"),
+            to=to,
+        )
     needle = next((line for line in reversed(body.splitlines()) if line.strip()), None)
     if needle is None:
-        return _record_receipt(
+        return _record_refusal(
             Receipt(None, "refused", "empty body: no non-blank needle to witness"),
             to=to,
         )

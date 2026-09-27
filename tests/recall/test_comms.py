@@ -5,12 +5,14 @@ import subprocess
 from synapt.recall import comms
 
 
-def test_guessed_time_refuses_before_recipient_resolution(monkeypatch):
-    monkeypatch.setattr(comms, "_record_receipt", lambda receipt, **_: receipt)
-    monkeypatch.setattr(comms.direct, "resolve_registered_recipient", lambda _: (_ for _ in ()).throw(AssertionError()))
+def test_guessed_time_refuses_when_recipient_is_unregistered(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(comms, "_record_receipt", lambda receipt, **kwargs: recorded.append((receipt, kwargs)) or receipt)
+    monkeypatch.setattr(comms.direct, "resolve_registered_recipient", lambda _: (_ for _ in ()).throw(ValueError("unregistered")))
     receipt = comms.send("atlas", "COMMS PROOF TEST, ignore\nclock 09:xx", from_agent="fathom-001")
     assert receipt.message_id is None
     assert receipt.state == "refused"
+    assert recorded == [(comms.Receipt(None, "refused", "guessed time label: 09:xx; unresolved recipient: atlas"), {"to": "atlas"})]
 
 
 def test_missing_pane_is_undeliverable(monkeypatch):
@@ -70,6 +72,8 @@ def test_trailing_blank_body_uses_last_non_blank_line(monkeypatch):
 
 def test_empty_body_returns_refused_receipt(monkeypatch):
     monkeypatch.setattr(comms, "_record_receipt", lambda receipt, **_: receipt)
+    recipient = comms.direct.RegisteredRecipient("atlas-001", "synapt", "atlas")
+    monkeypatch.setattr(comms.direct, "resolve_registered_recipient", lambda _: recipient)
     monkeypatch.setattr(
         comms.direct,
         "send_message",
@@ -112,8 +116,48 @@ def test_missing_declared_tmux_pane_is_undeliverable(monkeypatch):
     assert comms.send("atlas", message.body, from_agent="fathom-001").state == "undeliverable"
 
 
-def test_receipt_ledger_roundtrip(tmp_path, monkeypatch):
+def test_receipt_ledger_lists_refusal_and_success_by_canonical_recipient_id(tmp_path, monkeypatch):
     monkeypatch.setenv("SYNAPT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SYNAPT_SHARED_CHANNELS_DIR", str(tmp_path / "channels"))
-    receipt = comms._record_receipt(comms.Receipt(None, "refused", "guessed time label: 09:xx"), to="atlas")
-    assert comms.ledger("atlas") == [receipt]
+    recipient = comms.direct.RegisteredRecipient("atlas-001", "synapt", "atlas")
+    message = comms.direct.DirectMessage("dm_test", "fathom-001", "atlas-001", "now", "nonce")
+    pane = comms.direct.PaneTarget("synapt:atlas", "claude")
+    delivery = comms.direct.TmuxDelivery(True, "synapt:atlas", 2, "pasted")
+    monkeypatch.setattr(comms.direct, "resolve_registered_recipient", lambda _: recipient)
+    monkeypatch.setattr(comms.direct, "load_pane_map", lambda: {"atlas-001": {"target": "synapt:atlas", "runtime": "claude"}})
+    monkeypatch.setattr(comms.direct, "send_message", lambda **_: message)
+    monkeypatch.setattr(comms.direct, "deliver_via_tmux", lambda *_: delivery)
+    monkeypatch.setattr(comms, "_verify_submitted", lambda *_: True)
+    monkeypatch.setattr(comms.time, "sleep", lambda _: None)
+
+    refused = comms.send("atlas", "clock 09:xx", from_agent="fathom-001")
+    submitted = comms.send("atlas", "nonce", from_agent="fathom-001")
+
+    assert comms.ledger("atlas-001") == [refused, submitted]
+
+
+def test_refused_receipt_is_persisted_without_message_or_pane_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNAPT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SYNAPT_SHARED_CHANNELS_DIR", str(tmp_path / "channels"))
+    recipient = comms.direct.RegisteredRecipient("atlas-001", "synapt", "atlas")
+    monkeypatch.setattr(comms.direct, "resolve_registered_recipient", lambda _: recipient)
+    monkeypatch.setattr(
+        comms.direct,
+        "send_message",
+        lambda **_: (_ for _ in ()).throw(AssertionError("refusal must not write a message")),
+    )
+    monkeypatch.setattr(
+        comms.direct,
+        "deliver_via_tmux",
+        lambda *_: (_ for _ in ()).throw(AssertionError("refusal must not paste")),
+    )
+
+    refused = comms.send("atlas", "clock 09:xx", from_agent="fathom-001")
+
+    assert comms.ledger("atlas-001") == [refused]
+    conn = comms.direct._get_db()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM comms_receipts").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+    finally:
+        conn.close()
