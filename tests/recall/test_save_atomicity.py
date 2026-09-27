@@ -70,39 +70,73 @@ def _store_holds(marker: str, root) -> bool:
     return False
 
 
-@pytest.mark.parametrize(
-    "provider_name,provider",
-    [
-        ("wrong-width (THE REAL SHAPE: embed succeeds at 1024)", _WrongWidthProvider()),
-        ("raising (embed() itself raises)", _RaisingProvider()),
-    ],
-)
-def test_failed_embedding_leaves_no_node_behind(
-    tmp_path, monkeypatch, provider_name, provider
-):
-    """THE WITNESS. Pre-fix: the node lands and this fails."""
+def test_wrong_width_fails_atomically(tmp_path, monkeypatch):
+    """THE ATOMICITY WITNESS. Pre-fix: the node lands and this fails.
+
+    A provider that SUCCEEDS at the wrong width is not a transient condition --
+    embed() returns 1024 floats and the store holds 384 -- so the pack rejects it
+    BEFORE the node write and nothing is left behind.
+    """
     monkeypatch.setenv("GRIPSPACE_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     import synapt.recall.server as server
 
-    monkeypatch.setattr(server, "get_embedding_provider", lambda: provider)
+    monkeypatch.setattr(server, "get_embedding_provider", lambda: _WrongWidthProvider())
 
     result = server.recall_save(content=MARKER, category="decision")
 
     assert result.startswith("Knowledge save failed"), (
-        f"[{provider_name}] the save must report the failure it hit; "
-        f"got {result[:120]!r}"
+        f"the save must report the failure it hit; got {result[:120]!r}"
     )
     assert not _store_holds(MARKER, tmp_path), (
-        f"[{provider_name}] a save that reported failure left the node in the "
-        "store: the node row is committed before the step that can fail, and "
-        "nothing undoes it"
+        "a save that reported failure left the node in the store: the node row is "
+        "committed before the step that can fail, and nothing undoes it"
     )
     # AND THE OTHER HALF OF THE SYMPTOM: search must not report FOUND either.
     found = server.recall_search(MARKER, include_historical=True, min_score=0.0)
     assert MARKER not in found, (
-        f"[{provider_name}] search reported FOUND after a save that failed: "
-        f"{found[:160]!r}"
+        f"search reported FOUND after a save that failed: {found[:160]!r}"
+    )
+
+
+def test_transient_provider_error_keeps_the_node(tmp_path, monkeypatch):
+    """A TRANSIENT failure DEGRADES instead of discarding the fact.
+
+    An unreachable Ollama, a timeout, or a model being pulled is temporary;
+    failing the save over it would discard knowledge the caller asked to keep.
+    The node lands with no vector, the save says so in words that are true, and
+    keyword search still finds it.
+
+    THE FLIP. This is #1004's raising row, which asserted the OPPOSITE -- that a
+    raising embed() failed the save and left no node. That was correct while a
+    transient error and a wrong width were indistinguishable. The pack separates
+    them, so the two rows now assert different contracts and live apart: the
+    wrong-width row still requires atomic failure, this one requires the fact to
+    survive.
+    """
+    monkeypatch.setenv("GRIPSPACE_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    import synapt.recall.server as server
+
+    monkeypatch.setattr(server, "get_embedding_provider", lambda: _RaisingProvider())
+
+    result = server.recall_save(content=MARKER, category="decision")
+
+    assert result.startswith("Knowledge node"), (
+        f"a transient provider failure must not fail the save; got {result[:120]!r}"
+    )
+    assert "saved without embeddings" in result, (
+        f"the save must say the vector is missing, in its own words: {result!r}"
+    )
+    assert _store_holds(MARKER, tmp_path), (
+        "the node was NOT kept, which is the loss this change exists to prevent"
+    )
+    # AND THE OTHER HALF: the fact is still FINDABLE by keyword, so degrading
+    # costs the vector and not the knowledge.
+    found = server.recall_search(MARKER, include_historical=True, min_score=0.0)
+    assert MARKER in found, (
+        "the node was kept but keyword search does not find it, so the fact is "
+        f"kept in name only: {found[:160]!r}"
     )
 
 
