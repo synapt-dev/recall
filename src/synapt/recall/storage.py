@@ -385,7 +385,10 @@ def prune_cached_shard_overviews(index_db_path: Path, generation_names: list[str
     Courtesy, never a dependency -- the same rule the cache accessors carry: the
     table may not exist at all, and index.db may be read-only or busy behind an
     active build. Every failure degrades to "the rows stay until the next
-    rebuild", never to an error in the caller. Returns the number of names the
+    rebuild", never to an error in the caller. The scope is ``DatabaseError`` and
+    not ``OperationalError``: a file that is not a database at all raises the
+    PARENT (measured: "file is not a database"), which an ``OperationalError``
+    handler misses. Returns the number of names the
     DELETE named, so a test can assert it without depending on row counts; a
     missing table returns 0, which is also the honest "it did not actually run"
     signal.
@@ -405,7 +408,7 @@ def prune_cached_shard_overviews(index_db_path: Path, generation_names: list[str
             conn.commit()
         finally:
             conn.close()
-    except sqlite3.OperationalError:
+    except sqlite3.DatabaseError:
         return 0
     return len(names)
 
@@ -1933,7 +1936,9 @@ class RecallDB:
         corrupt/unreadable entry is possible if a write was interrupted
         mid-commit — both degrade to a miss rather than an error, the same
         courtesy-not-dependency shape as the Codex-session-cwd cache
-        (``codex.py``'s ``_cwd_cache``).
+        (``codex.py``'s ``_cwd_cache``). The handler catches ``DatabaseError``
+        and not ``OperationalError``: a file that is not a database at all
+        raises the PARENT, so a child-scoped handler would break this promise.
         """
         try:
             row = self._conn.execute(
@@ -1941,7 +1946,7 @@ class RecallDB:
                 "WHERE generation_name = ? AND shard_name = ? AND schema_version = ?",
                 (generation_name, shard_name, schema_version),
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
             return None
         if row is None:
             return None
@@ -1965,7 +1970,7 @@ class RecallDB:
         active build's write lock on index.db; this cache is a courtesy,
         never a dependency (same rule as ``flush_cwd_cache``'s docstring),
         so a bounded, short ``busy_timeout`` and a swallowed
-        ``OperationalError`` mean a busy or read-only index.db just skips
+        ``DatabaseError`` mean a busy or read-only index.db just skips
         the write and the next call recomputes uncached — never blocks or
         fails the caller.
         """
@@ -1988,7 +1993,7 @@ class RecallDB:
                 conn.commit()
             finally:
                 conn.close()
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
             pass
 
     def session_activity(self) -> dict[str, tuple[int, str]]:
