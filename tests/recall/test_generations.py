@@ -3,6 +3,7 @@ fixes save_chunks()'s non-atomic full-rebuild (R3.1, PR two)."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from synapt.recall.core import TranscriptChunk
@@ -258,6 +259,58 @@ def test_gc_keeps_only_current_and_previous_generation(tmp_path):
     )
     current = read_current_generation(tmp_path)
     assert current in remaining, "CURRENT itself must never be GC'd"
+
+
+def test_gc_prunes_cached_overview_rows_for_collected_generations(tmp_path):
+    """The symmetric claim to the test above, and the one that was missing.
+
+    ``shard_overview_cache`` is keyed on the generation NAME, so bounding the
+    generation DIRECTORIES does not bound the rows: without the prune, one dead
+    generation's rows survive every rebuild, and a rebuild happens every session
+    start. Measured 2026-09-27 (R3.1): five rebuilds left two directories and
+    five generation names in the cache, three of them gone.
+    """
+    # index.db and its schema, as the build path creates it. The cache table
+    # lives here, not inside any generation -- and without index.db the cache
+    # write is a silent best-effort no-op, which would make this pass for the
+    # wrong reason.
+    store = RecallDB(tmp_path / "index.db")
+    store.close()
+
+    for i in range(4):
+        rebuild_and_publish(tmp_path, [_chunk(f"round{i}", 0, f"round {i}")])
+        db = ShardedRecallDB.open(tmp_path)
+        try:
+            db.session_overview()  # what a session start does
+        finally:
+            db.close()
+
+    live = {p.name for p in generations_root(tmp_path).iterdir() if p.is_dir()}
+    assert len(live) <= 2, (
+        f"premise: gc must bound the generation directories first, found {sorted(live)}"
+    )
+
+    con = sqlite3.connect(tmp_path / "index.db")
+    try:
+        named = {
+            row[0]
+            for row in con.execute(
+                "SELECT DISTINCT generation_name FROM shard_overview_cache"
+            )
+        }
+    finally:
+        con.close()
+
+    # Controls, so this cannot pass on an untested path: a table empty for both
+    # live and dead proves nothing, and neither does one that never cached the
+    # generation still on disk.
+    assert named, "control: the cache must hold rows at all, or this proves nothing"
+    assert named & live, f"control: the live generation must be cached, named={sorted(named)}"
+
+    assert named <= live, (
+        f"shard_overview_cache names generation(s) that no longer exist on disk: "
+        f"{sorted(named - live)} -- gc collected the directories and left the rows"
+    )
 
 
 def test_real_concurrent_build_and_search_across_two_processes(tmp_path):

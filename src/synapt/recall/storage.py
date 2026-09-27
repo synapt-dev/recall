@@ -368,6 +368,48 @@ CREATE TABLE IF NOT EXISTS shard_overview_cache (
 SHARD_OVERVIEW_CACHE_SCHEMA_VERSION = 1
 
 
+def prune_cached_shard_overviews(index_db_path: Path, generation_names: list[str]) -> int:
+    """Delete cached ``session_overview()`` rows for generations that are gone.
+
+    The cache key includes ``generation_name``, so collecting a generation's
+    DIRECTORY does not touch its rows. Without this, one dead generation's rows
+    survive every rebuild, and the code's own comment says a rebuild happens
+    every session start. Measured 2026-09-27 (R3.1): five rebuilds bounded the
+    directories to two while the cache still named five generations, three of
+    them gone, with the live rows present as the control.
+
+    Called by ``rebuild_and_publish`` with exactly the names
+    ``gc_old_generations`` returned, so the prune is scoped to generations that
+    no longer exist on disk rather than to anything age-based.
+
+    Courtesy, never a dependency -- the same rule the cache accessors carry: the
+    table may not exist at all, and index.db may be read-only or busy behind an
+    active build. Every failure degrades to "the rows stay until the next
+    rebuild", never to an error in the caller. Returns the number of names the
+    DELETE named, so a test can assert it without depending on row counts; a
+    missing table returns 0, which is also the honest "it did not actually run"
+    signal.
+    """
+    names = [name for name in generation_names if name]
+    if not names:
+        return 0
+    try:
+        conn = sqlite3.connect(str(index_db_path), timeout=0.5)
+        try:
+            conn.execute("PRAGMA busy_timeout=500")
+            placeholders = ",".join("?" * len(names))
+            conn.execute(
+                f"DELETE FROM shard_overview_cache WHERE generation_name IN ({placeholders})",
+                names,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return 0
+    return len(names)
+
+
 def _serialize_shard_overview(overview: dict[str, dict]) -> str:
     """JSON-encode session_overview()'s return shape for the cache.
 
