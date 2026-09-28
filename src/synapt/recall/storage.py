@@ -2647,12 +2647,27 @@ class RecallDB:
             )
         self._conn.commit()
 
-    def get_knowledge_rowids_without_embeddings(self) -> list[tuple[int, str]]:
-        """Return (rowid, content) for active knowledge nodes missing embeddings."""
-        rows = self._conn.execute(
+    def get_knowledge_rowids_without_embeddings(
+        self, limit: int | None = None
+    ) -> list[tuple[int, str]]:
+        """Return (rowid, content) for active knowledge nodes missing embeddings.
+
+        ``limit`` bounds this in SQL rather than in the caller, so a store with a
+        long backlog is never fully materialised just to be sliced. ``ORDER BY
+        rowid`` makes the bounded slice deterministic, which is what lets a
+        caller that takes a fixed-size slice per invocation WALK the queue:
+        filled rows leave it, so the next call starts where the last one
+        stopped, instead of re-reading whichever rows the engine returns first.
+        """
+        sql = (
             "SELECT rowid, content FROM knowledge "
-            "WHERE embedding IS NULL AND status = 'active'"
-        ).fetchall()
+            "WHERE embedding IS NULL AND status = 'active' ORDER BY rowid"
+        )
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self._conn.execute(sql, params).fetchall()
         return [(r[0], r[1]) for r in rows]
 
     # -- pending contradictions --------------------------------------------

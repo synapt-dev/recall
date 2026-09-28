@@ -52,6 +52,7 @@ _STARTUP_VERSION = getattr(_synapt_pkg, "__version__", "unknown")
 from synapt.recall.core import (
     TranscriptIndex,
     atomic_json_write,
+    backfill_knowledge_embeddings,
     describe_root_source,
     format_size,
     project_data_dir,
@@ -61,6 +62,15 @@ from synapt.recall._llm_util import truncate_at_word as _tw
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.hybrid import classify_query_intent, intent_search_params
 from synapt.recall.session_start import _pid_alive
+
+# How many knowledge rows ONE healthy save will backfill.
+#
+# Bounded so a save stays cheap on a store with a long backlog: a save that
+# walked the whole queue would make the cost of keeping a fact depend on how
+# many other facts are missing vectors. Repeated saves walk it forward, because
+# the accessor orders by rowid and a filled row leaves the queue -- so a
+# first-user store heals a batch at a time instead of never.
+KNOWLEDGE_BACKFILL_PER_SAVE = 32
 
 
 def _cap_tokens(requested: int) -> int:
@@ -2878,14 +2888,17 @@ def recall_save(
                 # the caller asked to keep. Degrade instead: the node lands with
                 # no vector and the save reports "saved without embeddings".
                 #
-                # THE VECTOR STAYS EMPTY, AND NOTHING HERE CLAIMS OTHERWISE.
-                # _build_knowledge_embeddings can fill such a row, but its only
-                # caller is the background chunk-embedding build, which does not
-                # run on a store that has no chunk embeddings -- so on a fresh
-                # first-user store no later pass fills this vector. Measured in a
-                # two-process probe: two later runs with a healthy provider left
-                # the vector absent, twice. A bounded backfill on a healthy save
-                # is a follow-on, not a property of this path.
+                # THE VECTOR MAY STAY EMPTY HERE, BUT NOT FOREVER.
+                # The degradation above leaves this node with no vector, and on a
+                # fresh first-user store nothing else fills it: the other filler,
+                # the background chunk-embedding build, does not run where there
+                # are no chunk embeddings. Measured in a two-process probe: two
+                # later runs with a healthy provider left the vector absent,
+                # twice. The bounded backfill at the end of this function is the
+                # answer to that -- after a HEALTHY save it fills up to
+                # KNOWLEDGE_BACKFILL_PER_SAVE rows this path left empty, so the
+                # store heals in the flow a first user actually runs rather than
+                # waiting on an embedding rebuild that never comes.
                 #
                 # THE PACK STAYS OUTSIDE THIS try, DELIBERATELY. A provider that
                 # succeeds but returns the wrong WIDTH is not a transient
@@ -2915,6 +2928,19 @@ def recall_save(
                 if rowid is not None:
                     db.save_knowledge_embeddings({rowid: embedding})
                     embedded = True
+                # A HEALTHY SAVE HEALS WHAT AN UNHEALTHY ONE LEFT BEHIND.
+                # Placed AFTER this node's own vector is written, so the node
+                # just saved is not in the queue this drains. It runs only when
+                # the provider just worked: a provider that failed a moment ago
+                # would fail again here and log noise on every save.
+                # Bounded, so the cost of keeping one fact does not depend on how
+                # many other facts are missing vectors.
+                # Its own failure is swallowed INSIDE the backfill -- this save
+                # has already committed, and a repair the caller never asked for
+                # must not turn a successful write into a reported failure.
+                backfill_knowledge_embeddings(
+                    db, provider, limit=KNOWLEDGE_BACKFILL_PER_SAVE
+                )
         finally:
             db.close()
 
