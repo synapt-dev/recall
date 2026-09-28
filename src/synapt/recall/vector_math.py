@@ -7,7 +7,7 @@ this function before -- ``source_index._cosine``, ``core._cosine`` and
 produced a plausible-looking number that was simply wrong.
 
 WHY THIS MODULE IMPORTS NOTHING BUT ``math``: the modules that need a cosine sit
-on hot import paths (``core`` is on the CLI cold-start path, recall#435), and
+on hot import paths (``core`` is on the CLI cold-start path), and
 ``embeddings`` -- which used to own this function -- drags in ``urllib.request``,
 which is why four of its callers import it lazily. A cosine needs no I/O and no
 provider, so it lives here and costs nothing to import. ``embeddings``
@@ -31,10 +31,10 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     wider query deflates further until rows fall under a similarity floor and
     drop out of the results with no error anywhere.
 
-    Refusing is the same invariant the store's write side already holds
-    (recall#1003: a provider whose width is not the store's must not produce a
-    blob either). A width mismatch must not produce a VALUE. Callers decide what
-    to do about it -- ``search_source`` skips the row and counts it, because a
+    Refusing is the invariant the store's write side already holds: a provider
+    whose width is not the store's must not produce a blob, so a width mismatch
+    must not produce a VALUE here either. Callers decide what to do about it --
+    ``search_source`` skips the row and counts it, because a
     stored width is a property of when that row was written and refusing the
     whole query would take down the rows that ARE comparable.
     """
