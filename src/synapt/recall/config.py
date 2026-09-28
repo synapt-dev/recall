@@ -44,8 +44,14 @@ _ENV_MAP = {
     "SYNAPT_SUMMARY_MODEL": "summarization",
     "SYNAPT_ENRICHMENT_MODEL": "enrichment",
     "SYNAPT_RERANKER_MODEL": "reranker",
-    "SYNAPT_EMBEDDING_MODEL": "embedding",
     "SYNAPT_CONSOLIDATION_MODEL": "consolidation",
+    # SYNAPT_EMBEDDING_MODEL is deliberately NOT here. It never reached the
+    # constructor -- LocalEmbeddings() is always built with the default -- so
+    # honouring it only moved the stats row, making the table name an embedding
+    # model the product never loaded. Removed rather than wired: on a
+    # fixed-width store the switch could only ever accept another 384-dimension
+    # model, which the width check would then have to explain. Rewire if a user
+    # asks. See the status-table row in resolve_model_states().
 }
 
 # Default query parameters

@@ -55,10 +55,18 @@ class TestRecallConfig:
         cfg = RecallConfig()
         assert cfg.get_model("enrichment") == "custom/enrichment"
 
-    def test_env_override_embedding(self, monkeypatch):
+    def test_env_embedding_override_is_NOT_honoured(self, monkeypatch):
+        """The regression witness for the removal.
+
+        SYNAPT_EMBEDDING_MODEL is no longer in _ENV_MAP. It never reached the
+        constructor -- LocalEmbeddings() is always built with the default -- so
+        honouring it here only moved the stats row, making the status table name
+        an embedding model the product never loaded. Setting it must now leave
+        the resolved model at the default, which is what the runtime uses.
+        """
         monkeypatch.setenv("SYNAPT_EMBEDDING_MODEL", "all-MiniLM-L12-v2")
         cfg = RecallConfig()
-        assert cfg.get_model("embedding") == "all-MiniLM-L12-v2"
+        assert cfg.get_model("embedding") == DEFAULTS["embedding"]
 
     def test_env_override_reranker(self, monkeypatch):
         monkeypatch.setenv("SYNAPT_RERANKER_MODEL", "custom/reranker")
@@ -199,19 +207,38 @@ class TestLoadConfig:
         # Env var wins
         assert cfg.get_model("summarization") == "env-model"
 
+    # Roles deliberately WITHOUT an env override, each with its reason. This is
+    # an ALLOW-LIST OF ONE, not a relaxation of the invariant: a sixth role added
+    # to DEFAULTS that has no override still reddens this test, which is what it
+    # exists for.
+    NOT_OVERRIDABLE = {
+        # SYNAPT_EMBEDDING_MODEL deliberately has no override: it never reached the
+        # constructor -- LocalEmbeddings() is always built with the default -- so
+        # honouring it only moved the stats row and made the table name a model
+        # the product never loaded. Removed rather than wired. See the comment at
+        # _ENV_MAP in config.py.
+        "embedding",
+    }
+
     def test_every_model_role_has_an_env_override(self):
         """The set-level invariant, so a sixth role cannot be added silently.
 
         No test referenced `_ENV_MAP`/`_KEY_TO_ENV` at all before this: the per-role
         witnesses would stay green while a new role in DEFAULTS had no override, which
         is precisely how consolidation sat without one. Both directions are asserted --
-        every role has a var, and no var names a role that does not exist."""
+        every role has a var, and no var names a role that does not exist.
+
+        `NOT_OVERRIDABLE` carries the roles the product deliberately does not
+        override, with the reason on the entry. It is a named exception list rather
+        than a weakened assertion, so the invariant keeps its full force for every
+        other role."""
         from synapt.recall.config import _ENV_MAP
 
         roles = set(DEFAULTS)
         mapped = set(_ENV_MAP.values())
-        assert mapped == roles, (
-            f"roles without an env override: {sorted(roles - mapped)}; "
+        expected = roles - self.NOT_OVERRIDABLE
+        assert mapped == expected, (
+            f"roles without an env override: {sorted(expected - mapped)}; "
             f"overrides naming unknown roles: {sorted(mapped - roles)}"
         )
 
