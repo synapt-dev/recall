@@ -105,6 +105,33 @@ jobs:
       - name: Build wheel and self-contained CLI
         shell: bash
         working-directory: source
+        env:
+          # `pex --scie eager` invokes `science`, which resolves the CPython
+          # distribution named by --scie-pbs-release through
+          # api.github.com/repos/astral-sh/python-build-standalone/releases/tags/<release>.
+          # Those calls are unauthenticated by default and share the runner IP
+          # pool's 60/hour anonymous quota, which is held per IP rather than by
+          # us. Measured: the macOS leg has failed with "403 rate limit exceeded"
+          # on v0.25.1, v0.25.2 and v0.25.4, while the Linux leg of the SAME matrix
+          # succeeded on all three -- and v0.25.3 passed BOTH legs. That
+          # intermittency is itself what a shared per-IP quota predicts, and it is
+          # why this broke three times without ever looking deterministic. Where
+          # the macOS leg failed, "Attach release binaries" was SKIPPED and the
+          # release shipped with 0 binary assets while PyPI succeeded. science
+          # reads per-host bearer credentials from
+          # SCIENCE_AUTH_<HOSTNAME>_BEARER, the host uppercased with dots and
+          # dashes as underscores -- api.github.com becomes API_GITHUB_COM.
+          # GITHUB_TOKEN gets 1,000 requests/hour PER REPOSITORY -- a bucket held
+          # per repository rather than per IP, so this lookup stops competing with
+          # other IPs for the 60/hour anonymous allowance. It is NOT exclusive:
+          # other workflows in this repository drawing on GITHUB_TOKEN share it.
+          # (5,000/hour is the personal-token allowance, not this one.)
+          # Scoped to this step: the smoke test below runs the EAGER scie, which
+          # already embeds the distribution, so it makes no API call.
+          # Mechanism read from science/fetcher.py at a-scie/lift v0.21.0 and
+          # pex/scie/science.py at pex v2.100.7 (which copies os.environ into the
+          # science subprocess, so this env var reaches it).
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
         run: |
           ../release-venv/bin/python -m build --wheel --no-isolation
           wheel="$(printf '%s\n' dist/synapt-*.whl)"

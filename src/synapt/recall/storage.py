@@ -39,6 +39,20 @@ EMBEDDING_DIM = 384
 _EMBEDDING_FMT = f"{EMBEDDING_DIM}f"
 _EMBEDDING_BYTES = struct.calcsize(_EMBEDDING_FMT)
 
+
+def pack_embedding(embedding: "list[float]") -> bytes:
+    """Pack ONE embedding into the store's fixed-width blob.
+
+    THE SINGLE PLACE THE WIDTH IS APPLIED. Every write path goes through here,
+    so the width a store can hold is expressed once instead of restated at each
+    call site -- which is what let a second write path keep its own copy.
+
+    Raises ``struct.error`` when the vector is not EMBEDDING_DIM wide. That is
+    the failure a caller validating BEFORE an irreversible write depends on: an
+    embedding provider whose width is not the store's SUCCEEDS at producing a
+    vector, so this is the step that has to reject it.
+    """
+    return struct.pack(_EMBEDDING_FMT, *embedding)
 _SCHEMA_OPEN_RETRY_SECONDS = 5.0
 _SCHEMA_OPEN_RETRY_INTERVAL_SECONDS = 0.025
 
@@ -366,6 +380,51 @@ CREATE TABLE IF NOT EXISTS shard_overview_cache (
 # or renames a field -- an old cached blob under a stale version is never
 # read as current (the schema_version column is part of the cache key).
 SHARD_OVERVIEW_CACHE_SCHEMA_VERSION = 1
+
+
+def prune_cached_shard_overviews(index_db_path: Path, generation_names: list[str]) -> int:
+    """Delete cached ``session_overview()`` rows for generations that are gone.
+
+    The cache key includes ``generation_name``, so collecting a generation's
+    DIRECTORY does not touch its rows. Without this, one dead generation's rows
+    survive every rebuild, and the code's own comment says a rebuild happens
+    every session start. Measured 2026-09-27 (R3.1): five rebuilds bounded the
+    directories to two while the cache still named five generations, three of
+    them gone, with the live rows present as the control.
+
+    Called by ``rebuild_and_publish`` with exactly the names
+    ``gc_old_generations`` returned, so the prune is scoped to generations that
+    no longer exist on disk rather than to anything age-based.
+
+    Courtesy, never a dependency -- the same rule the cache accessors carry: the
+    table may not exist at all, and index.db may be read-only or busy behind an
+    active build. Every failure degrades to "the rows stay until the next
+    rebuild", never to an error in the caller. The scope is ``DatabaseError`` and
+    not ``OperationalError``: a file that is not a database at all raises the
+    PARENT (measured: "file is not a database"), which an ``OperationalError``
+    handler misses. Returns the number of names the
+    DELETE named, so a test can assert it without depending on row counts; a
+    missing table returns 0, which is also the honest "it did not actually run"
+    signal.
+    """
+    names = [name for name in generation_names if name]
+    if not names:
+        return 0
+    try:
+        conn = sqlite3.connect(str(index_db_path), timeout=0.5)
+        try:
+            conn.execute("PRAGMA busy_timeout=500")
+            placeholders = ",".join("?" * len(names))
+            conn.execute(
+                f"DELETE FROM shard_overview_cache WHERE generation_name IN ({placeholders})",
+                names,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return 0
+    return len(names)
 
 
 def _serialize_shard_overview(overview: dict[str, dict]) -> str:
@@ -1891,7 +1950,9 @@ class RecallDB:
         corrupt/unreadable entry is possible if a write was interrupted
         mid-commit — both degrade to a miss rather than an error, the same
         courtesy-not-dependency shape as the Codex-session-cwd cache
-        (``codex.py``'s ``_cwd_cache``).
+        (``codex.py``'s ``_cwd_cache``). The handler catches ``DatabaseError``
+        and not ``OperationalError``: a file that is not a database at all
+        raises the PARENT, so a child-scoped handler would break this promise.
         """
         try:
             row = self._conn.execute(
@@ -1899,7 +1960,7 @@ class RecallDB:
                 "WHERE generation_name = ? AND shard_name = ? AND schema_version = ?",
                 (generation_name, shard_name, schema_version),
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
             return None
         if row is None:
             return None
@@ -1923,7 +1984,7 @@ class RecallDB:
         active build's write lock on index.db; this cache is a courtesy,
         never a dependency (same rule as ``flush_cwd_cache``'s docstring),
         so a bounded, short ``busy_timeout`` and a swallowed
-        ``OperationalError`` mean a busy or read-only index.db just skips
+        ``DatabaseError`` mean a busy or read-only index.db just skips
         the write and the next call recomputes uncached — never blocks or
         fails the caller.
         """
@@ -1946,7 +2007,7 @@ class RecallDB:
                 conn.commit()
             finally:
                 conn.close()
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
             pass
 
     def session_activity(self) -> dict[str, tuple[int, str]]:
@@ -2291,7 +2352,7 @@ class RecallDB:
         """Store embedding BLOBs for specific rowids."""
         cur = self._conn.cursor()
         for rowid, emb in embeddings.items():
-            blob = struct.pack(_EMBEDDING_FMT, *emb)
+            blob = pack_embedding(emb)
             cur.execute("UPDATE chunks SET embedding = ? WHERE rowid = ?", (blob, rowid))
         self._conn.commit()
 
@@ -2579,7 +2640,7 @@ class RecallDB:
         """Store embedding BLOBs for knowledge nodes by rowid."""
         cur = self._conn.cursor()
         for rowid, emb in embeddings.items():
-            blob = struct.pack(_EMBEDDING_FMT, *emb)
+            blob = pack_embedding(emb)
             cur.execute(
                 "UPDATE knowledge SET embedding = ? WHERE rowid = ?",
                 (blob, rowid),

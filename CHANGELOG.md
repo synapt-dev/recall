@@ -4,6 +4,64 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-28
+
+Minor release. A new user whose machine runs Ollama with a local embedding model
+can install and save knowledge: recall refuses an embedding provider whose
+vector width is not the store's, and a save never leaves a half-written node. One
+new command, `comms send`, is why this is a minor release rather than a patch.
+
+Sixteen files changed across `v0.25.4..dev`, excluding this entry: 1276
+insertions, 32 deletions, carrying #1229, #1230, #1231, #1232, #1233, #1234,
+#1235 and #1236 plus the version bump. As in the 0.25.4 entry, the figure
+includes the version files and excludes this changelog entry.
+
+### Added
+
+- **`comms send`, a declared-pane communication proof.** It records what one
+  declared tmux-pane transport observed next to the durable direct-message
+  ledger, rather than guessing delivery. A guessed time label and an empty body
+  are refused before anything is written. A missing pane is recorded as
+  undeliverable, and a capture that cannot be read is recorded as unknown
+  rather than raising (#1231).
+
+### Fixed
+
+- **An embedding provider whose width is not the store's is refused.** On a
+  machine where a local Ollama embedding model is present, recall could pick a
+  1024-wide model for a 384-wide store, and every knowledge save then failed.
+  The mismatch is now refused visibly and recall stays on the store's width
+  (#1233).
+
+- **A knowledge save computes its embedding before the node is committed.** A
+  failed embedding used to leave the node written but unsearchable by vector.
+  The vector is now packed before the write, so a failing pack leaves nothing
+  behind (#1234).
+
+- **One `pack_embedding()` serves every write path.** The store's vector format
+  is packed in one place, with a named width error, so no write path can pack a
+  vector of the wrong width by a side door (#1235).
+
+- **A transient provider failure keeps the fact.** When the embedding provider
+  errors for a moment, the node is saved and reported as saved without its
+  search vector, instead of the fact being lost. A wrong-width vector still
+  refuses the whole save (#1236).
+
+- **Session start defers the incremental index build.** Session-start catchup
+  still archives transcripts and compacts the journal, but no longer launches
+  the build; explicit maintenance commands still run it (#1230).
+
+- **The overview cache prune survives a file that is not a database.** The
+  prune caught `sqlite3.OperationalError`, but a non-database file raises its
+  parent, `sqlite3.DatabaseError`; both the prune and the write accessor now
+  catch that (#1232).
+
+- **Release binaries build on macOS again.** The macOS release build's lookup
+  of the bundled Python distribution was unauthenticated and hit the shared
+  anonymous rate limit, so v0.25.1 and v0.25.2 carry no binary assets, and
+  v0.25.4's were attached only by a later run. The lookup is now authenticated
+  (#1229).
+
 ## [0.25.4] - 2026-09-25
 
 Patch release. Six fixes, all in the paths a session start, a compaction and a

@@ -2856,16 +2856,63 @@ def recall_save(
                 node.created_at = existing.get("created_at", node.created_at)
                 node.version = existing.get("version", 1) + 1
                 node.lineage_id = existing.get("lineage_id", "") or existing["id"]
+            # COMPUTE AND PACK THE VECTOR BEFORE THE NODE IS COMMITTED.
+            # The operation that FAILS is the PACK, not the embed: on a width
+            # mismatch embed() SUCCEEDS and returns a vector of the wrong width,
+            # and struct.pack against this store's fixed-width format is what
+            # raises ("pack expected 384 items for packing (got 1024)"). That pack
+            # lives inside save_knowledge_embeddings, which runs AFTER
+            # save_knowledge_node, so a failure there leaves the node behind.
+            # Packing here moves the real failure ahead of the write that cannot
+            # be undone. The result is discarded ON PURPOSE: this is the same
+            # operation the store will run, executed early. Do not remove it as an
+            # unused value.
+            from synapt.recall.storage import pack_embedding
+
+            provider = get_embedding_provider()
+            embedding = None
+            if provider:
+                # A TRANSIENT PROVIDER FAILURE MUST NOT LOSE THE KNOWLEDGE.
+                # An unreachable Ollama, a timeout, or a model being pulled is a
+                # temporary condition; failing the save over it discards a fact
+                # the caller asked to keep. Degrade instead: the node lands with
+                # no vector and the save reports "saved without embeddings".
+                #
+                # THE VECTOR STAYS EMPTY, AND NOTHING HERE CLAIMS OTHERWISE.
+                # _build_knowledge_embeddings can fill such a row, but its only
+                # caller is the background chunk-embedding build, which does not
+                # run on a store that has no chunk embeddings -- so on a fresh
+                # first-user store no later pass fills this vector. Measured in a
+                # two-process probe: two later runs with a healthy provider left
+                # the vector absent, twice. A bounded backfill on a healthy save
+                # is a follow-on, not a property of this path.
+                #
+                # THE PACK STAYS OUTSIDE THIS try, DELIBERATELY. A provider that
+                # succeeds but returns the wrong WIDTH is not a transient
+                # condition, and that is the case the pack rejects; folding it in
+                # here would silently degrade it instead.
+                try:
+                    embedding = provider.embed_single(node.content[:500])
+                except Exception as exc:  # noqa: BLE001 - see above
+                    logging.getLogger("synapt.recall").warning(
+                        "Knowledge node %s saved WITHOUT an embedding: the provider "
+                        "failed transiently (%s: %s). The node is saved and keyword "
+                        "search finds it; vector search does not see it.",
+                        node.id, type(exc).__name__, exc,
+                    )
+                    embedding = None
+
+            if embedding is not None:
+                pack_embedding(embedding)
+
             save_knowledge_node(
                 node, project_data_dir(project) / "knowledge.jsonl", project_index_dir(project)
             )
 
             embedded = False
-            provider = get_embedding_provider()
-            if provider:
+            if embedding is not None:
                 rowid = db.get_knowledge_rowid(node.id)
                 if rowid is not None:
-                    embedding = provider.embed_single(node.content[:500])
                     db.save_knowledge_embeddings({rowid: embedding})
                     embedded = True
         finally:
