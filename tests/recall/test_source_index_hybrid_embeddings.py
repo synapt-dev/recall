@@ -378,14 +378,22 @@ class _WideProvider(_FakeProvider):
 
 
 def test_cosine_refuses_a_width_mismatch() -> None:
-    """The root fix: `_cosine` raises rather than truncating the dot product."""
-    from synapt.recall.source_index import _cosine
+    """The root fix: the package's ONE cosine raises rather than truncating the
+    dot product. It lives in vector_math and is used by source_index and core."""
+    from synapt.recall.vector_math import cosine_similarity
 
     with pytest.raises(ValueError, match="width mismatch"):
-        _cosine([1.0] * 3, [1.0] * 2)
+        cosine_similarity([1.0] * 3, [1.0] * 2)
     # CONTROL, without which a blanket refusal would pass: matched widths still
     # score, and the wrong-width call is the ONLY one that raises.
-    assert _cosine([1.0, 1.0], [1.0, 1.0]) == pytest.approx(1.0)
+    assert cosine_similarity([1.0, 1.0], [1.0, 1.0]) == pytest.approx(1.0)
+    # AND THE IDENTITY CLAIM: source_index no longer keeps a private copy, and
+    # the name embeddings re-exports IS this function rather than a second one.
+    import synapt.recall.embeddings as embeddings_module
+    import synapt.recall.source_index as source_index_module
+
+    assert embeddings_module.cosine_similarity is cosine_similarity
+    assert not hasattr(source_index_module, "_cosine")
 
 
 def test_a_width_mismatch_is_skipped_and_counted_not_scored(

@@ -23,6 +23,13 @@ import threading
 import urllib.request
 from typing import List, Optional
 
+# The ONE cosine for the package lives in vector_math, which refuses a width
+# mismatch instead of truncating the dot product. This name is re-exported
+# because hybrid, consolidate and knowledge already import it from here; they
+# inherit the fix without their call sites changing. Nothing here re-implements
+# it -- a second definition is what let the truncation survive in three places.
+from synapt.recall.vector_math import cosine_similarity  # noqa: F401
+
 
 def _detect_device() -> str:
     """Pick the safest available torch device for embedding inference.
@@ -153,14 +160,9 @@ class OllamaEmbeddings(EmbeddingProvider):
         return all_embeddings
 
 
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Cosine similarity between two vectors (pure Python)."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+# `cosine_similarity` was defined here. It is now imported above from
+# vector_math, which is the single owner of the width rule; see that module for
+# why a mismatched pair raises rather than scoring.
 
 
 _singleton_lock = threading.Lock()
