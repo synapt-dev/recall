@@ -36,6 +36,7 @@ logger = logging.getLogger("synapt.recall")
 from synapt.recall.bm25 import BM25, _tokenize
 from synapt.recall.hybrid import augment_query_for_intent, extract_entities
 from synapt.recall.storage import RecallDB
+from synapt.recall.vector_math import cosine_similarity
 from synapt.recall.sharded_db import ShardedRecallDB
 
 # Multiplier for knowledge nodes whose content matches query entities
@@ -51,19 +52,17 @@ ENTITY_BOOST = 1.5
 CO_RETRIEVAL_SIMILARITY_FLOOR = 0.40
 
 
-def _cosine(u: list[float], v: list[float]) -> float:
-    """Plain cosine between two equal-length vectors (no numpy dependency)."""
-    num = sum(a * b for a, b in zip(u, v))
-    den_u = math.sqrt(sum(a * a for a in u))
-    den_v = math.sqrt(sum(b * b for b in v))
-    if not den_u or not den_v:
-        return 0.0
-    return num / (den_u * den_v)
-
-
 def _pair_clears_floor(vec_a: list[float], vec_b: list[float]) -> bool:
-    """The co-retrieval floor: cos(a, b) >= CO_RETRIEVAL_SIMILARITY_FLOOR."""
-    return _cosine(vec_a, vec_b) >= CO_RETRIEVAL_SIMILARITY_FLOOR
+    """The co-retrieval floor: cos(a, b) >= CO_RETRIEVAL_SIMILARITY_FLOOR.
+
+    Uses the package's ONE cosine, which REFUSES a pair of different widths
+    rather than truncating the dot product. Both vectors here come from one
+    `emb_by_id` map, so a healthy store never reaches that refusal; a store
+    carrying rows written by an older provider at another width is exactly the
+    case it is there for, and a wrong floor verdict on a contradiction pair is
+    worse than a loud error.
+    """
+    return cosine_similarity(vec_a, vec_b) >= CO_RETRIEVAL_SIMILARITY_FLOOR
 
 # Category-intent alignment map: which knowledge node categories are most
 # relevant for each query intent. Used to boost aligned nodes by 1.5×.
