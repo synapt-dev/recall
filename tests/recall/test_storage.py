@@ -1280,3 +1280,122 @@ class TestAccessTracking:
         assert stats_high["weighted_count"] > stats_low["weighted_count"]
         assert abs(stats_high["weighted_count"] - 2.7) < 0.001
         assert abs(stats_low["weighted_count"] - 0.6) < 0.001
+
+
+def _overlay_cursor(transcript_path: str, size: int) -> dict:
+    """The cursor dict ``replace_query_tail`` stamps beside its overlay rows."""
+    return {
+        "transcript_path": transcript_path,
+        "observed_complete_offset": size,
+        "rewind_offset": 0,
+        "rewind_turn_index": 0,
+        "source_size": size,
+        "source_mtime_ns": size,
+        "observed_prefix_sha256": "digest",
+        "suppresses_base": False,
+        "latest_projected_timestamp": "",
+        "last_attempt_at": "2026-03-02T00:00:00Z",
+        "last_success_at": "2026-03-02T00:00:00Z",
+    }
+
+
+def _seed_overlay(db, session_id: str, turns: int) -> list[str]:
+    """Write ``turns`` overlay rows for one session; return their ids in order."""
+    chunks = [
+        TranscriptChunk(
+            id=f"{session_id}:t{turn}",
+            session_id=session_id,
+            timestamp=f"2026-03-02T10:{turn:02d}:00Z",
+            turn_index=turn,
+            user_text=f"overlay {session_id} turn {turn}",
+            assistant_text="assistant",
+            transcript_path=f"/runtime/{session_id}.jsonl",
+            agent_id="overlay-agent",
+        )
+        for turn in range(turns)
+    ]
+    db.replace_query_tail(
+        source_key=f"source-{session_id}",
+        session_id=session_id,
+        rewind_offset=0,
+        chunks=chunks,
+        cursor=_overlay_cursor(f"/runtime/{session_id}.jsonl", turns),
+    )
+    return [chunk.id for chunk in chunks]
+
+
+class TestBoundedQueryTailLoad:
+    """A bounded caller must be able to issue a bounded overlay read.
+
+    The overlay reached 23,753 rows on the production store while every
+    bounded loader called the full ``SELECT *`` and filtered in Python --
+    measured on a /tmp copy of that store as 4.01 s for the full read
+    against 0.03 s for one session's rows, with ``EXPLAIN QUERY PLAN``
+    reporting ``SEARCH query_tail_chunks USING INDEX idx_query_tail_session``.
+    """
+
+    def test_bounded_load_equals_the_full_load_filtered(self, db):
+        """The bounded read is the full read filtered: same ids, same order.
+
+        This is the equivalence every bounded caller rests on. Extra rows,
+        missing rows or reordered rows would each mean a bounded caller
+        sees a different overlay than the unbounded one.
+        """
+        seeded = {
+            "session-aaa": _seed_overlay(db, "session-aaa", 3),
+            "session-bbb": _seed_overlay(db, "session-bbb", 2),
+        }
+
+        everything = db.load_query_tail_chunks()
+        assert len(everything) == 5
+
+        for session_id, expected_ids in seeded.items():
+            bounded = db.load_query_tail_chunks([session_id])
+            assert [chunk.id for chunk in bounded] == expected_ids
+            assert [
+                chunk.id for chunk in everything if chunk.session_id == session_id
+            ] == expected_ids
+
+    def test_bounded_load_returns_rowid_order_not_request_order(self, db):
+        """Order is the unbounded read's order, not the caller's list order.
+
+        ``session_overview`` reads the first chunk for a session as the
+        source of its ``transcript_path``, so the order must not depend on
+        how a caller happened to spell its session list.
+        """
+        _seed_overlay(db, "session-aaa", 2)
+        _seed_overlay(db, "session-bbb", 1)
+        _seed_overlay(db, "session-ccc", 1)
+
+        everything = [chunk.id for chunk in db.load_query_tail_chunks()]
+        bounded = db.load_query_tail_chunks(["session-ccc", "session-aaa"])
+
+        assert [chunk.id for chunk in bounded] == [
+            chunk_id for chunk_id in everything if "session-bbb" not in chunk_id
+        ]
+
+    def test_bounded_load_with_no_sessions_reads_nothing(self, db):
+        """An empty request is an empty answer, not the whole table.
+
+        ``[]`` must not fall through to the unbounded read: a caller whose
+        candidate list came out empty would otherwise pay the full scan and
+        receive every session's rows as a bonus.
+        """
+        _seed_overlay(db, "session-aaa", 2)
+
+        assert db.load_query_tail_chunks([]) == []
+        assert len(db.load_query_tail_chunks()) == 2
+
+    def test_bounded_load_deduplicates_repeated_session_ids(self, db):
+        """A repeated session id must not double its rows.
+
+        ``session_ids`` arrives from caller-built lists, so a duplicate is
+        reachable; the batches are per-id, and an id asked for twice would
+        otherwise return its rows twice.
+        """
+        _seed_overlay(db, "session-aaa", 2)
+
+        once = db.load_query_tail_chunks(["session-aaa"])
+        twice = db.load_query_tail_chunks(["session-aaa", "session-aaa"])
+
+        assert [chunk.id for chunk in twice] == [chunk.id for chunk in once]
