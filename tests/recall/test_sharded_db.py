@@ -963,5 +963,131 @@ class TestShardedRecallDBSessionOverviewCache(unittest.TestCase):
         db.close()
 
 
+class TestBoundedOverlayReadAtCallSites(unittest.TestCase):
+    """The bounded loaders must not materialize the whole overlay.
+
+    The fruit is a cold resume inside the 2 s budget, and what spent the
+    budget was these two call sites hydrating every overlay row in order to
+    answer for one session. Both witnesses count MATERIALIZED overlay
+    chunks rather than elapsed time: a timing assertion would be a machine
+    property, while a widen-the-read bug is what this pins, and that bug
+    reddens the count on any machine.
+
+    ``_query_tail_chunk_from_row`` is the overlay's own row builder (its
+    only callers are the four ``query_tail`` loaders in storage.py), so
+    counting its calls counts exactly the overlay rows a code path
+    materialized -- base chunks from the shards come through a different
+    builder and are not counted here.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.index_dir = Path(self.tmpdir)
+        RecallDB(self.index_dir / "index.db").close()
+        shard = RecallDB(self.index_dir / "data_001.db")
+        shard.save_chunks([
+            self._chunk("session-aaa:t0", "session-aaa", 0, "base row for the wanted session"),
+        ])
+        shard.close()
+        # Two sessions in the overlay; only session-aaa is ever asked for.
+        index = RecallDB(self.index_dir / "index.db")
+        index.replace_query_tail(
+            source_key="src-aaa",
+            session_id="session-aaa",
+            rewind_offset=0,
+            chunks=[self._chunk("session-aaa:t1", "session-aaa", 1, "overlay row, wanted")],
+            cursor=self._cursor("session-aaa"),
+        )
+        index.replace_query_tail(
+            source_key="src-bbb",
+            session_id="session-bbb",
+            rewind_offset=0,
+            chunks=[self._chunk("session-bbb:t0", "session-bbb", 0, "never asked for")],
+            cursor=self._cursor("session-bbb"),
+        )
+        index.close()
+
+    @staticmethod
+    def _chunk(chunk_id, session_id, turn_index, text):
+        return TranscriptChunk(
+            id=chunk_id,
+            session_id=session_id,
+            timestamp=f"2026-01-0{turn_index + 1}T00:00:00Z",
+            turn_index=turn_index,
+            user_text=text,
+            assistant_text="assistant",
+            # the overlay row's transcript_path is the CHUNK's (storage.py
+            # replace_query_tail), not the cursor's -- session_overview reads
+            # the first chunk's, so the fixture has to carry one.
+            transcript_path=f"/runtime/{session_id}.jsonl",
+            agent_id="overlay-agent",
+        )
+
+    @staticmethod
+    def _cursor(session_id):
+        return {
+            "transcript_path": f"/runtime/{session_id}.jsonl",
+            "observed_complete_offset": 2,
+            "rewind_offset": 0,
+            "rewind_turn_index": 0,
+            "source_size": 2,
+            "source_mtime_ns": 2,
+            "observed_prefix_sha256": "digest",
+            "suppresses_base": False,
+            "latest_projected_timestamp": "",
+            "last_attempt_at": "2026-01-01T00:00:00Z",
+            "last_success_at": "2026-01-01T00:00:00Z",
+        }
+
+    def _materialized(self, call):
+        """Run ``call``; return (session ids of overlay rows materialized, result)."""
+        seen = []
+        real = RecallDB._query_tail_chunk_from_row
+
+        def counting(row):
+            seen.append(row["session_id"])
+            return real(row)
+
+        with mock.patch.object(
+            RecallDB, "_query_tail_chunk_from_row", staticmethod(counting)
+        ):
+            result = call()
+        return seen, result
+
+    def test_load_session_chunks_many_materializes_only_the_requested_session(self):
+        db = ShardedRecallDB.open_readonly(self.index_dir)
+        try:
+            seen, chunks = self._materialized(
+                lambda: db.load_session_chunks_many(["session-aaa"])
+            )
+        finally:
+            db.close()
+
+        self.assertEqual(
+            sorted(chunk.id for chunk in chunks["session-aaa"]),
+            ["session-aaa:t0", "session-aaa:t1"],
+        )
+        self.assertTrue(
+            seen, "the bounded loader materialized no overlay chunk at all"
+        )
+        self.assertEqual(set(seen), {"session-aaa"})
+
+    def test_session_overview_reads_overlay_metadata_without_materializing_chunks(self):
+        db = ShardedRecallDB.open_readonly(self.index_dir)
+        try:
+            seen, overview = self._materialized(db.session_overview)
+        finally:
+            db.close()
+
+        # the overlay still contributes its session, its turns and its path
+        self.assertIn("session-bbb", overview)
+        self.assertEqual(overview["session-bbb"]["turn_count"], 1)
+        self.assertTrue(overview["session-bbb"]["has_real_activity"])
+        self.assertEqual(overview["session-bbb"]["transcript_path"], "/runtime/session-bbb.jsonl")
+        self.assertEqual(overview["session-aaa"]["turn_count"], 2)
+        # ...while materializing not one overlay chunk
+        self.assertEqual(seen, [])
+
+
 if __name__ == "__main__":
     unittest.main()

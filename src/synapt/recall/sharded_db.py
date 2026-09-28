@@ -425,35 +425,35 @@ class ShardedRecallDB:
                 current["agent_ids"] = frozenset(current.get("agent_ids", ())) | frozenset(
                     overview.get("agent_ids", ())
                 )
-        for chunk in self._index.load_query_tail_chunks():
+        for chunk in self._index.load_query_tail_overview_rows():
             current = result.setdefault(
-                chunk.session_id,
+                chunk["session_id"],
                 {
                     "activity": (0, ""),
                     "earliest_ts": "",
                     "latest_ts": "",
                     "turn_count": 0,
                     "has_real_activity": False,
-                    "transcript_path": chunk.transcript_path,
+                    "transcript_path": chunk["transcript_path"] or "",
                     "agent_ids": frozenset(
-                        [chunk.agent_id]
-                        if chunk.turn_index != -1 and chunk.agent_id else []
+                        [chunk["agent_id"]]
+                        if chunk["turn_index"] != -1 and chunk["agent_id"] else []
                     ),
                 },
             )
             current["earliest_ts"] = min(
-                filter(None, (current["earliest_ts"], chunk.timestamp))
-            ) if current["earliest_ts"] or chunk.timestamp else ""
-            current["latest_ts"] = max(current["latest_ts"], chunk.timestamp)
-            current["turn_count"] += int(chunk.turn_index >= 0)
-            if chunk.turn_index != -1:
+                filter(None, (current["earliest_ts"], chunk["timestamp"]))
+            ) if current["earliest_ts"] or chunk["timestamp"] else ""
+            current["latest_ts"] = max(current["latest_ts"], chunk["timestamp"])
+            current["turn_count"] += int(chunk["turn_index"] >= 0)
+            if chunk["turn_index"] != -1:
                 current["has_real_activity"] = True
                 current["activity"] = max(
-                    current["activity"], _timestamp_activity(chunk.timestamp)
+                    current["activity"], _timestamp_activity(chunk["timestamp"])
                 )
-            if chunk.turn_index != -1 and chunk.agent_id:
+            if chunk["turn_index"] != -1 and chunk["agent_id"]:
                 current["agent_ids"] = frozenset(current.get("agent_ids", ())) | {
-                    chunk.agent_id
+                    chunk["agent_id"]
                 }
         return result
 
@@ -484,7 +484,7 @@ class ShardedRecallDB:
                 if session_id in suppressed:
                     continue
                 grouped.setdefault(session_id, []).extend(chunks)
-        overlay = self._index.load_query_tail_chunks()
+        overlay = self._index.load_query_tail_chunks(session_ids)
         overlay_ids = {chunk.id for chunk in overlay}
         for session_id, chunks in grouped.items():
             grouped[session_id] = [
@@ -507,7 +507,7 @@ class ShardedRecallDB:
                 if session_id in suppressed:
                     continue
                 grouped.setdefault(session_id, []).extend(rows)
-        overlay = self._index.load_query_tail_chunks()
+        overlay = self._index.load_query_tail_chunks(session_ids)
         overlay_ids = {chunk.id for chunk in overlay}
         for session_id, rows in grouped.items():
             grouped[session_id] = [
