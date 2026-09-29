@@ -773,13 +773,32 @@ def pending_next_steps(path: Path | None = None) -> list[str]:
     have not appeared in any entry's ``done`` list.  Deduplicates by
     normalized key, preserving the most recent wording.
     """
+    path = path or _journal_path()
     entries = read_entries(path, n=20)
     if not entries:
         return []
 
-    # Collect all done items from all recent entries
-    all_done = set()
-    for entry in entries:
+    # The retirement set comes from the RAW entries, never the deduped view above.
+    # ``read_entries`` keeps only the NEWEST entry per session, so a ``done`` list
+    # written by an earlier write in the same session is discarded and the
+    # retirement it records becomes invisible -- the reader serves a step the
+    # session retired, and the write that retired it reported doing so.
+    # ``session_done_items`` reads the raw entries for exactly this reason; this is
+    # its read-side twin, so a retirement made earlier in the session counts here
+    # too.
+    #
+    # The window stays on SESSIONS, not on raw rows: the raw read is narrowed to the
+    # sessions ``read_entries`` actually kept, so widening the done set does not
+    # widen what counts as a recent session.
+    #
+    # ``next_steps`` below stay on the DEDUPED entries, deliberately: the newest
+    # write's list is the handoff, so a step a newer same-session write dropped must
+    # not come back through a raw union of next_steps.
+    sessions = {entry.session_id for entry in entries}
+    all_done: set[str] = set()
+    for entry in _read_all_entries(path):
+        if entry.session_id not in sessions:
+            continue
         for item in entry.done:
             if item and item.strip():
                 all_done.add(_step_key(item))
