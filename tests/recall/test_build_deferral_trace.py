@@ -22,9 +22,35 @@ import pytest
 
 from synapt.recall import build_deferrals, cli
 from synapt.recall.build_deferrals import DEFERRALS_FILENAME, deferral_notice, record_build, record_deferral
+from synapt.recall.config import clear_config_cache
 
 REFUSE = "0:100:2.0:0"   # free_inactive 2.0 GB, under the 6.0 floor
 PASS = "0:100:9.0:0"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_the_config_layer(tmp_path, monkeypatch):
+    """The premise of this file is that the floor is the 6.0 constant, and the floor is a
+    setting now: this drives the REAL ``cmd_catchup``, and the gate reads the GLOBAL config.
+
+    So the file reads the DEVELOPER'S ``~/.synapt/config.json`` unless it is isolated. The
+    failure is not hypothetical and not only a CI-vs-laptop difference: measured 2026-09-29,
+    this host carries ``{"memory": {"build_min_free_gb": 3.0}}``, and this witness failed
+    here (``floor_gb=3.0``, "floor from global config") while passing on a machine with no
+    config file at all. That is red exactly for the user the setting exists to serve and
+    green where nobody is watching.
+
+    A scratch HOME, and an explicit cache clear on both sides, because ``load_config``
+    memoises into ``_cached_config``: without the clear the first test's config leaks into
+    every test after it, and the fixture would look like it works while it does not.
+    """
+    home = tmp_path / "trace-home"
+    (home / ".synapt").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("SYNAPT_BUILD_MIN_FREE_GB", raising=False)
+    clear_config_cache()
+    yield home
+    clear_config_cache()
 
 
 @pytest.fixture
