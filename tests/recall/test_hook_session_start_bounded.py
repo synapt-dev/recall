@@ -222,10 +222,17 @@ def _real_host_lock_untouched():
     check below is a WRITE witness, and the bisection that found this defect shared it: both
     measured the same file, so "the other four files leave the lock alone" was a claim about a
     single file and this guard could not detect any host-state defect the bisection could not
-    already have found. The second instrument removes that blind spot — it records every path the
-    module actually RESOLVES through ``cli._host_synapt_dir`` and refuses any that is the real
-    ``~/.synapt``, whatever the caller goes on to write. It cannot false-red on fleet activity,
-    because it measures this module's calls and not the directory's contents.
+    already have found. The second instrument removes that blind spot: it refuses any call that
+    resolves the real ``~/.synapt``, whatever the caller goes on to write. It cannot false-red on
+    fleet activity, because it measures this module's calls and not the directory's contents.
+
+    IT IS A TRIPWIRE, NOT A CONTINUOUS OBSERVER, and the distinction matters when reading it
+    (Sentinel, r2, 2026-09-29). The catchup fixture sets the SAME attribute this recorder is
+    installed on, so during the only tests that resolve the host dir the recorder is NOT in the
+    call chain: it records ``[]`` on a clean run and is bypassed exactly when the fix is working.
+    That empty list is a NARROW negative, not evidence that nothing resolved the host dir — the
+    instrument fires only when the fix REGRESSES (mutation M1 below proves it does). So ``[]``
+    means "the recorder was not in the chain", never "the module was clean".
 
     COVERAGE, measured by mutation rather than assumed: deleting the scratch-host fixture in
     ``TestCatchupCommand`` reddens the class-level assertion below ("RESOLVED the real host dir 1
