@@ -1287,6 +1287,94 @@ def test_a_replaced_source_does_not_retire_the_previous_sessions_overlay(
     )
 
 
+def test_a_rewrite_that_keeps_the_ids_but_moves_the_content_does_not_retire(
+    tmp_path, monkeypatch
+):
+    """The shifted-turn row, and Apollo's row from his §5 BLOCK.
+
+    Chunk ids are POSITIONAL (`{short_id}:t{turn_index}`, core.py:162), so a
+    rewrite can leave an id in place while the turn it names is a different turn.
+    Measured on the live store: of 1,532 ids present in both the overlay and the
+    current parse, 848 (55%) carried different content.
+
+    That is why coverage must be judged on CONTENT. An id-presence test would
+    retire here, and so does today's gate — for a different reason, which is the
+    point of the row: it retires on the OFFSET comparison, after the key matches,
+    and those offsets were recorded against a file whose bytes have since moved.
+    Measured end state for this construction: cursor SURVIVED = False.
+
+    EXPECTED TO FAIL on the current gate; it is the spec for the fix.
+
+    Its sibling `..._key_match_with_no_coverage_...` is the same hazard from the
+    other side — a rewrite that makes the file SHORTER — and that one PASSES
+    today because the extent falls behind the cursor. Together they pin the
+    boundary: a key match alone must not decide, and neither must an offset.
+    """
+    from synapt.recall.core import TranscriptIndex, parse_transcript
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "base turn", "base answer", 20)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+
+    _write_turn(transcript, "overlay turn", "overlay answer", 21)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    refreshed = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert refreshed.state is QueryFreshnessState.REFRESHED
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        before = {c.id: (c.user_text, c.assistant_text) for c in db.load_query_tail_chunks()}
+    finally:
+        db.close()
+
+    # REWRITE IN PLACE: the same turn INDICES, different text, so the ids survive
+    # and the content does not. The inode is preserved, so the stored key still
+    # matches and this row is not measuring a rename.
+    inode_before = transcript.stat().st_ino
+    transcript.write_text("", encoding="utf-8")
+    _write_turn(transcript, "base turn", "base answer", 20)
+    _write_turn(transcript, "TOTALLY DIFFERENT text here", "and a different answer too", 21)
+    assert transcript.stat().st_ino == inode_before, (
+        "the rewrite changed the inode, so this row measures a rename"
+    )
+
+    after = {c.id: (c.user_text, c.assistant_text) for c in parse_transcript(transcript)}
+    shared = set(before) & set(after)
+    moved = [i for i in shared if before[i] != after[i]]
+    assert moved, (
+        "no id kept its name while its content moved, so this row does not "
+        "measure the shifted-turn shape it exists for"
+    )
+
+    db = ShardedRecallDB.open(index_dir)
+    rebuilt = TranscriptIndex(
+        parse_transcript(transcript),
+        use_embeddings=False,
+        cache_dir=index_dir,
+        db=db,
+    )
+    rebuilt.save(index_dir)
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        cursor = db.load_query_tail_cursor(refreshed.source_key)
+    finally:
+        db.close()
+
+    assert cursor is not None, (
+        f"the cursor was retired although ids {sorted(moved)} kept their names "
+        "and MOVED their content; the base does not hold what the overlay holds, "
+        "so retirement was decided on an offset rather than on coverage"
+    )
+
+
 def test_overlay_only_session_hydrates_bounded_resume_listing(tmp_path, monkeypatch):
     transcript = tmp_path / f"{SESSION}.jsonl"
     _write_turn(transcript, "overlay listing witness", "visible", 20)
