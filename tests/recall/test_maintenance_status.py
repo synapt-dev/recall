@@ -30,6 +30,9 @@ def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     (h / ".synapt").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(h))
+    # Windows: os.path.expanduser reads USERPROFILE, not HOME, so setting HOME alone
+    # isolates nothing there and these witnesses read the developer's real config.
+    monkeypatch.setenv("USERPROFILE", str(h))
     monkeypatch.delenv("SYNAPT_BUILD_MIN_FREE_GB", raising=False)
     clear_config_cache()
     yield h
