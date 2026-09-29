@@ -3997,7 +3997,10 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # hook exists, so it must survive a refusal.
             verdict, numbers = _host_memory_verdict()
             if verdict == "refuse":
-                print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers})",
+                # The source travels on the REFUSE line, and only there: a deferred user
+                # needs to know WHERE to change the number, and a pass has nothing to change.
+                print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers}; "
+                      f"floor from {_resolve_build_min_free_gb()[1]})",
                       file=sys.stderr)
                 from synapt.recall.build_deferrals import record_deferral
                 record_deferral(project_data_dir(project), "precompact", numbers)
@@ -4585,29 +4588,91 @@ class FakeMeasurements:
     ENV = "SYNAPT_RECALL_MEM_FAKE"
 
 
-def _build_min_free_gb() -> float:
-    """The free+inactive floor a build needs, overridable by environment.
+# The lower clamp a setting cannot go below: a setting that
+# can turn the safety off is a way to hurt a user's laptop. It is a POLICY floor, not a
+# measured one, and it says so when it fires rather than reading as a configured number.
+BUILD_MIN_FREE_HARD_FLOOR_GB = 0.5
 
-    A named constant behind one env var so a permanent change of the number after a
-    reboot is a one-constant change rather than a re-review, and so a test can pin it
-    the same way it pins the measurements.
+
+def _resolve_build_min_free_gb() -> "tuple[float, str, str]":
+    """``(value, source, note)`` for the build floor, and where the value came from.
+
+    *source* is ``env`` / ``global config`` / ``default``; *note* is empty only when the
+    value was used as given, and otherwise says what was asked for and what was used:
+
+        requested 0.1, using 0.5 (hard floor)
+        requested True, using 6 (not a number)
+        requested nan, using 6 (not a usable number)
+
+    Precedence is env, then the GLOBAL config, then the constant. The project layer is
+    deliberately NOT consulted: these guards are host properties, the project file
+    is found from the caller's cwd so one host would gate differently by working directory,
+    and a project config committed to a repository could lower a safety floor for everyone
+    who clones it.
+
+    Every rejection falls back to the constant rather than becoming a verdict. Measured on
+    the first version of this -- `0` and `-1` set a floor no host can miss, `inf` never opens
+    the gate, and **`nan` compares False against every reading**, so it silently disabled the
+    gate while looking like a configured number. `True` is rejected BEFORE the float() cast
+    for the same class of reason: `float(True)` is `1.0`, so a boolean typo in the config
+    would become a 1 GB build floor and read as configured.
+
+    A numeric STRING is accepted, deliberately: env values are always strings, so rejecting
+    strings from the config layer would make the two layers disagree about the same text.
     """
     import math
 
-    raw = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
-    if raw:
+    from synapt.recall.config import load_config
+
+    requested: object = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
+    source = "env" if requested else "default"
+    asked = bool(requested)
+    if not asked:
+        # PRESENCE, not truthiness: a key set to JSON `null` hands back None and must still
+        # be reported as a setting the user made and the gate rejected. Only a key that is
+        # ABSENT is "nothing was asked for".
         try:
-            value = float(raw)
-        except ValueError:
-            return BUILD_MIN_FREE_INACTIVE_GB
-        # A value the gate cannot use must fall back to the constant rather than
-        # become a verdict. Measured on the first version of this: `0` and `-1` set a
-        # floor no host can miss, `inf` never opens the gate, and **`nan` compares
-        # False against every reading**, so it silently disabled the gate while
-        # looking like a configured number.
-        if math.isfinite(value) and value > 0:
-            return value
-    return BUILD_MIN_FREE_INACTIVE_GB
+            config = load_config()
+        except Exception:  # noqa: BLE001 -- a config read must not become a verdict
+            config = None
+        if config is not None and "build_min_free_gb" in config.memory:
+            requested, source = config.memory["build_min_free_gb"]
+            asked = True
+
+    if not asked:
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", ""
+    if isinstance(requested, bool):
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", (
+            f"requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} (not a number)"
+        )
+    try:
+        value = float(requested)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", (
+            f"requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} (not a number)"
+        )
+    if not (math.isfinite(value) and value > 0):
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", (
+            f"requested {value!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            "(not a usable number)"
+        )
+    if value < BUILD_MIN_FREE_HARD_FLOOR_GB:
+        return (
+            BUILD_MIN_FREE_HARD_FLOOR_GB,
+            source,
+            f"requested {value:g}, using {BUILD_MIN_FREE_HARD_FLOOR_GB:g} (hard floor)",
+        )
+    return value, source, ""
+
+
+def _build_min_free_gb() -> float:
+    """The free+inactive floor a build needs: the gate's own entry point.
+
+    Thin by design -- the source and the clamp note live in
+    :func:`_resolve_build_min_free_gb`, and this keeps the signature every caller and test
+    already uses.
+    """
+    return _resolve_build_min_free_gb()[0]
 
 
 def _host_memory_verdict() -> "tuple[str, str]":
@@ -4664,6 +4729,47 @@ def _host_memory_verdict() -> "tuple[str, str]":
     if free_gb < floor:
         return "refuse", numbers
     return "pass", numbers
+
+
+def cmd_maintenance(args: argparse.Namespace) -> None:
+    """``synapt maintenance status`` -- each guard beside its live reading and its source.
+
+    The printed words are the design's; the
+    gate's own verdicts are ``pass`` / ``refuse`` / ``cannot_measure``, and the mapping
+    between the two is here, in one place, so a reader can check it rather than trust it.
+    The live reading is the gate's own numbers string rather than a second parse of the same
+    host readings: two producers of one reading is how the two drift apart.
+    """
+    action = getattr(args, "maintenance_action", None)
+    if action != "status":
+        print("usage: synapt maintenance status", file=sys.stderr)
+        raise SystemExit(2)
+
+    value, source, note = _resolve_build_min_free_gb()
+    verdict, numbers = _host_memory_verdict()
+    word = {"pass": "OK", "refuse": "DEFER", "cannot_measure": "CANNOT MEASURE"}.get(
+        verdict, verdict
+    )
+    line = f"build_min_free_gb  {value:g}  -> {word}  |  source: {source}  |  live: {numbers}"
+    if note:
+        line += f"  |  note: {note}"
+    print(line)
+
+    # A project config carrying a guard key looks applied and is not (these are host
+    # properties). Saying so is the difference between a user fixing their setting and a user
+    # wondering why it does nothing.
+    try:
+        from synapt.recall.config import load_config
+
+        ignored = load_config().memory_ignored_project_keys
+    except Exception:  # noqa: BLE001 -- a config read must not break the report
+        ignored = []
+    if ignored:
+        names = ", ".join(f"memory.{name}" for name in ignored)
+        print(
+            f"note: this project's config carries {names}; memory.* guards are host "
+            "properties read from the global config only, so it is IGNORED here"
+        )
 
 
 def cmd_catchup(args: argparse.Namespace) -> None:
@@ -4725,8 +4831,9 @@ def cmd_catchup(args: argparse.Namespace) -> None:
                   "because an unreadable instrument is not a memory verdict",
                   file=sys.stderr)
         elif verdict == "refuse":
-            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
-                  "next explicit catchup or precompact rebuild retries", file=sys.stderr)
+            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}; floor from "
+                  f"{_resolve_build_min_free_gb()[1]}); the next explicit catchup or "
+                  "precompact rebuild retries", file=sys.stderr)
             from synapt.recall.build_deferrals import record_deferral
             record_deferral(data_dir, "catchup", numbers)
             return
@@ -5077,6 +5184,16 @@ def make_parser() -> argparse.ArgumentParser:
         help="Archive and journal only; skip the incremental build and enrich",
     )
 
+    maintenance_parser = subparsers.add_parser(
+        "maintenance",
+        help="Show the maintenance guards: value, source, live reading, decision",
+    )
+    maintenance_sub = maintenance_parser.add_subparsers(dest="maintenance_action")
+    maintenance_sub.add_parser(
+        "status",
+        help="One line per guard: the build free-memory floor",
+    )
+
     maintain_parser = subparsers.add_parser(
         "maintain",
         help="Upgrade cluster summaries with an LLM, bounded, and report the backlog",
@@ -5222,6 +5339,8 @@ def main():
         cmd_rescrub(args)
     elif args.command == "migrate":
         cmd_migrate_channels(args)
+    elif args.command == "maintenance":
+        cmd_maintenance(args)
     elif args.command == "comms":
         from synapt.recall.comms import ledger, read_body, send
         if args.comms_command == "send":

@@ -77,6 +77,11 @@ def main():
         # this defined, and what did the team say about it. Same entry point
         # as `synapt recall code`, not a second implementation.
         _dispatch_recall("code", *sys.argv[2:])
+    elif subcmd == "maintenance":
+        # Front-door verb: the maintenance guards, each beside its live reading
+        # and the source of its value. Same entry point as `synapt recall maintenance`,
+        # not a second implementation -- the rule every front-door verb here follows.
+        _dispatch_recall("maintenance", *sys.argv[2:])
     elif subcmd == "server":
         # Remove the subcommand from argv so the sub-CLI sees correct args.
         sys.argv = [f"synapt {subcmd}"] + sys.argv[2:]
@@ -116,6 +121,7 @@ def _print_help(extra_commands: dict | None = None):
         "  resume    Pick up where the last session stopped",
         "  code      Where is this defined, and what did the team say about it",
         "  recall    Search and manage past session transcripts",
+        "  maintenance  Show the maintenance guards: value, source, live reading, decision",
         "  dashboard Launch mission control UI",
         "  server    Start the unified MCP server (--dev for auto-reload)",
     ]

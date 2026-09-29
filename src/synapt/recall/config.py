@@ -81,6 +81,29 @@ class RecallConfig:
     query_freshness: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_QUERY_FRESHNESS)
     )
+    # Guard settings a user set. Each entry carries the value AND the layer it came
+    # from, because a reader has to report the SOURCE beside the number: a bare number with
+    # no source is what let the 6 GB build floor outlive the measurement contradicting it.
+    # Only keys a user actually set appear here -- a missing key means unset, and the reader
+    # applies its own default, so exactly one place owns each default.
+    #
+    # The value is stored RAW, not coerced here: validation lives in the reader so that a
+    # bad setting can be reported back to the person who typed it ("requested true, using 6")
+    # rather than only logged. Coercing here would also be wrong -- float(True) is 1.0, so a
+    # boolean typo would silently become a 1 GB build floor.
+    memory: dict[str, tuple[object, str]] = field(default_factory=dict)
+    # `memory.*` keys found in the PROJECT layer, by name. These guards are host properties
+    # and never read that layer; they are recorded so `maintenance status` can say
+    # so instead of letting a project setting look applied.
+    memory_ignored_project_keys: list[str] = field(default_factory=list)
+
+    def get_memory(self, name: str) -> tuple[object, str] | None:
+        """``(raw_value, source)`` for a configured guard setting, or None when unset.
+
+        *source* is ``"global config"``. The value is whatever the file carried; the reader
+        validates it.
+        """
+        return self.memory.get(name)
 
     def get_model(self, key: str) -> str:
         """Get a model name by key, with env var override."""
@@ -262,12 +285,35 @@ def load_config() -> RecallConfig:
             except (TypeError, ValueError):
                 logger.warning("Invalid query_freshness.%s, using prior value", key)
 
+    # memory: the GLOBAL layer only. These guards are HOST properties, so the
+    # precedence is env > global config > default and the PROJECT file is deliberately not
+    # consulted: it is found from the caller's cwd, so one host would gate differently by
+    # working directory (the cwd-keyed store defect family), and a project config committed
+    # to a repository could lower a safety floor for everyone who clones it. A project key is
+    # recorded by name so `maintenance status` can say it is ignored.
+    # The value is kept RAW and its validation stays in the reader
+    # (`_resolve_build_min_free_gb`), which is where the "requested X, using Y" note is made.
+    memory: dict[str, tuple[object, str]] = {}
+    configured_memory = global_data.get("memory", {})
+    if isinstance(configured_memory, dict):
+        for name, raw in configured_memory.items():
+            memory[name] = (raw, "global config")
+    elif configured_memory:
+        logger.warning("Invalid memory section in the global config, ignoring it")
+
+    memory_ignored_project_keys: list[str] = []
+    project_memory = project_data.get("memory", {})
+    if isinstance(project_memory, dict):
+        memory_ignored_project_keys = sorted(project_memory)
+
     config = RecallConfig(
         models=models,
         backend=backend,
         max_tokens=max_tokens,
         session_start_continuity=continuity,
         query_freshness=query_freshness,
+        memory=memory,
+        memory_ignored_project_keys=memory_ignored_project_keys,
     )
     _cached_config = config
     _cached_mtime = current_mtime
