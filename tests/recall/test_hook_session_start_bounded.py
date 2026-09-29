@@ -186,6 +186,7 @@ def _run_hook(monkeypatch, tmp_path, *, source="startup", context_lines=None, tr
          patch("synapt.recall.server._resolved_provenance_line", **provenance_kwargs), \
          patch("synapt.recall.journal.compact_journal", return_value=0), \
          patch.object(cli, "_dev_loop_activation_prompt", return_value=None), \
+         patch.object(cli, "_host_synapt_dir", return_value=tmp_path / "hostsynapt"), \
          patch("synapt.recall.reminders._reminders_path", return_value=tmp_path / "reminders.json"), \
          patch("synapt.recall.channel.channel_join"), \
          patch("synapt.recall.channel.channel_unread", return_value=channel_unread or {}), \
@@ -201,6 +202,36 @@ def _run_hook(monkeypatch, tmp_path, *, source="startup", context_lines=None, tr
         else:
             cli.cmd_hook(argparse.Namespace(event="session-start"))
     return out.getvalue(), popen_calls
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _real_host_lock_untouched():
+    """The suite must not take the host build lock at the REAL ``~/.synapt``.
+
+    Measured 2026-09-29: a full ``tests/recall`` run wrote ``~/.synapt/recall-build.lock``, so a
+    suite could make a real build or the sleep step wait on a lock taken for nobody's benefit.
+    Bisected to THIS module the same day, and inside it to ``TestCatchupCommand``, which drives
+    ``cmd_catchup`` directly.
+
+    Module-scoped and checked at TEARDOWN rather than in one test, because a single test's
+    position decides what it can see: the first version of this guard sat near the top of the
+    file, PASSED, and the lock moved afterwards — an assertion that cannot see the thing it is
+    about. This sees every test in the module whatever the order.
+
+    Scoped to that ONE named file rather than a listing of ``~/.synapt``: the fleet writes other
+    things there while a suite runs, so a directory-wide guard would red on the healthy state.
+    The residual hazard is a real build taking the lock during this module's ~2s — if that ever
+    reds the guard, the guard is right about the mtime and the reader should look at what else
+    was running.
+    """
+    real = Path.home() / ".synapt" / cli._HOST_BUILD_LOCK
+    before = real.stat().st_mtime_ns if real.exists() else None
+    yield
+    after = real.stat().st_mtime_ns if real.exists() else None
+    assert after == before, (
+        f"this module took the REAL host lock {real} (mtime {before} -> {after}); the catchup and "
+        "hook paths must be pointed at a scratch host dir, or a test run can stall a real build"
+    )
 
 
 class TestSessionStartContinuityPolicy:
@@ -666,6 +697,16 @@ class TestSessionStartCatchupBanner:
 
 
 class TestCatchupCommand:
+    @pytest.fixture(autouse=True)
+    def _scratch_host_dir(self, monkeypatch, tmp_path):
+        """cmd_catchup takes the HOST build lock; without this it takes the real one at ~/.synapt.
+
+        Measured 2026-09-29: this class alone moved the mtime of ~/.synapt/recall-build.lock, so a
+        suite run could make a real build or the sleep step wait. The module-level guard below
+        fails if this regresses.
+        """
+        monkeypatch.setattr(cli, "_host_synapt_dir", lambda: tmp_path / "hostsynapt")
+
     def test_runs_archive_journal_compact_build_enrich_in_order(self, owned_recall_root, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         # catchup's heavy tail is host-gated now, so a healthy host is pinned here;
