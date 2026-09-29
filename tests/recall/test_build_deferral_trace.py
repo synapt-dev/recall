@@ -331,6 +331,7 @@ def test_the_funnel_records_the_caller_who_started_the_build(store, monkeypatch)
     assert "ppid_cmd" in row, "the key is always present; None means ps could not be read"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="needs a real ps and /bin/sh; neither exists on Windows")
 def test_the_parents_command_line_comes_from_ps_and_not_a_placeholder(tmp_path):
     """The parent's REAL command line must land in the row.
 
@@ -392,6 +393,7 @@ def test_the_background_cold_refresh_script_records_a_built_row(tmp_path):
     assert not (data / DEFERRALS_FILENAME).exists(), "control: nothing was built, so nothing is recorded"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
 def test_the_ledger_is_owner_only_on_create_and_on_a_world_readable_file(store):
     """A row can carry a parent's command line, so the file is owner-only -- on a file created
     now, and on one an earlier version already left at the umask default."""
@@ -407,6 +409,7 @@ def test_the_ledger_is_owner_only_on_create_and_on_a_world_readable_file(store):
     assert stat.S_IMODE(p.stat().st_mode) == 0o600, "and on CREATE, where the row is written first"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
 def test_a_new_ledger_is_owner_only_from_the_first_byte(tmp_path, monkeypatch):
     """The create-time mode is a guard of its own, and the test above cannot see it.
 
@@ -428,6 +431,20 @@ def test_the_parents_command_line_is_capped(monkeypatch):
     monkeypatch.setattr(build_deferrals.subprocess, "run",
                         lambda *a, **k: SimpleNamespace(stdout="x" * 5000 + "\n"))
     assert len(build_deferrals._parent_command_line(2)) == build_deferrals._MAX_CMD_CHARS
+
+
+def test_the_ps_read_asks_for_an_unbounded_width(monkeypatch):
+    """procps truncates `ps -o command=` to the terminal width, and a hooked build has no
+    terminal, so on Linux the parent's command line is silently cut at about 80 columns while
+    BSD ps never truncates -- which is why it was invisible here. The property cannot be
+    OBSERVED on this host, so this pins the flag that carries it, and the Linux CI job pins
+    the behaviour: the marker test above sits past the truncation width and goes red without it.
+    """
+    seen = {}
+    monkeypatch.setattr(build_deferrals.subprocess, "run",
+                        lambda argv, *a, **k: seen.update(argv=list(argv)) or SimpleNamespace(stdout=""))
+    build_deferrals._parent_command_line(2)
+    assert "-ww" in seen["argv"], f"an unbounded-width ps is required on Linux: {seen['argv']}"
 
 
 def test_the_ps_read_is_behind_a_timeout_and_expiry_degrades_to_none(monkeypatch):

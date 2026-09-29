@@ -95,8 +95,13 @@ def _parent_command_line(ppid: int) -> str | None:
     if ppid <= 0:
         return None
     try:
+        # -ww is load-bearing, not style. procps (Linux) truncates `ps -o command=` to the
+        # terminal width, and a build spawned by a hook has no terminal, so the recorded
+        # parent command line would be silently cut at about 80 columns -- the same
+        # "answered a different question" defect this row exists to end. BSD/macOS ps does
+        # not truncate, which is exactly why the cut was invisible on a developer machine.
         out = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(ppid)],
+            ["ps", "-ww", "-o", "command=", "-p", str(ppid)],
             capture_output=True, text=True, timeout=_PS_TIMEOUT_S,
         )
     except Exception:  # noqa: BLE001 -- best effort by design
