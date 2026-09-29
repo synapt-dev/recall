@@ -120,6 +120,37 @@ def _index_gripspace_root(index_dir: Path) -> Path | None:
     return None
 
 
+def _canonical_index_shape(path: Path) -> bool:
+    """True when *path*, exactly as spelled, is ``<root>/.synapt/recall/index``. No resolving."""
+    return path.name == "index" and path.parent.name == "recall" and path.parent.parent.name == ".synapt"
+
+
+def _deferral_notice_for_index(index_dir: Path, *, own_store: bool = False) -> "str | None":
+    """The memory-floor notice for the store that owns *index_dir*, or None.
+
+    The source of truth is where the WRITER writes: ``project_data_dir(project)``, unresolved, which
+    ``project_index_dir()`` is defined as the parent of. So:
+
+    * *own_store* (the wake, and a resume with no ``--index``): the index IS the ambient store's own, so read its
+      parent as spelled. No guard and no resolve: a store whose own canonical index is a symlink still finds its
+      notice, because the writer wrote beside the link, not beside its target.
+    * an explicit ``--index``: if the path as spelled is the canonical layout, read its parent as spelled; else if it
+      resolves to the canonical layout (a link from a non-store directory), read the RESOLVED parent; else the index
+      cannot be safely mapped back to a store (``_index_gripspace_root`` says so) and there is no notice, rather than
+      another directory's history. The two cases need different directories, so neither "always resolve" nor
+      "never resolve" is right.
+    """
+    from synapt.recall.build_deferrals import deferral_notice
+
+    index_dir = Path(index_dir)
+    if own_store or _canonical_index_shape(index_dir):
+        return deferral_notice(index_dir.parent, index_dir)
+    if _index_gripspace_root(index_dir) is None:
+        return None
+    resolved = index_dir.resolve()
+    return deferral_notice(resolved.parent, resolved)
+
+
 def _refuse_if_index_disagrees_with_source(
     args: argparse.Namespace, index_dir: Path, source_dir: Path
 ) -> None:
@@ -673,10 +704,15 @@ def _archive_and_build(
         return None
 
     try:
-        return _archive_and_build_locked(
+        built = _archive_and_build_locked(
             project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
             progress, skip_clustering=skip_clustering,
         )
+        if built is not None:
+            # every build/rebuild/setup/precompact/catchup/MCP build passes through here
+            from synapt.recall.build_deferrals import record_build
+            record_build(data_dir)
+        return built
     finally:
         _release_build_lock(lock_fd)
 
@@ -2306,6 +2342,11 @@ def cmd_resume(args: argparse.Namespace) -> None:
     # the same declared version while the linked worktree underneath it
     # changes out from under every running process.
     print(_with_provenance(_with_query_freshness(format_resume(view), freshness_line)))
+    from synapt.recall.build_deferrals import deferral_notice
+    notice = _deferral_notice_for_index(
+        index_dir, own_store=not getattr(args, "index", None) and not getattr(args, "out", None))
+    if notice:
+        print(notice)
 
 
 def _attach_unclean_end(view, args):
@@ -3870,6 +3911,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
             except Exception:
                 banners.append("WARNING: could not spawn `synapt recall catchup`; index and journal will not update this session.")
 
+        with run.phase("deferral_notice"):
+            try:
+                from synapt.recall.build_deferrals import deferral_notice
+                _idx = project_index_dir(project)
+                notice = _deferral_notice_for_index(_idx, own_store=True)
+                if notice:
+                    banners.append(f"INFO: {notice}")
+            except Exception:
+                pass
+
         # 2. Compact journal (dedup + sort) before surfacing context. Cheap
         #    (tens of ms on a 5 MB journal) and it keeps the read consistent.
         with run.phase("compact_journal"):
@@ -3948,6 +3999,8 @@ def cmd_hook(args: argparse.Namespace) -> None:
             if verdict == "refuse":
                 print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers})",
                       file=sys.stderr)
+                from synapt.recall.build_deferrals import record_deferral
+                record_deferral(project_data_dir(project), "precompact", numbers)
             else:
                 if verdict == "cannot_measure":
                     print(f"[precompact] memory gate could not measure ({numbers}); "
@@ -4674,6 +4727,8 @@ def cmd_catchup(args: argparse.Namespace) -> None:
         elif verdict == "refuse":
             print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
                   "next explicit catchup or precompact rebuild retries", file=sys.stderr)
+            from synapt.recall.build_deferrals import record_deferral
+            record_deferral(data_dir, "catchup", numbers)
             return
 
         host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)
