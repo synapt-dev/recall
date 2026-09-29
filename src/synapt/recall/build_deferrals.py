@@ -56,14 +56,29 @@ def _append(data_dir: Path, row: dict) -> None:
                 os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _FILE_MODE))
             except OSError:
                 pass
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
-        # And on an EXISTING file: a ledger an earlier version created sits at the umask
-        # default, so the mode is asserted every write rather than only at creation.
+        # TIGHTEN BEFORE THE APPEND, not after. A ledger an operator (or an earlier version)
+        # has left read-only -- 0400 or 0500 -- makes open(path, "a") raise, and the broad
+        # except that closes this function swallows it, so the row is dropped and the chmod
+        # that would have repaired the mode is never reached: the state that breaks the write
+        # is the state the write exists to correct. Correcting the mode first means the append
+        # always has a file its owner can write. This repairs a mode the OWNER can repair; if
+        # the chmod itself fails -- not the owner of the file, or an immutable file -- the
+        # append still fails and is still swallowed, which is the pre-existing degradation and
+        # is not fixed here. A hardened PARENT DIRECTORY is not in that list FOR AN EXISTING
+        # LEDGER only: chmod needs ownership of the file, not write permission on the directory
+        # holding it, so a hardened parent does not stop the repair of a ledger already there
+        # (measured: parent mode 0500 with the ledger at 0400 took the row and ended at 0600).
+        # Where NO ledger exists yet it is the other way round, and that state is NOT repaired:
+        # the create needs write permission on the DIRECTORY, so os.open(..., O_CREAT) raises,
+        # the chmod then raises ENOENT, the append raises, and all three are swallowed -- no
+        # row, no error, no file (measured: parent mode 0500 with no ledger leaves none). No
+        # code here can create a file in a directory it may not write.
         try:
             os.chmod(path, _FILE_MODE)
         except OSError:
             pass
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
         lines = path.read_text(encoding="utf-8").splitlines()
         if len(lines) > _KEEP_LINES:
             kept = lines[-_KEEP_LINES:]

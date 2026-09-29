@@ -426,6 +426,75 @@ def test_a_new_ledger_is_owner_only_from_the_first_byte(tmp_path, monkeypatch):
     assert stat.S_IMODE((tmp_path / DEFERRALS_FILENAME).stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
+@pytest.mark.parametrize("mode", [0o400, 0o500])
+def test_a_read_only_ledger_still_records_the_row_and_ends_owner_only(tmp_path, mode):
+    """An operator who hardens the ledger must not be able to switch the record off.
+
+    The append is the step that must not fail, and the tighten is what lets it run: in the
+    pre-fix order the open raised, the broad except swallowed it, and the chmod that would
+    have repaired the mode was never reached, so the state that broke the write was the state
+    the write existed to correct. Both read-only modes are covered because they are separate
+    states that fail for the same reason.
+    """
+    path = tmp_path / DEFERRALS_FILENAME
+    path.write_text(json.dumps({"ts": 1.0, "event": "built"}) + "\n")
+    os.chmod(path, mode)
+    assert stat.S_IMODE(path.stat().st_mode) == mode, "premise: the ledger starts read-only"
+    record_build(tmp_path, caller={})
+    rows = [json.loads(x) for x in path.read_text().splitlines()]
+    assert len(rows) == 2, f"the row was dropped on a {oct(mode)} ledger"
+    assert rows[0].get("event") == "built", "the pre-existing row must survive"
+    assert rows[1].get("event") == "built"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600, "and the ledger ends owner-only"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
+def test_a_read_only_parent_directory_does_not_block_the_repair(tmp_path):
+    """The Scope says which states still drop a row, so the list has to be right in both directions.
+
+    chmod on a file needs ownership of the FILE, not write permission on the directory holding it,
+    so a hardened parent is NOT one of the states that still fails -- measured on the frozen range
+    and pinned here so the claim cannot drift back. The directory mode is restored in a finally, or
+    pytest cannot clean tmp_path up and a passing test starts failing at teardown.
+    """
+    ledger_dir = tmp_path / "hardened"
+    ledger_dir.mkdir()
+    path = ledger_dir / DEFERRALS_FILENAME
+    path.write_text(json.dumps({"ts": 1.0, "event": "built"}) + "\n")
+    os.chmod(path, 0o400)
+    os.chmod(ledger_dir, 0o500)
+    try:
+        record_build(ledger_dir, caller={})
+    finally:
+        os.chmod(ledger_dir, 0o700)
+    rows = [json.loads(x) for x in path.read_text().splitlines()]
+    assert len(rows) == 2, "a hardened parent directory must not block the repair"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
+def test_a_hardened_parent_with_no_ledger_yet_is_a_limit_the_repair_does_not_reach(tmp_path):
+    """The other side of the same boundary, and the reason the Scope has to state it.
+
+    The repair reaches a ledger that already exists, because chmod needs ownership of the FILE.
+    Where no ledger exists yet it needs write permission on the DIRECTORY instead, so the create
+    raises, the chmod then raises ENOENT, the append raises, and all three are swallowed: no row,
+    no error, no file. That is a LIMITATION, not desired behaviour -- no code here can create a
+    file in a directory its owner may not write -- and it is asserted so that a future change
+    which starts making a file is a visible change rather than a silent one.
+    """
+    ledger_dir = tmp_path / "hardened"
+    ledger_dir.mkdir()
+    path = ledger_dir / DEFERRALS_FILENAME
+    os.chmod(ledger_dir, 0o500)
+    try:
+        record_build(ledger_dir, caller={})
+        assert not path.exists(), "a ledger cannot be created in a directory the owner may not write"
+    finally:
+        os.chmod(ledger_dir, 0o700)
+
+
 def test_the_parents_command_line_is_capped(monkeypatch):
     """A command line is an unbounded place for a secret, so the recorded field is bounded."""
     monkeypatch.setattr(build_deferrals.subprocess, "run",
