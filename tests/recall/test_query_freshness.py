@@ -1088,6 +1088,75 @@ def test_a_rewritten_transcript_orphans_its_cursor_and_it_never_retires(
     assert overlay == []
 
 
+def test_a_key_match_with_no_coverage_does_not_retire(tmp_path, monkeypatch):
+    """The row that guards against retiring on the KEY alone.
+
+    This PASSES today and must keep passing — which is exactly why it is kept
+    rather than tuned. It is the witness against the `st_ino`-dropping fix: with
+    the inode gone, a rewritten file produces the SAME key, the gate matches, and
+    control falls through to an offset comparison between two numbers from
+    different file versions. That can pass, and then `clear_query_tail` deletes
+    overlay rows whose content the base never held.
+
+    Retirement must be decided by whether the base holds the OVERLAY's content,
+    not by whether the key still matches.
+
+    The file is truncated IN PLACE on purpose, so the inode is preserved and the
+    stored key still matches; the inode is asserted unchanged so the row cannot
+    pass while measuring a rename.
+    """
+    from synapt.recall.core import TranscriptIndex, parse_transcript
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "base turn", "base answer", 20)
+    with_base_only = transcript.read_bytes()
+
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+
+    # the overlay is written for a file that DOES hold the next turn
+    _write_turn(transcript, "overlay turn", "overlay answer", 21)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    refreshed = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert refreshed.state is QueryFreshnessState.REFRESHED
+
+    # TRUNCATE IN PLACE: same inode, so the key still matches, and the base is
+    # rebuilt from a file that no longer holds the overlay's turn.
+    inode_before = transcript.stat().st_ino
+    transcript.write_bytes(with_base_only)
+    assert transcript.stat().st_ino == inode_before, (
+        "the truncation changed the inode, so this row measures a rename and not "
+        "a key match without coverage"
+    )
+
+    db = ShardedRecallDB.open(index_dir)
+    rebuilt = TranscriptIndex(
+        parse_transcript(transcript),
+        use_embeddings=False,
+        cache_dir=index_dir,
+        db=db,
+    )
+    rebuilt.save(index_dir)
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        cursor = db.load_query_tail_cursor(refreshed.source_key)
+    finally:
+        db.close()
+
+    assert cursor is not None, (
+        "the cursor was retired although the base does NOT hold the overlay's "
+        "turn: retirement was decided on the key rather than on coverage, which "
+        "is the data-loss direction"
+    )
+
+
 def test_overlay_only_session_hydrates_bounded_resume_listing(tmp_path, monkeypatch):
     transcript = tmp_path / f"{SESSION}.jsonl"
     _write_turn(transcript, "overlay listing witness", "visible", 20)
