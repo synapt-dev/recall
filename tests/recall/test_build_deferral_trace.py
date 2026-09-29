@@ -12,9 +12,12 @@ import argparse
 import io
 import json
 import os
+import shlex
+import stat
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -330,3 +333,155 @@ def test_a_link_from_a_non_store_directory_reads_the_stores_own_trace(store, mon
     (store.data / DEFERRALS_FILENAME).unlink()
     out = _resume(store, monkeypatch, real_resolver=True, index_arg=str(link))
     assert "memory floor" not in out, "a file beside the link, which this store never wrote, must not be shown as its history"
+
+
+# --------------------------------------------------------------------------------------
+# The caller of a build. A build that ran at 03:33 left a row saying only that a build
+# happened; who asked for it died with the parent process, and that answer cannot be
+# recovered afterwards, so it has to be written while the parent still exists.
+# --------------------------------------------------------------------------------------
+
+_SRC = str(Path(__file__).resolve().parents[2] / "src")
+
+
+def test_the_funnel_records_the_caller_who_started_the_build(store, monkeypatch):
+    monkeypatch.setattr(cli, "_acquire_build_lock", lambda *a, **k: 1)
+    monkeypatch.setattr(cli, "_release_build_lock", lambda fd: None)
+    monkeypatch.setattr(cli, "_archive_and_build_locked", lambda *a, **k: object())
+    assert cli._archive_and_build(store.tmp, use_embeddings=False, incremental=True) is not None
+    row = _rows(store)[0]
+    assert row["event"] == "built"
+    assert row["pid"] == os.getpid()
+    assert row["ppid"] == os.getppid()
+    assert row["argv"] == sys.argv
+    assert "ppid_cmd" in row, "the key is always present; None means ps could not be read"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs a real ps and /bin/sh; neither exists on Windows")
+def test_the_parents_command_line_comes_from_ps_and_not_a_placeholder(tmp_path):
+    """The parent's REAL command line must land in the row.
+
+    The writer is spawned through /bin/sh whose own command line carries a marker, so the
+    only way the marker can reach the row is a real ``ps`` read of the real parent. A stub, a
+    hardcoded None, or an unconsulted ps fails this. The trailing ``; :`` keeps the shell
+    alive as the parent, because a shell that execs its last command would leave the python
+    process reparented to pytest and the marker would vanish.
+    """
+    data = tmp_path / "root" / ".synapt" / "recall"
+    data.mkdir(parents=True)
+    marker = "fathom-ps-marker-14-2"
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {_SRC!r})\n"
+        "from pathlib import Path\n"
+        "from synapt.recall.build_deferrals import record_build\n"
+        f"# {marker}\n"
+        "record_build(Path(sys.argv[1]))\n"
+    )
+    subprocess.run(
+        ["/bin/sh", "-c",
+         f"{sys.executable} -c {shlex.quote(script)} {shlex.quote(str(data))} ; :"],
+        check=True, capture_output=True,
+    )
+    rows = [json.loads(x) for x in (data / DEFERRALS_FILENAME).read_text().splitlines()]
+    got = rows[0].get("ppid_cmd")
+    assert got and marker in got, f"the parent's command line was not read from ps: ppid_cmd={got!r}"
+
+
+def test_the_background_cold_refresh_script_records_a_built_row(tmp_path):
+    """The fix lives INSIDE a string literal, so this EXECs the script.
+
+    A source grep would prove the text exists, not that it runs. Only the heavy build edge is
+    stubbed; the lock and the writer are real, and the row must land in the same file the
+    funnel writes.
+    """
+    store_root = tmp_path / "root"
+    data = store_root / ".synapt" / "recall"
+    data.mkdir(parents=True)
+    wrapper = (
+        "import sys\n"
+        f"sys.path.insert(0, {_SRC!r})\n"
+        "import synapt.recall.cli as cli\n"
+        "cli._archive_and_build_locked = lambda *a, **k: object()\n"
+        + cli._BACKGROUND_COLD_REFRESH_SCRIPT
+    )
+    subprocess.run([sys.executable, "-c", wrapper, str(store_root), str(tmp_path)],
+                   check=True, capture_output=True)
+    rows = [json.loads(x) for x in (data / DEFERRALS_FILENAME).read_text().splitlines()]
+    assert [r.get("event") for r in rows] == ["built"], "the background refresh built and left no row"
+    assert rows[0]["pid"] != os.getpid(), "the row was written by the spawned process, not by this test"
+
+    # control: the same exec with a build that produced nothing records nothing
+    (data / DEFERRALS_FILENAME).unlink()
+    nothing = wrapper.replace("lambda *a, **k: object()", "lambda *a, **k: None")
+    subprocess.run([sys.executable, "-c", nothing, str(store_root), str(tmp_path)],
+                   check=True, capture_output=True)
+    assert not (data / DEFERRALS_FILENAME).exists(), "control: nothing was built, so nothing is recorded"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
+def test_the_ledger_is_owner_only_on_create_and_on_a_world_readable_file(store):
+    """A row can carry a parent's command line, so the file is owner-only -- on a file created
+    now, and on one an earlier version already left at the umask default."""
+    p = store.data / DEFERRALS_FILENAME
+    p.write_text(json.dumps({"ts": 1.0, "event": "built"}) + "\n")
+    os.chmod(p, 0o644)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o644, "premise: the file starts world-readable"
+    record_build(store.data)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600, "an existing ledger must be tightened, not just a new one"
+
+    p.unlink()
+    record_build(store.data)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600, "and on CREATE, where the row is written first"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner-only is a POSIX mode property; Windows models only a read-only bit")
+def test_a_new_ledger_is_owner_only_from_the_first_byte(tmp_path, monkeypatch):
+    """The create-time mode is a guard of its own, and the test above cannot see it.
+
+    That one asserts the mode after record_build returns, which the after-the-fact chmod would
+    have fixed either way -- so the create block can be deleted and it stays green. Here the
+    chmod is neutered and the umask is wide, so only a file BORN at 0600 passes.
+    """
+    monkeypatch.setattr(build_deferrals.os, "chmod", lambda *a, **k: None)
+    old = os.umask(0)          # umask can only clear bits; 0 makes a wide create visible
+    try:
+        record_build(tmp_path, caller={})
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / DEFERRALS_FILENAME).stat().st_mode) == 0o600
+
+
+def test_the_parents_command_line_is_capped(monkeypatch):
+    """A command line is an unbounded place for a secret, so the recorded field is bounded."""
+    monkeypatch.setattr(build_deferrals.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(stdout="x" * 5000 + "\n"))
+    assert len(build_deferrals._parent_command_line(2)) == build_deferrals._MAX_CMD_CHARS
+
+
+def test_the_ps_read_asks_for_an_unbounded_width(monkeypatch):
+    """procps truncates `ps -o command=` to the terminal width, and a hooked build has no
+    terminal, so on Linux the parent's command line is silently cut at about 80 columns while
+    BSD ps never truncates -- which is why it was invisible here. The property cannot be
+    OBSERVED on this host, so this pins the flag that carries it, and the Linux CI job pins
+    the behaviour: the marker test above sits past the truncation width and goes red without it.
+    """
+    seen = {}
+    monkeypatch.setattr(build_deferrals.subprocess, "run",
+                        lambda argv, *a, **k: seen.update(argv=list(argv)) or SimpleNamespace(stdout=""))
+    build_deferrals._parent_command_line(2)
+    assert "-ww" in seen["argv"], f"an unbounded-width ps is required on Linux: {seen['argv']}"
+
+
+def test_the_ps_read_is_behind_a_timeout_and_expiry_degrades_to_none(monkeypatch):
+    """A hung ps must not hang the build it describes: the call carries a timeout, and a
+    timeout is a None rather than an exception escaping into the build."""
+    seen = {}
+
+    def fake(*a, **k):
+        seen.update(k)
+        raise subprocess.TimeoutExpired("ps", k.get("timeout"))
+
+    monkeypatch.setattr(build_deferrals.subprocess, "run", fake)
+    assert build_deferrals._parent_command_line(2) is None
+    assert seen.get("timeout") == build_deferrals._PS_TIMEOUT_S
