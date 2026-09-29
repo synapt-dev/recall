@@ -1019,6 +1019,75 @@ def test_base_rebuild_retires_overlay_only_after_matching_coverage(
     assert overlay == []
 
 
+def test_a_rewritten_transcript_orphans_its_cursor_and_it_never_retires(
+    tmp_path, monkeypatch
+):
+    """PIN the orphan class: a rewrite changes the inode, so the stored
+    ``source_key`` never matches again and ``retire_absorbed_query_tails``
+    skips the cursor FOREVER -- the base can prove full coverage of the session
+    and the overlay still is not retired.
+
+    The gate re-derives the key from the file AS IT IS NOW and skips on
+    mismatch. Its intent is conservative (do not retire an overlay whose source
+    has moved on), but a compaction rewrite IS the source moving on, so the
+    guard fires permanently. Measured on the live store: 52 of 58 cursors.
+
+    The rewrite is the RENAME form on purpose. A truncate-and-rewrite keeps the
+    inode and would reproduce nothing, so the inode move is asserted inside the
+    witness rather than assumed -- without that control this test could pass
+    while measuring a rewrite that never happened.
+    """
+    from synapt.recall.core import TranscriptIndex, parse_transcript
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "base turn", "base answer", 20)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+
+    _write_turn(transcript, "overlay turn", "overlay answer", 21)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    refreshed = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert refreshed.state is QueryFreshnessState.REFRESHED
+
+    # THE REWRITE: same path, SAME BYTES, same session -- only the inode moves,
+    # which is exactly what compaction does and all the gate keys on.
+    before_ino = transcript.stat().st_ino
+    aside = tmp_path / "rewrite.tmp"
+    aside.write_bytes(transcript.read_bytes())
+    os.replace(aside, transcript)
+    assert transcript.stat().st_ino != before_ino, (
+        "the rewrite did not change the inode, so this witness measures nothing"
+    )
+
+    db = ShardedRecallDB.open(index_dir)
+    rebuilt = TranscriptIndex(
+        parse_transcript(transcript),
+        use_embeddings=False,
+        cache_dir=index_dir,
+        db=db,
+    )
+    rebuilt.save(index_dir)
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        cursor = db.load_query_tail_cursor(refreshed.source_key)
+        overlay = db.load_query_tail_chunks()
+    finally:
+        db.close()
+
+    assert cursor is None, (
+        "the cursor survived a rewrite whose content the base now covers, so it "
+        "can never be retired and its overlay rows can never be absorbed"
+    )
+    assert overlay == []
+
+
 def test_overlay_only_session_hydrates_bounded_resume_listing(tmp_path, monkeypatch):
     transcript = tmp_path / f"{SESSION}.jsonl"
     _write_turn(transcript, "overlay listing witness", "visible", 20)
