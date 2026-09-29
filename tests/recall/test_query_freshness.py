@@ -1218,20 +1218,41 @@ def test_a_replaced_source_does_not_retire_the_previous_sessions_overlay(
 ):
     """REPLACED: a different session now sits at that path. Guards today.
 
-    THE MECHANISM IS NOT THE ONE I FIRST WROTE HERE, and the mutation is what
-    caught it. I documented `extent is None` as the guard and then dropped that
-    check -- and this row stayed GREEN, so it was passing for some other reason.
-    Diagnosed on the end state: the in-place `write_text` PRESERVES the inode, so
-    the stored key still MATCHES, and `session_indexed_extent` for the original
-    session is NOT None, because the base retains the earlier generation's rows
-    even after a rebuild that no longer sees that session. What actually holds
-    the cursor is the OFFSET comparison: the base's extent for that session is
-    behind the cursor's recorded offset, so the gate `continue`s.
+    THE MECHANISM TOOK THREE PASSES AND THE FIRST TWO WERE WRONG, so what is
+    written here is the MEASURED path, not a reading of the code.
 
-    Mutation: drop the OFFSET comparison (the same block the coverage guard
-    names). This row must go RED with it -- and note that it shares that
-    mechanism, so what this row adds is the CONSTRUCTION (a different session at
-    the same path), not a second falsifier.
+      * Pass 1 named `extent is None` as the guard. A mutation dropped that check
+        and the row stayed GREEN, so it was passing for some other reason.
+      * Pass 2 named the OFFSET comparison alone and claimed that dropping it
+        would redden this row. MEASURED FALSE: dropping the offset clause leaves
+        it GREEN, and dropping the timestamp clause leaves it GREEN too.
+
+    The gate is an OR:
+        `if extent[offset] < cursor[offset] or extent[ts] != cursor[ts]: continue`
+    and in this construction BOTH halves are false, so either one alone keeps
+    the cursor. Only removing the whole block reddens the row.
+
+    The measured inputs at the gate, read by instrumenting
+    `retire_absorbed_query_tails` rather than by inference:
+
+        KEY_MATCH=True   extent_off=189   cursor_off=790   OFF_OK=False
+        TS_OK=False      -> continue      (nothing retired)
+
+    So this row is NOT a second falsifier for the offset clause; the coverage
+    guard already owns that construction. What this row adds is the
+    CONSTRUCTION (a different session written at the same path), and what it
+    proves is that the gate does not retire on the strength of whatever now
+    sits at that path.
+
+    Mutation that DOES redden it: remove both halves of that block
+    (`if False: continue`) -- measured 1 failed. Dropping only the offset clause
+    (1 passed) or only the timestamp clause (1 passed) does not.
+
+    NOT covered here: the `session_id` component. The cursor row keeps the
+    ORIGINAL session id, because `refresh_current_session` wrote it before the
+    replacement, so the replacement never changes what the cursor claims. A row
+    isolating that component would have to write a cursor FOR the new session
+    and then drive the gate.
     """
     from synapt.recall.core import TranscriptIndex, parse_transcript
 
