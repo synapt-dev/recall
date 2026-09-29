@@ -218,15 +218,55 @@ def _real_host_lock_untouched():
     file, PASSED, and the lock moved afterwards — an assertion that cannot see the thing it is
     about. This sees every test in the module whatever the order.
 
-    Scoped to that ONE named file rather than a listing of ``~/.synapt``: the fleet writes other
-    things there while a suite runs, so a directory-wide guard would red on the healthy state.
-    The residual hazard is a real build taking the lock during this module's ~2s — if that ever
-    reds the guard, the guard is right about the mtime and the reader should look at what else
-    was running.
+    TWO instruments, because one of them was too narrow (Sentinel, r1, 2026-09-29). The mtime
+    check below is a WRITE witness, and the bisection that found this defect shared it: both
+    measured the same file, so "the other four files leave the lock alone" was a claim about a
+    single file and this guard could not detect any host-state defect the bisection could not
+    already have found. The second instrument removes that blind spot — it records every path the
+    module actually RESOLVES through ``cli._host_synapt_dir`` and refuses any that is the real
+    ``~/.synapt``, whatever the caller goes on to write. It cannot false-red on fleet activity,
+    because it measures this module's calls and not the directory's contents.
+
+    COVERAGE, measured by mutation rather than assumed: deleting the scratch-host fixture in
+    ``TestCatchupCommand`` reddens the class-level assertion below ("RESOLVED the real host dir 1
+    time(s)"). Deleting the analogous patch in ``_run_hook`` reddens NOTHING — the hook path in
+    these tests never resolves the host dir even unpatched. So this guard's measured coverage is
+    the CATCHUP path, which is also where the defect was found; it is not a claim about the hook.
     """
-    real = Path.home() / ".synapt" / cli._HOST_BUILD_LOCK
+    real_host = Path.home() / ".synapt"
+    real = real_host / cli._HOST_BUILD_LOCK
     before = real.stat().st_mtime_ns if real.exists() else None
-    yield
+
+    resolved: list[Path] = []
+    original = cli._host_synapt_dir
+
+    def _recording(*args, **kwargs):
+        got = Path(original(*args, **kwargs))
+        resolved.append(got)
+        return got
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cli, "_host_synapt_dir", _recording)
+    try:
+        # CONTROL, and it is load-bearing rather than decorative: an unwired recorder is silent in
+        # exactly the same way a clean module is, so silence from it would read as a pass. Prove it
+        # fires, then clear, so the teardown assertion is about the module and not the instrument.
+        cli._host_synapt_dir()
+        assert resolved == [real_host], (
+            "the recorder is not wired — an empty record is indistinguishable from a clean module"
+        )
+        resolved.clear()
+        yield
+    finally:
+        mp.undo()
+
+    strays = [path for path in resolved if path == real_host]
+    assert not strays, (
+        f"this module RESOLVED the real host dir {real_host} {len(strays)} time(s) through "
+        "cli._host_synapt_dir; every hook and catchup path must be pointed at a scratch host dir, "
+        "or a test run can take the real build lock"
+    )
+
     after = real.stat().st_mtime_ns if real.exists() else None
     assert after == before, (
         f"this module took the REAL host lock {real} (mtime {before} -> {after}); the catchup and "
@@ -702,8 +742,9 @@ class TestCatchupCommand:
         """cmd_catchup takes the HOST build lock; without this it takes the real one at ~/.synapt.
 
         Measured 2026-09-29: this class alone moved the mtime of ~/.synapt/recall-build.lock, so a
-        suite run could make a real build or the sleep step wait. The module-level guard below
-        fails if this regresses.
+        suite run could make a real build or the sleep step wait. The module-level guard ABOVE
+        (``_real_host_lock_untouched``) fails if this regresses — verified by mutation: deleting
+        this line reddens its class-level assertion with "RESOLVED the real host dir 1 time(s)".
         """
         monkeypatch.setattr(cli, "_host_synapt_dir", lambda: tmp_path / "hostsynapt")
 
