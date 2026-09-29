@@ -4676,7 +4676,7 @@ def _resolve_build_min_free_gb() -> "tuple[float, str, str]":
         return (
             BUILD_MIN_FREE_HARD_FLOOR_GB,
             source,
-            f"requested {value:g}, using {BUILD_MIN_FREE_HARD_FLOOR_GB:g} (hard floor)",
+            f"{where} requested {value:g}, using {BUILD_MIN_FREE_HARD_FLOOR_GB:g} (hard floor)",
         )
     return value, source, ""
 

@@ -117,6 +117,22 @@ def test_refuse_skips_the_rebuild_and_still_writes_the_journal(precompact_env, m
     assert "floor from default" in out, f"the refusal line does not name the floor's source: {out!r}"
 
 
+def test_a_rejected_setting_is_named_on_the_precompact_refuse_line(precompact_env, monkeypatch, capsys):
+    """A REJECTED value returns the constant, so the source reads "default" and the note is the
+    only thing left that can say which layer to fix; the precompact line must print it too."""
+    monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", "abc")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.9:9")
+    cli.cmd_hook(_args())
+    assert precompact_env.built == []
+    out = capsys.readouterr().err
+    assert "env SYNAPT_BUILD_MIN_FREE_GB requested 'abc'" in out, (
+        f"a deferred user is not told which layer to fix: {out!r}"
+    )
+    assert "floor from default" not in out, (
+        f"the uninformative source was printed instead of the note: {out!r}"
+    )
+
+
 def test_held_host_lock_skips_the_rebuild_and_still_writes_the_journal(
     precompact_env, monkeypatch, capsys
 ):

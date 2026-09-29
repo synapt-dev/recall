@@ -85,7 +85,7 @@ class TestTheHardFloorAndBadTypes:
         value, source, note = cli._resolve_build_min_free_gb()
         assert value == FLOOR, "a setting must not be able to go under the hard floor"
         assert source == "global config"
-        assert note == f"requested 0.1, using {FLOOR:g} (hard floor)", note
+        assert note == f"global config requested 0.1, using {FLOOR:g} (hard floor)", note
 
     @pytest.mark.parametrize(
         "raw,label",
