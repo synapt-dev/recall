@@ -87,6 +87,7 @@ def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "next session-start catchup" not in err
     assert "next explicit catchup or precompact rebuild retries" in err
+    assert "floor from default" in err, f"a deferred user is not told where the floor came from: {err!r}"
 
 
 def test_gate_pass_starts_exactly_one_build(catchup_env, monkeypatch):

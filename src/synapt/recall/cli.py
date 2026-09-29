@@ -4588,9 +4588,10 @@ class FakeMeasurements:
     ENV = "SYNAPT_RECALL_MEM_FAKE"
 
 
-# The lower clamp a setting cannot go below: a setting that
-# can turn the safety off is a way to hurt a user's laptop. It is a POLICY floor, not a
-# measured one, and it says so when it fires rather than reading as a configured number.
+# The low end a setting cannot go below. A setting that can turn the safety off is a way to
+# hurt a user's laptop, so this one is clamped and the reader says when it clamped. It is a
+# POLICY floor rather than a measured one, which is exactly why it announces itself instead
+# of reading back as a number the user chose.
 BUILD_MIN_FREE_HARD_FLOOR_GB = 0.5
 
 
@@ -4641,19 +4642,30 @@ def _resolve_build_min_free_gb() -> "tuple[float, str, str]":
 
     if not asked:
         return BUILD_MIN_FREE_INACTIVE_GB, "default", ""
+
+    # A rejected value returns the CONSTANT, so `source` below reads "default" and no longer
+    # tells the user which layer to go and fix. The note carries it instead, and it says which
+    # layer in words the user can act on: the env var by name, the global config by name.
+    where = "env SYNAPT_BUILD_MIN_FREE_GB" if source == "env" else "global config"
+
     if isinstance(requested, bool):
         return BUILD_MIN_FREE_INACTIVE_GB, "default", (
-            f"requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} (not a number)"
+            f"{where} requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            "(not a number)"
         )
     try:
         value = float(requested)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError belongs with the other two: a JSON integer with 400 digits is a real
+        # config value, and float(10**400) raises it rather than returning inf. The old
+        # env-only path could not do this, because a digit STRING parses to inf.
         return BUILD_MIN_FREE_INACTIVE_GB, "default", (
-            f"requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} (not a number)"
+            f"{where} requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            "(not a number)"
         )
     if not (math.isfinite(value) and value > 0):
         return BUILD_MIN_FREE_INACTIVE_GB, "default", (
-            f"requested {value!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            f"{where} requested {value!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
             "(not a usable number)"
         )
     if value < BUILD_MIN_FREE_HARD_FLOOR_GB:
@@ -4734,11 +4746,11 @@ def _host_memory_verdict() -> "tuple[str, str]":
 def cmd_maintenance(args: argparse.Namespace) -> None:
     """``synapt maintenance status`` -- each guard beside its live reading and its source.
 
-    The printed words are the design's; the
-    gate's own verdicts are ``pass`` / ``refuse`` / ``cannot_measure``, and the mapping
-    between the two is here, in one place, so a reader can check it rather than trust it.
-    The live reading is the gate's own numbers string rather than a second parse of the same
-    host readings: two producers of one reading is how the two drift apart.
+    The gate's own words are ``pass`` / ``refuse`` / ``cannot_measure`` and the user-facing
+    ones are OK / DEFER / CANNOT MEASURE; the mapping between them is here, in one place, so a
+    reader can check it rather than trust it. The live reading is the gate's own numbers
+    string rather than a second parse of the same host readings, because two producers of one
+    reading is how the two drift apart.
     """
     action = getattr(args, "maintenance_action", None)
     if action != "status":

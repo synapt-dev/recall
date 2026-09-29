@@ -91,6 +91,7 @@ def test_refuse_skips_the_rebuild_and_still_writes_the_journal(precompact_env, m
     assert precompact_env.journaled, "the journal write was skipped along with the rebuild"
     out = capsys.readouterr().err
     assert "REFUSE" in out and "5.9" in out, f"the refusal line does not carry the numbers: {out!r}"
+    assert "floor from default" in out, f"the refusal line does not name the floor's source: {out!r}"
 
 
 def test_held_host_lock_skips_the_rebuild_and_still_writes_the_journal(

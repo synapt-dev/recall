@@ -98,7 +98,9 @@ class TestTheHardFloorAndBadTypes:
         value, source, note = cli._resolve_build_min_free_gb()
         assert value == CONSTANT, f"{label} produced floor={value!r}"
         assert source == "default"
-        assert note.startswith("requested ") and note.endswith("(not a number)"), note
+        assert note.startswith("global config requested ") and note.endswith(
+            "(not a number)"
+        ), note
 
     @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", 0, -1])
     def test_a_number_the_gate_cannot_use_falls_back_and_says_so(self, home, raw):
@@ -113,6 +115,15 @@ class TestTheHardFloorAndBadTypes:
         write_global(home, {"build_min_free_gb": "2.0"})
         value, source, note = cli._resolve_build_min_free_gb()
         assert (value, source, note) == (2.0, "global config", "")
+
+    def test_a_rejected_env_value_names_the_variable_to_go_and_fix(self, home, monkeypatch):
+        """A rejected value returns the constant, so `source` reads "default" and stops naming
+        the layer the value came from. The note has to carry it, or a user who set an
+        environment variable has nowhere to look."""
+        monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", "abc")
+        value, source, note = cli._resolve_build_min_free_gb()
+        assert value == CONSTANT and source == "default"
+        assert note.startswith("env SYNAPT_BUILD_MIN_FREE_GB requested "), note
 
     def test_an_absent_key_carries_no_note(self, home):
         """The absence of a setting must not be reported as a rejected one."""
@@ -136,3 +147,12 @@ class TestTheProjectLayerIsNotConsulted:
         )
         out = status_line(capsys)
         assert "IGNORED" in out and "memory.build_min_free_gb" in out, out
+
+
+def test_an_integer_too_large_for_a_float_falls_back_instead_of_raising(home):
+    """float(10**400) raises OverflowError, which is neither TypeError nor ValueError; the gate
+    (and the precompact hook through it) must never raise on a config value."""
+    (home / ".synapt" / "config.json").write_text('{"memory": {"build_min_free_gb": 1' + "0" * 400 + '}}')
+    clear_config_cache()
+    value, source, note = cli._resolve_build_min_free_gb()
+    assert value == CONSTANT and note.startswith("global config requested ") and note.endswith("(not a number)"), (value, note)

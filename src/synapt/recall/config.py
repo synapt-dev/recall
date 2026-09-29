@@ -93,17 +93,9 @@ class RecallConfig:
     # boolean typo would silently become a 1 GB build floor.
     memory: dict[str, tuple[object, str]] = field(default_factory=dict)
     # `memory.*` keys found in the PROJECT layer, by name. These guards are host properties
-    # and never read that layer; they are recorded so `maintenance status` can say
-    # so instead of letting a project setting look applied.
+    # and never read that layer; they are recorded so `maintenance status` can say so instead
+    # of letting a project setting look applied.
     memory_ignored_project_keys: list[str] = field(default_factory=list)
-
-    def get_memory(self, name: str) -> tuple[object, str] | None:
-        """``(raw_value, source)`` for a configured guard setting, or None when unset.
-
-        *source* is ``"global config"``. The value is whatever the file carried; the reader
-        validates it.
-        """
-        return self.memory.get(name)
 
     def get_model(self, key: str) -> str:
         """Get a model name by key, with env var override."""
