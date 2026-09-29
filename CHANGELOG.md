@@ -4,6 +4,10 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A memory-floor refusal of an automatic build leaves a trace.** A refused catchup or precompact rebuild used to be printed to a stream its own spawn discarded, so days without a build looked like a build never attempted. Each refusal is now one line in `build-deferrals.jsonl` beside the index, and `synapt resume` and the session-start banner print "index last built <date>; automatic build deferred <n> times (memory floor); run synapt build" once refusals have piled up since the last build. The 6 GB floor is unchanged.
+
 ## [0.26.0] - 2026-09-28
 
 Minor release. A new user whose machine runs Ollama with a local embedding model
