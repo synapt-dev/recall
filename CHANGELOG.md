@@ -7,6 +7,7 @@ All notable changes to synapt are documented here.
 ### Fixed
 
 - **A memory-floor refusal of an automatic build leaves a trace.** A refused catchup or precompact rebuild used to be printed to a stream its own spawn discarded, so days without a build looked like a build never attempted. Each refusal is now one line in `build-deferrals.jsonl` beside the index, and `synapt resume` and the session-start banner print "index last built <date>; automatic build deferred <n> times (memory floor); run synapt build" once refusals have piled up since the last build. The 6 GB floor is unchanged.
+- **A `built` row names the caller who started the build.** Each row now carries the build's `argv`, `pid`, `ppid`, and its parent's command line (read from `ps`), so a build can be attributed after the fact instead of only while its parent process is alive. A build whose parent has already exited has been reparented, so its row records `ppid` 1 and a parent command line naming the init process rather than the caller; the `pid` and `argv` are still the build's own. The background cold-refresh build, which reaches the engine below the shared build funnel, now records a row too. Because a row carries two unbounded command lines, the build's own `argv` and its parent's, `build-deferrals.jsonl` is written owner-only (0600), on creation and on any file an earlier version left world-readable.
 
 ## [0.26.0] - 2026-09-28
 
