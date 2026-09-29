@@ -1157,6 +1157,136 @@ def test_a_key_match_with_no_coverage_does_not_retire(tmp_path, monkeypatch):
     )
 
 
+def test_a_deleted_source_does_not_retire_its_overlay(tmp_path, monkeypatch):
+    """A MISSING transcript must not retire its overlay. Guards today, must keep.
+
+    The overlay may be the only surviving copy of those turns once the file is
+    gone, so clearing it is the one direction with no recovery. Today the gate
+    `continue`s on the OSError from `path.stat()`; this row pins that.
+
+    Mutation: treat a missing source as absorbed -- replace the `except OSError:
+    continue` with a `clear_query_tail` on that key. This row must then go RED
+    while the coverage guard stays GREEN, which is what separates the two.
+    """
+    from synapt.recall.core import TranscriptIndex, parse_transcript
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "base turn", "base answer", 20)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+
+    _write_turn(transcript, "overlay turn", "overlay answer", 21)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    refreshed = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert refreshed.state is QueryFreshnessState.REFRESHED
+
+    os.unlink(transcript)
+    assert not transcript.exists()
+
+    # the rebuild sees no chunks for the session, because its source is gone
+    db = ShardedRecallDB.open(index_dir)
+    rebuilt = TranscriptIndex(
+        [],
+        use_embeddings=False,
+        cache_dir=index_dir,
+        db=db,
+    )
+    rebuilt.save(index_dir)
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        cursor = db.load_query_tail_cursor(refreshed.source_key)
+        overlay = db.load_query_tail_chunks()
+    finally:
+        db.close()
+
+    assert cursor is not None, (
+        "the cursor was retired for a transcript that no longer exists, so its "
+        "overlay was cleared with no replacement copy anywhere"
+    )
+    assert overlay != []
+
+
+def test_a_replaced_source_does_not_retire_the_previous_sessions_overlay(
+    tmp_path, monkeypatch
+):
+    """REPLACED: a different session now sits at that path. Guards today.
+
+    THE MECHANISM IS NOT THE ONE I FIRST WROTE HERE, and the mutation is what
+    caught it. I documented `extent is None` as the guard and then dropped that
+    check -- and this row stayed GREEN, so it was passing for some other reason.
+    Diagnosed on the end state: the in-place `write_text` PRESERVES the inode, so
+    the stored key still MATCHES, and `session_indexed_extent` for the original
+    session is NOT None, because the base retains the earlier generation's rows
+    even after a rebuild that no longer sees that session. What actually holds
+    the cursor is the OFFSET comparison: the base's extent for that session is
+    behind the cursor's recorded offset, so the gate `continue`s.
+
+    Mutation: drop the OFFSET comparison (the same block the coverage guard
+    names). This row must go RED with it -- and note that it shares that
+    mechanism, so what this row adds is the CONSTRUCTION (a different session at
+    the same path), not a second falsifier.
+    """
+    from synapt.recall.core import TranscriptIndex, parse_transcript
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "base turn", "base answer", 20)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+
+    _write_turn(transcript, "overlay turn", "overlay answer", 21)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    refreshed = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert refreshed.state is QueryFreshnessState.REFRESHED
+
+    # A DIFFERENT session now occupies the same path, written in place.
+    other = "bbbbbbbb-1111-1111-1111-111111111111"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "a different session"},
+                "sessionId": other,
+                "uuid": "u-other",
+                "timestamp": "2026-08-30T10:22:00Z",
+            }
+        )
+        + "\n"
+    )
+
+    db = ShardedRecallDB.open(index_dir)
+    rebuilt = TranscriptIndex(
+        parse_transcript(transcript),
+        use_embeddings=False,
+        cache_dir=index_dir,
+        db=db,
+    )
+    rebuilt.save(index_dir)
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        cursor = db.load_query_tail_cursor(refreshed.source_key)
+    finally:
+        db.close()
+
+    assert cursor is not None, (
+        "the original session's cursor was retired on the strength of a "
+        "DIFFERENT session's coverage now sitting at that path"
+    )
+
+
 def test_overlay_only_session_hydrates_bounded_resume_listing(tmp_path, monkeypatch):
     transcript = tmp_path / f"{SESSION}.jsonl"
     _write_turn(transcript, "overlay listing witness", "visible", 20)
