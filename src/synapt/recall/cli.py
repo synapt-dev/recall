@@ -3997,10 +3997,14 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # hook exists, so it must survive a refusal.
             verdict, numbers = _host_memory_verdict()
             if verdict == "refuse":
-                # The source travels on the REFUSE line, and only there: a deferred user
-                # needs to know WHERE to change the number, and a pass has nothing to change.
+                # The origin travels on the REFUSE line, and only there: a deferred user needs
+                # to know WHERE to change the number, and a pass has nothing to change. It is
+                # the NOTE when there is one, because a REJECTED setting returns source
+                # "default", so printing the source alone would tell the reader the least at
+                # exactly the moment they need the most.
+                _floor, _source, _note = _resolve_build_min_free_gb()
                 print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers}; "
-                      f"floor from {_resolve_build_min_free_gb()[1]})",
+                      f"{_note or f'floor from {_source}'})",
                       file=sys.stderr)
                 from synapt.recall.build_deferrals import record_deferral
                 record_deferral(project_data_dir(project), "precompact", numbers)
@@ -4843,8 +4847,9 @@ def cmd_catchup(args: argparse.Namespace) -> None:
                   "because an unreadable instrument is not a memory verdict",
                   file=sys.stderr)
         elif verdict == "refuse":
-            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}; floor from "
-                  f"{_resolve_build_min_free_gb()[1]}); the next explicit catchup or "
+            _floor, _source, _note = _resolve_build_min_free_gb()
+            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}; "
+                  f"{_note or f'floor from {_source}'}); the next explicit catchup or "
                   "precompact rebuild retries", file=sys.stderr)
             from synapt.recall.build_deferrals import record_deferral
             record_deferral(data_dir, "catchup", numbers)

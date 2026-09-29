@@ -16,6 +16,29 @@ from pathlib import Path
 import pytest
 
 from synapt.recall import cli
+from synapt.recall.config import clear_config_cache
+
+
+@pytest.fixture(autouse=True)
+def _isolate_the_config_layer(tmp_path, monkeypatch):
+    """These witnesses drive the real gate, and the gate reads the GLOBAL config.
+
+    Without this the suite reads the DEVELOPER'S ``~/.synapt/config.json``. A machine that
+    set ``memory.build_min_free_gb`` for itself would fail these witnesses, while CI (no
+    config file at all) stays green: the file would be red exactly for the user the setting
+    exists to serve, and green where it is watched.
+
+    A scratch HOME, and an explicit cache clear on both sides, because ``load_config``
+    memoises into ``_cached_config``: without the clear the first test's config leaks into
+    every test after it, and the fixture would look like it works while it does not.
+    """
+    home = tmp_path / "gate-home"
+    (home / ".synapt").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("SYNAPT_BUILD_MIN_FREE_GB", raising=False)
+    clear_config_cache()
+    yield home
+    clear_config_cache()
 
 
 class _Recorder:
@@ -88,6 +111,23 @@ def test_gate_refuses_so_no_build_starts(catchup_env, monkeypatch, capsys):
     assert "next session-start catchup" not in err
     assert "next explicit catchup or precompact rebuild retries" in err
     assert "floor from default" in err, f"a deferred user is not told where the floor came from: {err!r}"
+
+
+def test_a_rejected_setting_is_named_on_the_refuse_line(catchup_env, monkeypatch, capsys):
+    """A REJECTED value returns the constant, so the source reads "default" and the note is the
+    only thing left that can say which layer to go and fix. Printing the source alone tells the
+    reader the least at exactly the moment they need the most."""
+    monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", "abc")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.9:9")
+    cli.cmd_catchup(_args())
+    assert catchup_env.builds == []
+    err = capsys.readouterr().err
+    assert "env SYNAPT_BUILD_MIN_FREE_GB requested 'abc'" in err, (
+        f"a deferred user is not told which layer to fix: {err!r}"
+    )
+    assert "floor from default" not in err, (
+        f"the uninformative source was printed instead of the note: {err!r}"
+    )
 
 
 def test_gate_pass_starts_exactly_one_build(catchup_env, monkeypatch):

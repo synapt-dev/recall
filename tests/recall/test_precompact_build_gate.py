@@ -21,6 +21,29 @@ from pathlib import Path
 import pytest
 
 from synapt.recall import cli
+from synapt.recall.config import clear_config_cache
+
+
+@pytest.fixture(autouse=True)
+def _isolate_the_config_layer(tmp_path, monkeypatch):
+    """These witnesses drive the real gate, and the gate reads the GLOBAL config.
+
+    Without this the suite reads the DEVELOPER'S ``~/.synapt/config.json``. A machine that
+    set ``memory.build_min_free_gb`` for itself would fail these witnesses, while CI (no
+    config file at all) stays green: the file would be red exactly for the user the setting
+    exists to serve, and green where it is watched.
+
+    A scratch HOME, and an explicit cache clear on both sides, because ``load_config``
+    memoises into ``_cached_config``: without the clear the first test's config leaks into
+    every test after it, and the fixture would look like it works while it does not.
+    """
+    home = tmp_path / "gate-home"
+    (home / ".synapt").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("SYNAPT_BUILD_MIN_FREE_GB", raising=False)
+    clear_config_cache()
+    yield home
+    clear_config_cache()
 
 
 class _Recorder:
