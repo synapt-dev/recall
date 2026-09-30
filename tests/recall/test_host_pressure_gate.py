@@ -75,6 +75,53 @@ def test_a_refusal_from_the_floor_still_names_the_floor_and_not_the_level(monkey
     assert "floor_gb=6.0" in numbers, f"the pinned floor is not the one reported: {numbers!r}"
 
 
+# --- the darwin arm's three instruments, answered rather than replaced ---------------
+#
+# Faking ONLY the pressure read is not enough off macOS, and CI is where that was measured:
+# on Linux `/usr/sbin/sysctl -n vm.swapusage` and `/usr/bin/vm_stat` are either absent or
+# answer nothing, so the two rows below fell through to the real binaries and read an empty
+# stdout through their regexes -- `AttributeError: 'NoneType' object has no attribute
+# 'group'`, and `cannot_measure`. Five red jobs on 2026-09-30, both rows, same cause: the
+# tests were macOS-shaped while the suite runs on three platforms. Every local run here is
+# on the one platform where they happened to be true.
+#
+# THE PRESSURE READ ITSELF IS STILL PRODUCTION CODE. `_host_pressure_level()` is not
+# replaced; it is only ANSWERED by the fake `subprocess.run`. That is what keeps these rows
+# the mutation's witness: replace `pressure = _host_pressure_level()` with
+# `pressure = None` and nothing consults the fake, so the assertion fails. A fake that
+# replaced the FUNCTION would witness nothing, on any platform.
+_VM_SWAPUSAGE = "total = 16384.00M  used = 2048.00M  free = 14336.00M\n"
+_VM_STAT = (
+    "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+    "Pages free:                              500000.\n"
+    "Pages inactive:                          500000.\n"
+)
+
+
+def _darwin_instrument_run(real_run, pressure):
+    """A `subprocess.run` that answers the darwin arm's three commands.
+
+    *pressure* is the stdout for the memorystatus read, or an exception instance to raise
+    for it. Free+inactive comes back at ~15.3 GB, comfortably above any floor this gate can
+    be configured with, so the pressure reading is the ONLY reason either row can refuse.
+    """
+
+    def fake_run(cmd, *a, **kw):
+        if isinstance(cmd, (list, tuple)):
+            joined = " ".join(str(c) for c in cmd)
+            if "memorystatus" in joined:
+                if isinstance(pressure, BaseException):
+                    raise pressure
+                return subprocess.CompletedProcess(cmd, 0, stdout=pressure, stderr="")
+            if "vm.swapusage" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout=_VM_SWAPUSAGE, stderr="")
+            if "vm_stat" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout=_VM_STAT, stderr="")
+        return real_run(cmd, *a, **kw)
+
+    return fake_run
+
+
 def test_the_kernel_is_actually_asked_on_a_real_host(monkeypatch):
     """THE ROW THE MUTATION FOUND MISSING.
 
@@ -83,20 +130,16 @@ def test_the_kernel_is_actually_asked_on_a_real_host(monkeypatch):
     unreadable row cannot be that witness: "we asked and it failed" and "we never asked" are
     the same bytes downstream, which is exactly why `None` is not reported as a normal level.
 
-    So this row drives the REAL path -- no fake -- with the sysctl patched to ANSWER, and
-    asserts the answer reaches the verdict. A gate that reads the level in a fake and never
-    in production would pass every other test here.
+    So this row drives the REAL pressure read -- `_host_pressure_level()` runs its own body,
+    parses its own stdout -- with the darwin binaries ANSWERED, and asserts the answer reaches
+    the verdict. A gate that reads the level in a fake and never in production would pass
+    every other test here.
     """
     monkeypatch.delenv("SYNAPT_RECALL_MEM_FAKE", raising=False)
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", _darwin_instrument_run(real_run, "4\n"))
 
-    def fake_run(cmd, *a, **kw):
-        if isinstance(cmd, (list, tuple)) and any("memorystatus" in str(c) for c in cmd):
-            return subprocess.CompletedProcess(cmd, 0, stdout="4\n", stderr="")
-        return real_run(cmd, *a, **kw)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
     verdict, numbers = cli._host_memory_verdict()
     assert verdict == "refuse", (
         f"the kernel answered 4 (CRITICAL) and the gate did not ask, or did not honour it: "
@@ -114,15 +157,12 @@ def test_an_unreadable_pressure_instrument_does_not_stop_the_build(monkeypatch, 
     absent, because a gate that did not ask one of its two questions must say so.
     """
     monkeypatch.delenv("SYNAPT_RECALL_MEM_FAKE", raising=False)
-    real_run = subprocess.run
-
-    def fake_run(cmd, *a, **kw):
-        if isinstance(cmd, (list, tuple)) and any("memorystatus" in str(c) for c in cmd):
-            raise OSError("no such sysctl")
-        return real_run(cmd, *a, **kw)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(cli.sys, "platform", "darwin")
+    real_run = subprocess.run
+    monkeypatch.setattr(
+        subprocess, "run", _darwin_instrument_run(real_run, OSError("no such sysctl"))
+    )
+
     verdict, numbers = cli._host_memory_verdict()
     assert verdict in ("pass", "refuse"), f"an unreadable instrument produced {verdict!r}"
     assert "pressure_level=unreadable" in numbers, (
