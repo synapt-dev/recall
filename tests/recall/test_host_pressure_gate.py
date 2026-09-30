@@ -277,6 +277,61 @@ def test_a_stop_survives_a_broad_except_in_the_build_body(monkeypatch, capsys):
     )
 
 
+def test_a_stop_survives_even_a_bare_baseexception_handler(monkeypatch, capsys):
+    """THE SECOND NET, AND IT NEEDS ITS OWN ROW BECAUSE THE FIRST NET DOES NOT COVER IT.
+
+    Deriving `BuildStoppedByPressure` from `BaseException` makes the stop uncatchable by
+    `except Exception` -- but a bare `except:` or an `except BaseException` still eats it, and
+    those exist in the wild for the same reason broad handlers do. That is what the watchdog's
+    FLAG is for: it is set by ANOTHER THREAD, so the thread it raises in cannot swallow it,
+    and it is read after the body has returned however it returned.
+
+    **THIS ROW EXISTS BECAUSE THE MUTATION SET SAID SO.** Removing the flag read reddened
+    NOTHING across the whole file -- the clause was decoration until this row. Here the body
+    really does swallow the stop (the assertion says so rather than pretending otherwise),
+    and the outcome must still be a stop.
+    """
+    import threading
+    import time
+
+    started: list[bool] = []
+    swallowed: list[str] = []
+
+    def base_swallowing_build(*a, **k):
+        started.append(True)
+        deadline = time.monotonic() + 5.0
+        try:
+            while time.monotonic() < deadline:
+                time.sleep(0.01)
+        except BaseException:  # noqa: BLE001 -- THE POINT OF THIS ROW
+            swallowed.append("BaseException")
+            return "SWALLOWED-THE-STOP-AT-THE-BASE"
+        return "RAN TO COMPLETION"
+
+    released, recorded = _wire_build(monkeypatch, base_swallowing_build)
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9:1")
+
+    def turn_the_host():
+        time.sleep(0.15)
+        monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9:4")
+
+    threading.Thread(target=turn_the_host, daemon=True).start()
+    result = cli._archive_and_build(Path("/tmp/witness-does-not-need-to-exist"))
+
+    assert started, "the build never started, so this witness proves nothing"
+    assert swallowed, (
+        "this row's premise is that the body swallows even the base exception; if it did not, "
+        "the row is testing something else"
+    )
+    assert result is None, (
+        f"the body swallowed the stop and the FLAG did not catch it: {result!r}"
+    )
+    assert recorded == [], f"a stop defeated at the base wrote a completion receipt: {recorded}"
+    assert released == [42], f"the lock was not released: {released}"
+    err = capsys.readouterr().err
+    assert "STOPPED mid-run" in err, f"the operator was told nothing: {err!r}"
+
+
 def test_the_control_a_build_on_a_quiet_host_is_not_stopped(monkeypatch):
     """The other arm. A monitor that stopped builds unconditionally would pass the witness
     above and be worse than no monitor at all, so the quiet case is pinned too."""
