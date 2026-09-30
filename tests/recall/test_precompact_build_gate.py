@@ -21,6 +21,32 @@ from pathlib import Path
 import pytest
 
 from synapt.recall import cli
+from synapt.recall.config import clear_config_cache
+
+
+@pytest.fixture(autouse=True)
+def _isolate_the_config_layer(tmp_path, monkeypatch):
+    """These witnesses drive the real gate, and the gate reads the GLOBAL config.
+
+    Without this the suite reads the DEVELOPER'S ``~/.synapt/config.json``. A machine that
+    set ``memory.build_min_free_gb`` for itself would fail these witnesses, while CI (no
+    config file at all) stays green: the file would be red exactly for the user the setting
+    exists to serve, and green where it is watched.
+
+    A scratch HOME, and an explicit cache clear on both sides, because ``load_config``
+    memoises into ``_cached_config``: without the clear the first test's config leaks into
+    every test after it, and the fixture would look like it works while it does not.
+    """
+    home = tmp_path / "gate-home"
+    (home / ".synapt").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    # Windows: os.path.expanduser reads USERPROFILE, not HOME, so setting HOME alone
+    # isolates nothing there and these witnesses read the developer's real config.
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("SYNAPT_BUILD_MIN_FREE_GB", raising=False)
+    clear_config_cache()
+    yield home
+    clear_config_cache()
 
 
 class _Recorder:
@@ -91,6 +117,23 @@ def test_refuse_skips_the_rebuild_and_still_writes_the_journal(precompact_env, m
     assert precompact_env.journaled, "the journal write was skipped along with the rebuild"
     out = capsys.readouterr().err
     assert "REFUSE" in out and "5.9" in out, f"the refusal line does not carry the numbers: {out!r}"
+    assert "floor from default" in out, f"the refusal line does not name the floor's source: {out!r}"
+
+
+def test_a_rejected_setting_is_named_on_the_precompact_refuse_line(precompact_env, monkeypatch, capsys):
+    """A REJECTED value returns the constant, so the source reads "default" and the note is the
+    only thing left that can say which layer to fix; the precompact line must print it too."""
+    monkeypatch.setenv("SYNAPT_BUILD_MIN_FREE_GB", "abc")
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:5.9:9")
+    cli.cmd_hook(_args())
+    assert precompact_env.built == []
+    out = capsys.readouterr().err
+    assert "env SYNAPT_BUILD_MIN_FREE_GB requested 'abc'" in out, (
+        f"a deferred user is not told which layer to fix: {out!r}"
+    )
+    assert "floor from default" not in out, (
+        f"the uninformative source was printed instead of the note: {out!r}"
+    )
 
 
 def test_held_host_lock_skips_the_rebuild_and_still_writes_the_journal(

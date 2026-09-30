@@ -522,6 +522,10 @@ Recall resolves its data root in this order:
 The reported path is operational provenance only. Public recall does not infer
 or report the caller's identity from it.
 
+### Running several agents on a 16 GB machine
+
+An automatic index build (a compaction's rebuild, or an explicit `synapt recall catchup`) skips itself when free plus inactive memory is under 6 GB, and a session start's catchup does not build at all, so a machine with several agents open can go days without a fresh index. When that happens `synapt resume` and the session-start banner say so in one line, for example "index last built 2026-09-26; automatic build deferred 3 times (memory floor); run synapt build"; close a few agents and run `synapt build` yourself, or set `SYNAPT_BUILD_MIN_FREE_GB` to a lower floor if you accept the memory cost.
+
 ## What `synapt init` does
 
 Run from a project root:
