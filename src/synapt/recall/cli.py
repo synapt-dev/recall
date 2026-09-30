@@ -663,6 +663,85 @@ def _build_journal_files(project_dir: Path) -> list[Path]:
     return files
 
 
+class BuildStoppedByPressure(RuntimeError):
+    """The build was stopped MID-RUN because the host turned while it ran.
+
+    Distinct from a refusal at admission: that one never starts, this one starts and is
+    taken down. They are different events to report, so they are different exceptions.
+    """
+
+
+# How often the monitor samples the gate while a build runs. Long enough to cost nothing on
+# a healthy host, short enough that a build cannot ride a fresh refusal far.
+_PRESSURE_MONITOR_INTERVAL_S = 15.0
+
+
+class _PressureWatchdog:
+    """Sample the host gate WHILE a build runs, and stop it when the host turns.
+
+    Admission answers one question at one instant, and the 2026-09-30 incident is what that costs: on
+    2026-09-30 a build passed the gate at 07:09 on a host that still had memory, then grew to
+    about 5.6 GB and held the kernel at pressure level 4 while the fleet was loaded. Nothing
+    was looking. This looks.
+
+    **THE BOUND IS STATED RATHER THAN IMPLIED: stopping is a raise in the MAIN thread, which
+    lands at the next BYTECODE boundary.** A single long call inside C code is therefore not
+    interrupted part-way -- the embedding loop is Python-level per batch, so the stop is
+    reached between batches and never in the middle of one. A monitor that could not
+    interrupt at all would only be a reporter, and saying which one this is matters more than
+    the mechanism.
+
+    An unreadable gate is NOT a reason to stop a build; that is this module's existing
+    doctrine for a broken instrument, and it is why a sample that raises is skipped rather
+    than treated as pressure.
+    """
+
+    def __init__(self, interval: float = _PRESSURE_MONITOR_INTERVAL_S) -> None:
+        import threading
+
+        self.interval = interval
+        self.stopped_because = ""
+        self.samples = 0
+        self._stop = threading.Event()
+        self._thread: "threading.Thread | None" = None
+        self._main_thread_id = threading.get_ident()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            self.samples += 1
+            try:
+                verdict, numbers = _host_memory_verdict()
+            except Exception:  # noqa: BLE001 -- unreadable instrument, not pressure
+                continue
+            if verdict == "refuse":
+                self.stopped_because = numbers
+                self._raise_in_main()
+                return
+
+    def _raise_in_main(self) -> None:
+        import ctypes
+
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(self._main_thread_id),
+            ctypes.py_object(BuildStoppedByPressure),
+        )
+
+    def __enter__(self) -> "_PressureWatchdog":
+        import threading
+
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="recall-pressure-watchdog"
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        return False  # never swallow: a stop must reach the caller that releases the lock
+
+
 def _archive_and_build(
     project_dir: Path,
     source_dirs: list[Path] | None = None,
@@ -706,16 +785,30 @@ def _archive_and_build(
         print(f"  Warning: another build is in progress (timed out waiting for lock; {_build_lock_busy_message(data_dir)})")
         return None
 
+    watchdog: "_PressureWatchdog | None" = None
     try:
-        built = _archive_and_build_locked(
-            project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
-            progress, skip_clustering=skip_clustering,
-        )
+        with _PressureWatchdog() as watchdog:
+            built = _archive_and_build_locked(
+                project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
+                progress, skip_clustering=skip_clustering,
+            )
         if built is not None:
             # every build/rebuild/setup/precompact/catchup/MCP build passes through here
             from synapt.recall.build_deferrals import record_build
             record_build(data_dir)
         return built
+    except BuildStoppedByPressure:
+        # NOT a completed build: `record_build` is deliberately not called, because a
+        # stopped build must not leave a receipt that reads like a finished one. The
+        # `finally` below releases the lock, which is the whole reason this stop is an
+        # exception rather than an os._exit -- a killed holder leaves a lock no one clears.
+        why = watchdog.stopped_because if watchdog is not None else "pressure"
+        print(
+            f"  Build STOPPED mid-run: the host went under memory pressure while this build "
+            f"ran ({why}). Nothing was recorded; re-run it when the host is quieter.",
+            file=sys.stderr,
+        )
+        return None
     finally:
         _release_build_lock(lock_fd)
 
@@ -4589,10 +4682,19 @@ class FakeMeasurements:
 
     It replaces the host gate's own override name: that name belonged to another
     tool, and a seam one repository injects through should carry that repository's
-    name. Same format -- ``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``.
+    name. Same format -- ``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count`` -- with
+    an OPTIONAL fifth field carrying ``kern.memorystatus_vm_pressure_level``. The fifth is
+    optional so that the four-field fakes written before the pressure arm existed keep
+    meaning what they meant; redefining the fourth would have changed them silently.
     """
 
     ENV = "SYNAPT_RECALL_MEM_FAKE"
+
+
+# macOS pressure levels: 1 NORMAL, 2 WARN, 4 CRITICAL. The gate refuses ABOVE NORMAL, so a
+# host the kernel has already flagged is refused even when its free+inactive reading looks
+# healthy -- that combination is exactly the 2026-09-30 incident.
+PRESSURE_REFUSE_ABOVE = 1
 
 
 # The low end a setting cannot go below. A setting that can turn the safety off is a way to
@@ -4694,33 +4796,84 @@ def _build_min_free_gb() -> float:
     return _resolve_build_min_free_gb()[0]
 
 
+def _host_pressure_level() -> "int | None":
+    """``kern.memorystatus_vm_pressure_level``, or ``None`` when it cannot be read.
+
+    1 NORMAL, 2 WARN, 4 CRITICAL on macOS. **``None`` is deliberately NOT 1**: a reading that
+    was never taken must not be reported as a normal host, because downstream the two are
+    indistinguishable -- the same shape as a count that hit its bound in silence.
+
+    Free+inactive is a SNAPSHOT of pages; this is the kernel's own integrated judgement of
+    whether the host is coping. The 2026-09-30 incident is the reason it is
+    read at all: the build passed the free+inactive gate at 07:09 on a host that still had
+    memory, then grew to about 5.6 GB and held the kernel at level 4, and nothing had asked.
+    """
+    import subprocess as _sp
+
+    try:
+        out = _sp.run(
+            ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+        return int(out.strip())
+    except Exception:  # noqa: BLE001 -- an unreadable instrument, not a verdict
+        return None
+
+
 def _host_memory_verdict() -> "tuple[str, str]":
     """``("pass"|"refuse"|"cannot_measure", numbers)`` for a heavy local step.
 
-    The gate is FREE+INACTIVE ALONE, at ``BUILD_MIN_FREE_INACTIVE_GB`` (6 GB), which is
-    NOT the 4 GB used as the floor for heavy local runs generally: the incident this
-    exists for started on a host that still read 4.89 GB free+inactive, so 4 GB is not
-    a gate against it. Two floors, two purposes -- keep them apart. Swap percent is
-    reported and never thresholded, because on this platform allocated swap is held
-    rather than released and the percentage does not track pressure.
+    TWO ARMS, and each refusal names the one that fired.
 
-    CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an
-    instrument failure, and an earlier misread of one stopped real maintenance work
-    for two nights, so a missing instrument must not stop a build here either -- the
-    caller warns and proceeds. ``SYNAPT_RECALL_MEM_FAKE``
-    (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``) forces a verdict
-    deterministically.
+    * FREE+INACTIVE alone, at ``BUILD_MIN_FREE_INACTIVE_GB`` (6 GB), which is NOT the 4 GB
+      used as the floor for heavy local runs generally: the incident this exists for started
+      on a host that still read 4.89 GB free+inactive, so 4 GB is not a gate against it. Two
+      floors, two purposes -- keep them apart. Swap percent is reported and never
+      thresholded, because on this platform allocated swap is held rather than released and
+      the percentage does not track pressure.
+    * THE KERNEL'S PRESSURE LEVEL, above ``PRESSURE_REFUSE_ABOVE`` (1, NORMAL). Added
+      2026-09-30: free+inactive is a snapshot, and a build that passes it
+      can still drive the host into CRITICAL. This arm is why a large free+inactive reading
+      is not by itself a pass.
+
+    CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an instrument
+    failure, and an earlier misread of one stopped real maintenance work for two nights, so a
+    missing instrument must not stop a build here either -- the caller warns and proceeds.
+    That doctrine covers the pressure arm too, and it is why an unreadable level is REPORTED
+    in *numbers* rather than silently dropped: a gate that did not ask one of its two
+    questions has to say so. ``SYNAPT_RECALL_MEM_FAKE``
+    (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count[:pressure_level]``) forces a
+    verdict deterministically; the fifth field is OPTIONAL and the fourth is left alone,
+    because four-field fakes already exist here and redefining one would change what they
+    meant.
     """
     import re
     import subprocess as _sp
 
     floor = _build_min_free_gb()
     fake = os.environ.get(FakeMeasurements.ENV)
+    # ``None`` with ``pressure_src="level"`` never happens; the pair is written this way so a
+    # reader can see WHICH kind of absence they are looking at.
+    pressure: "int | None" = None
+    pressure_src = "unreadable"
     if fake:
         try:
             used, total, free_gb = (float(x) for x in fake.split(":")[:3])
         except (ValueError, IndexError):
             return "cannot_measure", f"SYNAPT_RECALL_MEM_FAKE={fake!r} is not three numbers"
+        parts = fake.split(":")
+        if len(parts) > 4:
+            try:
+                pressure = int(float(parts[4]))
+            except (ValueError, TypeError):
+                return "cannot_measure", (
+                    f"SYNAPT_RECALL_MEM_FAKE={fake!r} has a pressure field that is not a number"
+                )
+            pressure_src = "level"
+        else:
+            pressure_src = "not_forced"
     elif sys.platform != "darwin":
         # The thresholds mirror a macOS host gate, so elsewhere the gate is inert
         # rather than unreadable: PASS with a reason and no warning, because a line
@@ -4741,10 +4894,16 @@ def _host_memory_verdict() -> "tuple[str, str]":
             free_gb = (free + inactive) * page / 1024 ** 3
         except Exception as exc:  # noqa: BLE001 -- an unreadable instrument, not a verdict
             return "cannot_measure", f"{type(exc).__name__}: {exc}"
+        pressure = _host_pressure_level()
+        pressure_src = "level" if pressure is not None else "unreadable"
 
     pct = (used / total * 100) if total else 0.0
+    level_txt = str(pressure) if pressure is not None else pressure_src
     numbers = (f"free_inactive_gb={free_gb:.2f} floor_gb={floor:.1f} "
-               f"swap_used_pct={pct:.1f} (context, not a gate)")
+               f"swap_used_pct={pct:.1f} (context, not a gate) "
+               f"pressure_level={level_txt}")
+    if pressure is not None and pressure > PRESSURE_REFUSE_ABOVE:
+        return "refuse", numbers
     if free_gb < floor:
         return "refuse", numbers
     return "pass", numbers
