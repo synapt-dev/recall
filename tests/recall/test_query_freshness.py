@@ -1037,6 +1037,81 @@ def test_a_cursor_with_no_overlay_rows_is_not_retired():
     assert query_tail_coverage_complete([], set()) is False
 
 
+def test_both_base_reads_agree_on_a_session_that_has_a_journal_row(tmp_path):
+    """PARITY, pinned on the one input that divides the two readers.
+
+    The shard read excludes journal rows for free: its inner read is
+    ``load_session_chunks()``, which passes ``include_journal=False``. The
+    monolithic read had no such clause, so for a session that ALSO has a journal
+    entry it returned a digest the overlay has no counterpart for. A suppressing
+    cursor then fails ``base <= overlay`` and can NEVER retire -- the same
+    never-retires class this change exists to remove, reached by a different road.
+
+    The direction of the defect is a cursor that lives forever, not a DELETE, so
+    nothing reddens on its own; only the two readers disagreeing shows it. The
+    row therefore asserts agreement AND that the real turn is present, so two
+    empty sets cannot satisfy it.
+    """
+    from synapt.recall.core import TranscriptChunk, parse_transcript
+    from synapt.recall.storage import query_tail_turn_digest
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "a real turn", "a real answer", 20)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    # ONE call: `save_chunks` is a whole-table replace (storage.py:1770), not a
+    # per-session upsert, so a second call would drop the turns saved first and
+    # leave this row measuring an empty base.
+    db.save_chunks(
+        list(parse_transcript(transcript))
+        + [
+            TranscriptChunk(
+                id=f"{SESSION[:8]}:journal:deadbeef",
+                session_id=SESSION,
+                timestamp="2026-08-30T10:25:00Z",
+                turn_index=-1,
+                user_text="journal entry",
+                assistant_text="journal body",
+            )
+        ]
+    )
+    db.close()
+
+    db = RecallDB(index_dir / "recall.db")
+    try:
+        monolith = db.base_turn_digests(SESSION)
+    finally:
+        db.close()
+
+    sharded = ShardedRecallDB.open(index_dir)
+    try:
+        shards = sharded.base_turn_digests(SESSION)
+    finally:
+        sharded.close()
+
+    journal_digest = query_tail_turn_digest(
+        "journal entry", "journal body", "2026-08-30T10:25:00Z"
+    )
+    assert journal_digest not in shards, (
+        "the shard read carried the journal sentinel, so this row is not "
+        "measuring the case it exists for"
+    )
+    assert journal_digest not in monolith, (
+        "the monolithic base read returned the journal row at turn_index -1; a "
+        "suppressing cursor over this session fails base <= overlay and can "
+        "never retire"
+    )
+    assert monolith == shards, (
+        f"the two base reads disagree on the same store: monolith "
+        f"{len(monolith)} digests, shards {len(shards)}"
+    )
+    assert len(monolith) == 1, (
+        f"expected the one real turn, got {len(monolith)} digests -- an empty "
+        "set would satisfy the agreement assertion above vacuously"
+    )
+
+
 def test_base_rebuild_retires_overlay_only_after_matching_coverage(
     tmp_path, monkeypatch
 ):
@@ -1374,20 +1449,21 @@ def test_a_replaced_source_does_not_retire_the_previous_sessions_overlay(
 def test_a_rewrite_that_keeps_the_ids_but_moves_the_content_does_not_retire(
     tmp_path, monkeypatch
 ):
-    """The shifted-turn row, and Apollo's row from his §5 BLOCK.
+    """The shifted-turn row: ids kept, content moved, nothing may retire.
 
     Chunk ids are POSITIONAL (`{short_id}:t{turn_index}`, core.py:162), so a
     rewrite can leave an id in place while the turn it names is a different turn.
     Measured on the live store: of 1,532 ids present in both the overlay and the
     current parse, 848 (55%) carried different content.
 
-    That is why coverage must be judged on CONTENT. An id-presence test would
-    retire here, and so does today's gate — for a different reason, which is the
-    point of the row: it retires on the OFFSET comparison, after the key matches,
-    and those offsets were recorded against a file whose bytes have since moved.
-    Measured end state for this construction: cursor SURVIVED = False.
+    That is why coverage is judged on CONTENT. An id-presence test would retire
+    here. The row went red before the coverage fix and is green after it, and it
+    is what reddens if the content rule is ever weakened to an id or offset test.
+    The rename it is NOT measuring is asserted below: the rewrite keeps the inode,
+    so the stored key still matches and the row would pass for the wrong reason
+    if it did not.
 
-    EXPECTED TO FAIL on the current gate; it is the spec for the fix.
+    Measured end state for this construction: cursor SURVIVED.
 
     Its sibling `..._key_match_with_no_coverage_...` is the same hazard from the
     other side — a rewrite that makes the file SHORTER — and that one PASSES

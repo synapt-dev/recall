@@ -114,6 +114,14 @@ def query_tail_coverage_complete(
        exactly a suppressing overlay's job. Retiring on coverage alone un-hides
        them -- the ``latest_projected_timestamp`` comparison in the old gate was
        carrying this, so it was NOT subsumed by the digest.
+
+    DELIBERATE, SO IT IS NOT READ AS AN OVERSIGHT: when ONE session has TWO
+    suppressing generations, each fails condition 3 against a base the other has
+    already replaced, so both survive. The alternative is retiring one and
+    un-hiding what the other was hiding, which is the defect 3 exists to stop.
+    The cost is a session whose overlays both persist until the base catches up
+    on its own -- the safe direction, and it is stated here rather than left for
+    a reader to infer from the code.
     """
     if not overlay_turns:
         return False
@@ -1435,10 +1443,18 @@ class RecallDB:
         the overlay's whole job is to suppress the base until it retires. A veto
         there would mean no suppressed session could ever be retired -- which is
         every session with an overlay.
+
+        ``turn_index >= 0`` is PARITY WITH THE SHARD READ, not an optimisation.
+        Journal rows carry the same session_id at turn_index -1, so without it
+        this reader sees rows the overlay has no counterpart for -- and a
+        suppressing cursor then fails the subset test and can NEVER retire,
+        which is the exact class this change exists to remove. The shard path
+        gets it for free because ``load_session_chunks`` passes
+        ``include_journal=False``.
         """
         rows = self._conn.execute(
             "SELECT user_text, assistant_text, timestamp FROM chunks "
-            "WHERE session_id = ?",
+            "WHERE session_id = ? AND turn_index >= 0",
             (session_id,),
         ).fetchall()
         return {
