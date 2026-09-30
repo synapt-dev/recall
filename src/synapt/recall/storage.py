@@ -91,20 +91,41 @@ def query_tail_turn_digest(
     return digest.hexdigest()[:16]
 
 
-def query_tail_coverage_complete(overlay_turns: list, base_digests: set) -> bool:
-    """True when EVERY overlay turn is present in the base BY CONTENT.
+def query_tail_coverage_complete(
+    overlay_turns: list, base_digests: set, suppresses_base: bool = False
+) -> bool:
+    """True when the base can prove it absorbed the overlay -- BY CONTENT.
 
     The decision, shared by both stores. The source key and the indexed extent
     are both proxies for this question -- the key because it hashes ``st_ino``,
     so a compaction rewrite breaks it permanently while leaving the content
-    covered; the extent because it is bookkeeping about the same rows. Coverage
-    is the thing itself, so it is what decides.
+    covered.
+
+    THREE CONDITIONS, and the last two were each found by a reader rather than
+    by reasoning about them:
+
+    1. Every overlay turn is present in the base by digest.
+    2. **The overlay is NOT EMPTY.** ``all([])`` is True, so a zero-row overlay
+       would read as covered. An empty overlay is not evidence that anything was
+       absorbed.
+    3. **For a suppressing overlay, the base holds NOTHING the overlay does
+       not.** Coverage proves the base has what the overlay carries; it says
+       nothing about what the overlay was HIDING, and hiding stale base rows is
+       exactly a suppressing overlay's job. Retiring on coverage alone un-hides
+       them -- the ``latest_projected_timestamp`` comparison in the old gate was
+       carrying this, so it was NOT subsumed by the digest.
     """
-    return all(
+    if not overlay_turns:
+        return False
+    overlay = {
         query_tail_turn_digest(chunk.user_text, chunk.assistant_text, chunk.timestamp)
-        in base_digests
         for chunk in overlay_turns
-    )
+    }
+    if not overlay <= base_digests:
+        return False
+    if suppresses_base and not base_digests <= overlay:
+        return False
+    return True
 
 
 _SCHEMA_SQL = """\
@@ -1487,6 +1508,7 @@ class RecallDB:
             if query_tail_coverage_complete(
                 self.load_query_tail_chunks_for_source(cursor["source_key"]),
                 self.base_turn_digests(cursor["session_id"]),
+                bool(cursor.get("suppresses_base")),
             ):
                 self.clear_query_tail(cursor["source_key"])
 

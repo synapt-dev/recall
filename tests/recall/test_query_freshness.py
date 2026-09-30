@@ -974,6 +974,69 @@ def test_source_shrink_suppresses_stale_base_rows_until_rebuilt(tmp_path, monkey
     assert cursor["suppresses_base"] == 1
 
 
+def test_a_suppressing_overlay_is_not_retired_while_the_base_holds_what_it_hides(
+    tmp_path, monkeypatch
+):
+    """COVERAGE IS NOT ENOUGH WHEN THE OVERLAY SUPPRESSES THE BASE.
+
+    Coverage proves every overlay turn is present in the base. It does NOT prove
+    the base holds nothing the overlay REPLACED -- and hiding exactly that is a
+    suppressing overlay's whole job. Retiring on coverage alone un-hides the
+    stale rows, so the base rule's `latest_projected_timestamp` comparison was
+    carrying real work and was not subsumed by the digest.
+
+    State is the source-shrink one: the base holds a stale turn the shrunk
+    source no longer produces, the overlay suppresses the base, and ONE retire
+    pass must leave the stale turn hidden.
+    """
+    from synapt.recall.core import parse_transcript
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _write_turn(transcript, "replacement survives", "new truth", 20)
+    first_turn = transcript.read_text()
+    _write_turn(transcript, "stale base secret", "must disappear", 21)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+    transcript.write_text(first_turn)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    result = refresh_current_session(index_dir, tmp_path, policy=_policy())
+    assert result.state is QueryFreshnessState.REFRESHED
+
+    db = ShardedRecallDB.open(index_dir)
+    try:
+        db.retire_absorbed_query_tails()
+        stale_hits = db.fts_search("stale base secret", limit=10)
+        cursor = db.load_query_tail_cursor(result.source_key)
+        chunks = db.load_chunks()
+    finally:
+        db.close()
+
+    assert stale_hits == [], (
+        "the stale turn reappeared: a suppressing overlay was retired while the "
+        "base still held the row it was hiding"
+    )
+    assert cursor is not None, "the suppressing cursor must survive this pass"
+    assert [c.user_text for c in chunks] == ["replacement survives"]
+
+
+def test_a_cursor_with_no_overlay_rows_is_not_retired():
+    """`all([])` is True, so a vacuous overlay would read as covered.
+
+    An empty overlay is not evidence that anything was absorbed, and when it
+    suppresses the base, retiring it un-hides rows nothing is left to replace.
+    """
+    from synapt.recall.storage import query_tail_coverage_complete
+
+    assert query_tail_coverage_complete([], {"anything"}) is False
+    assert query_tail_coverage_complete([], set()) is False
+
+
 def test_base_rebuild_retires_overlay_only_after_matching_coverage(
     tmp_path, monkeypatch
 ):

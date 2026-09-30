@@ -757,6 +757,7 @@ class ShardedRecallDB:
             if query_tail_coverage_complete(
                 self._index.load_query_tail_chunks_for_source(cursor["source_key"]),
                 self.base_turn_digests(cursor["session_id"]),
+                bool(cursor.get("suppresses_base")),
             ):
                 self._index.clear_query_tail(cursor["source_key"])
 
