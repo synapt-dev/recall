@@ -350,10 +350,16 @@ def test_a_sample_that_outlives_the_join_cannot_forge_a_stop(monkeypatch, capsys
     """
     import time
 
-    def quick_build(*a, **k):
+    def quick_but_not_instant_build(*a, **k):
+        # LONGER THAN ONE SAMPLING INTERVAL, ON PURPOSE. The first version of this row returned
+        # immediately, so `__exit__` set `_stop` BEFORE the watchdog's first sample fired, the
+        # loop never entered `_host_memory_verdict` at all, and the mutation that removes the
+        # very check under test reddened NOTHING. A row whose subject cannot exhibit the failure
+        # it asserts -- the third time that shape has turned up in this file today.
+        time.sleep(0.15)
         return "INDEX"
 
-    released, recorded = _wire_build(monkeypatch, quick_build)
+    released, recorded = _wire_build(monkeypatch, quick_but_not_instant_build)
 
     def slow_refusal(*a, **k):
         time.sleep(1.5)  # longer than __exit__'s one-second join
