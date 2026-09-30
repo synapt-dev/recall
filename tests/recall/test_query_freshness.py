@@ -1356,35 +1356,31 @@ def test_a_replaced_source_does_not_retire_the_previous_sessions_overlay(
 ):
     """REPLACED: a different session now sits at that path. Guards today.
 
-    THE MECHANISM TOOK THREE PASSES AND THE FIRST TWO WERE WRONG, so what is
-    written here is the MEASURED path, not a reading of the code.
+    WHAT THE ROW PROVES: a cursor is not retired on the strength of whatever now
+    sits at that path. The construction is a different session written at the same
+    path, which is what keeps this row distinct from the coverage rows rather than
+    a restatement of one.
+
+    THE MECHANISM HAS BEEN DERIVED THREE TIMES AND THE FIRST TWO WERE WRONG, in
+    the same way -- a reading of the code written down as though it had been
+    measured. Kept because the row outlived both mechanisms:
 
       * Pass 1 named `extent is None` as the guard. A mutation dropped that check
         and the row stayed GREEN, so it was passing for some other reason.
       * Pass 2 named the OFFSET comparison alone and claimed that dropping it
         would redden this row. MEASURED FALSE: dropping the offset clause leaves
-        it GREEN, and dropping the timestamp clause leaves it GREEN too.
+        it GREEN, and dropping the timestamp clause leaves it GREEN too. The gate
+        then was an OR whose both halves were false in this construction, so only
+        removing the whole block reddened the row.
+      * Pass 3, the current one: that OR block is GONE. The decision is coverage
+        by content, and this row reddens because the replacement session's turns do
+        not cover the cursor's overlay. Same conclusion the extent gate reached,
+        reached by the rule that replaced it.
 
-    The gate is an OR:
-        `if extent[offset] < cursor[offset] or extent[ts] != cursor[ts]: continue`
-    and in this construction BOTH halves are false, so either one alone keeps
-    the cursor. Only removing the whole block reddens the row.
-
-    The measured inputs at the gate, read by instrumenting
-    `retire_absorbed_query_tails` rather than by inference:
-
-        KEY_MATCH=True   extent_off=189   cursor_off=790   OFF_OK=False
-        TS_OK=False      -> continue      (nothing retired)
-
-    So this row is NOT a second falsifier for the offset clause; the coverage
-    guard already owns that construction. What this row adds is the
-    CONSTRUCTION (a different session written at the same path), and what it
-    proves is that the gate does not retire on the strength of whatever now
-    sits at that path.
-
-    Mutation that DOES redden it: remove both halves of that block
-    (`if False: continue`) -- measured 1 failed. Dropping only the offset clause
-    (1 passed) or only the timestamp clause (1 passed) does not.
+    The mutation that reddens it now is forcing the coverage predicate to claim
+    complete. That is not a discriminating mutation for this construction -- it
+    reddens every "must not retire" row at once -- so it is named as what it is
+    rather than offered as evidence about this one.
 
     NOT covered here: the `session_id` component. The cursor row keeps the
     ORIGINAL session id, because `refresh_current_session` wrote it before the
