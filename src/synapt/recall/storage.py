@@ -70,6 +70,43 @@ def query_tail_source_key(session_id: str, path: Path) -> str:
     )
     return hashlib.sha256(identity.encode()).hexdigest()
 
+
+def query_tail_turn_digest(
+    user_text: str, assistant_text: str, timestamp: str
+) -> str:
+    """Content identity for one turn, for coverage BY CONTENT.
+
+    The timestamp is in the digest deliberately. Measured on the live store
+    2026-09-30 (35,373 overlay rows against a 234,115-chunk base): dropping it
+    merges 96 rows that are distinct turns, and of the 222 rows it would newly
+    count as covered, ALL 222 are a DIFFERENT turn whose ``user_text``
+    coincides -- zero are a genuine turn recorded at a different time. A false
+    "covered" authorises ``clear_query_tail``, which DELETEs, so the digest
+    takes the conservative side of that trade.
+    """
+    digest = hashlib.sha256()
+    for part in (user_text or "", assistant_text or "", timestamp or ""):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def query_tail_coverage_complete(overlay_turns: list, base_digests: set) -> bool:
+    """True when EVERY overlay turn is present in the base BY CONTENT.
+
+    The decision, shared by both stores. The source key and the indexed extent
+    are both proxies for this question -- the key because it hashes ``st_ino``,
+    so a compaction rewrite breaks it permanently while leaving the content
+    covered; the extent because it is bookkeeping about the same rows. Coverage
+    is the thing itself, so it is what decides.
+    """
+    return all(
+        query_tail_turn_digest(chunk.user_text, chunk.assistant_text, chunk.timestamp)
+        in base_digests
+        for chunk in overlay_turns
+    )
+
+
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
@@ -1350,6 +1387,44 @@ class RecallDB:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def load_query_tail_chunks_for_source(self, source_key: str) -> list:
+        """The overlay rows belonging to ONE source generation.
+
+        Deliberately not ``load_query_tail_chunks(session_ids)``: one session can
+        hold several generations, and retiring one is decided on that
+        generation's own turns.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM query_tail_chunks WHERE source_key = ? "
+            "ORDER BY byte_offset",
+            (source_key,),
+        ).fetchall()
+        return [self._query_tail_chunk_from_row(row) for row in rows]
+
+    def base_turn_digests(self, session_id: str) -> set:
+        """Content digests of this session's BASE chunks -- never the overlay.
+
+        Reads ``chunks`` directly. ``load_session_chunks`` MERGES the overlay
+        into its result, so a coverage predicate built on it would match the
+        overlay against itself, read as covered, and authorise a DELETE of every
+        cursor.
+
+        NOT filtered by ``query_tail_suppressed_sessions``: suppression is about
+        what a READER is shown, not about whether the base holds the rows, and
+        the overlay's whole job is to suppress the base until it retires. A veto
+        there would mean no suppressed session could ever be retired -- which is
+        every session with an overlay.
+        """
+        rows = self._conn.execute(
+            "SELECT user_text, assistant_text, timestamp FROM chunks "
+            "WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        return {
+            query_tail_turn_digest(r["user_text"], r["assistant_text"], r["timestamp"])
+            for r in rows
+        }
+
     def query_tail_suppressed_sessions(self) -> set[str]:
         """Return sessions whose replacement overlay hides every base row."""
         rows = self._conn.execute(
@@ -1401,26 +1476,19 @@ class RecallDB:
             )
 
     def retire_absorbed_query_tails(self) -> None:
-        """Retire overlays absorbed by this monolithic base index."""
+        """Retire overlays the base can prove it absorbed -- BY CONTENT.
+
+        Coverage decides, not the source key. The key hashes ``st_ino``, so a
+        compaction rewrite (the source legitimately moving on) breaks it
+        permanently, and the cursor was skipped FOREVER while the base held
+        every turn. Measured on the live store 2026-09-30: 52 of 58 cursors.
+        """
         for cursor in self.load_query_tail_cursors():
-            path = Path(cursor["transcript_path"])
-            try:
-                current_key = query_tail_source_key(cursor["session_id"], path)
-            except OSError:
-                continue
-            if current_key != cursor["source_key"]:
-                continue
-            extent = self.session_indexed_extent(cursor["session_id"])
-            if extent is None:
-                continue
-            if (
-                extent["observed_complete_offset"]
-                < cursor["observed_complete_offset"]
-                or extent.get("latest_projected_timestamp", "")
-                != cursor.get("latest_projected_timestamp", "")
+            if query_tail_coverage_complete(
+                self.load_query_tail_chunks_for_source(cursor["source_key"]),
+                self.base_turn_digests(cursor["session_id"]),
             ):
-                continue
-            self.clear_query_tail(cursor["source_key"])
+                self.clear_query_tail(cursor["source_key"])
 
     def replace_query_tail(
         self,
