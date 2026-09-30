@@ -663,11 +663,25 @@ def _build_journal_files(project_dir: Path) -> list[Path]:
     return files
 
 
-class BuildStoppedByPressure(RuntimeError):
+class BuildStoppedByPressure(BaseException):
     """The build was stopped MID-RUN because the host turned while it ran.
 
     Distinct from a refusal at admission: that one never starts, this one starts and is
     taken down. They are different events to report, so they are different exceptions.
+
+    **IT DERIVES FROM ``BaseException`` AND NOT ``Exception``, AND THAT IS LOAD-BEARING
+    RATHER THAN STYLISTIC.** The stop is delivered by ``PyThreadState_SetAsyncExc``, which
+    raises an ORDINARY exception at an ORDINARY bytecode boundary -- so an ordinary
+    ``except Exception`` catches it, and the very function this watchdog wraps carries
+    **seven** of them (1074, 1308, 1320, 1368, 1386, 1395, 1496). Line 1074 is a 37-line
+    loop over every ``*.jsonl`` with per-file hashing, so with a 15-second sampling interval
+    the main thread sits inside one of those regions for a large fraction of a multi-minute
+    build. Swallowed, the body runs to COMPLETION, a completion receipt is written, and the
+    operator is told nothing. This is the same reason ``KeyboardInterrupt`` is not an
+    ``Exception``.
+
+    Two readers found this independently, on the same clause, by running the author's own
+    witness harness with the build body in the shape the real site has.
     """
 
 
@@ -792,6 +806,22 @@ def _archive_and_build(
                 project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
                 progress, skip_clustering=skip_clustering,
             )
+        # THE WATCHDOG'S FLAG DECIDES THE OUTCOME, NOT THE EXCEPTION -- and the difference is
+        # a real hole rather than a style choice.
+        #
+        # The stop is delivered by `PyThreadState_SetAsyncExc`, which raises an ORDINARY
+        # exception at an ORDINARY bytecode boundary. So an ordinary `except Exception`
+        # catches it, and this module's own build body carries SEVEN of them (1074, 1308,
+        # 1320, 1368, 1386, 1395, 1496). Where one of those sits between two bytecode
+        # boundaries the exception is SWALLOWED: the body runs to completion, `built` comes
+        # back non-None, and a completion receipt is written -- the one outcome this guard
+        # exists to prevent. A test whose build stub has no `except` cannot see it.
+        #
+        # The flag cannot be swallowed. The watchdog thread sets it BEFORE it raises, and it
+        # is read HERE, after the body has returned however it returned. Both routes -- the
+        # exception propagating, and the exception being eaten -- converge on the same line.
+        if watchdog is not None and watchdog.stopped_because:
+            raise BuildStoppedByPressure(watchdog.stopped_because)
         if built is not None:
             # every build/rebuild/setup/precompact/catchup/MCP build passes through here
             from synapt.recall.build_deferrals import record_build

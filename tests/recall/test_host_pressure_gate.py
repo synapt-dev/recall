@@ -218,6 +218,65 @@ def test_a_build_that_passed_admission_is_stopped_when_the_host_turns(monkeypatc
     assert "pressure_level=4" in err, f"the stop does not say what it saw: {err!r}"
 
 
+def test_a_stop_survives_a_broad_except_in_the_build_body(monkeypatch, capsys):
+    """THE ROW BOTH READERS FOUND MISSING, and the reason the whole guarantee held only by luck.
+
+    `BuildStoppedByPressure` is delivered by `PyThreadState_SetAsyncExc` -- an ordinary
+    exception at an ordinary bytecode boundary -- so an ordinary `except Exception` catches
+    it. `_archive_and_build_locked`, the function the watchdog wraps, carries SEVEN of them,
+    and one is a 37-line loop over every `*.jsonl`. Swallowed, the body runs to COMPLETION,
+    `built` comes back non-None, and a completion receipt is written: the exact outcome this
+    guard exists to prevent, and it is SILENT.
+
+    The witness that missed it had a stub body with no `except`, so its assertion could only
+    fail if the monitor never fired at all -- **a row whose subject cannot exhibit the failure
+    it asserts.** This one puts a broad handler in the body, which is the shape the real site
+    has, and requires the stop to survive it.
+
+    Sentinel and Atlas each found this independently by running the author's own harness with
+    the body changed and nothing else. It is in as a row so the next reader does not have to.
+    """
+    import threading
+    import time
+
+    started: list[bool] = []
+    swallowed: list[str] = []
+
+    def swallowing_build(*a, **k):
+        started.append(True)
+        deadline = time.monotonic() + 5.0
+        try:
+            while time.monotonic() < deadline:
+                time.sleep(0.01)
+        except Exception as exc:  # noqa: BLE001 -- THE POINT OF THIS ROW
+            swallowed.append(type(exc).__name__)
+            return "SWALLOWED-THE-STOP"
+        return "RAN TO COMPLETION"
+
+    released, recorded = _wire_build(monkeypatch, swallowing_build)
+    monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9:1")
+
+    def turn_the_host():
+        time.sleep(0.15)
+        monkeypatch.setenv("SYNAPT_RECALL_MEM_FAKE", "100:4096:20.0:9:4")
+
+    threading.Thread(target=turn_the_host, daemon=True).start()
+    result = cli._archive_and_build(Path("/tmp/witness-does-not-need-to-exist"))
+
+    assert started, "the build never started, so this witness proves nothing"
+    assert swallowed == [], (
+        f"a broad `except Exception` in the build body caught the stop: {swallowed}. "
+        f"BuildStoppedByPressure must derive from BaseException, or the body runs on."
+    )
+    assert result is None, f"a swallowed stop reported a completed build: {result!r}"
+    assert recorded == [], f"a stop that was swallowed wrote a completion receipt: {recorded}"
+    assert released == [42], f"the lock was not released: {released}"
+    err = capsys.readouterr().err
+    assert "STOPPED mid-run" in err, (
+        f"the operator was told NOTHING about a swallowed stop: {err!r}"
+    )
+
+
 def test_the_control_a_build_on_a_quiet_host_is_not_stopped(monkeypatch):
     """The other arm. A monitor that stopped builds unconditionally would pass the witness
     above and be worse than no monitor at all, so the quiet case is pinned too."""
