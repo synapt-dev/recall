@@ -332,6 +332,46 @@ def test_a_stop_survives_even_a_bare_baseexception_handler(monkeypatch, capsys):
     assert "STOPPED mid-run" in err, f"the operator was told nothing: {err!r}"
 
 
+def test_a_sample_that_outlives_the_join_cannot_forge_a_stop(monkeypatch, capsys):
+    """THE WINDOW ATLAS NAMED, CLOSED AND WITNESSED.
+
+    `__exit__` sets `_stop` and joins with a BOUNDED timeout, so a sample already inside
+    `_host_memory_verdict` can outlive the join and then set the flag AFTER the caller has read
+    it. The result is a completion receipt for a build that the stop message calls "nothing was
+    recorded" -- the same lie this lane exists to remove, one window further in. It needs a
+    sysctl to take longer than the join, which needs a loaded host, which is exactly when a
+    build runs.
+
+    Atlas argued for this window and **tried to construct it and failed**, so he named it
+    unmeasured rather than filed it. This row constructs it deterministically instead: the
+    watchdog's sample sleeps past the one-second join and then reports pressure, while the
+    build has long since finished. **The correct outcome is that the sample is DISCARDED** --
+    the build completed, so its receipt is honest and no stop is claimed.
+    """
+    import time
+
+    def quick_build(*a, **k):
+        return "INDEX"
+
+    released, recorded = _wire_build(monkeypatch, quick_build)
+
+    def slow_refusal(*a, **k):
+        time.sleep(1.5)  # longer than __exit__'s one-second join
+        return "refuse", "free_inactive_gb=20.00 floor_gb=3.0 pressure_level=4"
+
+    monkeypatch.setattr(cli, "_host_memory_verdict", slow_refusal)
+
+    result = cli._archive_and_build(Path("/tmp/witness-does-not-need-to-exist"))
+    time.sleep(0.8)  # let the straggling sample finish, so the assertion is about the outcome
+
+    assert result == "INDEX", f"a completed build was reported as stopped: {result!r}"
+    assert len(recorded) == 1, f"the completed build's receipt is missing: {recorded}"
+    err = capsys.readouterr().err
+    assert "STOPPED" not in err, (
+        f"a stop was claimed for a build that COMPLETED and wrote its receipt — the lie: {err!r}"
+    )
+
+
 def test_the_control_a_build_on_a_quiet_host_is_not_stopped(monkeypatch):
     """The other arm. A monitor that stopped builds unconditionally would pass the witness
     above and be worse than no monitor at all, so the quiet case is pinned too."""

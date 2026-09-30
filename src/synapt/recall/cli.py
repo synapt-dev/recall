@@ -719,6 +719,19 @@ class _PressureWatchdog:
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
         self._main_thread_id = threading.get_ident()
+        # THE FLAG IS GUARDED BY A LOCK, AND THAT IS WHAT MAKES THE OUTCOME A TOTAL ORDER
+        # RATHER THAN A RACE. `__exit__` sets `_stop` and joins with a BOUNDED timeout, so a
+        # sample already inside `_host_memory_verdict` can outlive the join -- and then set the
+        # flag AFTER the caller has read it, which writes a completion receipt for a build the
+        # stop message calls "nothing was recorded". That is the same lie this lane exists to
+        # remove, one window further in. It needs a sysctl to take longer than the join, which
+        # needs a loaded host, which is exactly when a build is running.
+        #
+        # With the lock the three acts -- set `_stop`, set the flag, read the flag -- are
+        # SEQUENCED: a sample that finishes after the stop request is DISCARDED, because the
+        # build has already returned and a stop then means nothing; and a sample that finishes
+        # before it is seen by the reader. Neither interleaving can produce the lie.
+        self._flag_lock = threading.Lock()
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval):
@@ -728,9 +741,17 @@ class _PressureWatchdog:
             except Exception:  # noqa: BLE001 -- unreadable instrument, not pressure
                 continue
             if verdict == "refuse":
-                self.stopped_because = numbers
+                with self._flag_lock:
+                    if self._stop.is_set():
+                        return  # the build has already returned; a stop now means nothing
+                    self.stopped_because = numbers
                 self._raise_in_main()
                 return
+
+    def stop_reason(self) -> str:
+        """The reason this watchdog stopped the build, or ``""``. Read under the flag lock."""
+        with self._flag_lock:
+            return self.stopped_because
 
     def _raise_in_main(self) -> None:
         import ctypes
@@ -750,7 +771,8 @@ class _PressureWatchdog:
         return self
 
     def __exit__(self, *exc: object) -> bool:
-        self._stop.set()
+        with self._flag_lock:
+            self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
         return False  # never swallow: a stop must reach the caller that releases the lock
@@ -820,8 +842,11 @@ def _archive_and_build(
         # The flag cannot be swallowed. The watchdog thread sets it BEFORE it raises, and it
         # is read HERE, after the body has returned however it returned. Both routes -- the
         # exception propagating, and the exception being eaten -- converge on the same line.
-        if watchdog is not None and watchdog.stopped_because:
-            raise BuildStoppedByPressure(watchdog.stopped_because)
+        # Read through the locked accessor, not the attribute: the lock is what sequences this
+        # read against a sample that may still be in flight (see `_flag_lock`).
+        why = watchdog.stop_reason() if watchdog is not None else ""
+        if why:
+            raise BuildStoppedByPressure(why)
         if built is not None:
             # every build/rebuild/setup/precompact/catchup/MCP build passes through here
             from synapt.recall.build_deferrals import record_build
@@ -832,7 +857,7 @@ def _archive_and_build(
         # stopped build must not leave a receipt that reads like a finished one. The
         # `finally` below releases the lock, which is the whole reason this stop is an
         # exception rather than an os._exit -- a killed holder leaves a lock no one clears.
-        why = watchdog.stopped_because if watchdog is not None else "pressure"
+        why = watchdog.stop_reason() if watchdog is not None else "pressure"
         print(
             f"  Build STOPPED mid-run: the host went under memory pressure while this build "
             f"ran ({why}). Nothing was recorded; re-run it when the host is quieter.",
