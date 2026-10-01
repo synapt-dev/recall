@@ -4,10 +4,100 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-01
+
+Minor release. Index builds now ask the kernel whether the host is under memory
+pressure, and keep asking while they run; the build's free-memory floor becomes a
+config key that `synapt maintenance status` explains; and a journal step retired
+earlier in a session stays retired when `recall_journal action=pending` reads it.
+The new config key and status command are why this is a minor release rather than
+a patch.
+
+Thirty-two files changed across `v0.26.0..dev`, excluding this entry: 3898
+insertions, 191 deletions, carrying #1238, #1240, #1241, #1242, #1243, #1244,
+#1245, #1247, #1248, #1249, #1250 and #1251 plus the version bump. As in the
+0.26.0 entry, the figure includes the version files and excludes this changelog
+entry.
+
+### Added
+
+- **`memory.build_min_free_gb`, and `synapt maintenance status`.** The build's
+  free-memory floor was a constant behind one environment variable. It is now a
+  key in the global config, resolved environment, then global config, then the
+  default, and `synapt maintenance status` prints the floor beside its live
+  reading, where its value came from, and the decision. A project config is not
+  consulted for `memory.*`, and a project file that sets one is named as ignored:
+  the floor is a property of the host, not of the directory a build starts in. A
+  value the gate cannot use falls back to the default and says what was asked
+  for and what was used; a boolean is refused, and a value below 0.5 GB is
+  clamped to it with a note (#1247).
+
+### Changed
+
+- **The build gate asks the kernel, and keeps watching while the build runs.**
+  On macOS, where the gate applies, it used to read free and inactive pages once,
+  at admission. It now also reads the kernel's own memory-pressure level and
+  refuses above normal, and it keeps checking while a build runs. Each refusal
+  prints the free-memory reading beside its floor and the kernel's pressure
+  level. On a loaded host this means builds defer more often, by design: heavy
+  maintenance belongs in a quiet window. A pressure reading that cannot be taken does not stop a build (#1251).
+
 ### Fixed
 
-- **A memory-floor refusal of an automatic build leaves a trace.** A refused catchup or precompact rebuild used to be printed to a stream its own spawn discarded, so days without a build looked like a build never attempted. Each refusal is now one line in `build-deferrals.jsonl` beside the index, and `synapt resume` and the session-start banner print "index last built <date>; automatic build deferred <n> times (memory floor); run synapt build" once refusals have piled up since the last build. The 6 GB floor is unchanged.
-- **A `built` row names the caller who started the build.** Each row now carries the build's `argv`, `pid`, `ppid`, and its parent's command line (read from `ps`), so a build can be attributed after the fact instead of only while its parent process is alive. A build whose parent has already exited has been reparented, so its row records `ppid` 1 and a parent command line naming the init process rather than the caller; the `pid` and `argv` are still the build's own. The background cold-refresh build, which reaches the engine below the shared build funnel, now records a row too. Because a row carries two unbounded command lines, the build's own `argv` and its parent's, `build-deferrals.jsonl` is written owner-only (0600), on creation and on any file an earlier version left world-readable.
+- **A journal step retired earlier in the session stays retired.**
+  `recall_journal action=pending` built its retirement set from a view that kept
+  only the newest entry per session, so a step retired by an earlier write in the
+  same session came back on the next read. The retirement set now comes from
+  every entry of the sessions in view (#1249).
+- **A memory-floor refusal of an automatic build leaves a trace.** A refused
+  catchup or precompact rebuild used to be printed to a stream its own spawn
+  discarded, so days without a build looked like a build never attempted. Each
+  refusal is now one line in `build-deferrals.jsonl` beside the index, and
+  `synapt resume` and the session-start banner print "index last built <date>;
+  automatic build deferred <n> times (memory floor); run synapt build" once
+  refusals have piled up since the last build. The default floor is unchanged
+  (#1243).
+- **A `built` row names the caller who started the build.** Each row now carries
+  the build's `argv`, `pid`, `ppid`, and its parent's command line (read from
+  `ps`), so a build can be attributed after the fact instead of only while its
+  parent process is alive. A build whose parent has already exited has been
+  reparented, so its row records `ppid` 1 and a parent command line naming the
+  init process rather than the caller; the `pid` and `argv` are still the
+  build's own. The background cold-refresh build now records a row too. Because
+  a row carries two unbounded command lines, `build-deferrals.jsonl` is written
+  owner-only (0600), on creation and on any file an earlier version left
+  world-readable (#1245). The mode is tightened before each append rather than
+  after it, so a ledger an operator set read-only is repaired instead of
+  silently ending the record (#1248).
+- **`resume` reads only the query-tail rows it was asked for.** Two loaders that
+  promised a bounded set of sessions read the whole query-tail overlay and
+  filtered afterwards; on a large store that was most of a `resume` that ran
+  well past its budget. Both now bound the read in SQL (#1242).
+- **Query tails retire on content, not on the source file's key.** A transcript
+  rewritten in place by a compaction got a new inode, so its overlay's stored key
+  never matched again and the overlay grew without draining. An overlay now
+  retires when every one of its turns is present in the base index, compared by
+  a digest of the turn's text and timestamp; an empty overlay never counts as
+  covered (#1244).
+- **A healthy save heals knowledge vectors a failed save left empty.** A save
+  whose embedding provider was briefly unreachable lands without a vector, and on
+  a store with no chunk embeddings nothing refilled it. A later save whose
+  provider call succeeds now backfills up to 32 such rows, oldest first, after
+  its own write (#1241).
+- **One cosine for the package, refusing a width mismatch.** Three copies of the
+  cosine computed the dot product over the shorter of two vectors and the norms
+  over both, so a mismatched pair returned a plausible number with no meaning.
+  There is now one implementation, and it refuses vectors of different widths
+  (#1240).
+- **`recall stats` no longer advertises `SYNAPT_EMBEDDING_MODEL`.** The variable
+  changed the model `stats` displayed but not the model recall loads, so the
+  display was wrong whenever it was set. It is no longer read (#1238).
+
+### Tests
+
+- The guard that keeps a test run from taking the real host build lock now
+  refuses any call that resolves the real `~/.synapt` directory, not only a
+  write to one named lock file (#1250).
 
 ## [0.26.0] - 2026-09-28
 
