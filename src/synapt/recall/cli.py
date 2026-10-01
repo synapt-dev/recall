@@ -120,6 +120,37 @@ def _index_gripspace_root(index_dir: Path) -> Path | None:
     return None
 
 
+def _canonical_index_shape(path: Path) -> bool:
+    """True when *path*, exactly as spelled, is ``<root>/.synapt/recall/index``. No resolving."""
+    return path.name == "index" and path.parent.name == "recall" and path.parent.parent.name == ".synapt"
+
+
+def _deferral_notice_for_index(index_dir: Path, *, own_store: bool = False) -> "str | None":
+    """The memory-floor notice for the store that owns *index_dir*, or None.
+
+    The source of truth is where the WRITER writes: ``project_data_dir(project)``, unresolved, which
+    ``project_index_dir()`` is defined as the parent of. So:
+
+    * *own_store* (the wake, and a resume with no ``--index``): the index IS the ambient store's own, so read its
+      parent as spelled. No guard and no resolve: a store whose own canonical index is a symlink still finds its
+      notice, because the writer wrote beside the link, not beside its target.
+    * an explicit ``--index``: if the path as spelled is the canonical layout, read its parent as spelled; else if it
+      resolves to the canonical layout (a link from a non-store directory), read the RESOLVED parent; else the index
+      cannot be safely mapped back to a store (``_index_gripspace_root`` says so) and there is no notice, rather than
+      another directory's history. The two cases need different directories, so neither "always resolve" nor
+      "never resolve" is right.
+    """
+    from synapt.recall.build_deferrals import deferral_notice
+
+    index_dir = Path(index_dir)
+    if own_store or _canonical_index_shape(index_dir):
+        return deferral_notice(index_dir.parent, index_dir)
+    if _index_gripspace_root(index_dir) is None:
+        return None
+    resolved = index_dir.resolve()
+    return deferral_notice(resolved.parent, resolved)
+
+
 def _refuse_if_index_disagrees_with_source(
     args: argparse.Namespace, index_dir: Path, source_dir: Path
 ) -> None:
@@ -478,16 +509,19 @@ _BACKGROUND_COLD_REFRESH_SCRIPT = (
     "from synapt.recall.cli import (\n"
     "    _acquire_build_lock, _release_build_lock, _archive_and_build_locked, project_data_dir,\n"
     ")\n"
+    "from synapt.recall.build_deferrals import record_build\n"
     "store_root = Path(sys.argv[1])\n"
     "project_dir = Path(sys.argv[2])\n"
     "data_dir = project_data_dir(store_root)\n"
     "fd = _acquire_build_lock(data_dir, timeout=0.0)\n"
     "if fd is not None:\n"
     "    try:\n"
-    "        _archive_and_build_locked(\n"
+    "        built = _archive_and_build_locked(\n"
     "            store_root, None, use_embeddings=False, incremental=True,\n"
     "            chatgpt_archive=None, source_dir=project_dir, skip_clustering=True,\n"
     "        )\n"
+    "        if built is not None:\n"
+    "            record_build(data_dir)\n"
     "    finally:\n"
     "        _release_build_lock(fd)\n"
 )
@@ -629,6 +663,121 @@ def _build_journal_files(project_dir: Path) -> list[Path]:
     return files
 
 
+class BuildStoppedByPressure(BaseException):
+    """The build was stopped MID-RUN because the host turned while it ran.
+
+    Distinct from a refusal at admission: that one never starts, this one starts and is
+    taken down. They are different events to report, so they are different exceptions.
+
+    **IT DERIVES FROM ``BaseException`` AND NOT ``Exception``, AND THAT IS LOAD-BEARING
+    RATHER THAN STYLISTIC.** The stop is delivered by ``PyThreadState_SetAsyncExc``, which
+    raises an ORDINARY exception at an ORDINARY bytecode boundary -- so an ordinary
+    ``except Exception`` catches it, and the very function this watchdog wraps carries
+    **seven** of them (1074, 1308, 1320, 1368, 1386, 1395, 1496). Line 1074 is a 37-line
+    loop over every ``*.jsonl`` with per-file hashing, so with a 15-second sampling interval
+    the main thread sits inside one of those regions for a large fraction of a multi-minute
+    build. Swallowed, the body runs to COMPLETION, a completion receipt is written, and the
+    operator is told nothing. This is the same reason ``KeyboardInterrupt`` is not an
+    ``Exception``.
+
+    Two readers found this independently, on the same clause, by running the author's own
+    witness harness with the build body in the shape the real site has.
+    """
+
+
+# How often the monitor samples the gate while a build runs. Long enough to cost nothing on
+# a healthy host, short enough that a build cannot ride a fresh refusal far.
+_PRESSURE_MONITOR_INTERVAL_S = 15.0
+
+
+class _PressureWatchdog:
+    """Sample the host gate WHILE a build runs, and stop it when the host turns.
+
+    Admission answers one question at one instant, and the 2026-09-30 incident is what that costs: on
+    2026-09-30 a build passed the gate at 07:09 on a host that still had memory, then grew to
+    about 5.6 GB and held the kernel at pressure level 4 while the fleet was loaded. Nothing
+    was looking. This looks.
+
+    **THE BOUND IS STATED RATHER THAN IMPLIED: stopping is a raise in the MAIN thread, which
+    lands at the next BYTECODE boundary.** A single long call inside C code is therefore not
+    interrupted part-way -- the embedding loop is Python-level per batch, so the stop is
+    reached between batches and never in the middle of one. A monitor that could not
+    interrupt at all would only be a reporter, and saying which one this is matters more than
+    the mechanism.
+
+    An unreadable gate is NOT a reason to stop a build; that is this module's existing
+    doctrine for a broken instrument, and it is why a sample that raises is skipped rather
+    than treated as pressure.
+    """
+
+    def __init__(self, interval: float = _PRESSURE_MONITOR_INTERVAL_S) -> None:
+        import threading
+
+        self.interval = interval
+        self.stopped_because = ""
+        self.samples = 0
+        self._stop = threading.Event()
+        self._thread: "threading.Thread | None" = None
+        self._main_thread_id = threading.get_ident()
+        # THE FLAG IS GUARDED BY A LOCK, AND THAT IS WHAT MAKES THE OUTCOME A TOTAL ORDER
+        # RATHER THAN A RACE. `__exit__` sets `_stop` and joins with a BOUNDED timeout, so a
+        # sample already inside `_host_memory_verdict` can outlive the join -- and then set the
+        # flag AFTER the caller has read it, which writes a completion receipt for a build the
+        # stop message calls "nothing was recorded". That is the same lie this lane exists to
+        # remove, one window further in. It needs a sysctl to take longer than the join, which
+        # needs a loaded host, which is exactly when a build is running.
+        #
+        # With the lock the three acts -- set `_stop`, set the flag, read the flag -- are
+        # SEQUENCED: a sample that finishes after the stop request is DISCARDED, because the
+        # build has already returned and a stop then means nothing; and a sample that finishes
+        # before it is seen by the reader. Neither interleaving can produce the lie.
+        self._flag_lock = threading.Lock()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            self.samples += 1
+            try:
+                verdict, numbers = _host_memory_verdict()
+            except Exception:  # noqa: BLE001 -- unreadable instrument, not pressure
+                continue
+            if verdict == "refuse":
+                with self._flag_lock:
+                    if self._stop.is_set():
+                        return  # the build has already returned; a stop now means nothing
+                    self.stopped_because = numbers
+                self._raise_in_main()
+                return
+
+    def stop_reason(self) -> str:
+        """The reason this watchdog stopped the build, or ``""``. Read under the flag lock."""
+        with self._flag_lock:
+            return self.stopped_because
+
+    def _raise_in_main(self) -> None:
+        import ctypes
+
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(self._main_thread_id),
+            ctypes.py_object(BuildStoppedByPressure),
+        )
+
+    def __enter__(self) -> "_PressureWatchdog":
+        import threading
+
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="recall-pressure-watchdog"
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        with self._flag_lock:
+            self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        return False  # never swallow: a stop must reach the caller that releases the lock
+
+
 def _archive_and_build(
     project_dir: Path,
     source_dirs: list[Path] | None = None,
@@ -672,11 +821,49 @@ def _archive_and_build(
         print(f"  Warning: another build is in progress (timed out waiting for lock; {_build_lock_busy_message(data_dir)})")
         return None
 
+    watchdog: "_PressureWatchdog | None" = None
     try:
-        return _archive_and_build_locked(
-            project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
-            progress, skip_clustering=skip_clustering,
+        with _PressureWatchdog() as watchdog:
+            built = _archive_and_build_locked(
+                project_dir, source_dirs, use_embeddings, incremental, chatgpt_archive,
+                progress, skip_clustering=skip_clustering,
+            )
+        # THE WATCHDOG'S FLAG DECIDES THE OUTCOME, NOT THE EXCEPTION -- and the difference is
+        # a real hole rather than a style choice.
+        #
+        # The stop is delivered by `PyThreadState_SetAsyncExc`, which raises an ORDINARY
+        # exception at an ORDINARY bytecode boundary. So an ordinary `except Exception`
+        # catches it, and this module's own build body carries SEVEN of them (1074, 1308,
+        # 1320, 1368, 1386, 1395, 1496). Where one of those sits between two bytecode
+        # boundaries the exception is SWALLOWED: the body runs to completion, `built` comes
+        # back non-None, and a completion receipt is written -- the one outcome this guard
+        # exists to prevent. A test whose build stub has no `except` cannot see it.
+        #
+        # The flag cannot be swallowed. The watchdog thread sets it BEFORE it raises, and it
+        # is read HERE, after the body has returned however it returned. Both routes -- the
+        # exception propagating, and the exception being eaten -- converge on the same line.
+        # Read through the locked accessor, not the attribute: the lock is what sequences this
+        # read against a sample that may still be in flight (see `_flag_lock`).
+        why = watchdog.stop_reason() if watchdog is not None else ""
+        if why:
+            raise BuildStoppedByPressure(why)
+        if built is not None:
+            # every build/rebuild/setup/precompact/catchup/MCP build passes through here
+            from synapt.recall.build_deferrals import record_build
+            record_build(data_dir)
+        return built
+    except BuildStoppedByPressure:
+        # NOT a completed build: `record_build` is deliberately not called, because a
+        # stopped build must not leave a receipt that reads like a finished one. The
+        # `finally` below releases the lock, which is the whole reason this stop is an
+        # exception rather than an os._exit -- a killed holder leaves a lock no one clears.
+        why = watchdog.stop_reason() if watchdog is not None else "pressure"
+        print(
+            f"  Build STOPPED mid-run: the host went under memory pressure while this build "
+            f"ran ({why}). Nothing was recorded; re-run it when the host is quieter.",
+            file=sys.stderr,
         )
+        return None
     finally:
         _release_build_lock(lock_fd)
 
@@ -2306,6 +2493,11 @@ def cmd_resume(args: argparse.Namespace) -> None:
     # the same declared version while the linked worktree underneath it
     # changes out from under every running process.
     print(_with_provenance(_with_query_freshness(format_resume(view), freshness_line)))
+    from synapt.recall.build_deferrals import deferral_notice
+    notice = _deferral_notice_for_index(
+        index_dir, own_store=not getattr(args, "index", None) and not getattr(args, "out", None))
+    if notice:
+        print(notice)
 
 
 def _attach_unclean_end(view, args):
@@ -3870,6 +4062,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
             except Exception:
                 banners.append("WARNING: could not spawn `synapt recall catchup`; index and journal will not update this session.")
 
+        with run.phase("deferral_notice"):
+            try:
+                from synapt.recall.build_deferrals import deferral_notice
+                _idx = project_index_dir(project)
+                notice = _deferral_notice_for_index(_idx, own_store=True)
+                if notice:
+                    banners.append(f"INFO: {notice}")
+            except Exception:
+                pass
+
         # 2. Compact journal (dedup + sort) before surfacing context. Cheap
         #    (tens of ms on a 5 MB journal) and it keeps the read consistent.
         with run.phase("compact_journal"):
@@ -3946,8 +4148,17 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # hook exists, so it must survive a refusal.
             verdict, numbers = _host_memory_verdict()
             if verdict == "refuse":
-                print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers})",
+                # The origin travels on the REFUSE line, and only there: a deferred user needs
+                # to know WHERE to change the number, and a pass has nothing to change. It is
+                # the NOTE when there is one, because a REJECTED setting returns source
+                # "default", so printing the source alone would tell the reader the least at
+                # exactly the moment they need the most.
+                _floor, _source, _note = _resolve_build_min_free_gb()
+                print(f"[precompact] rebuild skipped: memory gate REFUSE ({numbers}; "
+                      f"{_note or f'floor from {_source}'})",
                       file=sys.stderr)
+                from synapt.recall.build_deferrals import record_deferral
+                record_deferral(project_data_dir(project), "precompact", numbers)
             else:
                 if verdict == "cannot_measure":
                     print(f"[precompact] memory gate could not measure ({numbers}); "
@@ -4526,64 +4737,198 @@ class FakeMeasurements:
 
     It replaces the host gate's own override name: that name belonged to another
     tool, and a seam one repository injects through should carry that repository's
-    name. Same format -- ``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``.
+    name. Same format -- ``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count`` -- with
+    an OPTIONAL fifth field carrying ``kern.memorystatus_vm_pressure_level``. The fifth is
+    optional so that the four-field fakes written before the pressure arm existed keep
+    meaning what they meant; redefining the fourth would have changed them silently.
     """
 
     ENV = "SYNAPT_RECALL_MEM_FAKE"
 
 
-def _build_min_free_gb() -> float:
-    """The free+inactive floor a build needs, overridable by environment.
+# macOS pressure levels: 1 NORMAL, 2 WARN, 4 CRITICAL. The gate refuses ABOVE NORMAL, so a
+# host the kernel has already flagged is refused even when its free+inactive reading looks
+# healthy -- that combination is exactly the 2026-09-30 incident.
+PRESSURE_REFUSE_ABOVE = 1
 
-    A named constant behind one env var so a permanent change of the number after a
-    reboot is a one-constant change rather than a re-review, and so a test can pin it
-    the same way it pins the measurements.
+
+# The low end a setting cannot go below. A setting that can turn the safety off is a way to
+# hurt a user's laptop, so this one is clamped and the reader says when it clamped. It is a
+# POLICY floor rather than a measured one, which is exactly why it announces itself instead
+# of reading back as a number the user chose.
+BUILD_MIN_FREE_HARD_FLOOR_GB = 0.5
+
+
+def _resolve_build_min_free_gb() -> "tuple[float, str, str]":
+    """``(value, source, note)`` for the build floor, and where the value came from.
+
+    *source* is ``env`` / ``global config`` / ``default``; *note* is empty only when the
+    value was used as given, and otherwise says what was asked for and what was used:
+
+        requested 0.1, using 0.5 (hard floor)
+        requested True, using 6 (not a number)
+        requested nan, using 6 (not a usable number)
+
+    Precedence is env, then the GLOBAL config, then the constant. The project layer is
+    deliberately NOT consulted: these guards are host properties, the project file
+    is found from the caller's cwd so one host would gate differently by working directory,
+    and a project config committed to a repository could lower a safety floor for everyone
+    who clones it.
+
+    Every rejection falls back to the constant rather than becoming a verdict. Measured on
+    the first version of this -- `0` and `-1` set a floor no host can miss, `inf` never opens
+    the gate, and **`nan` compares False against every reading**, so it silently disabled the
+    gate while looking like a configured number. `True` is rejected BEFORE the float() cast
+    for the same class of reason: `float(True)` is `1.0`, so a boolean typo in the config
+    would become a 1 GB build floor and read as configured.
+
+    A numeric STRING is accepted, deliberately: env values are always strings, so rejecting
+    strings from the config layer would make the two layers disagree about the same text.
     """
     import math
 
-    raw = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
-    if raw:
+    from synapt.recall.config import load_config
+
+    requested: object = os.environ.get("SYNAPT_BUILD_MIN_FREE_GB")
+    source = "env" if requested else "default"
+    asked = bool(requested)
+    if not asked:
+        # PRESENCE, not truthiness: a key set to JSON `null` hands back None and must still
+        # be reported as a setting the user made and the gate rejected. Only a key that is
+        # ABSENT is "nothing was asked for".
         try:
-            value = float(raw)
-        except ValueError:
-            return BUILD_MIN_FREE_INACTIVE_GB
-        # A value the gate cannot use must fall back to the constant rather than
-        # become a verdict. Measured on the first version of this: `0` and `-1` set a
-        # floor no host can miss, `inf` never opens the gate, and **`nan` compares
-        # False against every reading**, so it silently disabled the gate while
-        # looking like a configured number.
-        if math.isfinite(value) and value > 0:
-            return value
-    return BUILD_MIN_FREE_INACTIVE_GB
+            config = load_config()
+        except Exception:  # noqa: BLE001 -- a config read must not become a verdict
+            config = None
+        if config is not None and "build_min_free_gb" in config.memory:
+            requested, source = config.memory["build_min_free_gb"]
+            asked = True
+
+    if not asked:
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", ""
+
+    # A rejected value returns the CONSTANT, so `source` below reads "default" and no longer
+    # tells the user which layer to go and fix. The note carries it instead, and it says which
+    # layer in words the user can act on: the env var by name, the global config by name.
+    where = "env SYNAPT_BUILD_MIN_FREE_GB" if source == "env" else "global config"
+
+    if isinstance(requested, bool):
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", (
+            f"{where} requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            "(not a number)"
+        )
+    try:
+        value = float(requested)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError belongs with the other two: a JSON integer with 400 digits is a real
+        # config value, and float(10**400) raises it rather than returning inf. The old
+        # env-only path could not do this, because a digit STRING parses to inf.
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", (
+            f"{where} requested {requested!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            "(not a number)"
+        )
+    if not (math.isfinite(value) and value > 0):
+        return BUILD_MIN_FREE_INACTIVE_GB, "default", (
+            f"{where} requested {value!r}, using {BUILD_MIN_FREE_INACTIVE_GB:g} "
+            "(not a usable number)"
+        )
+    if value < BUILD_MIN_FREE_HARD_FLOOR_GB:
+        return (
+            BUILD_MIN_FREE_HARD_FLOOR_GB,
+            source,
+            f"{where} requested {value:g}, using {BUILD_MIN_FREE_HARD_FLOOR_GB:g} (hard floor)",
+        )
+    return value, source, ""
+
+
+def _build_min_free_gb() -> float:
+    """The free+inactive floor a build needs: the gate's own entry point.
+
+    Thin by design -- the source and the clamp note live in
+    :func:`_resolve_build_min_free_gb`, and this keeps the signature every caller and test
+    already uses.
+    """
+    return _resolve_build_min_free_gb()[0]
+
+
+def _host_pressure_level() -> "int | None":
+    """``kern.memorystatus_vm_pressure_level``, or ``None`` when it cannot be read.
+
+    1 NORMAL, 2 WARN, 4 CRITICAL on macOS. **``None`` is deliberately NOT 1**: a reading that
+    was never taken must not be reported as a normal host, because downstream the two are
+    indistinguishable -- the same shape as a count that hit its bound in silence.
+
+    Free+inactive is a SNAPSHOT of pages; this is the kernel's own integrated judgement of
+    whether the host is coping. The 2026-09-30 incident is the reason it is
+    read at all: the build passed the free+inactive gate at 07:09 on a host that still had
+    memory, then grew to about 5.6 GB and held the kernel at level 4, and nothing had asked.
+    """
+    import subprocess as _sp
+
+    try:
+        out = _sp.run(
+            ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+        return int(out.strip())
+    except Exception:  # noqa: BLE001 -- an unreadable instrument, not a verdict
+        return None
 
 
 def _host_memory_verdict() -> "tuple[str, str]":
     """``("pass"|"refuse"|"cannot_measure", numbers)`` for a heavy local step.
 
-    The gate is FREE+INACTIVE ALONE, at ``BUILD_MIN_FREE_INACTIVE_GB`` (6 GB), which is
-    NOT the 4 GB used as the floor for heavy local runs generally: the incident this
-    exists for started on a host that still read 4.89 GB free+inactive, so 4 GB is not
-    a gate against it. Two floors, two purposes -- keep them apart. Swap percent is
-    reported and never thresholded, because on this platform allocated swap is held
-    rather than released and the percentage does not track pressure.
+    TWO ARMS, and each refusal names the one that fired.
 
-    CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an
-    instrument failure, and an earlier misread of one stopped real maintenance work
-    for two nights, so a missing instrument must not stop a build here either -- the
-    caller warns and proceeds. ``SYNAPT_RECALL_MEM_FAKE``
-    (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count``) forces a verdict
-    deterministically.
+    * FREE+INACTIVE alone, at ``BUILD_MIN_FREE_INACTIVE_GB`` (6 GB), which is NOT the 4 GB
+      used as the floor for heavy local runs generally: the incident this exists for started
+      on a host that still read 4.89 GB free+inactive, so 4 GB is not a gate against it. Two
+      floors, two purposes -- keep them apart. Swap percent is reported and never
+      thresholded, because on this platform allocated swap is held rather than released and
+      the percentage does not track pressure.
+    * THE KERNEL'S PRESSURE LEVEL, above ``PRESSURE_REFUSE_ABOVE`` (1, NORMAL). Added
+      2026-09-30: free+inactive is a snapshot, and a build that passes it
+      can still drive the host into CRITICAL. This arm is why a large free+inactive reading
+      is not by itself a pass.
+
+    CANNOT MEASURE is NOT a refusal: a gate that cannot read the host is an instrument
+    failure, and an earlier misread of one stopped real maintenance work for two nights, so a
+    missing instrument must not stop a build here either -- the caller warns and proceeds.
+    That doctrine covers the pressure arm too, and it is why an unreadable level is REPORTED
+    in *numbers* rather than silently dropped: a gate that did not ask one of its two
+    questions has to say so. ``SYNAPT_RECALL_MEM_FAKE``
+    (``swap_used_mb:swap_total_mb:free_inactive_gb:pane_count[:pressure_level]``) forces a
+    verdict deterministically; the fifth field is OPTIONAL and the fourth is left alone,
+    because four-field fakes already exist here and redefining one would change what they
+    meant.
     """
     import re
     import subprocess as _sp
 
     floor = _build_min_free_gb()
     fake = os.environ.get(FakeMeasurements.ENV)
+    # ``None`` with ``pressure_src="level"`` never happens; the pair is written this way so a
+    # reader can see WHICH kind of absence they are looking at.
+    pressure: "int | None" = None
+    pressure_src = "unreadable"
     if fake:
         try:
             used, total, free_gb = (float(x) for x in fake.split(":")[:3])
         except (ValueError, IndexError):
             return "cannot_measure", f"SYNAPT_RECALL_MEM_FAKE={fake!r} is not three numbers"
+        parts = fake.split(":")
+        if len(parts) > 4:
+            try:
+                pressure = int(float(parts[4]))
+            except (ValueError, TypeError):
+                return "cannot_measure", (
+                    f"SYNAPT_RECALL_MEM_FAKE={fake!r} has a pressure field that is not a number"
+                )
+            pressure_src = "level"
+        else:
+            pressure_src = "not_forced"
     elif sys.platform != "darwin":
         # The thresholds mirror a macOS host gate, so elsewhere the gate is inert
         # rather than unreadable: PASS with a reason and no warning, because a line
@@ -4604,13 +4949,60 @@ def _host_memory_verdict() -> "tuple[str, str]":
             free_gb = (free + inactive) * page / 1024 ** 3
         except Exception as exc:  # noqa: BLE001 -- an unreadable instrument, not a verdict
             return "cannot_measure", f"{type(exc).__name__}: {exc}"
+        pressure = _host_pressure_level()
+        pressure_src = "level" if pressure is not None else "unreadable"
 
     pct = (used / total * 100) if total else 0.0
+    level_txt = str(pressure) if pressure is not None else pressure_src
     numbers = (f"free_inactive_gb={free_gb:.2f} floor_gb={floor:.1f} "
-               f"swap_used_pct={pct:.1f} (context, not a gate)")
+               f"swap_used_pct={pct:.1f} (context, not a gate) "
+               f"pressure_level={level_txt}")
+    if pressure is not None and pressure > PRESSURE_REFUSE_ABOVE:
+        return "refuse", numbers
     if free_gb < floor:
         return "refuse", numbers
     return "pass", numbers
+
+
+def cmd_maintenance(args: argparse.Namespace) -> None:
+    """``synapt maintenance status`` -- each guard beside its live reading and its source.
+
+    The gate's own words are ``pass`` / ``refuse`` / ``cannot_measure`` and the user-facing
+    ones are OK / DEFER / CANNOT MEASURE; the mapping between them is here, in one place, so a
+    reader can check it rather than trust it. The live reading is the gate's own numbers
+    string rather than a second parse of the same host readings, because two producers of one
+    reading is how the two drift apart.
+    """
+    action = getattr(args, "maintenance_action", None)
+    if action != "status":
+        print("usage: synapt maintenance status", file=sys.stderr)
+        raise SystemExit(2)
+
+    value, source, note = _resolve_build_min_free_gb()
+    verdict, numbers = _host_memory_verdict()
+    word = {"pass": "OK", "refuse": "DEFER", "cannot_measure": "CANNOT MEASURE"}.get(
+        verdict, verdict
+    )
+    line = f"build_min_free_gb  {value:g}  -> {word}  |  source: {source}  |  live: {numbers}"
+    if note:
+        line += f"  |  note: {note}"
+    print(line)
+
+    # A project config carrying a guard key looks applied and is not (these are host
+    # properties). Saying so is the difference between a user fixing their setting and a user
+    # wondering why it does nothing.
+    try:
+        from synapt.recall.config import load_config
+
+        ignored = load_config().memory_ignored_project_keys
+    except Exception:  # noqa: BLE001 -- a config read must not break the report
+        ignored = []
+    if ignored:
+        names = ", ".join(f"memory.{name}" for name in ignored)
+        print(
+            f"note: this project's config carries {names}; memory.* guards are host "
+            "properties read from the global config only, so it is IGNORED here"
+        )
 
 
 def cmd_catchup(args: argparse.Namespace) -> None:
@@ -4672,8 +5064,12 @@ def cmd_catchup(args: argparse.Namespace) -> None:
                   "because an unreadable instrument is not a memory verdict",
                   file=sys.stderr)
         elif verdict == "refuse":
-            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}); the "
-                  "next explicit catchup or precompact rebuild retries", file=sys.stderr)
+            _floor, _source, _note = _resolve_build_min_free_gb()
+            print(f"[catchup] build deferred: memory gate REFUSE ({numbers}; "
+                  f"{_note or f'floor from {_source}'}); the next explicit catchup or "
+                  "precompact rebuild retries", file=sys.stderr)
+            from synapt.recall.build_deferrals import record_deferral
+            record_deferral(data_dir, "catchup", numbers)
             return
 
         host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)
@@ -5022,6 +5418,16 @@ def make_parser() -> argparse.ArgumentParser:
         help="Archive and journal only; skip the incremental build and enrich",
     )
 
+    maintenance_parser = subparsers.add_parser(
+        "maintenance",
+        help="Show the maintenance guards: value, source, live reading, decision",
+    )
+    maintenance_sub = maintenance_parser.add_subparsers(dest="maintenance_action")
+    maintenance_sub.add_parser(
+        "status",
+        help="One line per guard: the build free-memory floor",
+    )
+
     maintain_parser = subparsers.add_parser(
         "maintain",
         help="Upgrade cluster summaries with an LLM, bounded, and report the backlog",
@@ -5167,6 +5573,8 @@ def main():
         cmd_rescrub(args)
     elif args.command == "migrate":
         cmd_migrate_channels(args)
+    elif args.command == "maintenance":
+        cmd_maintenance(args)
     elif args.command == "comms":
         from synapt.recall.comms import ledger, read_body, send
         if args.comms_command == "send":

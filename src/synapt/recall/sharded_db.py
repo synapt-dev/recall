@@ -425,35 +425,35 @@ class ShardedRecallDB:
                 current["agent_ids"] = frozenset(current.get("agent_ids", ())) | frozenset(
                     overview.get("agent_ids", ())
                 )
-        for chunk in self._index.load_query_tail_chunks():
+        for chunk in self._index.load_query_tail_overview_rows():
             current = result.setdefault(
-                chunk.session_id,
+                chunk["session_id"],
                 {
                     "activity": (0, ""),
                     "earliest_ts": "",
                     "latest_ts": "",
                     "turn_count": 0,
                     "has_real_activity": False,
-                    "transcript_path": chunk.transcript_path,
+                    "transcript_path": chunk["transcript_path"] or "",
                     "agent_ids": frozenset(
-                        [chunk.agent_id]
-                        if chunk.turn_index != -1 and chunk.agent_id else []
+                        [chunk["agent_id"]]
+                        if chunk["turn_index"] != -1 and chunk["agent_id"] else []
                     ),
                 },
             )
             current["earliest_ts"] = min(
-                filter(None, (current["earliest_ts"], chunk.timestamp))
-            ) if current["earliest_ts"] or chunk.timestamp else ""
-            current["latest_ts"] = max(current["latest_ts"], chunk.timestamp)
-            current["turn_count"] += int(chunk.turn_index >= 0)
-            if chunk.turn_index != -1:
+                filter(None, (current["earliest_ts"], chunk["timestamp"]))
+            ) if current["earliest_ts"] or chunk["timestamp"] else ""
+            current["latest_ts"] = max(current["latest_ts"], chunk["timestamp"])
+            current["turn_count"] += int(chunk["turn_index"] >= 0)
+            if chunk["turn_index"] != -1:
                 current["has_real_activity"] = True
                 current["activity"] = max(
-                    current["activity"], _timestamp_activity(chunk.timestamp)
+                    current["activity"], _timestamp_activity(chunk["timestamp"])
                 )
-            if chunk.turn_index != -1 and chunk.agent_id:
+            if chunk["turn_index"] != -1 and chunk["agent_id"]:
                 current["agent_ids"] = frozenset(current.get("agent_ids", ())) | {
-                    chunk.agent_id
+                    chunk["agent_id"]
                 }
         return result
 
@@ -484,7 +484,7 @@ class ShardedRecallDB:
                 if session_id in suppressed:
                     continue
                 grouped.setdefault(session_id, []).extend(chunks)
-        overlay = self._index.load_query_tail_chunks()
+        overlay = self._index.load_query_tail_chunks(session_ids)
         overlay_ids = {chunk.id for chunk in overlay}
         for session_id, chunks in grouped.items():
             grouped[session_id] = [
@@ -507,7 +507,7 @@ class ShardedRecallDB:
                 if session_id in suppressed:
                     continue
                 grouped.setdefault(session_id, []).extend(rows)
-        overlay = self._index.load_query_tail_chunks()
+        overlay = self._index.load_query_tail_chunks(session_ids)
         overlay_ids = {chunk.id for chunk in overlay}
         for session_id, rows in grouped.items():
             grouped[session_id] = [
@@ -723,29 +723,43 @@ class ShardedRecallDB:
         logger.info("save_chunks: published a new generation with %d chunks across %d shard(s)",
                      len(chunks), len(self._data_dbs))
 
+    def base_turn_digests(self, session_id: str) -> set:
+        """Content digests of this session's BASE chunks -- never the overlay.
+
+        NOT ``load_session_chunks``: that MERGES the overlay into its result, so
+        a coverage predicate built on it would match the overlay against itself,
+        read as covered, and authorise a DELETE of every cursor. The base is the
+        shards.
+        """
+        from synapt.recall.storage import query_tail_turn_digest
+
+        digests: set = set()
+        for _, db in self._iter_data_shards():
+            for chunk in db.load_session_chunks(session_id):
+                digests.add(
+                    query_tail_turn_digest(
+                        chunk.user_text, chunk.assistant_text, chunk.timestamp
+                    )
+                )
+        return digests
+
     def retire_absorbed_query_tails(self) -> None:
-        """Retire overlays only when the rebuilt base proves matching coverage."""
-        from synapt.recall.storage import query_tail_source_key
+        """Retire overlays the sharded base can prove it absorbed -- BY CONTENT.
+
+        Coverage decides, not the source key. The key hashes ``st_ino``, so a
+        compaction rewrite (the source legitimately moving on) breaks it
+        permanently, and the cursor was skipped FOREVER while the base held
+        every turn. Measured on the live store 2026-09-30: 52 of 58 cursors.
+        """
+        from synapt.recall.storage import query_tail_coverage_complete
 
         for cursor in self._index.load_query_tail_cursors():
-            path = Path(cursor["transcript_path"])
-            try:
-                current_key = query_tail_source_key(cursor["session_id"], path)
-            except OSError:
-                continue
-            if current_key != cursor["source_key"]:
-                continue
-            extent = self.session_indexed_extent(cursor["session_id"])
-            if extent is None:
-                continue
-            if (
-                extent["observed_complete_offset"]
-                < cursor["observed_complete_offset"]
-                or extent.get("latest_projected_timestamp", "")
-                != cursor.get("latest_projected_timestamp", "")
+            if query_tail_coverage_complete(
+                self._index.load_query_tail_chunks_for_source(cursor["source_key"]),
+                self.base_turn_digests(cursor["session_id"]),
+                bool(cursor.get("suppresses_base")),
             ):
-                continue
-            self._index.clear_query_tail(cursor["source_key"])
+                self._index.clear_query_tail(cursor["source_key"])
 
     def fts_search(self, query: str, limit: int = 100, **kwargs) -> list[tuple]:
         """FTS search across all shards, merging results by score.

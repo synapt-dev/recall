@@ -17,6 +17,8 @@ untouched paths.
 """
 
 import math
+
+import pytest
 from unittest.mock import patch
 
 
@@ -284,3 +286,50 @@ class TestWithinBatchDedup:
             assert len(set(old_ids)) == len(old_ids), f"same old node queued twice: {old_ids}"
         finally:
             db.close()
+
+
+class TestWidthMismatchAtTheCoRetrievalSite:
+    """The co-retrieval floor uses the package's ONE cosine, which REFUSES a pair
+    of different widths instead of truncating the dot product.
+
+    Both vectors here come from one `emb_by_id` map, so a healthy store never
+    reaches this. A store carrying rows written by an older provider at another
+    width does -- the same condition the source-index query guards -- and a wrong
+    floor verdict on a contradiction pair is worse than a loud error, because it
+    silently decides which facts get queued.
+    """
+
+    def test_mismatched_width_raises_at_the_floor(self):
+        from synapt.recall.core import _pair_clears_floor
+
+        # 384 vs 2: the two vectors are the same direction, so a truncating
+        # cosine would have returned 1.0 and cleared the floor.
+        with pytest.raises(ValueError, match="width mismatch"):
+            _pair_clears_floor(_pad([1.0, 0.0]), [1.0, 0.0])
+
+        # And the shape the source index was measured on.
+        with pytest.raises(ValueError, match="width mismatch"):
+            _pair_clears_floor([1.0] * 1024, [1.0] * 384)
+
+    def test_a_384_pair_scores_exactly_as_before(self):
+        """THE IDENTITY CHECK: consolidating the cosine must not move any number
+        for vectors that MATCH in width. Compared against this file's own
+        independent implementation, not against itself."""
+        from synapt.recall.core import (
+            CO_RETRIEVAL_SIMILARITY_FLOOR,
+            _pair_clears_floor,
+        )
+        from synapt.recall.vector_math import cosine_similarity
+
+        for u, v in (
+            (VEC_A, VEC_B),
+            (VEC_A, VEC_U),
+            (VEC_B, VEC_U),
+            (VEC_A, VEC_A),
+        ):
+            assert cosine_similarity(u, v) == pytest.approx(_cos(u, v), abs=1e-12)
+
+        # AND THE FLOOR'S OWN VERDICTS ARE UNCHANGED on the calibrated bands.
+        assert _pair_clears_floor(VEC_A, VEC_B) is True   # ~0.95, above 0.40
+        assert _pair_clears_floor(VEC_B, VEC_U) is False  # ~0.287, below 0.40
+        assert CO_RETRIEVAL_SIMILARITY_FLOOR == pytest.approx(0.40)

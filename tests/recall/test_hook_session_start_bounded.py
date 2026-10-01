@@ -186,6 +186,7 @@ def _run_hook(monkeypatch, tmp_path, *, source="startup", context_lines=None, tr
          patch("synapt.recall.server._resolved_provenance_line", **provenance_kwargs), \
          patch("synapt.recall.journal.compact_journal", return_value=0), \
          patch.object(cli, "_dev_loop_activation_prompt", return_value=None), \
+         patch.object(cli, "_host_synapt_dir", return_value=tmp_path / "hostsynapt"), \
          patch("synapt.recall.reminders._reminders_path", return_value=tmp_path / "reminders.json"), \
          patch("synapt.recall.channel.channel_join"), \
          patch("synapt.recall.channel.channel_unread", return_value=channel_unread or {}), \
@@ -201,6 +202,83 @@ def _run_hook(monkeypatch, tmp_path, *, source="startup", context_lines=None, tr
         else:
             cli.cmd_hook(argparse.Namespace(event="session-start"))
     return out.getvalue(), popen_calls
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _real_host_lock_untouched():
+    """The suite must not take the host build lock at the REAL ``~/.synapt``.
+
+    Measured 2026-09-29: a full ``tests/recall`` run wrote ``~/.synapt/recall-build.lock``, so a
+    suite could make a real build or the sleep step wait on a lock taken for nobody's benefit.
+    Bisected to THIS module the same day, and inside it to ``TestCatchupCommand``, which drives
+    ``cmd_catchup`` directly.
+
+    Module-scoped and checked at TEARDOWN rather than in one test, because a single test's
+    position decides what it can see: the first version of this guard sat near the top of the
+    file, PASSED, and the lock moved afterwards — an assertion that cannot see the thing it is
+    about. This sees every test in the module whatever the order.
+
+    TWO instruments, because one of them was too narrow (Sentinel, r1, 2026-09-29). The mtime
+    check below is a WRITE witness, and the bisection that found this defect shared it: both
+    measured the same file, so "the other four files leave the lock alone" was a claim about a
+    single file and this guard could not detect any host-state defect the bisection could not
+    already have found. The second instrument removes that blind spot: it refuses any call that
+    resolves the real ``~/.synapt``, whatever the caller goes on to write. It cannot false-red on
+    fleet activity, because it measures this module's calls and not the directory's contents.
+
+    IT IS A TRIPWIRE, NOT A CONTINUOUS OBSERVER, and the distinction matters when reading it
+    (Sentinel, r2, 2026-09-29). The catchup fixture sets the SAME attribute this recorder is
+    installed on, so during the only tests that resolve the host dir the recorder is NOT in the
+    call chain: it records ``[]`` on a clean run and is bypassed exactly when the fix is working.
+    That empty list is a NARROW negative, not evidence that nothing resolved the host dir — the
+    instrument fires only when the fix REGRESSES (mutation M1 below proves it does). So ``[]``
+    means "the recorder was not in the chain", never "the module was clean".
+
+    COVERAGE, measured by mutation rather than assumed: deleting the scratch-host fixture in
+    ``TestCatchupCommand`` reddens the class-level assertion below ("RESOLVED the real host dir 1
+    time(s)"). Deleting the analogous patch in ``_run_hook`` reddens NOTHING — the hook path in
+    these tests never resolves the host dir even unpatched. So this guard's measured coverage is
+    the CATCHUP path, which is also where the defect was found; it is not a claim about the hook.
+    """
+    real_host = Path.home() / ".synapt"
+    real = real_host / cli._HOST_BUILD_LOCK
+    before = real.stat().st_mtime_ns if real.exists() else None
+
+    resolved: list[Path] = []
+    original = cli._host_synapt_dir
+
+    def _recording(*args, **kwargs):
+        got = Path(original(*args, **kwargs))
+        resolved.append(got)
+        return got
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cli, "_host_synapt_dir", _recording)
+    try:
+        # CONTROL, and it is load-bearing rather than decorative: an unwired recorder is silent in
+        # exactly the same way a clean module is, so silence from it would read as a pass. Prove it
+        # fires, then clear, so the teardown assertion is about the module and not the instrument.
+        cli._host_synapt_dir()
+        assert resolved == [real_host], (
+            "the recorder is not wired — an empty record is indistinguishable from a clean module"
+        )
+        resolved.clear()
+        yield
+    finally:
+        mp.undo()
+
+    strays = [path for path in resolved if path == real_host]
+    assert not strays, (
+        f"this module RESOLVED the real host dir {real_host} {len(strays)} time(s) through "
+        "cli._host_synapt_dir; every hook and catchup path must be pointed at a scratch host dir, "
+        "or a test run can take the real build lock"
+    )
+
+    after = real.stat().st_mtime_ns if real.exists() else None
+    assert after == before, (
+        f"this module took the REAL host lock {real} (mtime {before} -> {after}); the catchup and "
+        "hook paths must be pointed at a scratch host dir, or a test run can stall a real build"
+    )
 
 
 class TestSessionStartContinuityPolicy:
@@ -666,6 +744,17 @@ class TestSessionStartCatchupBanner:
 
 
 class TestCatchupCommand:
+    @pytest.fixture(autouse=True)
+    def _scratch_host_dir(self, monkeypatch, tmp_path):
+        """cmd_catchup takes the HOST build lock; without this it takes the real one at ~/.synapt.
+
+        Measured 2026-09-29: this class alone moved the mtime of ~/.synapt/recall-build.lock, so a
+        suite run could make a real build or the sleep step wait. The module-level guard ABOVE
+        (``_real_host_lock_untouched``) fails if this regresses — verified by mutation: deleting
+        this line reddens its class-level assertion with "RESOLVED the real host dir 1 time(s)".
+        """
+        monkeypatch.setattr(cli, "_host_synapt_dir", lambda: tmp_path / "hostsynapt")
+
     def test_runs_archive_journal_compact_build_enrich_in_order(self, owned_recall_root, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         # catchup's heavy tail is host-gated now, so a healthy host is pinned here;

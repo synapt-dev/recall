@@ -70,6 +70,72 @@ def query_tail_source_key(session_id: str, path: Path) -> str:
     )
     return hashlib.sha256(identity.encode()).hexdigest()
 
+
+def query_tail_turn_digest(
+    user_text: str, assistant_text: str, timestamp: str
+) -> str:
+    """Content identity for one turn, for coverage BY CONTENT.
+
+    The timestamp is in the digest deliberately. Measured on the live store
+    2026-09-30 (35,373 overlay rows against a 234,115-chunk base): dropping it
+    merges 96 rows that are distinct turns, and of the 222 rows it would newly
+    count as covered, ALL 222 are a DIFFERENT turn whose ``user_text``
+    coincides -- zero are a genuine turn recorded at a different time. A false
+    "covered" authorises ``clear_query_tail``, which DELETEs, so the digest
+    takes the conservative side of that trade.
+    """
+    digest = hashlib.sha256()
+    for part in (user_text or "", assistant_text or "", timestamp or ""):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def query_tail_coverage_complete(
+    overlay_turns: list, base_digests: set, suppresses_base: bool = False
+) -> bool:
+    """True when the base can prove it absorbed the overlay -- BY CONTENT.
+
+    The decision, shared by both stores. The source key and the indexed extent
+    are both proxies for this question -- the key because it hashes ``st_ino``,
+    so a compaction rewrite breaks it permanently while leaving the content
+    covered.
+
+    THREE CONDITIONS, and the last two were each found by a reader rather than
+    by reasoning about them:
+
+    1. Every overlay turn is present in the base by digest.
+    2. **The overlay is NOT EMPTY.** ``all([])`` is True, so a zero-row overlay
+       would read as covered. An empty overlay is not evidence that anything was
+       absorbed.
+    3. **For a suppressing overlay, the base holds NOTHING the overlay does
+       not.** Coverage proves the base has what the overlay carries; it says
+       nothing about what the overlay was HIDING, and hiding stale base rows is
+       exactly a suppressing overlay's job. Retiring on coverage alone un-hides
+       them -- the ``latest_projected_timestamp`` comparison in the old gate was
+       carrying this, so it was NOT subsumed by the digest.
+
+    DELIBERATE, SO IT IS NOT READ AS AN OVERSIGHT: when ONE session has TWO
+    suppressing generations, each fails condition 3 against a base the other has
+    already replaced, so both survive. The alternative is retiring one and
+    un-hiding what the other was hiding, which is the defect 3 exists to stop.
+    The cost is a session whose overlays both persist until the base catches up
+    on its own -- the safe direction, and it is stated here rather than left for
+    a reader to infer from the code.
+    """
+    if not overlay_turns:
+        return False
+    overlay = {
+        query_tail_turn_digest(chunk.user_text, chunk.assistant_text, chunk.timestamp)
+        for chunk in overlay_turns
+    }
+    if not overlay <= base_digests:
+        return False
+    if suppresses_base and not base_digests <= overlay:
+        return False
+    return True
+
+
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
@@ -1350,6 +1416,52 @@ class RecallDB:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def load_query_tail_chunks_for_source(self, source_key: str) -> list:
+        """The overlay rows belonging to ONE source generation.
+
+        Deliberately not ``load_query_tail_chunks(session_ids)``: one session can
+        hold several generations, and retiring one is decided on that
+        generation's own turns.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM query_tail_chunks WHERE source_key = ? "
+            "ORDER BY byte_offset",
+            (source_key,),
+        ).fetchall()
+        return [self._query_tail_chunk_from_row(row) for row in rows]
+
+    def base_turn_digests(self, session_id: str) -> set:
+        """Content digests of this session's BASE chunks -- never the overlay.
+
+        Reads ``chunks`` directly. ``load_session_chunks`` MERGES the overlay
+        into its result, so a coverage predicate built on it would match the
+        overlay against itself, read as covered, and authorise a DELETE of every
+        cursor.
+
+        NOT filtered by ``query_tail_suppressed_sessions``: suppression is about
+        what a READER is shown, not about whether the base holds the rows, and
+        the overlay's whole job is to suppress the base until it retires. A veto
+        there would mean no suppressed session could ever be retired -- which is
+        every session with an overlay.
+
+        ``turn_index >= 0`` is PARITY WITH THE SHARD READ, not an optimisation.
+        Journal rows carry the same session_id at turn_index -1, so without it
+        this reader sees rows the overlay has no counterpart for -- and a
+        suppressing cursor then fails the subset test and can NEVER retire,
+        which is the exact class this change exists to remove. The shard path
+        gets it for free because ``load_session_chunks`` passes
+        ``include_journal=False``.
+        """
+        rows = self._conn.execute(
+            "SELECT user_text, assistant_text, timestamp FROM chunks "
+            "WHERE session_id = ? AND turn_index >= 0",
+            (session_id,),
+        ).fetchall()
+        return {
+            query_tail_turn_digest(r["user_text"], r["assistant_text"], r["timestamp"])
+            for r in rows
+        }
+
     def query_tail_suppressed_sessions(self) -> set[str]:
         """Return sessions whose replacement overlay hides every base row."""
         rows = self._conn.execute(
@@ -1401,26 +1513,20 @@ class RecallDB:
             )
 
     def retire_absorbed_query_tails(self) -> None:
-        """Retire overlays absorbed by this monolithic base index."""
+        """Retire overlays the base can prove it absorbed -- BY CONTENT.
+
+        Coverage decides, not the source key. The key hashes ``st_ino``, so a
+        compaction rewrite (the source legitimately moving on) breaks it
+        permanently, and the cursor was skipped FOREVER while the base held
+        every turn. Measured on the live store 2026-09-30: 52 of 58 cursors.
+        """
         for cursor in self.load_query_tail_cursors():
-            path = Path(cursor["transcript_path"])
-            try:
-                current_key = query_tail_source_key(cursor["session_id"], path)
-            except OSError:
-                continue
-            if current_key != cursor["source_key"]:
-                continue
-            extent = self.session_indexed_extent(cursor["session_id"])
-            if extent is None:
-                continue
-            if (
-                extent["observed_complete_offset"]
-                < cursor["observed_complete_offset"]
-                or extent.get("latest_projected_timestamp", "")
-                != cursor.get("latest_projected_timestamp", "")
+            if query_tail_coverage_complete(
+                self.load_query_tail_chunks_for_source(cursor["source_key"]),
+                self.base_turn_digests(cursor["session_id"]),
+                bool(cursor.get("suppresses_base")),
             ):
-                continue
-            self.clear_query_tail(cursor["source_key"])
+                self.clear_query_tail(cursor["source_key"])
 
     def replace_query_tail(
         self,
@@ -1487,11 +1593,57 @@ class RecallDB:
                 ),
             )
 
-    def load_query_tail_chunks(self) -> list[TranscriptChunk]:
-        rows = self._conn.execute(
-            "SELECT * FROM query_tail_chunks ORDER BY rowid"
-        ).fetchall()
+    def load_query_tail_chunks(
+        self, session_ids: list[str] | None = None,
+    ) -> list[TranscriptChunk]:
+        """Load overlay chunks, optionally bounded to a set of sessions.
+
+        ``session_ids=None`` keeps the whole-table read, for callers whose
+        subject really is the whole overlay population. Given ids, the read
+        is served by ``idx_query_tail_session`` instead of a full scan --
+        measured on the synapt store's 23,753-row overlay: 4.01 s for the
+        full ``SELECT *`` against 0.03 s for one session's rows.
+
+        Rows come back in ``rowid`` order in both forms, so a caller that
+        relies on the first chunk for a session seeing the lowest rowid
+        (``session_overview``'s ``transcript_path``) keeps that guarantee.
+        """
+        if session_ids is None:
+            rows = self._conn.execute(
+                "SELECT * FROM query_tail_chunks ORDER BY rowid"
+            ).fetchall()
+            return [self._query_tail_chunk_from_row(row) for row in rows]
+        unique_ids = list(dict.fromkeys(session_ids))
+        if not unique_ids:
+            return []
+        rows = []
+        for offset in range(0, len(unique_ids), 900):
+            batch = unique_ids[offset:offset + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(
+                self._conn.execute(
+                    "SELECT * FROM query_tail_chunks WHERE session_id IN ("
+                    + placeholders + ") ORDER BY rowid",
+                    batch,
+                ).fetchall()
+            )
+        rows.sort(key=lambda row: row["rowid"])
         return [self._query_tail_chunk_from_row(row) for row in rows]
+
+    def load_query_tail_overview_rows(self) -> list:
+        """Overlay rows carrying only what ``session_overview`` aggregates.
+
+        The overview needs a session's identity, turn index, timestamp,
+        agent and transcript path -- never the chunk text. Reading five
+        narrow columns instead of ``SELECT *`` skips the overlay's ~57 MB
+        of payload: measured 4.01 s against 0.16 s on the synapt store's
+        23,753-row overlay. Rowid order is preserved so the
+        first-path-for-a-session behaviour is unchanged.
+        """
+        return self._conn.execute(
+            "SELECT session_id, turn_index, timestamp, agent_id, transcript_path "
+            "FROM query_tail_chunks ORDER BY rowid"
+        ).fetchall()
 
     def query_tail_chunk_refs(self) -> list[tuple[str, str]]:
         """Return lightweight ``(id, session_id)`` overlay identities."""
@@ -2647,12 +2799,27 @@ class RecallDB:
             )
         self._conn.commit()
 
-    def get_knowledge_rowids_without_embeddings(self) -> list[tuple[int, str]]:
-        """Return (rowid, content) for active knowledge nodes missing embeddings."""
-        rows = self._conn.execute(
+    def get_knowledge_rowids_without_embeddings(
+        self, limit: int | None = None
+    ) -> list[tuple[int, str]]:
+        """Return (rowid, content) for active knowledge nodes missing embeddings.
+
+        ``limit`` bounds this in SQL rather than in the caller, so a store with a
+        long backlog is never fully materialised just to be sliced. ``ORDER BY
+        rowid`` makes the bounded slice deterministic, which is what lets a
+        caller that takes a fixed-size slice per invocation WALK the queue:
+        filled rows leave it, so the next call starts where the last one
+        stopped, instead of re-reading whichever rows the engine returns first.
+        """
+        sql = (
             "SELECT rowid, content FROM knowledge "
-            "WHERE embedding IS NULL AND status = 'active'"
-        ).fetchall()
+            "WHERE embedding IS NULL AND status = 'active' ORDER BY rowid"
+        )
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        rows = self._conn.execute(sql, params).fetchall()
         return [(r[0], r[1]) for r in rows]
 
     # -- pending contradictions --------------------------------------------

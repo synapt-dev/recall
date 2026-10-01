@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -31,6 +32,7 @@ from typing import Protocol
 
 from synapt.recall.embeddings import EmbeddingProvider
 from synapt.recall.hybrid import weighted_rrf_merge
+from synapt.recall.vector_math import cosine_similarity
 
 
 SOURCE_INDEX_SUPPORTED = hasattr(os, "O_DIRECTORY")
@@ -687,13 +689,9 @@ def _unpack_vector(blob: bytes, dim: int) -> list[float]:
     return list(struct.unpack(f"<{dim}f", blob))
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(y * y for y in b) ** 0.5
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+# `_cosine` was defined here. It is now the package's ONE cosine, imported above
+# from vector_math, which refuses a pair of different widths rather than
+# truncating the dot product. The private copy was one of three; see that module.
 
 
 def sync_source(
@@ -1115,10 +1113,34 @@ def search_source(
 
     query_vector = embed_provider.embed_single(query)
     cosine_by_unit_id: dict[str, float] = {}
+    width_skipped = 0
+    stored_width = 0
     for row in embedding_rows:
         vector = _unpack_vector(row["vector"], row["dim"])
-        cosine_by_unit_id[row["unit_id"]] = _cosine(query_vector, vector)
+        # A ROW WHOSE WIDTH DIFFERS FROM THE QUERY'S IS SKIPPED, NOT SCORED.
+        # The shared cosine refuses such a pair outright, so the choice here is
+        # only what to do instead of scoring it. Skip, not raise: the stored
+        # width is a property of when each row was written, so a store
+        # mid-migration would otherwise turn one stale row into a total search
+        # outage for the rows that ARE comparable. Skipping keeps that query
+        # working and loses only what could not be compared.
+        #
+        # AND IT IS COUNTED, because the defect this closes was that the loss was
+        # silent: before, the row was scored at a deflated value and dropped
+        # under the similarity floor with nothing said anywhere.
+        if len(vector) != len(query_vector):
+            width_skipped += 1
+            stored_width = stored_width or len(vector)
+            continue
+        cosine_by_unit_id[row["unit_id"]] = cosine_similarity(query_vector, vector)
         row_by_unit_id.setdefault(row["unit_id"], row)
+    if width_skipped:
+        logging.getLogger("synapt.recall").warning(
+            "source_index: skipped %d of %d embedded rows whose width is not the "
+            "query's (%d vs %d). Those rows cannot be compared against this "
+            "query; re-index the source with the current embedding provider.",
+            width_skipped, len(embedding_rows), stored_width, len(query_vector),
+        )
 
     bm25_ranked = [(row["unit_id"], 0.0) for row in bm25_rows]
     emb_ranked = [

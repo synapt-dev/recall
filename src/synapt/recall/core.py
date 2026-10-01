@@ -36,6 +36,7 @@ logger = logging.getLogger("synapt.recall")
 from synapt.recall.bm25 import BM25, _tokenize
 from synapt.recall.hybrid import augment_query_for_intent, extract_entities
 from synapt.recall.storage import RecallDB
+from synapt.recall.vector_math import cosine_similarity
 from synapt.recall.sharded_db import ShardedRecallDB
 
 # Multiplier for knowledge nodes whose content matches query entities
@@ -51,19 +52,17 @@ ENTITY_BOOST = 1.5
 CO_RETRIEVAL_SIMILARITY_FLOOR = 0.40
 
 
-def _cosine(u: list[float], v: list[float]) -> float:
-    """Plain cosine between two equal-length vectors (no numpy dependency)."""
-    num = sum(a * b for a, b in zip(u, v))
-    den_u = math.sqrt(sum(a * a for a in u))
-    den_v = math.sqrt(sum(b * b for b in v))
-    if not den_u or not den_v:
-        return 0.0
-    return num / (den_u * den_v)
-
-
 def _pair_clears_floor(vec_a: list[float], vec_b: list[float]) -> bool:
-    """The co-retrieval floor: cos(a, b) >= CO_RETRIEVAL_SIMILARITY_FLOOR."""
-    return _cosine(vec_a, vec_b) >= CO_RETRIEVAL_SIMILARITY_FLOOR
+    """The co-retrieval floor: cos(a, b) >= CO_RETRIEVAL_SIMILARITY_FLOOR.
+
+    Uses the package's ONE cosine, which REFUSES a pair of different widths
+    rather than truncating the dot product. Both vectors here come from one
+    `emb_by_id` map, so a healthy store never reaches that refusal; a store
+    carrying rows written by an older provider at another width is exactly the
+    case it is there for, and a wrong floor verdict on a contradiction pair is
+    worse than a loud error.
+    """
+    return cosine_similarity(vec_a, vec_b) >= CO_RETRIEVAL_SIMILARITY_FLOOR
 
 # Category-intent alignment map: which knowledge node categories are most
 # relevant for each query intent. Used to boost aligned nodes by 1.5×.
@@ -1170,6 +1169,53 @@ def _session_activity_key(chunks: list) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
+# Knowledge-node embedding backfill
+# ---------------------------------------------------------------------------
+
+def backfill_knowledge_embeddings(db, provider, limit: int | None = None) -> int:
+    """Fill in embeddings for knowledge nodes that are missing them.
+
+    ONE implementation, two triggers, deliberately. The background
+    chunk-embedding build calls it unbounded (``limit=None``); ``recall_save``
+    calls it bounded after a healthy save, so a store whose nodes were saved
+    during a provider outage heals in the flow a user actually runs. A second
+    copy of the batching and width rules is how those two would drift apart.
+
+    ``limit`` is pushed into SQL by the accessor rather than applied here, so a
+    long backlog is never fully materialised just to be sliced.
+
+    FAILURE IS SWALLOWED AND LOGGED, because both callers have already committed
+    the work they were asked to do -- a node saved, a transcript indexed. A
+    backfill that cannot run must not convert a successful write into a reported
+    failure, and must not roll anything back.
+
+    Returns the number of rows filled: 0 when there is nothing to do, no
+    provider, or the provider failed.
+    """
+    if not db or not provider:
+        return 0
+    try:
+        missing = db.get_knowledge_rowids_without_embeddings(limit)
+        if not missing:
+            return 0
+        texts = [content[:500] for _, content in missing]
+        rowids = [rowid for rowid, _ in missing]
+        all_embs: list[list[float]] = []
+        for i in range(0, len(texts), 64):
+            batch = texts[i:i + 64]
+            all_embs.extend(provider.embed(batch))
+        emb_mapping = dict(zip(rowids, all_embs))
+        if not emb_mapping:
+            return 0
+        db.save_knowledge_embeddings(emb_mapping)
+        logger.info("Built embeddings for %d knowledge nodes", len(emb_mapping))
+        return len(emb_mapping)
+    except Exception as e:
+        logger.warning("Knowledge embedding build failed: %s", e)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # TranscriptIndex
 # ---------------------------------------------------------------------------
 
@@ -1445,29 +1491,14 @@ class TranscriptIndex:
                     db.close()
 
     def _build_knowledge_embeddings(self, db=None, provider=None) -> None:
-        """Build embeddings for knowledge nodes that don't have them yet."""
-        db = db or self._db
-        provider = provider or self._embed_provider
-        if not db or not provider:
-            return
-        try:
-            missing = db.get_knowledge_rowids_without_embeddings()
-            if not missing:
-                return
-            texts = [content[:500] for _, content in missing]
-            rowids = [rowid for rowid, _ in missing]
-            all_embs: list[list[float]] = []
-            for i in range(0, len(texts), 64):
-                batch = texts[i:i + 64]
-                all_embs.extend(provider.embed(batch))
-            emb_mapping = dict(zip(rowids, all_embs))
-            if emb_mapping:
-                db.save_knowledge_embeddings(emb_mapping)
-                logger.info(
-                    "Built embeddings for %d knowledge nodes", len(emb_mapping),
-                )
-        except Exception as e:
-            logger.warning("Knowledge embedding build failed: %s", e)
+        """Build embeddings for knowledge nodes that don't have them yet.
+
+        Unbounded, and a thin wrapper on purpose: the bounded trigger
+        (``recall_save``) and this one share ONE implementation in
+        ``backfill_knowledge_embeddings``, so the batching and width rules
+        cannot drift into two copies.
+        """
+        backfill_knowledge_embeddings(db or self._db, provider or self._embed_provider)
 
     def _get_chunk(self, idx: int) -> TranscriptChunk:
         """Return a chunk, hydrating it from the DB on demand when needed."""
