@@ -1724,7 +1724,7 @@ def cmd_build(args: argparse.Namespace) -> None:
     legacy = _check_legacy_index()
     if legacy:
         print(f"[build] Note: legacy index found at {legacy}")
-        print(f"[build] New location: {project_index_dir()}")
+        print(f"[build] New location: {index_dir}")
         print()
 
     from synapt.recall.codex import _has_buildable_transcripts
@@ -1779,7 +1779,9 @@ def cmd_build(args: argparse.Namespace) -> None:
     print(f"  Sessions: {stats['session_count']}")
     if stats.get("date_range"):
         print(f"  Date range: {stats['date_range']['earliest'][:10]} -> {stats['date_range']['latest'][:10]}")
-    print(f"  Saved to: {project_index_dir()}")
+    # index_dir is the store this build wrote: derived from the working directory with an explicit project, which
+    # suppresses the environment's store roots. The zero-argument resolver reads those roots and names another store.
+    print(f"  Saved to: {index_dir}")
 
 
 def cmd_code(args: argparse.Namespace) -> None:
