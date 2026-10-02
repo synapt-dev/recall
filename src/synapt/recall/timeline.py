@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from synapt.recall.bm25 import _tokenize
 from synapt.recall.clustering import _STOP_TOKENS
+from synapt.recall.progress import ProgressLog, phase
 from synapt.recall.tagging import extract_tags
 
 if TYPE_CHECKING:
@@ -105,7 +106,8 @@ def build_timeline_clusters(
 
     Returns list of cluster dicts ready for save_timeline_clusters().
     """
-    sessions = _session_info(db)
+    with phase("timeline: session info"):
+        sessions = _session_info(db)
     if not sessions:
         return []
 
@@ -121,7 +123,9 @@ def build_timeline_clusters(
     # Greedy grouping
     arcs: list[list[dict]] = []  # Each arc is a list of session info dicts
 
-    for sess in sessions:
+    sessions_log = ProgressLog("timeline: sessions", len(sessions), "sessions")
+    for position, sess in enumerate(sessions, 1):
+        sessions_log.tick(position)
         sid = sess["session_id"]
         entry = journal_by_session.get(sid)
         branch = entry.branch if entry else ""
@@ -155,12 +159,15 @@ def build_timeline_clusters(
 
         if not merged:
             arcs.append([sess])
+    sessions_log.done()
 
     # Convert arcs to cluster dicts
     now = datetime.now(timezone.utc).isoformat()
     clusters: list[dict] = []
 
-    for arc in arcs:
+    arcs_build_log = ProgressLog("timeline: arcs", len(arcs), "arcs")
+    for position, arc in enumerate(arcs, 1):
+        arcs_build_log.tick(position)
         session_ids = [s["session_id"] for s in arc]
         cluster_id = _timeline_id(session_ids)
 
@@ -232,6 +239,7 @@ def build_timeline_clusters(
             cluster["search_text"] += " " + " ".join(tags)
 
         clusters.append(cluster)
+    arcs_build_log.done()
 
     return clusters
 
@@ -257,7 +265,9 @@ def save_timeline_clusters(db: RecallDB, clusters: list[dict]) -> None:
         "END;"
     )
 
-    for c in clusters:
+    arcs_log = ProgressLog("timeline: save arcs", len(clusters), "arcs")
+    for position, c in enumerate(clusters, 1):
+        arcs_log.tick(position)
         cur.execute(
             "INSERT INTO clusters "
             "(cluster_id, topic, search_text, cluster_type, session_ids, branch, "
@@ -280,6 +290,9 @@ def save_timeline_clusters(db: RecallDB, clusters: list[dict]) -> None:
             ),
         )
 
-    # Rebuild FTS from all clusters (topic + timeline + access singletons)
-    cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
-    db._conn.commit()
+    arcs_log.done()
+
+    # Rebuild FTS from all clusters (topic + timeline + access singletons): one statement, so it is bracketed
+    with phase("timeline: FTS rebuild"):
+        cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
+        db._conn.commit()
