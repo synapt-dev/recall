@@ -2876,6 +2876,48 @@ def _list_available_sessions(transcript_dir: Path, project: Path) -> None:
         print(f"{sid:<40} {format_size(size):>10} {loc:>10}  {dt}")
 
 
+def _journal_flag_refusal(args: argparse.Namespace) -> str | None:
+    """A reason to refuse this flag combination, or None.
+
+    Every flag `journal` accepts must either do what it says or stop the command
+    before anything is written. ``--dry-run`` and ``--all-stores`` only mean
+    something under ``--repair``; accepted anywhere else they were ignored, and a
+    ``--write --dry-run`` wrote. ``--write`` beside another mode ran the other
+    mode and silently did not write the entry. Both are refused here, exit 2.
+    """
+    if not getattr(args, "repair", False):
+        for attr, flag in (("dry_run", "--dry-run"), ("all_stores", "--all-stores")):
+            if getattr(args, attr, False):
+                return (f"{flag} applies only with --repair and would be ignored here; "
+                        "refusing so that nothing is done on a flag that does nothing.")
+    if getattr(args, "write", False):
+        clash = [flag for attr, flag in (("read", "--read"), ("list", "--list"),
+                                         ("show", "--show"), ("repair", "--repair"))
+                 if getattr(args, attr, None)]
+        if clash:
+            return (f"--write cannot be combined with {', '.join(clash)}: only one mode would "
+                    "run, and the entry you asked for would not be written.")
+    return None
+
+
+def _journal_file_arg(args: argparse.Namespace) -> Path | None:
+    """The journal FILE named by ``--path``, or None to resolve the live one.
+
+    ``--path`` names the file in every mode (``--repair`` reads it its own way, so
+    it is left to that branch). A directory is refused: guessing a file inside it
+    is how a fixture lands in the wrong store.
+    """
+    explicit = getattr(args, "path", None)
+    if not explicit or getattr(args, "repair", False):
+        return None
+    target = Path(explicit).expanduser()
+    if target.is_dir():
+        print(f"synapt recall journal: --path names the journal FILE, but {target} is a directory.",
+              file=sys.stderr)
+        sys.exit(2)
+    return target
+
+
 def cmd_journal(args: argparse.Namespace) -> None:
     """Display or write session journal entries."""
     from synapt.recall.journal import (
@@ -2892,8 +2934,14 @@ def cmd_journal(args: argparse.Namespace) -> None:
         session_done_items,
     )
 
+    refusal = _journal_flag_refusal(args)
+    if refusal:
+        print(f"synapt recall journal: {refusal}", file=sys.stderr)
+        sys.exit(2)
+    journal_file = _journal_file_arg(args)
+
     if args.read:
-        entry = read_latest(meaningful=True)
+        entry = read_latest(path=journal_file, meaningful=True)
         if not entry:
             return  # Silent — no meaningful journal yet (hook context)
         text = format_for_session_start(entry)
@@ -2903,7 +2951,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
 
     if args.list:
         n = args.show if args.show else 5
-        entries = read_entries(n=n)
+        entries = read_entries(path=journal_file, n=n)
         if not entries:
             print("No journal entries yet.")
             return
@@ -2917,7 +2965,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         if args.show < 1:
             print("--show requires a positive integer.", file=sys.stderr)
             sys.exit(1)
-        entries = read_entries(n=args.show)
+        entries = read_entries(path=journal_file, n=args.show)
         if not entries:
             print("No journal entries yet.")
             return
@@ -2970,7 +3018,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
     project = Path.cwd().resolve()
     transcript_path = latest_transcript_path(project)
     entry = auto_extract_entry(transcript_path=transcript_path, cwd=str(project))
-    previous_entry = read_previous_meaningful(entry.session_id)
+    previous_entry = read_previous_meaningful(entry.session_id, path=journal_file)
 
     # Merge CLI-provided fields
     if args.focus:
@@ -2987,7 +3035,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         entry.next_steps,
         entry.done,
         previous_entry,
-        same_session_done=session_done_items(entry.session_id),
+        same_session_done=session_done_items(entry.session_id, path=journal_file),
         # What THIS session already retired in earlier writes: previous_entry is
         # from before the session by design, so without this a step retired
         # minutes ago comes back on the next write.
@@ -3003,7 +3051,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         if not entry.has_content():
             print("No content to journal (no files modified, no fields provided).", file=sys.stderr)
             return
-        path = append_entry(entry)
+        path = append_entry(entry, path=journal_file)
         sid = entry.session_id[:8] if entry.session_id else "unknown"
         print(f"Auto-stub saved for enrichment ({sid})", file=sys.stderr)
         return
@@ -3012,7 +3060,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         print("No content to journal (no files modified, no fields provided).", file=sys.stderr)
         return
 
-    path = append_entry(entry)
+    path = append_entry(entry, path=journal_file)
     print(f"Journal entry written to {path}", file=sys.stderr)
     print(format_write_confirmation(entry, explicit_next_steps, report=carry_report))
 
@@ -5302,12 +5350,14 @@ def make_parser() -> argparse.ArgumentParser:
     journal_parser.add_argument("--repair", action="store_true",
                                 help="Recover fields swallowed by an unclosed tool-call parameter (append-only)")
     journal_parser.add_argument("--dry-run", action="store_true",
-                                help="With --repair: report what would change, write nothing")
+                                help="With --repair only: report what would change, write nothing "
+                                     "(refused with any other mode)")
     journal_parser.add_argument("--all-stores", action="store_true",
-                                help="With --repair: sweep every worktree journal, not just this one")
+                                help="With --repair only: sweep every worktree journal, not just this one "
+                                     "(refused with any other mode)")
     journal_parser.add_argument("--path", default=None,
-                                help="With --repair: target this store explicitly (or this data root "
-                                     "with --all-stores) instead of resolving from the working directory")
+                                help="Journal file to read or write instead of resolving the live one from "
+                                     "the working directory (every mode; with --repair --all-stores, the data root)")
 
     # Enrich
     enrich_parser = subparsers.add_parser("enrich", help="Enrich auto-journal stubs using MLX (local LLM)")

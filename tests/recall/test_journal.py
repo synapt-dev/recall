@@ -1101,6 +1101,8 @@ class TestCarryForwardAgingAndBound(unittest.TestCase):
         for name in ("cli.py", "server.py"):
             source = (root / name).read_text()
             self.assertIn(
-                "same_session_done=session_done_items(entry.session_id),", source,
+                # a prefix, not the closing paren: the CLI call also names the journal file it was given
+                # (--path), and the CLI's behaviour is witnessed in tests/recall/test_journal_cli_flags.py
+                "same_session_done=session_done_items(entry.session_id", source,
                 f"{name} does not supply this session's own retired steps to the carry merge",
             )
