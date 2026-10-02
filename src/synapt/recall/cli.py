@@ -78,6 +78,7 @@ from synapt.recall.core import (
     _extract_assistant_content,
 )
 from synapt.recall.chatgpt import parse_chatgpt_archive
+from synapt.recall.progress import ProgressLog, phase
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.journal import (
     latest_transcript_path,
@@ -1271,7 +1272,9 @@ def _archive_and_build_locked(
             # Enrich each cluster with search_text from member chunk content.
             # Include user_text, tools, and files so concise-mode search
             # can find clusters by what users asked, not just assistant answers.
-            for cl in clusters:
+            search_log = ProgressLog("clusters: search text", len(clusters), "clusters")
+            for position, cl in enumerate(clusters, 1):
+                search_log.tick(position)
                 member_chunks = [chunk_map[cid] for cid in cl["chunk_ids"] if cid in chunk_map]
                 texts: list[str] = []
                 for c in member_chunks:
@@ -1287,6 +1290,7 @@ def _archive_and_build_locked(
                 if len(joined) > 4000:
                     joined = joined[:4000].rsplit(" ", 1)[0]
                 cl["search_text"] = joined
+            search_log.done()
 
             clusters_receipt = db.save_clusters(clusters, memberships)
             # Pre-generate concat summaries at build time (read path stays pure).
@@ -1297,7 +1301,9 @@ def _archive_and_build_locked(
                     "SELECT cluster_id FROM cluster_summaries WHERE method = 'llm'"
                 ).fetchall()
             }
-            for cl in clusters:
+            summaries_log = ProgressLog("clusters: summaries", len(clusters), "clusters")
+            for position, cl in enumerate(clusters, 1):
+                summaries_log.tick(position)  # before the skip, so a run of already-summarised clusters still moves n/N
                 if cl["cluster_id"] in llm_cluster_ids:
                     continue  # Already has LLM summary
                 member_chunks = [chunk_map[cid] for cid in cl["chunk_ids"] if cid in chunk_map]
@@ -1305,6 +1311,7 @@ def _archive_and_build_locked(
                     summary = generate_concat_summary(member_chunks, max_tokens=200)
                     if summary:
                         db.save_cluster_summary(cl["cluster_id"], summary)
+            summaries_log.done()
             clusters_line = f"  Clusters: {len(clusters)} topic clusters from {sum(c['chunk_count'] for c in clusters)} chunks"
             dangling_removed = clusters_receipt.get("dangling_removed", 0)
             if dangling_removed:
@@ -1336,7 +1343,9 @@ def _archive_and_build_locked(
         if transcript_only:
             tagged = 0
             all_clusters = db.load_clusters()
-            for cl in all_clusters:
+            tags_log = ProgressLog("clusters: tags", len(all_clusters), "clusters")
+            for position, cl in enumerate(all_clusters, 1):
+                tags_log.tick(position)
                 if cl["cluster_type"] != "topic":
                     continue
                 tags = _extract_tags(cl, j_entries)
@@ -1349,6 +1358,7 @@ def _archive_and_build_locked(
                         (json.dumps(tags), new_search, cl["cluster_id"]),
                     )
                     tagged += 1
+            tags_log.done()
             if tagged:
                 db._conn.commit()
                 # FTS is kept in sync by the clusters_au trigger on UPDATE;
@@ -1366,7 +1376,8 @@ def _archive_and_build_locked(
     # Process pending promotions (advance tiers based on access stats)
     try:
         from synapt.recall.promotion import process_build_promotions
-        promo = process_build_promotions(db)
+        with phase("build: promotions"):
+            promo = process_build_promotions(db)
         promo_total = sum(promo.values())
         if promo_total:
             print(f"  Promotions: {promo['summaries_upgraded']} summaries, "
@@ -1410,9 +1421,12 @@ def _archive_and_build_locked(
 
     # Maintain adaptive memory: decay, archival, log compaction
     try:
-        decayed = db.recompute_decay_scores()
-        archived = db.archive_cold_clusters()
-        compacted = db.compact_access_log()
+        with phase("build: decay scores"):
+            decayed = db.recompute_decay_scores()
+        with phase("build: archive cold clusters"):
+            archived = db.archive_cold_clusters()
+        with phase("build: compact access log"):
+            compacted = db.compact_access_log()
         parts = []
         if archived:
             parts.append(f"{len(archived)} clusters archived")
@@ -1431,11 +1445,13 @@ def _archive_and_build_locked(
         # Always compact first — removes same-ID duplicates from append-only JSONL
         kn_path = _knowledge_path(project_dir)
         if kn_path.exists():
-            compacted = compact_knowledge(kn_path)
+            with phase("knowledge: compact"):
+                compacted = compact_knowledge(kn_path)
             if compacted:
                 print(f"  Knowledge compact: removed {compacted} stale version(s)")
         # Then merge semantically similar nodes (different IDs, same content)
-        merged = dedup_knowledge_nodes(threshold=0.7, project_dir=project_dir)
+        with phase("knowledge: dedup"):
+            merged = dedup_knowledge_nodes(threshold=0.7, project_dir=project_dir)
         if merged:
             print(f"  Knowledge dedup: merged {merged} duplicate(s)")
     except Exception as exc:

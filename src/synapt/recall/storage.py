@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from synapt.recall.progress import ProgressLog, note, phase
+
 if TYPE_CHECKING:
     from synapt.recall.core import TranscriptChunk
 
@@ -2998,6 +3000,10 @@ class RecallDB:
             call unreported.
         """
         cur = self._conn.cursor()
+        note(
+            f"clusters: replacing the stored clusters with {len(clusters)} clusters "
+            f"and {len(chunk_memberships)} memberships"
+        )
 
         # A full rebuild re-derives clusters from the WHOLE known corpus
         # every time (recall#435's own "full-corpus, O(store size)" design)
@@ -3133,7 +3139,9 @@ class RecallDB:
             "END;"
         )
 
-        for c in clusters:
+        rows_log = ProgressLog("clusters: save rows", len(clusters), "clusters")
+        for position, c in enumerate(clusters, 1):
+            rows_log.tick(position)
             cur.execute(
                 "INSERT INTO clusters "
                 "(cluster_id, topic, search_text, cluster_type, session_ids, branch, "
@@ -3156,12 +3164,17 @@ class RecallDB:
                 ),
             )
 
-        for cluster_id, chunk_id, added_at in chunk_memberships:
+        rows_log.done()
+
+        members_log = ProgressLog("clusters: save memberships", len(chunk_memberships), "memberships")
+        for position, (cluster_id, chunk_id, added_at) in enumerate(chunk_memberships, 1):
+            members_log.tick(position)
             cur.execute(
                 "INSERT OR IGNORE INTO cluster_chunks "
                 "(cluster_id, chunk_id, added_at) VALUES (?, ?, ?)",
                 (cluster_id, chunk_id, added_at),
             )
+        members_log.done()
 
         # Re-home preserved rows the fresh pass did NOT place (see the
         # snapshot comment above). fresh_location is built from
@@ -3172,7 +3185,9 @@ class RecallDB:
             chunk_id: cluster_id for cluster_id, chunk_id, _added_at in chunk_memberships
         }
         reinserted_clusters: set[str] = set()
-        for old_cluster_id, chunk_id, added_at, run_id in preserved_rows:
+        rehome_log = ProgressLog("clusters: re-home preserved rows", len(preserved_rows), "rows")
+        for position, (old_cluster_id, chunk_id, added_at, run_id) in enumerate(preserved_rows, 1):
+            rehome_log.tick(position)
             if chunk_id in fresh_location:
                 # Placed by the fresh pass: that row is the BUILD's, not the
                 # merge's. Leave it exactly as inserted -- run_id stays NULL.
@@ -3206,7 +3221,11 @@ class RecallDB:
             )
             reinserted_clusters.add(target_cluster_id)
 
-        for cluster_id in reinserted_clusters:
+        rehome_log.done()
+
+        recount_log = ProgressLog("clusters: recount re-homed clusters", len(reinserted_clusters), "clusters")
+        for position, cluster_id in enumerate(reinserted_clusters, 1):
+            recount_log.tick(position)
             cur.execute(
                 "UPDATE clusters SET chunk_count = "
                 "(SELECT COUNT(*) FROM cluster_chunks WHERE cluster_chunks.cluster_id = clusters.cluster_id) "
@@ -3214,7 +3233,11 @@ class RecallDB:
                 (cluster_id,),
             )
 
-        for c in clusters:
+        recount_log.done()
+
+        signatures_log = ProgressLog("clusters: save signatures", len(clusters), "clusters")
+        for position, c in enumerate(clusters, 1):
+            signatures_log.tick(position)
             sig = c.get("signature_tokens")
             if sig is not None:
                 cur.execute(
@@ -3222,21 +3245,25 @@ class RecallDB:
                     "(cluster_id, tokens, updated_at) VALUES (?, ?, ?)",
                     (c["cluster_id"], json.dumps(sig), c["updated_at"]),
                 )
+        signatures_log.done()
 
         # Keep orphaned LLM summaries temporarily — they carry content_hash
         # values that upgrade_large_cluster_summaries() can match against
         # to avoid regenerating identical summaries. Orphans without
         # a content_hash (legacy summaries) are cleaned up immediately.
-        cur.execute(
-            "DELETE FROM cluster_summaries "
-            "WHERE method = 'llm' "
-            "AND content_hash IS NULL "
-            "AND cluster_id NOT IN (SELECT cluster_id FROM clusters)"
-        )
+        with phase("clusters: drop orphan summaries"):
+            cur.execute(
+                "DELETE FROM cluster_summaries "
+                "WHERE method = 'llm' "
+                "AND content_hash IS NULL "
+                "AND cluster_id NOT IN (SELECT cluster_id FROM clusters)"
+            )
 
-        # Rebuild FTS from all clusters (topic + preserved access singletons)
-        cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
-        self._conn.commit()
+        # Rebuild FTS from all clusters (topic + preserved access singletons). One statement over every cluster:
+        # it cannot tick, so it is bracketed instead.
+        with phase("clusters: FTS rebuild"):
+            cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
+            self._conn.commit()
         return {"dangling_removed": dangling_removed}
 
     def append_clusters(

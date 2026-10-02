@@ -35,6 +35,7 @@ logger = logging.getLogger("synapt.recall")
 
 from synapt.recall.bm25 import BM25, _tokenize
 from synapt.recall.hybrid import augment_query_for_intent, extract_entities
+from synapt.recall.progress import ProgressLog, note, phase
 from synapt.recall.storage import RecallDB
 from synapt.recall.vector_math import cosine_similarity
 from synapt.recall.sharded_db import ShardedRecallDB
@@ -1665,7 +1666,8 @@ class TranscriptIndex:
         """
         if _env_flag("SYNAPT_DISABLE_CROSS_LINKS"):
             return 0
-        self._ensure_embeddings_loaded()
+        with phase("cross-session links: load embeddings"):
+            self._ensure_embeddings_loaded()
         if not self._db or not self._all_embeddings:
             return 0
         import numpy as np
@@ -1673,6 +1675,11 @@ class TranscriptIndex:
         rowids = self._emb_rowids if self._emb_matrix is not None else list(self._all_embeddings.keys())
         if len(rowids) < 2:
             return 0
+        # The pairwise matrix below is n x n float32, which is the cost a watcher needs to see before it is paid.
+        note(
+            f"cross-session links: {len(rowids)} chunks with embeddings; the similarity matrix is "
+            f"{len(rowids) ** 2 * 4 / 1e9:.3f} GB"
+        )
 
         # Build session map and chunk ID map: rowid -> session_id, rowid -> chunk_id
         session_map = self._db.chunk_session_map()
@@ -1690,22 +1697,28 @@ class TranscriptIndex:
         norms[norms == 0] = 1.0
         normed = matrix / norms
 
-        # Full pairwise cosine similarity
-        sim_matrix = normed @ normed.T
+        # Full pairwise cosine similarity: one matrix product, which cannot tick, so it is bracketed
+        with phase("cross-session links: similarity matrix"):
+            sim_matrix = normed @ normed.T
 
         # Zero out self-similarity and same-session pairs
+        mask_log = ProgressLog("cross-session links: same-session mask", len(rowids), "chunks")
         for i in range(len(rowids)):
+            mask_log.tick(i + 1)
             sim_matrix[i, i] = -1.0
             for j in range(i + 1, len(rowids)):
                 if sessions[i] == sessions[j]:
                     sim_matrix[i, j] = -1.0
                     sim_matrix[j, i] = -1.0
+        mask_log.done()
 
         links: list[tuple[str, str, float]] = []
         k = self.CROSS_LINK_MAX_PER_CHUNK
         min_sim = self.CROSS_LINK_MIN_SIM
 
+        top_log = ProgressLog("cross-session links: top-k", len(rowids), "chunks")
         for i in range(len(rowids)):
+            top_log.tick(i + 1)
             row = sim_matrix[i]
             # Get top-K indices
             if len(rowids) > k:
@@ -1717,8 +1730,10 @@ class TranscriptIndex:
                     src_id = id_map.get(rowids[i], str(rowids[i]))
                     tgt_id = id_map.get(rowids[int(j)], str(rowids[int(j)]))
                     links.append((src_id, tgt_id, float(row[j])))
+        top_log.done()
 
-        self._db.save_chunk_links(links)
+        with phase("cross-session links: save links"):
+            self._db.save_chunk_links(links)
         logger.info("Built %d cross-session links for %d chunks", len(links), len(rowids))
         return len(links)
 
