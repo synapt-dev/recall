@@ -1049,6 +1049,39 @@ class TestShowPins(unittest.TestCase):
         self.assertNotIn("Pinned", result)
         self.assertIn("regular msg", result)
 
+    def _pin_many(self, count, width=40):
+        for i in range(count):
+            self._post_and_pin("dev", f"pinbody{i:03d} " + "x" * width)
+
+    def test_pin_block_is_capped_at_limit_with_an_omitted_count(self):
+        self._pin_many(12)
+        result = channel_read("dev", limit=3)
+        self.assertEqual(result.count("[pin]"), 3)
+        for kept in ("pinbody009", "pinbody010", "pinbody011"):
+            self.assertIn(kept, result)
+        self.assertNotIn("pinbody000", result)
+        self.assertNotIn("pinbody008", result)
+        self.assertIn("9 older pins omitted", result)
+
+    def test_detail_max_still_shows_every_pin(self):
+        self._pin_many(12)
+        result = channel_read("dev", limit=3, detail="max")
+        self.assertEqual(result.count("[pin]"), 12)
+        self.assertNotIn("omitted", result)
+
+    def test_pins_within_the_limit_are_all_shown_without_an_omitted_line(self):
+        self._pin_many(2)
+        result = channel_read("dev", limit=20)
+        self.assertEqual(result.count("[pin]"), 2)
+        self.assertNotIn("omitted", result)
+
+    def test_read_size_is_bounded_by_limit_not_by_how_many_pins_exist(self):
+        self._pin_many(80, width=2000)
+        result = channel_read("dev", limit=5)
+        # 5 messages and 5 pins of about 2 KB each, plus headings; 80 pins would be about 160 KB
+        self.assertLess(len(result), 30_000)
+        self.assertEqual(result.count("[pin]"), 5)
+
     def test_show_pins_false_still_shows_messages(self):
         self._post_and_pin("dev", "pinned content")
         channel_post("dev", "msg1", agent_name="a1")
