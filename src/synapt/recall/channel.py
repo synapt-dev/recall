@@ -2103,9 +2103,18 @@ def channel_read(
 
     lines = []
 
-    # Pins at top
+    # Pins at top. The block is bounded by the same limit as the messages (most recent pins),
+    # because every pin rendered on every read is how one read became hundreds of KB; detail=max
+    # still shows them all.
+    pins_omitted = 0
+    if pins and _detail != "max" and limit > 0 and len(pins) > limit:
+        pins_omitted = len(pins) - limit
+        pins = pins[-limit:]
     if pins:
         lines.append(f"## Pinned in #{channel}")
+        if pins_omitted:
+            noun = "pin" if pins_omitted == 1 else "pins"
+            lines.append(f"  ({pins_omitted} older {noun} omitted; detail=max shows every pin)")
         for pin in pins:
             ts = _render_ts(pin["pinned_at"])
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
