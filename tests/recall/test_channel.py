@@ -1015,6 +1015,79 @@ class TestUnpin(unittest.TestCase):
         self.assertNotIn("remove this pin", result.split("##")[1] if "##" in result else "")
 
 
+class TestSearchHonoursLimitAndDetail(unittest.TestCase):
+    """recall_channel action=search used to drop limit, detail and channel: every search returned 10 full bodies."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def _search(self, **kwargs):
+        from synapt.recall.actions import _handle_search
+        return _handle_search(message="needle", **kwargs)
+
+    def _hits(self, text):
+        return [ln for ln in text.splitlines() if ln.startswith("  [m_")]
+
+    def _post(self, channel, count, width=40):
+        for i in range(count):
+            channel_post(channel, f"needle {i:03d} " + "x" * width, agent_name="bot")
+
+    def test_limit_caps_the_number_of_results(self):
+        self._post("dev", 30)
+        self.assertEqual(len(self._hits(self._search(limit=5))), 5)
+        self.assertEqual(len(self._hits(self._search(limit=25))), 25)
+
+    def test_without_a_limit_the_old_default_of_ten_stands(self):
+        self._post("dev", 30)
+        self.assertEqual(len(self._hits(self._search())), 10)
+
+    def test_detail_low_truncates_bodies_and_says_so(self):
+        self._post("dev", 3, width=900)
+        out = self._search(limit=3, detail="low")
+        self.assertNotIn("x" * 300, out)
+        self.assertIn("x" * 150, out)  # about 200 characters survive, not a stub
+        self.assertIn("truncated", out)
+        self.assertEqual(len(self._hits(out)), 3)
+
+    def test_detail_min_is_one_short_line_per_hit(self):
+        channel_post("dev", "needle first line\nsecond line " + "y" * 500, agent_name="bot")
+        out = self._search(limit=3, detail="min")
+        hits = self._hits(out)
+        self.assertEqual(len(hits), 1)
+        self.assertNotIn("y" * 100, out)
+        self.assertLess(len(hits[0]), 200)
+        self.assertEqual(out.count("\n"), 1, "the header plus exactly one line")
+
+    def test_a_non_positive_limit_falls_back_to_the_default_not_to_nothing(self):
+        self._post("dev", 30)
+        self.assertEqual(len(self._hits(self._search(limit=0))), 10)
+        self.assertEqual(len(self._hits(self._search(limit=-1))), 10)
+
+    def test_medium_high_and_max_keep_the_full_body(self):
+        self._post("dev", 1, width=900)
+        for detail in ("medium", "high", "max"):
+            out = self._search(limit=3, detail=detail)
+            self.assertIn("x" * 900, out, detail)
+            self.assertNotIn("truncated", out, detail)
+
+    def test_a_search_still_spans_every_channel_whatever_channel_is_passed(self):
+        self._post("dev", 1)
+        self._post("ops", 1)
+        out = self._search(limit=10, channel="dev")
+        self.assertIn("#dev", out)
+        self.assertIn("#ops", out)
+
+    def test_output_size_is_bounded_by_limit_and_detail_not_by_the_corpus(self):
+        self._post("dev", 60, width=5000)
+        out = self._search(limit=3, detail="low")
+        self.assertLess(len(out), 3_000)
+
+
 class TestShowPins(unittest.TestCase):
     """Test show_pins option for channel_read (#306)."""
 
