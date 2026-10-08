@@ -3317,7 +3317,7 @@ def recall_channel(
         message: Message body (required for "post", "directive", "broadcast") or message_id for "read_message"/pin actions.
         to: Target agent for "directive" action.
         target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
-        limit: Max messages to return for "read" action (default 20).
+        limit: Max messages to return for "read" and max hits for "search" (default 20).
         pin: If True with "post" action, also pin the message. Use pin=False
              for routine posts. Reserve pins for durable reference material.
         name: Display name for this agent (set on join, shown in messages instead of agent ID).
