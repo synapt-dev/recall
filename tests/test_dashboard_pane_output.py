@@ -1,6 +1,55 @@
 from synapt.dashboard.pane_output import PaneOutputReader
 
 
+def test_rotation_drains_unread_old_tail_once(tmp_path):
+    path = tmp_path / "output.log"
+    reader = PaneOutputReader()
+    try:
+        path.write_bytes(b"AAAA")
+        assert reader.read_new(path) == "AAAA"
+        with path.open("ab") as stream:
+            stream.write(b"-LAST-WORDS-OF-THE-OLD-FILE")
+        path.replace(tmp_path / "output.log.1")
+        path.write_bytes(b"NEW")
+        assert reader.read_new(path) == "-LAST-WORDS-OF-THE-OLD-FILE" + "NEW"
+        assert reader.read_new(path) == ""
+    finally:
+        reader.close()
+
+
+def test_unreadable_log_retries_without_losing_position(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    path = tmp_path / "output.log"
+    path.write_bytes(b"first")
+    reader = PaneOutputReader()
+    try:
+        assert reader.read_new(path) == "first"
+        with path.open("ab") as stream:
+            stream.write(b" next")
+        with monkeypatch.context() as patch:
+            def refused(*args, **kwargs):
+                raise PermissionError("unreadable fixture")
+            patch.setattr(Path, "open", refused)
+            assert reader.read_new(path) == ""
+        assert reader.read_new(path) == " next"
+    finally:
+        reader.close()
+
+
+def test_first_connect_limits_legacy_log_to_latest_mib(tmp_path):
+    path = tmp_path / "output.log"
+    path.write_bytes(b"old" + b"x" * (1024 * 1024 - 6) + b"LATEST")
+    reader = PaneOutputReader()
+    try:
+        content = reader.read_new(path)
+        assert len(content) == 1024 * 1024
+        assert content.endswith("LATEST")
+        assert not content.startswith("old")
+    finally:
+        reader.close()
+
+
 def test_actual_sse_route_keeps_delivering_across_rotation(tmp_path, monkeypatch):
     import asyncio
     from synapt.dashboard import app as dashboard
