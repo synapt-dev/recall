@@ -18,7 +18,7 @@ def test_rotation_drains_unread_old_tail_once(tmp_path):
 
 
 def test_unreadable_log_retries_without_losing_position(tmp_path, monkeypatch):
-    from pathlib import Path
+    from synapt.dashboard import pane_output
 
     path = tmp_path / "output.log"
     path.write_bytes(b"first")
@@ -30,7 +30,7 @@ def test_unreadable_log_retries_without_losing_position(tmp_path, monkeypatch):
         with monkeypatch.context() as patch:
             def refused(*args, **kwargs):
                 raise PermissionError("unreadable fixture")
-            patch.setattr(Path, "open", refused)
+            patch.setattr(pane_output, "_open_log", refused)
             assert reader.read_new(path) == ""
         assert reader.read_new(path) == " next"
     finally:
