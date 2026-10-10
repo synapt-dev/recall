@@ -314,6 +314,27 @@ def hit_sort_key(h: dict) -> tuple:
     )
 
 
+def merged_hit_sort_key(h: dict) -> tuple:
+    """The order for an answer merged from SEVERAL repos: a symbol covering more
+    of the question's words outranks one whose path shares a single word.
+
+    Within one repo a path match is a useful tiebreak; across many repos nearly
+    every member has files whose path shares a word with a plain-English
+    question, so that signal is noise and buries the symbol the question names.
+    Everything else is ``hit_sort_key``'s order.
+    """
+    return (
+        h["is_foreign"],
+        h["is_test"],
+        -h["token_coverage"],
+        -h["path_match_ratio"],
+        -h["name_match_ratio"],
+        _MATCH_KIND_RANK[h["match_kind"]],
+        _KIND_RANK.get(h.get("kind"), 1),
+        h["name"],
+    )
+
+
 def recall_code(
     query: str,
     *,

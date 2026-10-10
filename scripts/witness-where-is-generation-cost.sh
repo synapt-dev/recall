@@ -13,10 +13,10 @@ QUESTION = "where do we compute generation cost for a run record"
 
 
 def verdict(answer: str) -> str:
-    """'ok' only when the answer is not a refusal AND some result line names a runner/ path."""
+    """'ok' only when the answer is not a refusal AND the GenerationCostSurface hit line names a runner/ path."""
     if "is not itself a git repository" in answer or "Pass repo_root" in answer:
         return "refused"
-    if re.search(r"(^|[\s(\[/])runner/[\w./-]+", answer):
+    if re.search(r"GenerationCostSurface\s+runner/[\w./-]+", answer):
         return "ok"
     return "other"
 
@@ -24,7 +24,9 @@ def verdict(answer: str) -> str:
 # the instrument must be able to disagree: a refusal and a non-runner answer both fail
 assert verdict("Repo root /x is not itself a git repository and contains member repos. Pass repo_root pointing at one") == "refused"
 assert verdict("function cost_of  eval/src/eval/cost.py:10-20  match: name") == "other"
-assert verdict("function cost_of  runner/src/runner/cost.py:10-20  match: name") == "ok"
+assert verdict("class RunRecord  runner/synapt/runner/records.py:33-74") == "other"  # a runner path alone is not the cost surface
+assert verdict("class GenerationCostSurface  other-member/x/cost.py:1-9") == "other"  # right name, wrong member
+assert verdict("class GenerationCostSurface  runner/synapt/runner/modal.py:41-66  [prefix]") == "ok"
 if verdict("") != "other":
     print("BROKEN INSTRUMENT: an empty answer did not classify as other")
     sys.exit(2)

@@ -891,7 +891,7 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
     directory is put first on each path, so every path is reachable from the root.
     """
     from synapt.recall.code_index import index_repo
-    from synapt.recall.code_search import hit_sort_key
+    from synapt.recall.code_search import merged_hit_sort_key
     from synapt.recall.code_search import recall_code as _recall_code
 
     cloned = [m for m in members if m.cloned]
@@ -939,7 +939,7 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
     for m in not_cloned:
         notes.append(f"{m.rel_path}: declared in the manifest but not cloned here; not searched")
 
-    hits.sort(key=hit_sort_key)
+    hits.sort(key=merged_hit_sort_key)
     try:
         memories = recall_search(query, max_chunks=max_chunks)
     except Exception as exc:

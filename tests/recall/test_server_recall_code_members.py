@@ -163,3 +163,36 @@ class TestNoManifestKeepsTheRefusal:
 
         assert "is not itself a git repository" in result
         assert "only_a" not in result.split("Pass repo_root")[0].split("including")[0]
+
+
+class TestMergedAnswerRanksCoverageBeforePath:
+    """Across many repos a one-word path hit is noise: every member has files
+    whose path shares a word with a plain-English question. A symbol covering
+    two of the question's words must outrank one that covers one, or the answer
+    is buried (measured on a real ten-member root: the symbol the question
+    named ranked 60th)."""
+
+    @staticmethod
+    def _hit(name, coverage, path_ratio):
+        return {
+            "name": name, "kind": "class", "is_foreign": False, "is_test": False,
+            "path_match_ratio": path_ratio, "token_coverage": coverage,
+            "name_match_ratio": 0.5, "match_kind": "prefix",
+        }
+
+    def test_two_words_in_the_name_beat_one_word_in_the_path(self):
+        from synapt.recall.code_search import merged_hit_sort_key
+
+        two_words = self._hit("GenerationCostSurface", coverage=2, path_ratio=0.0)
+        one_word_path = self._hit("run", coverage=1, path_ratio=0.17)
+
+        assert sorted([one_word_path, two_words], key=merged_hit_sort_key)[0] is two_words
+
+    def test_a_single_repo_answer_keeps_its_own_order(self):
+        """Control: the single-repo key is unchanged by the merged one."""
+        from synapt.recall.code_search import hit_sort_key
+
+        two_words = self._hit("GenerationCostSurface", coverage=2, path_ratio=0.0)
+        one_word_path = self._hit("run", coverage=1, path_ratio=0.17)
+
+        assert sorted([two_words, one_word_path], key=hit_sort_key)[0] is one_word_path
