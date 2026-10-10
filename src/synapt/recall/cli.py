@@ -3179,6 +3179,13 @@ def cmd_consolidate(args: argparse.Namespace) -> None:
     else:
         print(f"\n[consolidate] No knowledge extracted from {result.entries_processed} entries.")
 
+    # What the content filters turned away. Diagnostics, so stderr; stdout above is unchanged.
+    if result.nodes_rejected:
+        shown = "; ".join(f'"{w}"' for w in result.rejected_preview)
+        print(f"[consolidate] the model returned {result.nodes_emitted} node(s); "
+              f"{result.nodes_rejected} rejected by the content filters"
+              f"{': ' + shown if shown else ''}.", file=sys.stderr)
+
 
 def cmd_remind(args: argparse.Namespace) -> None:
     """Manage session reminders."""

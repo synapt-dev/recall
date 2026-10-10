@@ -4,6 +4,23 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`synapt recall consolidate` says how many nodes its content filters turned away.**
+  A run printed `3 created` whether the model had returned three nodes or seven. It now
+  also prints, on stderr, how many nodes the model returned, how many the content filters
+  rejected, and the first words of each rejected node (at most five, 48 characters each).
+  The preview is one printable line. What is kept is decided exactly as before.
+
+### Changed
+
+- **The low-specificity filter reads a named-rule identifier such as `STAMP-PARITY-91`
+  (two or more ALLCAPS words, then a number) as a project-specific signal**, as it already
+  does a path, a version or a CamelCase name, so a short node naming one is no longer
+  dropped as generic advice. Standard identifiers (`UTF-8`, `SHA-256`, `HTTP-2`, `CI-CD`),
+  a bare ticket number (`ABC-123`), hyphenated lowercase words and numbers with units are
+  not signals, because generic advice carries all of them.
+
 ## [0.27.0] - 2026-10-01
 
 Minor release. Index builds now ask the kernel whether the host is under memory
