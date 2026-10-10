@@ -23,7 +23,7 @@ import re
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -136,6 +136,7 @@ _SPECIFICITY_SIGNALS = re.compile(
     r"|--[\w-]{2,}"              # CLI flags
     r"|\b[A-Z][a-z]+[A-Z]\w*"   # CamelCase identifiers
     r"|\b[A-Z]\d{2,}\w*\b"      # Model/hardware identifiers: A100, H100, L4, T4
+    r"|\b[A-Z]{2,}(?:-[A-Z]{2,})+-\d+\b"  # named-rule identifiers: two or more ALLCAPS words then a number (STAMP-PARITY-91); NOT UTF-8, SHA-256, HTTP-2, CI-CD or ABC-123
     r"|\b[a-z]\w+_\w+\b"        # Snake_case identifiers (2+ parts, lowercase start)
     r"|\b[Ss]ession\s*#?\d+"    # Session references
     r"|\b[Pp][Rr]\s*#?\d+"      # PR references
@@ -362,6 +363,10 @@ Extract durable knowledge as JSON. Be specific — include names, values, dates.
 """
 
 
+_REJECTED_PREVIEW_MAX = 5      # nodes shown per run
+_REJECTED_PREVIEW_CHARS = 48   # characters shown per node
+
+
 @dataclass
 class ConsolidationResult:
     """Summary of a consolidation run."""
@@ -376,6 +381,11 @@ class ConsolidationResult:
     nodes_deduped: int = 0
     entries_processed: int = 0
     clusters_found: int = 0
+    # What the model returned and what the content filters turned away, so a run is not
+    # summarised by "created" alone. Counting only: what is kept is decided exactly as before.
+    nodes_emitted: int = 0
+    nodes_rejected: int = 0
+    rejected_preview: list[str] = field(default_factory=list)
 
 
 def _validate_iso_date(value: str | None) -> str | None:
@@ -2023,6 +2033,15 @@ def _apply_corroborate_update(target: KnowledgeNode, updates: dict, knowledge_pa
     return ok
 
 
+def _merge_filter_counts(total: "ConsolidationResult", part: "ConsolidationResult") -> None:
+    """Fold one cluster's emitted/rejected counts into the run's, keeping the preview bounded."""
+    total.nodes_emitted += part.nodes_emitted
+    total.nodes_rejected += part.nodes_rejected
+    room = _REJECTED_PREVIEW_MAX - len(total.rejected_preview)
+    if room > 0:
+        total.rejected_preview.extend(part.rejected_preview[:room])
+
+
 def _apply_consolidation_result(
     parsed: dict,
     existing_nodes: list[KnowledgeNode],
@@ -2062,6 +2081,7 @@ def _apply_consolidation_result(
         if not isinstance(raw_node, dict):
             continue
 
+        result.nodes_emitted += 1
         action = raw_node.get("action", "create")
         # Normalize + filter via the shared gate B4 also calls (_evaluate_create_content) —
         # parity by construction, see that function's docstring. is_create mirrors the
@@ -2090,6 +2110,12 @@ def _apply_consolidation_result(
         if not _create_content_passes_filters(
             content, content_profile, is_create=(action == "create"),
         ):
+            result.nodes_rejected += 1
+            if len(result.rejected_preview) < _REJECTED_PREVIEW_MAX:
+                # one printable line: model text reaches a terminal, so no control or line-break characters
+                flat = " ".join(content.split())
+                safe = "".join(ch if ch.isprintable() else " " for ch in flat)
+                result.rejected_preview.append(safe[:_REJECTED_PREVIEW_CHARS])
             continue
 
         if action == "corroborate":
@@ -4347,6 +4373,7 @@ def consolidate(
             result.nodes_corroborated += cluster_result.nodes_corroborated
             result.nodes_contradicted += cluster_result.nodes_contradicted
             result.nodes_contested += cluster_result.nodes_contested
+            _merge_filter_counts(result, cluster_result)
             return True
 
         cached_entry = response_cache.get(cache_key)
@@ -4415,6 +4442,7 @@ def consolidate(
         result.nodes_corroborated += cluster_result.nodes_corroborated
         result.nodes_contradicted += cluster_result.nodes_contradicted
         result.nodes_contested += cluster_result.nodes_contested
+        _merge_filter_counts(result, cluster_result)
 
         # Cache successful response + prompt for future runs / adapter training
         _save_cached_response(cache_path, cache_key, response, prompt)
