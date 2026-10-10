@@ -299,6 +299,42 @@ def _match_kind(symbol_name: str, token: str) -> str:
     return "substring"
 
 
+def hit_sort_key(h: dict) -> tuple:
+    """The order a recall_code answer ranks symbol hits in. Exposed so an answer
+    merged from several repos ranks exactly as one repo's does."""
+    return (
+        h["is_foreign"],
+        h["is_test"],
+        -h["path_match_ratio"],
+        -h["token_coverage"],
+        -h["name_match_ratio"],
+        _MATCH_KIND_RANK[h["match_kind"]],
+        _KIND_RANK.get(h.get("kind"), 1),
+        h["name"],
+    )
+
+
+def merged_hit_sort_key(h: dict) -> tuple:
+    """The order for an answer merged from SEVERAL repos: a symbol covering more
+    of the question's words outranks one whose path shares a single word.
+
+    Within one repo a path match is a useful tiebreak; across many repos nearly
+    every member has files whose path shares a word with a plain-English
+    question, so that signal is noise and buries the symbol the question names.
+    Everything else is ``hit_sort_key``'s order.
+    """
+    return (
+        h["is_foreign"],
+        h["is_test"],
+        -h["token_coverage"],
+        -h["path_match_ratio"],
+        -h["name_match_ratio"],
+        _MATCH_KIND_RANK[h["match_kind"]],
+        _KIND_RANK.get(h.get("kind"), 1),
+        h["name"],
+    )
+
+
 def recall_code(
     query: str,
     *,
@@ -307,6 +343,8 @@ def recall_code(
     repo_root: str,
     max_symbols: int = 5,
     max_chunks: int = 3,
+    memories: bool = True,
+    sort_key=None,
 ) -> dict:
     """Answer a natural-language question about this repo's code plus what
     the team has said about it. Composes find_symbols (code index) with
@@ -390,18 +428,9 @@ def recall_code(
         )
         hit["name_match_ratio"] = _name_match_ratio(hit["name"], query_words_set)
         hit["path_match_ratio"] = _path_match_ratio(hit["path"], query_words_set)
-    candidates.sort(
-        key=lambda h: (
-            h["is_foreign"],
-            h["is_test"],
-            -h["path_match_ratio"],
-            -h["token_coverage"],
-            -h["name_match_ratio"],
-            _MATCH_KIND_RANK[h["match_kind"]],
-            _KIND_RANK.get(h.get("kind"), 1),
-            h["name"],
-        )
-    )
+    # ``sort_key`` lets a caller that merges several repos rank (and so cut) each repo's candidates
+    # in the order the merged answer will use; the default is the single-repo order
+    candidates.sort(key=sort_key or hit_sort_key)
     symbol_hits = candidates[:max_symbols]
 
     annotator = _load_annotator()
@@ -414,8 +443,13 @@ def recall_code(
             except Exception as exc:  # noqa: BLE001 - enrichment, never the answer
                 hit["annotation_error"] = str(exc)
 
-    memory_text = recall_server.recall_search(query, max_chunks=max_chunks)
-    memory_hit = "No results found." not in memory_text
+    if memories:
+        memory_text = recall_server.recall_search(query, max_chunks=max_chunks)
+        memory_hit = "No results found." not in memory_text
+    else:
+        # the caller looks memories up once itself (an answer merged from several repos)
+        memory_text = ""
+        memory_hit = False
 
     return {
         "query": query,

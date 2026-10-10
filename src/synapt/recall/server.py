@@ -837,14 +837,9 @@ def recall_files(
         return f"File search failed: {exc}"
 
 
-def _format_recall_code(result: dict, root: Path, db: Path, stats) -> str:
-    """Render a code_search.recall_code() result as one readable block."""
+def _code_hit_lines(result: dict) -> list[str]:
+    """The symbol-hit lines of a recall_code answer (or its no-hit line)."""
     lines: list[str] = []
-    fresh = (
-        f"{stats.files_indexed} files re-parsed, {stats.files_skipped} unchanged, "
-        f"{stats.files_pruned} pruned"
-    )
-    lines.append(f"Code hits for \"{result['query']}\" in {root.name} ({fresh}; index {db}):")
     if result["symbols"]:
         for hit in result["symbols"]:
             span = f"{hit['path']}:{hit['line_start']}-{hit['line_end']}"
@@ -863,6 +858,18 @@ def _format_recall_code(result: dict, root: Path, db: Path, stats) -> str:
                 lines.append(f"      (annotation failed: {hit['annotation_error']})")
     else:
         lines.append("  No code symbol matched; memories only.")
+    return lines
+
+
+def _format_recall_code(result: dict, root: Path, db: Path, stats) -> str:
+    """Render a code_search.recall_code() result as one readable block."""
+    lines: list[str] = []
+    fresh = (
+        f"{stats.files_indexed} files re-parsed, {stats.files_skipped} unchanged, "
+        f"{stats.files_pruned} pruned"
+    )
+    lines.append(f"Code hits for \"{result['query']}\" in {root.name} ({fresh}; index {db}):")
+    lines.extend(_code_hit_lines(result))
     if getattr(stats, "parser_stack_missing", False):
         lines.append(
             "  (tree-sitter-language-pack is not installed, so the code index is empty: "
@@ -871,6 +878,96 @@ def _format_recall_code(result: dict, root: Path, db: Path, stats) -> str:
     lines.append("")
     lines.append("What the team said:")
     lines.append(result["memories"])
+    return "\n".join(lines)
+
+
+def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_chunks: int) -> str:
+    """Answer a recall_code question at a gripspace root that DECLARES its members.
+
+    Each cloned member is indexed and searched exactly as a call with
+    ``repo_root=<member>`` would be, under that member's own stable tag, so a
+    hit never mixes repos and the content-hash cache holds across calls. The
+    hits are then ranked together with the single-repo ordering and the member
+    directory is put first on each path, so every path is reachable from the root.
+    """
+    from synapt.recall.code_index import index_repo
+    from synapt.recall.code_search import merged_hit_sort_key
+    from synapt.recall.code_search import recall_code as _recall_code
+
+    cloned = [m for m in members if m.cloned]
+    not_cloned = [m for m in members if not m.cloned and not m.problem]
+    unusable = [m for m in members if m.problem]
+    if not cloned:
+        names = ", ".join(m.rel_path for m in members)
+        return (
+            f"Gripspace root {root} declares members ({names}) but none of them is "
+            "cloned here, so there is no code to search. Clone one, or pass repo_root."
+        )
+
+    hits: list[dict] = []
+    notes: list[str] = []
+    parser_missing = False
+    # A member's tag is its directory name, so a direct call with repo_root=<member> shares
+    # its cache. Two members with one directory name would share a tag and prune each other
+    # on every call, so those (and only those) are tagged by their path under the root.
+    names = [m.path.name for m in cloned]
+    tags = {m.rel_path: (m.path.name if names.count(m.path.name) == 1 else m.rel_path) for m in cloned}
+    for m in cloned:
+        tag = tags[m.rel_path]
+        db = project_data_dir(m.path) / "code_index.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            stats = index_repo(m.path, db, repo=tag)
+        except Exception as exc:
+            notes.append(f"{m.rel_path}: code index failed: {exc}")
+            continue
+        parser_missing = parser_missing or getattr(stats, "parser_stack_missing", False)
+        try:
+            result = _recall_code(
+                query,
+                db_path=str(db),
+                repo=tag,
+                repo_root=str(m.path),
+                max_symbols=max_symbols,
+                max_chunks=max_chunks,
+                memories=False,
+                # each member's own cut must use the order the merge uses, or the symbol that
+                # covers most of the question can be dropped before the merge sees it
+                sort_key=merged_hit_sort_key,
+            )
+        except Exception as exc:
+            notes.append(f"{m.rel_path}: code search failed: {exc}")
+            continue
+        notes.append(
+            f"{m.rel_path}: {stats.files_indexed} files re-parsed, "
+            f"{stats.files_skipped} unchanged, {stats.files_pruned} pruned"
+        )
+        for hit in result["symbols"]:
+            merged = dict(hit)
+            merged["path"] = f"{m.rel_path}/{hit['path']}"
+            hits.append(merged)
+    for m in not_cloned:
+        notes.append(f"{m.rel_path}: declared in the manifest but not cloned here; not searched")
+    for m in unusable:
+        notes.append(f"{m.rel_path}: {m.problem}; not searched")
+
+    hits.sort(key=merged_hit_sort_key)
+    try:
+        memories = recall_search(query, max_chunks=max_chunks)
+    except Exception as exc:
+        memories = f"Memory search failed: {exc}"
+
+    lines = [f"Code hits for \"{query}\" across the {len(cloned)} declared members of {root.name}:"]
+    lines.extend(f"  ({n})" for n in notes)
+    lines.extend(_code_hit_lines({"symbols": hits[:max_symbols]}))
+    if parser_missing:
+        lines.append(
+            "  (tree-sitter-language-pack is not installed, so the code index is empty: "
+            "pip install 'synapt[code-index]')"
+        )
+    lines.append("")
+    lines.append("What the team said:")
+    lines.append(memories)
     return "\n".join(lines)
 
 
@@ -920,6 +1017,13 @@ def recall_code(
     # either) and stops as soon as a second member repo is found -- the
     # question is only ever "one or more than one," never a full census.
     if not (root / ".git").exists():
+        # A root that DECLARES its members is searched member by member; only a
+        # root that does not is refused below (members are declared, not inferred).
+        from synapt.recall.gripspace_members import declared_members
+
+        members = declared_members(root)
+        if members:
+            return _recall_code_members(query, root, members, max_symbols, max_chunks)
         member_repos: list[str] = []
         for dirpath, dirnames, _filenames in os.walk(root):
             dirnames[:] = [
