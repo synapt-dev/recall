@@ -895,7 +895,8 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
     from synapt.recall.code_search import recall_code as _recall_code
 
     cloned = [m for m in members if m.cloned]
-    not_cloned = [m for m in members if not m.cloned]
+    not_cloned = [m for m in members if not m.cloned and not m.problem]
+    unusable = [m for m in members if m.problem]
     if not cloned:
         names = ", ".join(m.rel_path for m in members)
         return (
@@ -906,11 +907,17 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
     hits: list[dict] = []
     notes: list[str] = []
     parser_missing = False
+    # A member's tag is its directory name, so a direct call with repo_root=<member> shares
+    # its cache. Two members with one directory name would share a tag and prune each other
+    # on every call, so those (and only those) are tagged by their path under the root.
+    names = [m.path.name for m in cloned]
+    tags = {m.rel_path: (m.path.name if names.count(m.path.name) == 1 else m.rel_path) for m in cloned}
     for m in cloned:
+        tag = tags[m.rel_path]
         db = project_data_dir(m.path) / "code_index.db"
         db.parent.mkdir(parents=True, exist_ok=True)
         try:
-            stats = index_repo(m.path, db, repo=m.path.name)
+            stats = index_repo(m.path, db, repo=tag)
         except Exception as exc:
             notes.append(f"{m.rel_path}: code index failed: {exc}")
             continue
@@ -919,11 +926,14 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
             result = _recall_code(
                 query,
                 db_path=str(db),
-                repo=m.path.name,
+                repo=tag,
                 repo_root=str(m.path),
                 max_symbols=max_symbols,
                 max_chunks=max_chunks,
                 memories=False,
+                # each member's own cut must use the order the merge uses, or the symbol that
+                # covers most of the question can be dropped before the merge sees it
+                sort_key=merged_hit_sort_key,
             )
         except Exception as exc:
             notes.append(f"{m.rel_path}: code search failed: {exc}")
@@ -938,6 +948,8 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
             hits.append(merged)
     for m in not_cloned:
         notes.append(f"{m.rel_path}: declared in the manifest but not cloned here; not searched")
+    for m in unusable:
+        notes.append(f"{m.rel_path}: {m.problem}; not searched")
 
     hits.sort(key=merged_hit_sort_key)
     try:

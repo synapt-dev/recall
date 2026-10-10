@@ -344,6 +344,7 @@ def recall_code(
     max_symbols: int = 5,
     max_chunks: int = 3,
     memories: bool = True,
+    sort_key=None,
 ) -> dict:
     """Answer a natural-language question about this repo's code plus what
     the team has said about it. Composes find_symbols (code index) with
@@ -427,7 +428,9 @@ def recall_code(
         )
         hit["name_match_ratio"] = _name_match_ratio(hit["name"], query_words_set)
         hit["path_match_ratio"] = _path_match_ratio(hit["path"], query_words_set)
-    candidates.sort(key=hit_sort_key)
+    # ``sort_key`` lets a caller that merges several repos rank (and so cut) each repo's candidates
+    # in the order the merged answer will use; the default is the single-repo order
+    candidates.sort(key=sort_key or hit_sort_key)
     symbol_hits = candidates[:max_symbols]
 
     annotator = _load_annotator()

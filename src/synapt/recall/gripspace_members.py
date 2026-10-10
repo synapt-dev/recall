@@ -26,6 +26,7 @@ class Member:
     rel_path: str     # path under the root, without a leading "./"
     path: Path        # absolute
     cloned: bool      # has a .git
+    problem: str = ""  # why this entry is not searched, when it is not a usable member path
 
 
 def _scalar(value: str) -> str:
@@ -40,7 +41,9 @@ def declared_members(root: Path) -> list[Member] | None:
     when the root has no readable manifest or it declares no repos.
 
     A member whose directory is absent or has no ``.git`` is returned with
-    ``cloned=False`` so the caller can say it was not searched.
+    ``cloned=False`` so the caller can say it was not searched. A path that cannot
+    be a member (a NUL byte, or a location outside the root) is returned with
+    ``problem`` set and is never searched; two keys naming one path are one member.
     """
     manifest = Path(root) / MANIFEST_RELPATH
     try:
@@ -69,7 +72,9 @@ def declared_members(root: Path) -> list[Member] | None:
             key, _, value = line.partition(":")
             entries[current][key.strip()] = _scalar(value)
 
+    root_resolved = Path(root).resolve()
     members: list[Member] = []
+    seen: set[str] = set()
     for key, fields in entries.items():
         if fields.get("reference", "").lower() == "true":
             continue
@@ -77,6 +82,15 @@ def declared_members(root: Path) -> list[Member] | None:
         if not rel:
             continue
         rel = rel[2:] if rel.startswith("./") else rel
-        absolute = (Path(root) / rel).resolve()
+        if "\x00" in rel:
+            members.append(Member(key, rel.replace("\x00", "?"), root_resolved, False, "path holds a NUL byte"))
+            continue
+        absolute = (root_resolved / rel).resolve()
+        if absolute != root_resolved and root_resolved not in absolute.parents:
+            members.append(Member(key, rel, absolute, False, "declared path is outside the gripspace root"))
+            continue
+        if str(absolute) in seen:
+            continue
+        seen.add(str(absolute))
         members.append(Member(key, rel, absolute, (absolute / ".git").exists()))
     return members or None

@@ -196,3 +196,92 @@ class TestMergedAnswerRanksCoverageBeforePath:
         one_word_path = self._hit("run", coverage=1, path_ratio=0.17)
 
         assert sorted([two_words, one_word_path], key=hit_sort_key)[0] is one_word_path
+
+
+class TestRankingSurvivesTheCuts:
+    """A member keeps only its own top max_symbols before the merge. If that cut uses the
+    single-repo order, the best-coverage symbol can be dropped before the merged order
+    ever sees it; and if the final sort uses the single-repo order, it is buried again."""
+
+    def _members(self, root: Path):
+        # member one: six symbols whose PATH shares the query word (the single-repo order
+        # prefers these) and one symbol covering both query words in a path with no match
+        files = {f"src/alpha_{i}.py": f"def alpha_item_{i}():\n    return {i}\n" for i in range(6)}
+        files["src/util.py"] = "def alpha_beta_thing():\n    return 1\n"
+        _repo(root / "one", files)
+        files2 = {f"src/alpha_{i}.py": f"def alpha_other_{i}():\n    return {i}\n" for i in range(2)}
+        files2["src/util2.py"] = "def alpha_beta_other():\n    return 2\n"
+        _repo(root / "two", files2)
+        _manifest(root, {"one": {"path": "./one"}, "two": {"path": "./two"}})
+
+    def test_the_best_coverage_symbol_survives_each_members_own_cut(self, tmp_path):
+        from synapt.recall.server import recall_code
+
+        root = tmp_path / "gripspace"
+        self._members(root)
+
+        result = recall_code("alpha beta", repo_root=str(root))
+
+        assert "alpha_beta_thing" in result, "cut by the member's own single-repo top-5 before the merge"
+
+    def test_the_final_merge_uses_the_merged_order(self, tmp_path):
+        from synapt.recall.server import recall_code
+
+        root = tmp_path / "gripspace"
+        self._members(root)
+
+        result = recall_code("alpha beta", repo_root=str(root))
+
+        assert "alpha_beta_thing" in result and "alpha_beta_other" in result, (
+            "both two-word symbols must outrank the one-word path hits of either member"
+        )
+
+
+class TestManifestPathsThatAreNotMembers:
+    def test_a_nul_byte_in_a_path_skips_that_entry_not_the_answer(self, gripspace):
+        from synapt.recall.server import recall_code
+
+        manifest = gripspace / ".gitgrip" / "spaces" / "main" / "gripspace.yml"
+        manifest.write_text(manifest.read_text().replace("settings:", "  bad:\n    url: https://example.invalid/b.git\n    path: ./ba\x00d\nsettings:"))
+
+        result = recall_code("generation_cost_surface", repo_root=str(gripspace))
+
+        assert "runner/src/runner/cost.py" in result, f"one bad entry must not take the answer down: {result[:200]}"
+
+    def test_a_path_outside_the_root_is_named_and_not_searched(self, tmp_path):
+        from synapt.recall.server import recall_code
+
+        root = tmp_path / "gripspace"
+        _repo(root / "runner", {"src/cost.py": "def inside_the_root():\n    return 1\n"})
+        _repo(tmp_path / "outside", {"o.py": "def outside_the_root():\n    return 2\n"})
+        _manifest(root, {"runner": {"path": "./runner"}, "outside": {"path": "../outside"}})
+
+        result = recall_code("outside_the_root", repo_root=str(root))
+
+        assert "o.py" not in result, "a declared path outside the root must never be searched"
+        assert "outside the gripspace root" in result, "and the answer must say it was skipped"
+
+    def test_two_keys_for_one_path_are_one_member(self, gripspace):
+        from synapt.recall.server import recall_code
+
+        _manifest(gripspace, {"runner": {"path": "./runner"}, "runner-again": {"path": "./runner"}, "eval": {"path": "./eval"}})
+
+        result = recall_code("generation_cost_surface", repo_root=str(gripspace))
+
+        assert result.count("runner/src/runner/cost.py") == 1
+        assert "across the 2 declared members" in result
+
+    def test_members_with_the_same_directory_name_do_not_re_parse_each_other(self, tmp_path):
+        from synapt.recall.server import recall_code
+
+        root = tmp_path / "gripspace"
+        _repo(root / "a" / "x", {"one.py": "def only_in_a():\n    return 1\n"})
+        _repo(root / "b" / "x", {"two.py": "def only_in_b():\n    return 2\n"})
+        _manifest(root, {"ax": {"path": "./a/x"}, "bx": {"path": "./b/x"}})
+
+        first = recall_code("only_in_a", repo_root=str(root))
+        assert first.count("1 files re-parsed") == 2, f"control, both index once: {first[:300]}"
+
+        second = recall_code("only_in_a", repo_root=str(root))
+
+        assert second.count("0 files re-parsed") == 2, f"one tag shared by two members: {second[:400]}"
