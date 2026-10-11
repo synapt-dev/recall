@@ -248,13 +248,12 @@ def _timestamp_epoch(value: str) -> float:
 def caller_transcripts(project_dir: Path | None = None) -> list[CallerTranscript]:
     """Discover transcripts rooted at the caller, not the shared gripspace."""
     from synapt.recall.codex import _session_cwd, discover_codex_sessions
-    from synapt.recall.core import project_transcript_dir
+    from synapt.recall.core import project_transcript_dirs_any_root
     from synapt.recall.journal import extract_session_id
 
     caller = (project_dir or Path.cwd()).resolve()
     paths: list[Path] = []
-    claude_root = project_transcript_dir(caller)
-    if claude_root is not None:
+    for claude_root in project_transcript_dirs_any_root(caller):
         paths.extend(sorted(claude_root.glob("*.jsonl")))
     codex_root = discover_codex_sessions()
     if codex_root is not None:
@@ -498,6 +497,15 @@ def _runtime_root(path: str) -> str:
     if ".codex" in parts:
         return "codex"
     if ".claude" in parts:
+        return "claude-code"
+    from synapt.recall.core import claude_projects_roots
+
+    resolved = Path(path).resolve()
+    for root in claude_projects_roots():
+        try:
+            resolved.relative_to(root.resolve())
+        except ValueError:
+            continue
         return "claude-code"
     if "worktrees" in parts:
         return "recall-store"
