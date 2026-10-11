@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import threading
@@ -31,6 +32,35 @@ from typing import List, Optional
 from synapt.recall.vector_math import cosine_similarity  # noqa: F401
 
 
+_DEVICES = ("cpu", "mps", "cuda")
+_process_default_device: str | None = None
+
+
+def set_process_default_device(device: str) -> None:
+    """Make `device` this process's default, below SYNAPT_EMBED_DEVICE.
+
+    The MCP servers call this with "cpu": a long-lived server embeds one query
+    or one knowledge node at a time, and on Apple Silicon loading the model
+    onto MPS holds about 1 GB of graphics memory until the process exits
+    (`del` + `torch.mps.empty_cache()` returned none of it, measured). Batch
+    builds do not call it, so they keep the device `_detect_device` picks.
+    Held in-process rather than in the environment, so a subprocess the
+    server starts does not inherit it.
+    """
+    global _process_default_device
+    if device not in _DEVICES:
+        raise ValueError(f"device must be one of {_DEVICES}, got {device!r}")
+    _process_default_device = device
+
+
+def _module_present(name: str) -> bool:
+    """Whether `name` can be resolved here, without importing it."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _detect_device() -> str:
     """Pick the safest available torch device for embedding inference.
 
@@ -38,12 +68,15 @@ def _detect_device() -> str:
     sentence-transformers matmul; prefer MPS when available. Linux and other
     CPU-only environments fall back to "cpu" cleanly.
 
-    Env override: SYNAPT_EMBED_DEVICE=cpu|mps|cuda
+    Env override: SYNAPT_EMBED_DEVICE=cpu|mps|cuda, then the process default
+    (`set_process_default_device`), then the probe.
     """
     import os
     override = os.environ.get("SYNAPT_EMBED_DEVICE", "").strip().lower()
-    if override in ("cpu", "mps", "cuda"):
+    if override in _DEVICES:
         return override
+    if _process_default_device is not None:
+        return _process_default_device
     try:
         import torch
         if torch.backends.mps.is_available() and torch.backends.mps.is_built():
@@ -78,12 +111,18 @@ class LocalEmbeddings(EmbeddingProvider):
     Model loading is deferred to first use (lazy initialization) to avoid
     semaphore/deadlock issues when the provider is created before
     multiprocessing forks.
+
+    The device is resolved at first use too. `_detect_device` imports torch,
+    and building a provider is common where nothing is ever embedded (a
+    long-lived server on a store with nothing to embed): importing torch and
+    sentence-transformers took one such process from 8 MB to 366 MB of
+    physical footprint, measured with `footprint` on macOS.
     """
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2",
                  device: str | None = None):
         self._model_name = model_name
-        self._device = device if device is not None else _detect_device()
+        self._device = device
         self._model = None
         self._dim_cached: int | None = None
 
@@ -93,6 +132,9 @@ class LocalEmbeddings(EmbeddingProvider):
             import os
             from pathlib import Path
             from sentence_transformers import SentenceTransformer
+
+            if self._device is None:
+                self._device = _detect_device()
 
             # Skip the HuggingFace revision-check network call if the model is
             # already in the local cache. Accept both fully-qualified
@@ -205,16 +247,17 @@ def _resolve_provider(prefer_local: bool) -> Optional[EmbeddingProvider]:
     from synapt.recall.storage import EMBEDDING_DIM
 
     if prefer_local:
-        try:
-            import sentence_transformers  # noqa: F401
+        # Resolve the SPEC, do not import: importing sentence-transformers pulls
+        # in torch, the same cost LocalEmbeddings now defers to first use. A
+        # package that is present but raises on import is reported present, so
+        # its real error surfaces at the first embed instead of being read as
+        # absent (the rule _mlx.py states for its backends).
+        if _module_present("sentence_transformers"):
             return LocalEmbeddings()
-        except ImportError:
-            log.info(
-                "sentence-transformers not installed. "
-                "Install with: pip install sentence-transformers"
-            )
-        except Exception as e:
-            log.warning("sentence-transformers failed to load: %s", e)
+        log.info(
+            "sentence-transformers not installed. "
+            "Install with: pip install sentence-transformers"
+        )
 
     try:
         provider = OllamaEmbeddings()

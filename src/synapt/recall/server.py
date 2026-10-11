@@ -3936,6 +3936,9 @@ except Exception:  # pragma: no cover - never block server start on a version pr
 
 def main():
     """Entry point for standalone synapt-recall-server."""
+    from synapt.recall.embeddings import set_process_default_device
+
+    set_process_default_device("cpu")  # see its docstring; SYNAPT_EMBED_DEVICE still wins
     server = _build_validating_fastmcp_class()(
         "synapt-recall",
         instructions=MCP_INSTRUCTIONS,

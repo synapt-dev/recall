@@ -194,3 +194,131 @@ def test_mutation_dropping_the_width_check_reddens_the_witness(tmp_path):
         "defect the guard closes, and this is what makes the witness above mean "
         "something"
     )
+
+
+# --- The device is resolved at first use, and the MCP servers default to cpu ---
+# Building a provider used to import torch (via _detect_device) and
+# sentence-transformers (the presence check) even where nothing is ever
+# embedded; on macOS those imports took one process from 8 MB to 366 MB.
+
+import importlib.util
+import os
+import subprocess
+import sys
+import types
+
+import pytest
+
+from synapt.recall import embeddings as emb
+
+
+def _fake_sentence_transformers(monkeypatch, seen_devices):
+    class _FakeST:
+        def __init__(self, name, device=None):
+            seen_devices.append(device)
+
+        def get_sentence_embedding_dimension(self):
+            return 384
+
+    module = types.ModuleType("sentence_transformers")
+    module.SentenceTransformer = _FakeST
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("sentence_transformers") is None,
+                    reason="needs sentence-transformers installed to resolve the local provider")
+def test_building_the_local_provider_imports_neither_torch_nor_sentence_transformers():
+    code = (
+        "import sys\n"
+        "from synapt.recall.embeddings import _resolve_provider\n"
+        "p = _resolve_provider(prefer_local=True)\n"
+        "print(type(p).__name__, 'torch' in sys.modules, 'sentence_transformers' in sys.modules)\n"
+    )
+    env = dict(os.environ)  # SYSTEMROOT and USERPROFILE ride along for the Windows jobs
+    env.pop("SYNAPT_EMBED_DEVICE", None)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["LocalEmbeddings", "False", "False"], out.stdout
+
+
+def test_the_device_is_probed_at_first_use_not_at_construction(monkeypatch):
+    probes = []
+    monkeypatch.setattr(emb, "_detect_device", lambda: probes.append(1) or "cpu")
+    seen = []
+    _fake_sentence_transformers(monkeypatch, seen)
+    provider = emb.LocalEmbeddings()
+    assert probes == [], "constructing the provider must not probe the device"
+    provider._ensure_model()
+    assert probes == [1] and seen == ["cpu"]
+
+
+def test_an_explicit_device_is_never_probed(monkeypatch):
+    probes = []
+    monkeypatch.setattr(emb, "_detect_device", lambda: probes.append(1) or "mps")
+    seen = []
+    _fake_sentence_transformers(monkeypatch, seen)
+    emb.LocalEmbeddings(device="cpu")._ensure_model()
+    assert probes == [] and seen == ["cpu"]
+
+
+def _fake_torch_with_mps(monkeypatch):
+    mps = types.SimpleNamespace(is_available=lambda: True, is_built=lambda: True)
+    torch = types.ModuleType("torch")
+    torch.backends = types.SimpleNamespace(mps=mps)
+    torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+
+def test_the_process_default_beats_the_probe_and_the_env_var_beats_both(monkeypatch):
+    _fake_torch_with_mps(monkeypatch)
+    monkeypatch.delenv("SYNAPT_EMBED_DEVICE", raising=False)
+    monkeypatch.setattr(emb, "_process_default_device", None)
+    assert emb._detect_device() == "mps"  # control: the probe alone picks mps
+    emb.set_process_default_device("cpu")
+    assert emb._detect_device() == "cpu"
+    monkeypatch.setenv("SYNAPT_EMBED_DEVICE", "mps")
+    assert emb._detect_device() == "mps"
+
+
+def test_an_unknown_process_default_is_refused(monkeypatch):
+    monkeypatch.setattr(emb, "_process_default_device", None)
+    with pytest.raises(ValueError):
+        emb.set_process_default_device("gpu")
+    assert emb._process_default_device is None
+
+
+class _Stop(Exception):
+    pass
+
+
+def _record_defaults(monkeypatch):
+    calls = []
+    monkeypatch.setattr(emb, "set_process_default_device", calls.append)
+    return calls
+
+
+def test_the_recall_server_entry_defaults_embeddings_to_cpu(monkeypatch):
+    from synapt.recall import server as recall_server
+    calls = _record_defaults(monkeypatch)
+
+    def stop():
+        raise _Stop
+
+    monkeypatch.setattr(recall_server, "_build_validating_fastmcp_class", stop)
+    with pytest.raises(_Stop):
+        recall_server.main()
+    assert calls == ["cpu"]
+
+
+def test_the_unified_server_entry_defaults_embeddings_to_cpu(monkeypatch):
+    from synapt import server as unified
+    from synapt.recall import server as recall_server
+    calls = _record_defaults(monkeypatch)
+
+    def stop(*a, **k):
+        raise _Stop
+
+    monkeypatch.setattr(recall_server, "ValidatingFastMCP", stop)
+    with pytest.raises(_Stop):
+        unified._serve()
+    assert calls == ["cpu"]
