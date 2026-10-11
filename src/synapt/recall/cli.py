@@ -1614,16 +1614,22 @@ def _archive_and_build_locked(
 def discover_transcript_dirs() -> list[Path]:
     """Find all Claude Code project transcript directories.
 
-    Scans ~/.claude/projects/*/ for directories containing .jsonl files.
-    Returns directories sorted alphabetically.
+    Scans ``<root>/*/`` under every root of ``claude_projects_roots``
+    (configured roots first) for directories containing .jsonl files, sorted
+    alphabetically within each root. A directory reached through two roots is
+    listed once.
     """
-    base = Path.home() / ".claude" / "projects"
-    if not base.exists():
-        return []
+    from synapt.recall.core import claude_projects_roots
+
     dirs = []
-    for d in sorted(base.iterdir()):
-        if d.is_dir() and any(d.glob("*.jsonl")):
-            dirs.append(d)
+    seen: set[Path] = set()
+    for base in claude_projects_roots():
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and any(d.glob("*.jsonl")) and d.resolve() not in seen:
+                seen.add(d.resolve())
+                dirs.append(d)
     return dirs
 
 
