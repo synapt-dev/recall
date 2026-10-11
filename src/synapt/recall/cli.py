@@ -1693,6 +1693,9 @@ def _configure_codex_cwd_cache(index_dir: Path) -> None:
 
 def cmd_build(args: argparse.Namespace) -> None:
     """Build a transcript index from local files, HuggingFace, or ChatGPT."""
+    if getattr(args, "check_floor", False):
+        # Before ANY index resolution: the check reads the host and nothing else.
+        sys.exit(_check_build_floor())
     project = Path.cwd().resolve()
     index_dir = project_index_dir(project)
     # recall#1123 hardening: index_dir is derived FROM project here, so this
@@ -5037,6 +5040,28 @@ def _host_memory_verdict() -> "tuple[str, str]":
     return "pass", numbers
 
 
+# Exit codes of ``build --check-floor``. A caller reads the code and the last stdout line and
+# nothing else, so "could not measure" gets its OWN code: exit 0 for both "measured and fine"
+# and "could not read the host" would let an unread instrument pass as a pass.
+CHECK_FLOOR_OK = 0
+CHECK_FLOOR_REFUSE = 2
+CHECK_FLOOR_CANNOT_MEASURE = 3
+
+
+def _check_build_floor() -> int:
+    """Run only the build's own host-memory verdict and report it as an exit code.
+
+    The one place the build floor lives is :func:`_host_memory_verdict`; a gate in front of a
+    heavy run calls this instead of copying the number.
+    """
+    verdict, numbers = _host_memory_verdict()
+    if verdict == "cannot_measure":
+        print(f"cannot_measure: {numbers}")
+        return CHECK_FLOOR_CANNOT_MEASURE
+    print(numbers)
+    return CHECK_FLOOR_REFUSE if verdict == "refuse" else CHECK_FLOOR_OK
+
+
 def cmd_maintenance(args: argparse.Namespace) -> None:
     """``synapt maintenance status`` -- each guard beside its live reading and its source.
 
@@ -5239,6 +5264,11 @@ def make_parser() -> argparse.ArgumentParser:
              "scripts and hooks that pass it explicitly keep working.",
     )
     build_parser.add_argument("--rescrub", action="store_true", help="Re-scrub archived transcripts with latest patterns before building")
+    build_parser.add_argument(
+        "--check-floor", action="store_true",
+        help="Run only the host-memory check this build would run and exit: 0 met, 2 refused, "
+             "3 could not measure. Prints one line of numbers; reads no index and builds nothing.",
+    )
 
     # Split
     split_parser = subparsers.add_parser(
