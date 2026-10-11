@@ -457,6 +457,179 @@ def format_unclean_end(found: UncleanEnd, tail: dict | None) -> str:
     return "\n".join(lines)
 
 
+# The transcript gap: what was typed to this desk in sessions that ended before
+# the live one, read from the LIVE transcript files rather than the index. A
+# wake after an unclean end otherwise sees only what the last build indexed,
+# and the index can be hours behind the transcript.
+GAP_HIDE_ENV = "SYNAPT_GAP_HIDE"
+GAP_DEFAULT_HOURS = 6
+# Runtime-authored user records, never typed by a person or a peer.
+_GAP_RUNTIME_RE = re.compile(
+    r"^(<task-notification>|\[Request interrupted|<command-name>|<command-message>"
+    r"|<local-command-stdout>|<local-command-caveat>|<system-reminder>)"
+)
+_GAP_PASTE_RE = re.compile(r"^<pasted_content[^>]*>\s*")
+
+
+@dataclass(frozen=True)
+class GapSession:
+    session_id: str
+    path: Path
+    last_write: float
+    messages: tuple[tuple[str, str], ...]
+    hidden: int
+    files_written: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TranscriptGap:
+    since: float
+    since_source: str
+    sessions: tuple[GapSession, ...]
+    live_session_id: str | None
+
+
+def _first_event_epoch(path: Path) -> float:
+    with path.open("rb") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            timestamp = event.get("timestamp") if isinstance(event, dict) else None
+            if isinstance(timestamp, str) and timestamp:
+                return _timestamp_epoch(timestamp)
+    return 0.0
+
+
+def _user_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
+        )
+    return ""
+
+
+def _read_gap_session(source: CallerTranscript, since: float, hide: re.Pattern | None) -> GapSession:
+    messages: list[tuple[str, str]] = []
+    written: list[str] = []
+    hidden = 0
+    with source.path.open("rb") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            stamp = event.get("timestamp")
+            if not isinstance(stamp, str) or _timestamp_epoch(stamp) < since:
+                continue
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            if event.get("type") == "user":
+                text = _user_text(message.get("content", "")).strip()
+                if not text:
+                    continue
+                bare = _GAP_PASTE_RE.sub("", text)
+                if _GAP_RUNTIME_RE.match(bare) or (hide is not None and hide.search(bare)):
+                    hidden += 1
+                    continue
+                messages.append((stamp, text))
+            elif event.get("type") == "assistant":
+                for block in message.get("content") or []:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") in ("Write", "Edit", "NotebookEdit")
+                    ):
+                        target = (block.get("input") or {}).get("file_path") or (
+                            block.get("input") or {}
+                        ).get("notebook_path")
+                        if target and target not in written:
+                            written.append(target)
+    return GapSession(
+        session_id=source.session_id,
+        path=source.path,
+        last_write=source.mtime,
+        messages=tuple(messages),
+        hidden=hidden,
+        files_written=tuple(written),
+    )
+
+
+def gather_transcript_gap(
+    sources: list[CallerTranscript],
+    *,
+    since: float,
+    since_source: str,
+    hide: re.Pattern | None = None,
+    live_session_id: str | None = None,
+) -> TranscriptGap:
+    """Every Claude Code session written since *since*, minus the live one.
+
+    The live session is excluded by IDENTITY alone (*live_session_id*, which
+    the caller takes from the runtime), never guessed from recency: with no
+    live session on disk (a terminal run, or a hook before the new transcript
+    has an event) a recency guess hides the newest dead session, which is the
+    crash the reader most needs. With no id, nothing is excluded and the
+    render says so. Each listed session is read in full and reported oldest
+    first, one block per session, because a gap can span several dead
+    sessions. Codex rollouts are not read here.
+    """
+    claude = [s for s in sources if ".codex" not in s.path.parts]
+    starts = {s.path: _first_event_epoch(s.path) for s in claude}
+    dead = sorted(
+        (s for s in claude
+         if s.mtime >= since and (live_session_id is None or s.session_id != live_session_id)),
+        key=lambda s: starts[s.path],
+    )
+    return TranscriptGap(
+        since=since,
+        since_source=since_source,
+        sessions=tuple(_read_gap_session(s, since, hide) for s in dead),
+        live_session_id=live_session_id,
+    )
+
+
+def gap_hide_pattern(value: str | None) -> re.Pattern | None:
+    """The reader's own machine-paste pattern (``SYNAPT_GAP_HIDE``), or None."""
+    if not value:
+        return None
+    return re.compile(value)
+
+
+def _local(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%m-%d %H:%M")
+
+
+def format_transcript_gap(gap: TranscriptGap, *, max_chars: int = 1200) -> str:
+    total = sum(len(s.messages) for s in gap.sessions)
+    lines = [
+        f"TRANSCRIPT GAP since {_local(gap.since)} ({gap.since_source}): "
+        f"{total} message(s) in {len(gap.sessions)} session(s), read from the live "
+        "transcripts, not the index; "
+        + (f"the live session {gap.live_session_id[:8]} is not listed"
+           if gap.live_session_id else
+           "no live session was named, so none is excluded")
+    ]
+    for session in gap.sessions:
+        lines.append(
+            f"  session {session.session_id[:8]} (last write {_local(session.last_write)}): "
+            f"{len(session.messages)} message(s), {session.hidden} hidden"
+        )
+        for stamp, text in session.messages:
+            flat = text.replace("\n", " / ")
+            if len(flat) > max_chars:
+                flat = flat[:max_chars] + " …"
+            lines.append(f"    {_local(_timestamp_epoch(stamp))} | {flat}")
+        if session.files_written:
+            lines.append("    files written in the gap:")
+            lines.extend(f"      {path}" for path in session.files_written)
+    return "\n".join(lines)
+
+
 def _source_label(path: str) -> str:
     if not path:
         return "unknown"
