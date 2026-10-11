@@ -487,6 +487,7 @@ class TranscriptGap:
     since_source: str
     sessions: tuple[GapSession, ...]
     live_session_id: str | None
+    live_on_disk: bool = False
 
 
 def _first_event_epoch(path: Path) -> float:
@@ -533,7 +534,9 @@ def _read_gap_session(source: CallerTranscript, since: float, hide: re.Pattern |
                 if not text:
                     continue
                 bare = _GAP_PASTE_RE.sub("", text)
-                if _GAP_RUNTIME_RE.match(bare) or (hide is not None and hide.search(bare)):
+                # The runtime flags its own records: a compaction summary, a meta caveat.
+                runtime = event.get("isCompactSummary") is True or event.get("isMeta") is True
+                if runtime or _GAP_RUNTIME_RE.match(bare) or (hide is not None and hide.search(bare)):
                     hidden += 1
                     continue
                 messages.append((stamp, text))
@@ -590,6 +593,7 @@ def gather_transcript_gap(
         since_source=since_source,
         sessions=tuple(_read_gap_session(s, since, hide) for s in dead),
         live_session_id=live_session_id,
+        live_on_disk=any(s.session_id == live_session_id for s in claude),
     )
 
 
@@ -600,26 +604,52 @@ def gap_hide_pattern(value: str | None) -> re.Pattern | None:
     return re.compile(value)
 
 
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _local(epoch: float) -> str:
     return datetime.fromtimestamp(epoch).strftime("%m-%d %H:%M")
 
 
-def format_transcript_gap(gap: TranscriptGap, *, max_chars: int = 1200) -> str:
+def format_transcript_gap(
+    gap: TranscriptGap, *, max_chars: int = 1200, max_messages: int | None = None
+) -> str:
+    """Render the gap. *max_messages* bounds each session to its NEWEST
+    messages and says how many it withheld, so a bounded render is never read
+    as the whole gap; a bounded render also lists the newest session first,
+    since a byte cap downstream cuts from the end. Unbounded, oldest first."""
     total = sum(len(s.messages) for s in gap.sessions)
     lines = [
         f"TRANSCRIPT GAP since {_local(gap.since)} ({gap.since_source}): "
         f"{total} message(s) in {len(gap.sessions)} session(s), read from the live "
         "transcripts, not the index; "
         + (f"the live session {gap.live_session_id[:8]} is not listed"
+           if gap.live_session_id and gap.live_on_disk else
+           f"the live session {gap.live_session_id[:8]} has no transcript on disk yet, so none is excluded"
            if gap.live_session_id else
            "no live session was named, so none is excluded")
     ]
-    for session in gap.sessions:
+    sessions = gap.sessions
+    if max_messages is not None:
+        # Bounded renders get clipped from the END by their caller's byte cap,
+        # so the newest session (the crash, usually) goes first.
+        sessions = tuple(reversed(sessions))
+        lines[0] += "; newest session first"
+    for session in sessions:
         lines.append(
             f"  session {session.session_id[:8]} (last write {_local(session.last_write)}): "
             f"{len(session.messages)} message(s), {session.hidden} hidden"
         )
-        for stamp, text in session.messages:
+        shown = session.messages
+        if max_messages is not None and len(shown) > max_messages:
+            withheld = len(shown) - max_messages
+            shown = shown[-max_messages:]
+            lines.append(
+                f"    … {withheld} earlier message(s) withheld; "
+                f"all of them: synapt resume --since {_iso(gap.since)}"
+            )
+        for stamp, text in shown:
             flat = text.replace("\n", " / ")
             if len(flat) > max_chars:
                 flat = flat[:max_chars] + " …"
