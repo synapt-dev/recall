@@ -52,6 +52,7 @@ import importlib.resources
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2371,6 +2372,8 @@ def cmd_resume(args: argparse.Namespace) -> None:
     ):
         print(f"Error: no index found at {index_dir}", file=sys.stderr)
         print("Run 'synapt recall build' or 'synapt init' first.", file=sys.stderr)
+        # The gap reads live transcripts, not the index, so it still answers here.
+        _print_transcript_gap(args, project)
         sys.exit(1)
 
     # recall#1125: every caller of _session_cwd (this function's own loop
@@ -2514,11 +2517,69 @@ def cmd_resume(args: argparse.Namespace) -> None:
     # the same declared version while the linked worktree underneath it
     # changes out from under every running process.
     print(_with_provenance(_with_query_freshness(format_resume(view), freshness_line)))
+    _print_transcript_gap(args, project)
     from synapt.recall.build_deferrals import deferral_notice
     notice = _deferral_notice_for_index(
         index_dir, own_store=not getattr(args, "index", None) and not getattr(args, "out", None))
     if notice:
         print(notice)
+
+
+def _gap_since(args) -> tuple[float, str]:
+    """The gap's start: --since, else the newest authored journal, else -6h."""
+    import time as _time
+
+    from synapt.recall.journal import _journal_path
+    from synapt.recall.resume import GAP_DEFAULT_HOURS, _timestamp_epoch, authored_journals
+
+    raw = getattr(args, "since", None)
+    if raw:
+        match = re.fullmatch(r"-?(\d+)h", raw.strip())
+        if match:
+            return _time.time() - int(match.group(1)) * 3600, f"--since {raw}"
+        epoch = _timestamp_epoch(raw.strip())
+        if not epoch:
+            raise ValueError(f"--since must be an ISO time or Nh, got {raw!r}")
+        return epoch, f"--since {raw}"
+    journals = authored_journals(_journal_path(getattr(args, "project", None)))
+    if journals:
+        newest = max(journals, key=lambda e: _timestamp_epoch(e.timestamp))
+        epoch = _timestamp_epoch(newest.timestamp)
+        if epoch:
+            return epoch, "the newest authored journal"
+    return _time.time() - GAP_DEFAULT_HOURS * 3600, f"no authored journal, so the last {GAP_DEFAULT_HOURS}h"
+
+
+def _print_transcript_gap(args, project) -> None:
+    """Print what was typed to this desk in the sessions before the live one.
+
+    Never raises past a one-line note: the gap is the wake's backstop when the
+    index is stale, so its own failure must be visible and must not take the
+    rest of the resume with it.
+    """
+    from synapt.recall.resume import (
+        GAP_HIDE_ENV,
+        caller_transcripts,
+        format_transcript_gap,
+        gap_hide_pattern,
+        gather_transcript_gap,
+    )
+
+    try:
+        since, source = _gap_since(args)
+        gap = gather_transcript_gap(
+            caller_transcripts(Path(project)),
+            since=since,
+            since_source=source,
+            hide=gap_hide_pattern(os.environ.get(GAP_HIDE_ENV)),
+            live_session_id=(getattr(args, "live_session", None)
+                             or os.environ.get("CLAUDE_CODE_SESSION_ID") or None),
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        print(f"TRANSCRIPT GAP: not read ({type(exc).__name__}: {exc})")
+        return
+    print()
+    print(format_transcript_gap(gap))
 
 
 def _attach_unclean_end(view, args):
@@ -5360,6 +5421,12 @@ def make_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
     resume_parser.add_argument("--turns", type=int, default=10,
                                help="How many trailing turns to show (default: 10)")
+    resume_parser.add_argument("--since", default=None,
+                               help="Start of the transcript gap: an ISO time or Nh hours back "
+                                    "(default: the newest authored journal, else -6h)")
+    resume_parser.add_argument("--live-session", default=None,
+                               help="Session id the transcript gap excludes as live "
+                                    "(default: $CLAUDE_CODE_SESSION_ID; with neither, none is excluded)")
 
     # Rebuild (hook-triggered)
     rebuild_parser = subparsers.add_parser("rebuild", help="Incremental rebuild (for hooks)")
