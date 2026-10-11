@@ -151,3 +151,17 @@ def test_transcript_with_no_id_shows_the_newest_when_it_is_under_the_configured_
     os.utime(a, (old, old))
 
     assert _newest_live_transcript(project) == b
+
+
+def test_the_transcript_command_with_no_id_prints_the_newest_across_both_roots(homes, monkeypatch, capsys):
+    """The command itself, not only its helper: reverting the call site alone leaves the helper rows green."""
+    import argparse
+
+    from synapt.recall import cli
+
+    project, a, _ = _two_roots(homes, monkeypatch)
+    monkeypatch.chdir(project)
+
+    cli.cmd_transcript(argparse.Namespace(session_id=None, save=False, list=False))
+
+    assert "Session: aaaaaaaa-home" in capsys.readouterr().out
