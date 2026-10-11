@@ -5796,11 +5796,20 @@ def claude_projects_roots() -> list[Path]:
     under a configured directory and an earlier one run without it belong to the
     same project, and reading only the default root left every configured-root
     session invisible to resume and build. Listed once each, by resolved path.
+
+    The variable may name several directories separated by commas, read in the
+    order given, and ``~/.config/claude`` is read too when it holds a
+    ``projects`` directory, before ``~/.claude``: the roots other transcript
+    readers (ccusage) look in, so a session under any of them is not invisible.
     """
     roots: list[Path] = []
-    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if configured:
-        roots.append(Path(configured).expanduser() / "projects")
+    for configured in os.environ.get("CLAUDE_CONFIG_DIR", "").split(","):
+        configured = configured.strip()
+        if configured:
+            roots.append(Path(configured).expanduser() / "projects")
+    xdg_style = Path.home() / ".config" / "claude" / "projects"
+    if xdg_style.is_dir():
+        roots.append(xdg_style)
     roots.append(Path.home() / ".claude" / "projects")
     unique: list[Path] = []
     seen: set[Path] = set()

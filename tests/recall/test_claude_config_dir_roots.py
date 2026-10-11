@@ -179,3 +179,62 @@ def test_the_transcript_command_by_id_prints_a_session_that_lives_only_under_hom
     cli.cmd_transcript(argparse.Namespace(session_id="aaaaaaaa-home", save=False, list=False))
 
     assert "Session: aaaaaaaa-home" in capsys.readouterr().out
+
+
+# The roots other transcript readers use (ccusage reads CLAUDE_CONFIG_DIR as a
+# comma-separated list, and checks ~/.config/claude as well as ~/.claude). A session under either
+# was invisible to recall, the same silent blindness the single configured root had.
+
+
+def test_a_comma_separated_config_dir_lists_every_root_in_order(homes, monkeypatch, tmp_path):
+    home, config, _ = homes
+    second = tmp_path / "accounts" / "second"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", f"{config},{second}")
+    assert core.claude_projects_roots() == [
+        config / "projects", second / "projects", home / ".claude" / "projects",
+    ]
+
+
+def test_blank_entries_and_spaces_in_the_list_are_ignored(homes, monkeypatch, tmp_path):
+    home, config, _ = homes
+    second = tmp_path / "accounts" / "second"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", f" {config} , ,{second} ,")
+    assert core.claude_projects_roots() == [
+        config / "projects", second / "projects", home / ".claude" / "projects",
+    ]
+
+
+def test_a_root_listed_twice_is_listed_once(homes, monkeypatch):
+    home, config, _ = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", f"{config},{config}/,{home / '.claude'}")
+    assert core.claude_projects_roots() == [config / "projects", home / ".claude" / "projects"]
+
+
+def test_xdg_style_config_claude_is_read_before_home_claude_when_it_has_projects(homes):
+    home, _, _ = homes
+    (home / ".config" / "claude" / "projects").mkdir(parents=True)
+    assert core.claude_projects_roots() == [
+        home / ".config" / "claude" / "projects", home / ".claude" / "projects",
+    ]
+
+
+def test_config_claude_without_a_projects_dir_is_not_listed(homes):
+    home, _, _ = homes
+    (home / ".config" / "claude").mkdir(parents=True)
+    assert core.claude_projects_roots() == [home / ".claude" / "projects"]
+
+
+def test_caller_transcripts_finds_sessions_under_config_claude_and_the_second_listed_root(
+    homes, monkeypatch, tmp_path
+):
+    """Both sessions were invisible before these roots were read."""
+    home, config, project = homes
+    second = tmp_path / "accounts" / "second"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", f"{config},{second}")
+    _session(home / ".config" / "claude" / "projects", project, "cccccccc-xdg")
+    _session(second / "projects", project, "dddddddd-second")
+
+    found = {t.session_id for t in caller_transcripts(project)}
+
+    assert "cccccccc-xdg" in found, found
+    assert "dddddddd-second" in found, found
