@@ -165,3 +165,17 @@ def test_the_transcript_command_with_no_id_prints_the_newest_across_both_roots(h
     cli.cmd_transcript(argparse.Namespace(session_id=None, save=False, list=False))
 
     assert "Session: aaaaaaaa-home" in capsys.readouterr().out
+
+
+def test_the_transcript_command_by_id_prints_a_session_that_lives_only_under_home_claude(homes, monkeypatch, capsys):
+    """The command's by-id path itself: reverting its call site alone leaves the helper row green."""
+    import argparse
+
+    from synapt.recall import cli
+
+    project, _, _ = _two_roots(homes, monkeypatch)
+    monkeypatch.chdir(project)
+
+    cli.cmd_transcript(argparse.Namespace(session_id="aaaaaaaa-home", save=False, list=False))
+
+    assert "Session: aaaaaaaa-home" in capsys.readouterr().out
