@@ -130,3 +130,24 @@ def test_transcript_by_id_is_found_under_either_root(homes, monkeypatch):
     assert _find_live_transcript(project, "aaaaaaaa-home") == a
     assert _find_live_transcript(project, "bbbbbbbb-configured") == b
     assert _find_live_transcript(project, "cccccccc-absent") is None
+
+
+def test_transcript_with_no_id_shows_the_newest_across_both_roots(homes, monkeypatch):
+    from synapt.recall.cli import _newest_live_transcript
+
+    project, a, _ = _two_roots(homes, monkeypatch)
+
+    assert _newest_live_transcript(project) == a
+
+
+def test_transcript_with_no_id_shows_the_newest_when_it_is_under_the_configured_root(homes, monkeypatch):
+    """The mirror layout: dev read only ~/.claude, so it would print the older ~/.claude file here."""
+    import os, time
+
+    from synapt.recall.cli import _newest_live_transcript
+
+    project, a, b = _two_roots(homes, monkeypatch)
+    old = time.time() - 7200
+    os.utime(a, (old, old))
+
+    assert _newest_live_transcript(project) == b

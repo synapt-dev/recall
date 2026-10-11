@@ -2778,6 +2778,15 @@ def _find_live_transcript(project: Path, session_id: str) -> Path | None:
     return None
 
 
+def _newest_live_transcript(project: Path) -> Path | None:
+    """The most recently modified live transcript of ``project`` across every
+    Claude Code root, or None."""
+    from synapt.recall.core import project_transcript_dirs_any_root
+
+    files = [f for d in project_transcript_dirs_any_root(project) for f in d.glob("*.jsonl")]
+    return max(files, key=lambda f: f.stat().st_mtime) if files else None
+
+
 def cmd_transcript(args: argparse.Namespace) -> None:
     """Display or save a session transcript."""
     from synapt.recall.archive import archive_transcripts
@@ -2802,12 +2811,11 @@ def cmd_transcript(args: argparse.Namespace) -> None:
             _list_available_sessions(transcript_dir, project)
             sys.exit(1)
     else:
-        # Find current/most recent session by mtime
-        jsonl_files = sorted(transcript_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-        if not jsonl_files:
+        # Find current/most recent session by mtime, under every Claude Code root
+        target = _newest_live_transcript(project)
+        if target is None:
             print("No transcript files found.", file=sys.stderr)
             sys.exit(1)
-        target = jsonl_files[0]
 
     # --save: archive it locally
     if args.save:
