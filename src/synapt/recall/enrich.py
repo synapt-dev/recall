@@ -27,6 +27,7 @@ from synapt.recall.core import (
     parse_transcript,
     project_archive_dir,
     project_transcript_dir,
+    project_transcript_dirs_any_root,
     all_worktree_archive_dirs,
 )
 from synapt.recall.scrub import scrub_text
@@ -76,9 +77,9 @@ def _find_transcript(session_id: str, project_dir: Path) -> Path | None:
         path = archive / f"{session_id}.jsonl"
         if path.exists():
             return path
-    # Fall back to live transcripts
-    transcript_dir = project_transcript_dir(project_dir)
-    if transcript_dir:
+    # Fall back to live transcripts, under every Claude Code root (a session may
+    # live under ~/.claude or under $CLAUDE_CONFIG_DIR, never both)
+    for transcript_dir in project_transcript_dirs_any_root(project_dir):
         path = Path(transcript_dir) / f"{session_id}.jsonl"
         if path.exists():
             return path

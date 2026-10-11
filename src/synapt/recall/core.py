@@ -5788,16 +5788,52 @@ def project_archive_dir(project_dir: Path | None = None) -> Path:
     return project_worktree_dir(project_dir) / "transcripts"
 
 
+def claude_projects_roots() -> list[Path]:
+    """Where Claude Code keeps per-project transcripts, the configured root first.
+
+    Claude Code writes under ``$CLAUDE_CONFIG_DIR/projects`` when that variable is
+    set and under ``~/.claude/projects`` otherwise. Both are read: a session run
+    under a configured directory and an earlier one run without it belong to the
+    same project, and reading only the default root left every configured-root
+    session invisible to resume and build. Listed once each, by resolved path.
+    """
+    roots: list[Path] = []
+    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if configured:
+        roots.append(Path(configured).expanduser() / "projects")
+    roots.append(Path.home() / ".claude" / "projects")
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        key = root.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def project_transcript_dirs_any_root(project_dir: Path | None = None) -> list[Path]:
+    """Every Claude Code transcript directory for one project, across the roots of
+    ``claude_projects_roots``, configured root first. Only directories holding a
+    transcript are returned."""
+    slug = project_slug(project_dir)
+    found: list[Path] = []
+    for root in claude_projects_roots():
+        d = root / slug
+        if d.is_dir() and any(d.glob("*.jsonl")):
+            found.append(d)
+    return found
+
+
 def project_transcript_dir(project_dir: Path | None = None) -> Path | None:
     """Return the Claude Code transcript directory for a project.
 
-    Returns None if the directory doesn't exist or has no transcripts.
+    The configured root (``$CLAUDE_CONFIG_DIR``) wins when it holds transcripts,
+    because that is where the running session writes. Returns None if no root
+    has a directory with transcripts.
     """
-    slug = project_slug(project_dir)
-    d = Path.home() / ".claude" / "projects" / slug
-    if d.is_dir() and any(d.glob("*.jsonl")):
-        return d
-    return None
+    found = project_transcript_dirs_any_root(project_dir)
+    return found[0] if found else None
 
 
 def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
@@ -5823,9 +5859,10 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
         if slug in seen_slugs:
             return
         seen_slugs.add(slug)
-        transcript_dir = Path.home() / ".claude" / "projects" / slug
-        if transcript_dir.is_dir() and any(transcript_dir.glob("*.jsonl")):
-            dirs.append(transcript_dir)
+        for root in claude_projects_roots():
+            transcript_dir = root / slug
+            if transcript_dir.is_dir() and any(transcript_dir.glob("*.jsonl")):
+                dirs.append(transcript_dir)
 
     # Always include the actual CWD's transcript dir
     _maybe_add_transcript_dir(actual_dir)
