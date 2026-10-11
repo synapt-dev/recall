@@ -90,3 +90,43 @@ def test_a_configured_root_transcript_is_labelled_claude_code(homes, monkeypatch
     live = _session(config / "projects", project, "bbbbbbbb-live")
 
     assert _runtime_root(str(live)) == "claude-code"
+
+
+def _two_roots(homes, monkeypatch):
+    """Session A only under ~/.claude (the newest file), session B only under the configured root (older)."""
+    import os, time
+
+    home, config, project = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    b = _session(config / "projects", project, "bbbbbbbb-configured")
+    a = _session(home / ".claude" / "projects", project, "aaaaaaaa-home")
+    old = time.time() - 3600
+    os.utime(b, (old, old))
+    return project, a, b
+
+
+def test_find_transcript_finds_a_session_that_lives_only_under_home_claude(homes, monkeypatch):
+    from synapt.recall.enrich import _find_transcript
+
+    project, a, b = _two_roots(homes, monkeypatch)
+
+    assert _find_transcript("aaaaaaaa-home", project) == a
+    assert _find_transcript("bbbbbbbb-configured", project) == b
+
+
+def test_latest_transcript_path_is_the_newest_across_both_roots(homes, monkeypatch):
+    from synapt.recall.journal import latest_transcript_path
+
+    project, a, _ = _two_roots(homes, monkeypatch)
+
+    assert latest_transcript_path(project) == str(a)
+
+
+def test_transcript_by_id_is_found_under_either_root(homes, monkeypatch):
+    from synapt.recall.cli import _find_live_transcript
+
+    project, a, b = _two_roots(homes, monkeypatch)
+
+    assert _find_live_transcript(project, "aaaaaaaa-home") == a
+    assert _find_live_transcript(project, "bbbbbbbb-configured") == b
+    assert _find_live_transcript(project, "cccccccc-absent") is None

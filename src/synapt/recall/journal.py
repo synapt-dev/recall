@@ -14,7 +14,12 @@ from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapt.recall.core import project_worktree_dir, project_index_dir, project_transcript_dir
+from synapt.recall.core import (
+    project_index_dir,
+    project_transcript_dir,
+    project_transcript_dirs_any_root,
+    project_worktree_dir,
+)
 from synapt.recall._llm_util import truncate_at_word as _tw
 
 # Paths that are always noise in journal file lists (checked after normalising to /)
@@ -1082,8 +1087,7 @@ def latest_transcript_path(project: Path | None = None) -> str | None:
     project = (project or Path.cwd()).resolve()
     candidates: list[Path] = []
 
-    transcript_dir = project_transcript_dir(project)
-    if transcript_dir:
+    for transcript_dir in project_transcript_dirs_any_root(project):
         candidates.extend(transcript_dir.glob("*.jsonl"))
 
     try:

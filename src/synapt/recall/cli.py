@@ -2766,6 +2766,18 @@ def cmd_import(args: argparse.Namespace) -> None:
     )
 
 
+def _find_live_transcript(project: Path, session_id: str) -> Path | None:
+    """The live transcript ``<session_id>.jsonl`` under the first Claude Code root
+    that holds it ($CLAUDE_CONFIG_DIR first, then ~/.claude), or None."""
+    from synapt.recall.core import project_transcript_dirs_any_root
+
+    for transcript_dir in project_transcript_dirs_any_root(project):
+        target = transcript_dir / f"{session_id}.jsonl"
+        if target.exists():
+            return target
+    return None
+
+
 def cmd_transcript(args: argparse.Namespace) -> None:
     """Display or save a session transcript."""
     from synapt.recall.archive import archive_transcripts
@@ -2779,7 +2791,7 @@ def cmd_transcript(args: argparse.Namespace) -> None:
 
     # Find the transcript file
     if args.session_id:
-        target = transcript_dir / f"{args.session_id}.jsonl"
+        target = _find_live_transcript(project, args.session_id) or transcript_dir / f"{args.session_id}.jsonl"
         if not target.exists():
             # Also check archive
             archive = project_archive_dir(project)
