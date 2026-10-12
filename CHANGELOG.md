@@ -4,7 +4,7 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
-## [0.29.0] - 2026-10-1X
+## [0.29.0] - 2026-10-12
 
 Minor release. A new command, `synapt orient`, prints a short wake card from
 the user's own journal and memory, so an agent starting a session knows where
