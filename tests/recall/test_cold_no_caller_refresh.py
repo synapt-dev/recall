@@ -68,6 +68,11 @@ def _patches(*, lock_fd, popen_side_effect=None, ts_before="2026-06-01T00:00:00"
         mock.patch.object(cli, "project_data_dir", return_value=Path("/tmp/x")),
         mock.patch("synapt.recall.freshness.check_index_freshness",
                    side_effect=lambda *a, **k: next(fresh)),
+        # The memory gate and the caller's `ps` read both run a subprocess, which the
+        # Popen patch above would count as a spawn. Fix the verdict (the gate rows
+        # override it) and the parent's command line; pid and argv stay real.
+        mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")),
+        mock.patch("synapt.recall.build_deferrals._parent_command_line", return_value="test-parent"),
     ]
     return cms, spawn_calls
 
@@ -121,6 +126,7 @@ class TestColdNoCallerRefresh(unittest.TestCase):
                  mock.patch.object(cli, "_acquire_build_lock", return_value=7), \
                  mock.patch.object(cli, "_release_build_lock"), \
                  mock.patch.object(cli.subprocess, "Popen", return_value=mock.Mock(pid=1)), \
+                 mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")), \
                  mock.patch.object(cli, "project_data_dir", return_value=store), \
                  mock.patch("synapt.recall.freshness.check_index_freshness",
                             side_effect=lambda *a, **k: next(fresh)):
@@ -173,6 +179,8 @@ class TestColdNoCallerRefresh(unittest.TestCase):
              mock.patch.object(cli, "_acquire_build_lock", return_value=7), \
              mock.patch.object(cli, "_release_build_lock", release_mock), \
              mock.patch.object(cli.subprocess, "Popen", popen_mock), \
+             mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")), \
+             mock.patch("synapt.recall.build_deferrals._parent_command_line", return_value="test-parent"), \
              mock.patch.object(cli, "project_data_dir", return_value=Path("/tmp/x")), \
              mock.patch("synapt.recall.freshness.check_index_freshness",
                         return_value=mock.Mock(build_timestamp="old")):
@@ -297,6 +305,8 @@ class TestColdRefreshStoreSplit(unittest.TestCase):
                  mock.patch.object(cli, "_newest_source_file",
                                    return_value=b / ".codex" / "rollout-x.jsonl"), \
                  mock.patch.object(cli.subprocess, "Popen", side_effect=spy_popen), \
+                 mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")), \
+                 mock.patch("synapt.recall.build_deferrals._parent_command_line", return_value="test-parent"), \
                  mock.patch("synapt.recall.freshness.check_index_freshness",
                             return_value=mock.Mock(build_timestamp="old")):
                 os.environ.pop("SYNAPT_RECALL_ROOT", None)
@@ -868,6 +878,112 @@ class TestBackgroundScriptRunsForReal(unittest.TestCase):
             return True
         finally:
             os.close(fd)
+
+
+class TestColdRefreshIsGatedLikeEveryOtherAutomaticBuild(unittest.TestCase):
+    """A read verb (a cold resume) must not start a detached heavy build that the
+    catchup and precompact paths would have refused. Three gaps, one row each:
+
+      * the memory floor: catchup and precompact consult _host_memory_verdict and
+        record a deferral on REFUSE; the cold refresh spawned regardless;
+      * the host build lock: catchup holds recall-build.lock under ~/.synapt so two
+        stores never build at once; the cold child took only its per-store lock;
+      * the caller: the child's ``built`` row is read in the child, whose parent (the
+        resume that spawned it) has already exited, so it names ppid 1. The spawner
+        passes its own facts, and the row carries them.
+    """
+
+    def _cold(self, verdict):
+        cms, spawn_calls = _patches(lock_fd=7)
+        cms.append(mock.patch.object(cli, "_host_memory_verdict", return_value=verdict))
+        deferrals = []
+        cms.append(mock.patch("synapt.recall.build_deferrals.record_deferral",
+                              side_effect=lambda d, site, numbers: deferrals.append((d, site, numbers))))
+        for c in cms:
+            c.start()
+        self.addCleanup(mock.patch.stopall)
+        out = cold_no_caller_refresh(Path("/proj"), Path("/proj/.synapt/recall/index"))
+        return out, spawn_calls, deferrals
+
+    def test_a_memory_refusal_queues_nothing_and_records_a_deferral(self):
+        out, spawn_calls, deferrals = self._cold(("refuse", "free+inactive 1.0 GB < 6 GB"))
+        self.assertEqual(spawn_calls, [], "a refused cold refresh must not spawn the background build")
+        self.assertEqual(out.reason, "memory_floor")
+        self.assertEqual(deferrals, [(Path("/tmp/x"), "cold_refresh", "free+inactive 1.0 GB < 6 GB")])
+
+    def test_a_memory_pass_still_queues_the_build(self):
+        out, spawn_calls, deferrals = self._cold(("pass", "free+inactive 12 GB"))
+        self.assertEqual(out.reason, "queued_background")
+        self.assertEqual(len(spawn_calls), 1)
+        self.assertEqual(deferrals, [])
+
+    def test_an_unmeasurable_host_still_queues_the_build_as_catchup_does(self):
+        # catchup's rule: an unreadable instrument is not a memory verdict.
+        out, spawn_calls, deferrals = self._cold(("cannot_measure", "vm_stat failed"))
+        self.assertEqual(out.reason, "queued_background")
+        self.assertEqual(len(spawn_calls), 1)
+        self.assertEqual(deferrals, [])
+
+    def test_the_spawn_passes_the_spawners_own_pid_and_argv(self):
+        import json
+
+        out, spawn_calls, _ = self._cold(("pass", "ok"))
+        argv = spawn_calls[0][0]
+        self.assertEqual(len(argv), 6, "store, source and the caller facts")
+        caller = json.loads(argv[5])
+        self.assertEqual(caller["pid"], os.getpid())
+        self.assertEqual(caller["argv"], list(cli.sys.argv))
+
+    def _exec_child(self, *, host_lock_free=True, caller_json=None):
+        """Run the child script in THIS process with every heavy seam patched: no
+        build, no lock file, no subprocess."""
+        locks, builds, rows = [], [], []
+
+        def fake_acquire(d, timeout=60.0, name="build.lock"):
+            locks.append((Path(d), name))
+            if name == cli._HOST_BUILD_LOCK and not host_lock_free:
+                return None
+            return 10 + len(locks)
+
+        def fake_build(*a, **k):
+            builds.append((a, k))
+            return object()
+
+        argv = ["-c", "/store", "/source"] + ([caller_json] if caller_json is not None else [])
+        with mock.patch.object(cli, "_acquire_build_lock", side_effect=fake_acquire), \
+             mock.patch.object(cli, "_release_build_lock"), \
+             mock.patch.object(cli, "_archive_and_build_locked", side_effect=fake_build), \
+             mock.patch.object(cli, "project_data_dir", return_value=Path("/tmp/x")), \
+             mock.patch("synapt.recall.build_deferrals.record_build",
+                        side_effect=lambda d, caller=None: rows.append(caller)), \
+             mock.patch.object(cli.sys, "argv", argv):
+            exec(compile(cli._BACKGROUND_COLD_REFRESH_SCRIPT, "<cold-child>", "exec"), {"__name__": "__main__"})
+        return locks, builds, rows
+
+    def test_the_background_build_takes_the_host_build_lock(self):
+        locks, builds, _ = self._exec_child()
+        self.assertIn((cli._host_synapt_dir(), cli._HOST_BUILD_LOCK), locks)
+        self.assertEqual(len(builds), 1)
+
+    def test_a_busy_host_build_lock_builds_nothing(self):
+        locks, builds, rows = self._exec_child(host_lock_free=False)
+        self.assertEqual(builds, [], "another store is building on this host; this one must wait its turn")
+        self.assertEqual(rows, [])
+
+    def test_the_built_row_carries_the_spawners_facts(self):
+        import json
+
+        spawner = {"pid": 4321, "argv": ["synapt", "resume"], "ppid": 99, "ppid_cmd": "zsh"}
+        _, builds, rows = self._exec_child(caller_json=json.dumps(spawner))
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["spawned_by"], spawner)
+
+    def test_a_child_started_without_caller_facts_still_builds(self):
+        # The real-run test above passes two argv only; an older spawner may too.
+        _, builds, rows = self._exec_child()
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

@@ -667,6 +667,9 @@ def test_cold_no_caller_refresh_passes_skip_clustering_true(monkeypatch):
         return None
 
     monkeypatch.setattr(cli.subprocess, "Popen", _spy_popen)
+    # The cold path consults the host memory gate first; pin it so this row does not
+    # depend on the free memory of whichever host runs it.
+    monkeypatch.setattr(cli, "_host_memory_verdict", lambda: ("pass", "test host"))
 
     outcome = cli.cold_no_caller_refresh(Path("/proj"), Path("/proj/.synapt/recall/index"))
 

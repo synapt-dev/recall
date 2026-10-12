@@ -511,21 +511,34 @@ _BACKGROUND_COLD_REFRESH_SCRIPT = (
     "from synapt.recall.cli import (\n"
     "    _acquire_build_lock, _release_build_lock, _archive_and_build_locked, project_data_dir,\n"
     ")\n"
-    "from synapt.recall.build_deferrals import record_build\n"
+    "from synapt.recall.cli import _HOST_BUILD_LOCK, _host_synapt_dir\n"
+    "from synapt.recall.build_deferrals import caller_facts, record_build\n"
+    "import json\n"
     "store_root = Path(sys.argv[1])\n"
     "project_dir = Path(sys.argv[2])\n"
-    "data_dir = project_data_dir(store_root)\n"
-    "fd = _acquire_build_lock(data_dir, timeout=0.0)\n"
-    "if fd is not None:\n"
+    "caller = caller_facts()\n"
+    "if len(sys.argv) > 3:\n"
     "    try:\n"
-    "        built = _archive_and_build_locked(\n"
-    "            store_root, None, use_embeddings=False, incremental=True,\n"
-    "            chatgpt_archive=None, source_dir=project_dir, skip_clustering=True,\n"
-    "        )\n"
-    "        if built is not None:\n"
-    "            record_build(data_dir)\n"
+    "        caller['spawned_by'] = json.loads(sys.argv[3])\n"
+    "    except ValueError:\n"
+    "        pass\n"
+    "data_dir = project_data_dir(store_root)\n"
+    "host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)\n"
+    "if host_fd is not None:\n"
+    "    try:\n"
+    "        fd = _acquire_build_lock(data_dir, timeout=0.0)\n"
+    "        if fd is not None:\n"
+    "            try:\n"
+    "                built = _archive_and_build_locked(\n"
+    "                    store_root, None, use_embeddings=False, incremental=True,\n"
+    "                    chatgpt_archive=None, source_dir=project_dir, skip_clustering=True,\n"
+    "                )\n"
+    "                if built is not None:\n"
+    "                    record_build(data_dir, caller=caller)\n"
+    "            finally:\n"
+    "                _release_build_lock(fd)\n"
     "    finally:\n"
-    "        _release_build_lock(fd)\n"
+    "        _release_build_lock(host_fd)\n"
 )
 
 
@@ -625,6 +638,21 @@ def cold_no_caller_refresh(project_dir: Path, index_dir: Path) -> ColdRefreshOut
         _release_build_lock(lock_fd)
     except OSError:
         pass
+    # The same memory gate catchup and precompact apply before an automatic build: a
+    # read verb must not start a heavy build those paths would have refused. A refusal
+    # queues nothing and leaves a deferral row; an unreadable instrument is not a
+    # memory verdict, so it proceeds, as catchup does.
+    verdict, numbers = _host_memory_verdict()
+    if verdict == "refuse":
+        _floor, _source, _note = _resolve_build_min_free_gb()
+        print(f"[resume] background refresh deferred: memory gate REFUSE ({numbers}; "
+              f"{_note or f'floor from {_source}'})", file=sys.stderr)
+        try:
+            from synapt.recall.build_deferrals import record_deferral
+            record_deferral(data_dir, "cold_refresh", numbers)
+        except Exception:  # noqa: BLE001 -- a trace must never break resume
+            pass
+        return ColdRefreshOutcome(True, False, source.name, before, before, "memory_floor")
     # recall#1123 hardening, preserved: name both paths on every cold rebuild,
     # even the (only) case that reaches here today -- store and source already
     # agree. cmd_resume's own refusal only guards ITS ambient resolution; a
@@ -634,8 +662,12 @@ def cold_no_caller_refresh(project_dir: Path, index_dir: Path) -> ColdRefreshOut
     # either way.
     print(f"[resume] queuing background refresh of store {store_root} from source {project_dir}", file=sys.stderr)
     try:
+        # The child's own parent is gone by the time it reads it (resume returns at
+        # once), so the spawner hands over its facts for the child's built row.
+        from synapt.recall.build_deferrals import caller_facts
         subprocess.Popen(
-            [sys.executable, "-c", _BACKGROUND_COLD_REFRESH_SCRIPT, str(store_root), str(project_dir)],
+            [sys.executable, "-c", _BACKGROUND_COLD_REFRESH_SCRIPT, str(store_root), str(project_dir),
+             json.dumps(caller_facts())],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
     except OSError:
