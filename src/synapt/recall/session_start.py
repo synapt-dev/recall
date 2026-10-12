@@ -52,6 +52,7 @@ _CARRY_STAMP_RE = re.compile(r"\[carried since (\d{4}-\d{2}-\d{2})\]")
 # construction, so the budget holds without a second pass; the final guard in
 # render_wake exists for the day someone adds a source and forgets this table.
 _CAP_UNCLEAN_END = 2_500
+_CAP_TRANSCRIPT_GAP = 2_500
 _CAP_CHECKPOINT = 2_500
 _CAP_COMPACTION = 4_000
 _CAP_JOURNAL_LATEST = 6_000
@@ -364,6 +365,8 @@ def _kind(block: str) -> str:
     head = _first_line(block)
     if head.startswith("UNCLEAN END"):
         return "unclean_end"
+    if head.startswith("TRANSCRIPT GAP"):
+        return "transcript_gap"
     if head.startswith("LAST CHECKPOINT"):
         return "checkpoint"
     if head.startswith("LAST COMPACTION SUMMARY") \
@@ -524,6 +527,9 @@ def render_wake(
     # does first, so it renders before everything, including the journal it
     # would otherwise be read as continuous with.
     take("unclean_end", _CAP_UNCLEAN_END)
+    # What was typed to this desk before it woke: read before the journal,
+    # which may predate it.
+    take("transcript_gap", _CAP_TRANSCRIPT_GAP)
     take("checkpoint", _CAP_CHECKPOINT)
     take("compaction", _CAP_COMPACTION)
     take("branch", _CAP_BRANCH)

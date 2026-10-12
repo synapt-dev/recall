@@ -3795,6 +3795,50 @@ def generate_startup_context(
     except Exception:
         pass
 
+    # 5b. Transcript gap: what was typed to this desk in the sessions before
+    # this one, read from the live transcripts, which the index can lag by
+    # hours. Unlike the O(1) blocks above, this reads each session in the gap
+    # in full: O(transcript size), measured 0.42 s for 55 MB. Like 5a, it runs only when the caller names the session that is
+    # starting (exclusion by identity), and it renders only when an earlier
+    # session sits in the gap. Bounded per session to fit the wake's
+    # transcript_gap cap (session_start); the render says what it withheld and
+    # how to read all of it.
+    try:
+        if current_session_id:
+            from synapt.recall.resume import (
+                GAP_DEFAULT_HOURS,
+                GAP_HIDE_ENV,
+                _timestamp_epoch,
+                caller_transcripts,
+                format_transcript_gap,
+                gap_hide_pattern,
+                gather_transcript_gap,
+            )
+            import time as _time
+
+            if latest_authored_journal_timestamp and _timestamp_epoch(latest_authored_journal_timestamp):
+                gap_since = _timestamp_epoch(latest_authored_journal_timestamp)
+                gap_source = "the newest authored journal"
+            else:
+                gap_since = _time.time() - GAP_DEFAULT_HOURS * 3600
+                gap_source = f"no authored journal, so the last {GAP_DEFAULT_HOURS}h"
+            gap = gather_transcript_gap(
+                caller_transcripts(project),
+                since=gap_since,
+                since_source=gap_source,
+                hide=gap_hide_pattern(os.environ.get(GAP_HIDE_ENV)),
+                live_session_id=current_session_id,
+            )
+            # A clean end still writes after its own journal (the session goes on
+            # a little), so a gap with sessions but nothing typed is not news.
+            if any(sess.messages or sess.files_written for sess in gap.sessions):
+                position = 1 if continuity_lines and continuity_lines[0].startswith("UNCLEAN END") else 0
+                continuity_lines.insert(
+                    position, format_transcript_gap(gap, max_chars=300, max_messages=6)
+                )
+    except Exception:
+        pass
+
     # 5. Raw SessionEnd recovery checkpoint, but only while it is newer than
     # the latest authored journal. Once an authored handoff catches up, it is
     # authoritative and the raw tail disappears from startup.
