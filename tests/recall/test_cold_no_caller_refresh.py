@@ -68,6 +68,11 @@ def _patches(*, lock_fd, popen_side_effect=None, ts_before="2026-06-01T00:00:00"
         mock.patch.object(cli, "project_data_dir", return_value=Path("/tmp/x")),
         mock.patch("synapt.recall.freshness.check_index_freshness",
                    side_effect=lambda *a, **k: next(fresh)),
+        # The memory gate and the caller's `ps` read both run a subprocess, which the
+        # Popen patch above would count as a spawn. Fix the verdict (the gate rows
+        # override it) and the parent's command line; pid and argv stay real.
+        mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")),
+        mock.patch("synapt.recall.build_deferrals._parent_command_line", return_value="test-parent"),
     ]
     return cms, spawn_calls
 
@@ -121,6 +126,7 @@ class TestColdNoCallerRefresh(unittest.TestCase):
                  mock.patch.object(cli, "_acquire_build_lock", return_value=7), \
                  mock.patch.object(cli, "_release_build_lock"), \
                  mock.patch.object(cli.subprocess, "Popen", return_value=mock.Mock(pid=1)), \
+                 mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")), \
                  mock.patch.object(cli, "project_data_dir", return_value=store), \
                  mock.patch("synapt.recall.freshness.check_index_freshness",
                             side_effect=lambda *a, **k: next(fresh)):
@@ -173,6 +179,8 @@ class TestColdNoCallerRefresh(unittest.TestCase):
              mock.patch.object(cli, "_acquire_build_lock", return_value=7), \
              mock.patch.object(cli, "_release_build_lock", release_mock), \
              mock.patch.object(cli.subprocess, "Popen", popen_mock), \
+             mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")), \
+             mock.patch("synapt.recall.build_deferrals._parent_command_line", return_value="test-parent"), \
              mock.patch.object(cli, "project_data_dir", return_value=Path("/tmp/x")), \
              mock.patch("synapt.recall.freshness.check_index_freshness",
                         return_value=mock.Mock(build_timestamp="old")):
@@ -297,6 +305,8 @@ class TestColdRefreshStoreSplit(unittest.TestCase):
                  mock.patch.object(cli, "_newest_source_file",
                                    return_value=b / ".codex" / "rollout-x.jsonl"), \
                  mock.patch.object(cli.subprocess, "Popen", side_effect=spy_popen), \
+                 mock.patch.object(cli, "_host_memory_verdict", return_value=("pass", "test host")), \
+                 mock.patch("synapt.recall.build_deferrals._parent_command_line", return_value="test-parent"), \
                  mock.patch("synapt.recall.freshness.check_index_freshness",
                             return_value=mock.Mock(build_timestamp="old")):
                 os.environ.pop("SYNAPT_RECALL_ROOT", None)
