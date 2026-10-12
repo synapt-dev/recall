@@ -5479,6 +5479,14 @@ def make_parser() -> argparse.ArgumentParser:
                                help="Session id the transcript gap excludes as live "
                                     "(default: $CLAUDE_CODE_SESSION_ID; with neither, none is excluded)")
 
+    # Orient (the wake card: goal, next, carried, ruled out, constraints, from the user's own record)
+    orient_parser = subparsers.add_parser(
+        "orient", help="Get oriented: a short wake card from your own journal and feedback memories"
+    )
+    orient_parser.add_argument("--project", default=None,
+                               help="Project directory (default: resolved as `synapt recall journal` does)")
+    orient_parser.add_argument("--json", action="store_true", help="Emit the card as JSON")
+
     # Rebuild (hook-triggered)
     rebuild_parser = subparsers.add_parser("rebuild", help="Incremental rebuild (for hooks)")
     rebuild_parser.add_argument("--out", default=None, help="Output directory (default: per-project)")
@@ -5779,6 +5787,11 @@ def main():
         cmd_sessions(args)
     elif args.command == "resume":
         cmd_resume(args)
+    elif args.command == "orient":
+        from synapt.recall.orient import build_card, format_card, format_json
+
+        card = build_card(Path(args.project) if args.project else None)
+        print(format_json(card) if args.json else format_card(card))
     elif args.command == "rebuild":
         cmd_rebuild(args)
     elif args.command == "sync":
