@@ -3084,12 +3084,7 @@ def recall_sync_memory(memory_dirs: list[str] | None = None) -> str:
     import yaml
     from pathlib import Path
 
-    from synapt.recall.core import (
-        _find_gripspace_root,
-        _resolve_project_root_override,
-        claude_projects_roots,
-        project_slug,
-    )
+    from synapt.recall.core import claude_projects_roots, project_slug
 
     named = memory_dirs is not None
     failures: list[str] = []
@@ -3108,11 +3103,14 @@ def recall_sync_memory(memory_dirs: list[str] | None = None) -> str:
         # memory directory reached through two roots (a symlink) is read once.
         # Measured before this scope: a glob of */memory under each root wrote
         # every other project's memory files into this project's store.
-        project = (
-            _resolve_project_root_override(None)
-            or _find_gripspace_root(Path.cwd())
-            or Path.cwd()
-        )
+        #
+        # The project is this process's cwd, NOT the recall root override:
+        # Claude Code names a session's memory directory after the directory it
+        # was launched in, and the MCP server it spawns runs there. Sibling
+        # desks share one GRIPSPACE_ROOT by design, so resolving through it
+        # synced the shared root's memory for every desk (measured: a desk whose
+        # GRIPSPACE_ROOT names the coordinator's root read the coordinator's).
+        project = Path.cwd()
         slug = project_slug(project)
         candidates = [root / slug / "memory" for root in claude_projects_roots(relative_to=project)]
         for memory_dir in candidates:

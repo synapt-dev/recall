@@ -75,6 +75,19 @@ def test_a_seat_syncs_only_its_own_memory_dir(seats):
     assert str(b_dir) not in result, result
 
 
+def test_a_shared_gripspace_root_does_not_redirect_the_sync_to_another_seat(seats, monkeypatch):
+    """Sibling desks share one GRIPSPACE_ROOT by design; the memory dir is the launch dir's."""
+    home, _config, seat_a, seat_b, a_dir, b_dir = seats
+    _memory_file(a_dir, "mine")
+    _memory_file(b_dir, "the-shared-roots")
+    monkeypatch.setenv("GRIPSPACE_ROOT", str(seat_b))
+
+    result = _sync(home, seat_a)
+
+    assert "1 synced" in result, result
+    assert str(a_dir) in result and str(b_dir) not in result, result
+
+
 def test_the_own_dir_is_read_under_every_claude_root(seats):
     home, _config, seat_a, _seat_b, a_dir, _b_dir = seats
     _memory_file(a_dir, "configured-root")
