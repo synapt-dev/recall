@@ -512,7 +512,7 @@ def index_repo(
                     stats.errors.append(
                         "tree-sitter-language-pack is not installed — code "
                         "indexing is disabled; install with "
-                        "pip install 'synapt[code-index]'"
+                        "uv tool install 'synapt[code-index]' (or pip install it in a virtualenv)"
                     )
                     stack_missing_reported = True
                 continue

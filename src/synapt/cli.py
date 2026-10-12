@@ -72,6 +72,10 @@ def main():
         # machine, or an unclean stop. Routing through the recall dispatcher
         # means `synapt recall resume` is the same entry point, not a second one.
         _dispatch_recall("resume", *sys.argv[2:])
+    elif subcmd == "orient":
+        # Front-door verb: the wake card from the user's own record (journal and
+        # feedback memories). Same entry point as `synapt recall orient`.
+        _dispatch_recall("orient", *sys.argv[2:])
     elif subcmd == "code":
         # Front-door verb for the code-plus-memory search (R3.2): where is
         # this defined, and what did the team say about it. Same entry point
@@ -95,7 +99,7 @@ def main():
         except ImportError:
             print(
                 "Dashboard requires extra dependencies.\n"
-                "Install with: pip install synapt[dashboard]",
+                "Install with: uv tool install 'synapt[dashboard]' (or pip install it in a virtualenv)",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -118,6 +122,7 @@ def _print_help(extra_commands: dict | None = None):
         "",
         "Commands:",
         "  init      One-command project setup",
+        "  orient    Get oriented: goal, next step, carried work and your rules, from your own record",
         "  resume    Pick up where the last session stopped",
         "  code      Where is this defined, and what did the team say about it",
         "  recall    Search and manage past session transcripts",

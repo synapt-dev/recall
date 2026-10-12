@@ -2246,3 +2246,73 @@ class TestUncleanEnd(unittest.TestCase):
         self.assertIn("A later journal at 2026-08-31T13:00:00Z", after)
         self.assertIn("A journal at 2026-08-31T11:00:00Z", before)
         self.assertNotIn("later", before)
+
+
+class TestFirstRunOutput(unittest.TestCase):
+    """What a first-time user sees from `synapt resume` on a fully indexed session.
+
+    The shape is a clean-box onboarding run: a two-turn transcript `fixture-0001`, 1202
+    bytes, indexed to its last byte, whose last chunk is timestamped by its opening user
+    turn (15:05:00) while the reply it holds is later (15:05:30).
+    """
+
+    SID = "fixture-0001"
+
+    def _view(self, indexed_end: int, size: int = 1202):
+        from dataclasses import replace
+        chunks = [
+            replace(_chunk(self.SID, 0, "q0", "a0", timestamp="2026-10-10T15:00:00Z"),
+                    byte_offset=0, byte_length=500),
+            replace(_chunk(self.SID, 1, "q1", "a1", timestamp="2026-10-10T15:05:00Z"),
+                    byte_offset=500, byte_length=indexed_end - 500),
+        ]
+        source = CallerTranscript(self.SID, Path("/caller/fixture-0001.jsonl"), 2_000_000_000.0, size,
+                                  latest_timestamp="2026-10-10T15:05:30Z")
+        return build_resume_view(_index(chunks), caller_sources=[source], journal_path=None)
+
+    def test_a_session_indexed_to_its_last_byte_gets_no_build_instruction(self):
+        first = format_resume(self._view(indexed_end=1202)).splitlines()[0]
+
+        self.assertNotIn("is not fully indexed yet", first)
+        self.assertNotIn("synapt recall build", first)
+
+    def test_a_session_whose_index_stops_short_of_the_file_still_says_so(self):
+        first = format_resume(self._view(indexed_end=900)).splitlines()[0]
+
+        self.assertIn("is not fully indexed yet", first)
+        self.assertIn("synapt recall build --no-embeddings", first)
+
+    def test_a_session_id_that_is_not_a_uuid_is_printed_whole(self):
+        text = format_resume(self._view(indexed_end=900))
+
+        self.assertIn("Session fixture-0001 ", text)
+        self.assertIn("session fixture-0001 is not fully indexed", text)
+
+    def test_session_label_cuts_only_a_uuid(self):
+        from synapt.recall.resume import session_label
+
+        self.assertEqual(session_label(SESSION_A), "aaaaaaaa")
+        self.assertEqual(session_label("fixture-0001"), "fixture-0001")
+        self.assertEqual(session_label("channel_dm--atlas--opus"), "channel_dm--atlas--opus")
+        self.assertEqual(session_label("aaaaaaaa-1111-2222-3333-44444444444"), "aaaaaaaa-1111-2222-3333-44444444444")
+
+    def test_the_freshness_line_prints_the_session_id_whole(self):
+        from synapt.recall.query_freshness import QueryFreshnessResult, QueryFreshnessState, format_query_freshness
+
+        line = format_query_freshness(QueryFreshnessResult(QueryFreshnessState.REFRESHED, session_id=self.SID))
+
+        self.assertIn("session=fixture-0001 ", line)
+
+    def test_a_missing_extra_names_uv_tool_install_first(self):
+        import io
+        import sys
+        from unittest import mock
+        from synapt.cli import main
+
+        err = io.StringIO()
+        with mock.patch.dict(sys.modules, {"synapt.dashboard.app": None}), \
+                mock.patch.object(sys, "argv", ["synapt", "dashboard"]), mock.patch.object(sys, "stderr", err):
+            with self.assertRaises(SystemExit):
+                main()
+
+        self.assertIn("uv tool install 'synapt[dashboard]'", err.getvalue())

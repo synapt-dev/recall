@@ -160,6 +160,16 @@ class CallerExtentGap:
     live_latest: str
 
 
+_UUID_SHAPED = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def session_label(session_id: str) -> str:
+    """A session id as a reader should see it: a UUID by its first eight characters,
+    anything else whole. Cut to eight, `fixture-0001` printed as `fixture-`, a name that
+    matches nothing the reader can search for."""
+    return session_id[:8] if _UUID_SHAPED.fullmatch(session_id or "") else session_id
+
+
 # A journal written this close to the session's last activity counts as its
 # handoff. Fifteen minutes covers an EOD "journal, then a few closing turns".
 UNCLEAN_END_GRACE_SECONDS = 15 * 60
@@ -406,7 +416,7 @@ def _gap_phrase(seconds: float | None) -> str:
 
 def format_unclean_end(found: UncleanEnd, tail: dict | None) -> str:
     """The wake block. Header first, then the facts, then this session's own tail."""
-    short = found.session_id[:8]
+    short = session_label(found.session_id)
     if found.last_authored_journal and found.gap_seconds is not None:
         journal_line = (
             f"Last authored journal that could be this session's: {found.last_authored_journal}; "
@@ -436,7 +446,7 @@ def format_unclean_end(found: UncleanEnd, tail: dict | None) -> str:
     if found.checkpoint_session:
         lines.append(
             f"No SessionEnd checkpoint for this session; checkpoint.json holds session "
-            f"{found.checkpoint_session[:8]}, which is NOT this one's bridge."
+            f"{session_label(found.checkpoint_session)}, which is NOT this one's bridge."
         )
     else:
         lines.append("No SessionEnd checkpoint for this session (a crash runs no SessionEnd).")
@@ -624,9 +634,9 @@ def format_transcript_gap(
         f"TRANSCRIPT GAP since {_local(gap.since)} ({gap.since_source}): "
         f"{total} message(s) in {len(gap.sessions)} session(s), read from the live "
         "transcripts, not the index; "
-        + (f"the live session {gap.live_session_id[:8]} is not listed"
+        + (f"the live session {session_label(gap.live_session_id)} is not listed"
            if gap.live_session_id and gap.live_on_disk else
-           f"the live session {gap.live_session_id[:8]} has no transcript on disk yet, so none is excluded"
+           f"the live session {session_label(gap.live_session_id)} has no transcript on disk yet, so none is excluded"
            if gap.live_session_id else
            "no live session was named, so none is excluded")
     ]
@@ -638,7 +648,7 @@ def format_transcript_gap(
         lines[0] += "; newest session first"
     for session in sessions:
         lines.append(
-            f"  session {session.session_id[:8]} (last write {_local(session.last_write)}): "
+            f"  session {session_label(session.session_id)} (last write {_local(session.last_write)}): "
             f"{len(session.messages)} message(s), {session.hidden} hidden"
         )
         shown = session.messages
@@ -1157,11 +1167,18 @@ def build_resume_view(
         None,
     )
     caller_partial = None
-    if (
-        selected_source is not None
-        and selected_source.latest_timestamp
+    # A chunk's timestamp is its OPENING turn's, so its reply's later timestamp read as an
+    # unindexed tail on a file indexed to its last byte. Compare bytes when the chunks carry them.
+    indexed_end = max(
+        (c.byte_offset + c.byte_length for c in chunks if c.byte_offset >= 0 and c.byte_length > 0),
+        default=None,
+    )
+    behind = (
+        indexed_end < selected_source.size if indexed_end is not None
+        else bool(selected_source.latest_timestamp)
         and _timestamp_epoch(selected_source.latest_timestamp) > selected_epoch
-    ):
+    ) if selected_source is not None else False
+    if behind and selected_source.latest_timestamp:
         caller_partial = CallerExtentGap(
             selected_source,
             selected_latest or "no searchable transcript endpoint",
@@ -1423,15 +1440,11 @@ def format_resume(view: ResumeView, max_chars: int = 600) -> str:
     date = view.turns[0].timestamp[:10] if view.turns else ""
     shown = len(view.turns)
 
-    # Channel ids are shown in full. Truncated to eight characters every one of
-    # them renders as "channel_", so the header names a channel without saying
-    # WHICH — and `channel_dev` and `channel_dm--atlas--opus` become
-    # indistinguishable at exactly the moment the reader needs to tell them
-    # apart. Session UUIDs stay short: eight characters identify those.
-    label = (
-        view.session_id if is_channel_session(view.session_id)
-        else view.session_id[:8]
-    )
+    # Only a UUID is cut to eight characters. Channel ids and every other name are
+    # shown whole: cut, every channel renders as "channel_" (`channel_dev` and
+    # `channel_dm--atlas--opus` become indistinguishable), and `fixture-0001` as
+    # `fixture-`.
+    label = session_label(view.session_id)
     header = f"Session {label}"
     if date:
         header += f" · {date}"
@@ -1449,7 +1462,7 @@ def format_resume(view: ResumeView, max_chars: int = 600) -> str:
         newest = view.caller_unindexed[0]
         stamp = datetime.fromtimestamp(newest.mtime, timezone.utc).isoformat(timespec="seconds")
         header = (
-            f"⚠ CALLER SOURCE STALE: {newest.session_id[:8]} "
+            f"⚠ CALLER SOURCE STALE: {session_label(newest.session_id)} "
             f"({stamp}, {newest.size} bytes) is newer and unindexed | " + header
         )
     if view.caller_partial:
@@ -1460,7 +1473,7 @@ def format_resume(view: ResumeView, max_chars: int = 600) -> str:
         # wording should say that plainly instead of alarming on it.
         gap = view.caller_partial
         header = (
-            f"Note: session {gap.source.session_id[:8]} is not fully indexed yet -- "
+            f"Note: session {session_label(gap.source.session_id)} is not fully indexed yet -- "
             f"indexed through {gap.indexed_latest}, live through {gap.live_latest}; "
             "run `synapt recall build --no-embeddings` to catch up | " + header
         )

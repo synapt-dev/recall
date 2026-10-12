@@ -1082,8 +1082,8 @@ def _transcript_sort_key(f: Path) -> tuple:
         return (0.0, f.name)
 
 
-def latest_transcript_path(project: Path | None = None) -> str | None:
-    """Find the most recently modified transcript file for the project."""
+def transcripts_newest_first(project: Path | None = None) -> list[Path]:
+    """Every transcript file for the project (Claude Code and Codex), newest first."""
     project = (project or Path.cwd()).resolve()
     candidates: list[Path] = []
 
@@ -1098,10 +1098,12 @@ def latest_transcript_path(project: Path | None = None) -> str | None:
     except Exception:
         pass
 
-    if not candidates:
-        return None
+    return sorted(candidates, key=_transcript_sort_key, reverse=True)
 
-    jsonl_files = sorted(candidates, key=_transcript_sort_key, reverse=True)
+
+def latest_transcript_path(project: Path | None = None) -> str | None:
+    """Find the most recently modified transcript file for the project."""
+    jsonl_files = transcripts_newest_first(project)
     return str(jsonl_files[0]) if jsonl_files else None
 
 

@@ -511,21 +511,34 @@ _BACKGROUND_COLD_REFRESH_SCRIPT = (
     "from synapt.recall.cli import (\n"
     "    _acquire_build_lock, _release_build_lock, _archive_and_build_locked, project_data_dir,\n"
     ")\n"
-    "from synapt.recall.build_deferrals import record_build\n"
+    "from synapt.recall.cli import _HOST_BUILD_LOCK, _host_synapt_dir\n"
+    "from synapt.recall.build_deferrals import caller_facts, record_build\n"
+    "import json\n"
     "store_root = Path(sys.argv[1])\n"
     "project_dir = Path(sys.argv[2])\n"
-    "data_dir = project_data_dir(store_root)\n"
-    "fd = _acquire_build_lock(data_dir, timeout=0.0)\n"
-    "if fd is not None:\n"
+    "caller = caller_facts()\n"
+    "if len(sys.argv) > 3:\n"
     "    try:\n"
-    "        built = _archive_and_build_locked(\n"
-    "            store_root, None, use_embeddings=False, incremental=True,\n"
-    "            chatgpt_archive=None, source_dir=project_dir, skip_clustering=True,\n"
-    "        )\n"
-    "        if built is not None:\n"
-    "            record_build(data_dir)\n"
+    "        caller['spawned_by'] = json.loads(sys.argv[3])\n"
+    "    except ValueError:\n"
+    "        pass\n"
+    "data_dir = project_data_dir(store_root)\n"
+    "host_fd = _acquire_build_lock(_host_synapt_dir(), timeout=0, name=_HOST_BUILD_LOCK)\n"
+    "if host_fd is not None:\n"
+    "    try:\n"
+    "        fd = _acquire_build_lock(data_dir, timeout=0.0)\n"
+    "        if fd is not None:\n"
+    "            try:\n"
+    "                built = _archive_and_build_locked(\n"
+    "                    store_root, None, use_embeddings=False, incremental=True,\n"
+    "                    chatgpt_archive=None, source_dir=project_dir, skip_clustering=True,\n"
+    "                )\n"
+    "                if built is not None:\n"
+    "                    record_build(data_dir, caller=caller)\n"
+    "            finally:\n"
+    "                _release_build_lock(fd)\n"
     "    finally:\n"
-    "        _release_build_lock(fd)\n"
+    "        _release_build_lock(host_fd)\n"
 )
 
 
@@ -625,6 +638,21 @@ def cold_no_caller_refresh(project_dir: Path, index_dir: Path) -> ColdRefreshOut
         _release_build_lock(lock_fd)
     except OSError:
         pass
+    # The same memory gate catchup and precompact apply before an automatic build: a
+    # read verb must not start a heavy build those paths would have refused. A refusal
+    # queues nothing and leaves a deferral row; an unreadable instrument is not a
+    # memory verdict, so it proceeds, as catchup does.
+    verdict, numbers = _host_memory_verdict()
+    if verdict == "refuse":
+        _floor, _source, _note = _resolve_build_min_free_gb()
+        print(f"[resume] background refresh deferred: memory gate REFUSE ({numbers}; "
+              f"{_note or f'floor from {_source}'})", file=sys.stderr)
+        try:
+            from synapt.recall.build_deferrals import record_deferral
+            record_deferral(data_dir, "cold_refresh", numbers)
+        except Exception:  # noqa: BLE001 -- a trace must never break resume
+            pass
+        return ColdRefreshOutcome(True, False, source.name, before, before, "memory_floor")
     # recall#1123 hardening, preserved: name both paths on every cold rebuild,
     # even the (only) case that reaches here today -- store and source already
     # agree. cmd_resume's own refusal only guards ITS ambient resolution; a
@@ -634,8 +662,12 @@ def cold_no_caller_refresh(project_dir: Path, index_dir: Path) -> ColdRefreshOut
     # either way.
     print(f"[resume] queuing background refresh of store {store_root} from source {project_dir}", file=sys.stderr)
     try:
+        # The child's own parent is gone by the time it reads it (resume returns at
+        # once), so the spawner hands over its facts for the child's built row.
+        from synapt.recall.build_deferrals import caller_facts
         subprocess.Popen(
-            [sys.executable, "-c", _BACKGROUND_COLD_REFRESH_SCRIPT, str(store_root), str(project_dir)],
+            [sys.executable, "-c", _BACKGROUND_COLD_REFRESH_SCRIPT, str(store_root), str(project_dir),
+             json.dumps(caller_facts())],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
     except OSError:
@@ -4711,7 +4743,8 @@ def _download_hf_transcripts(repo_id: str) -> Path | None:
     try:
         from huggingface_hub import HfApi, hf_hub_download
     except ImportError:
-        print("Error: huggingface_hub not installed. pip install synapt[hf]", file=sys.stderr)
+        print("Error: huggingface_hub not installed. Install with: uv tool install 'synapt[hf]' "
+              "(or pip install it in a virtualenv)", file=sys.stderr)
         return None
 
     token = os.environ.get("HF_TOKEN")
@@ -5478,6 +5511,14 @@ def make_parser() -> argparse.ArgumentParser:
                                help="Session id the transcript gap excludes as live "
                                     "(default: $CLAUDE_CODE_SESSION_ID; with neither, none is excluded)")
 
+    # Orient (the wake card: goal, next, carried, ruled out, constraints, from the user's own record)
+    orient_parser = subparsers.add_parser(
+        "orient", help="Get oriented: a short wake card from your own journal and feedback memories"
+    )
+    orient_parser.add_argument("--project", default=None,
+                               help="Project directory (default: resolved as `synapt recall journal` does)")
+    orient_parser.add_argument("--json", action="store_true", help="Emit the card as JSON")
+
     # Rebuild (hook-triggered)
     rebuild_parser = subparsers.add_parser("rebuild", help="Incremental rebuild (for hooks)")
     rebuild_parser.add_argument("--out", default=None, help="Output directory (default: per-project)")
@@ -5778,6 +5819,11 @@ def main():
         cmd_sessions(args)
     elif args.command == "resume":
         cmd_resume(args)
+    elif args.command == "orient":
+        from synapt.recall.orient import build_card, format_card, format_json
+
+        card = build_card(Path(args.project) if args.project else None)
+        print(format_json(card) if args.json else format_card(card))
     elif args.command == "rebuild":
         cmd_rebuild(args)
     elif args.command == "sync":
