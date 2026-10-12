@@ -29,6 +29,7 @@ def test_shared_helper_owns_every_declared_variable(monkeypatch):
         "SYNAPT_RECALL_WORKTREE",
         "GRIPSPACE_ROOT",
         "SYNAPT_AGENT_ID",
+        "CLAUDE_CONFIG_DIR",
     }
     assert set(AMBIENT_PROCESS_ENV_VARS) == required
 

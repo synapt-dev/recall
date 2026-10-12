@@ -57,10 +57,22 @@ def _resolve_gripspace_root(project_dir: Path | None) -> Path | None:
 
 def _claude_memory_dir(gripspace_root: Path) -> Path:
     """The directory Claude Code itself writes this gripspace's memory
-    files to: ``~/.claude/projects/<slug>/memory/``, where ``<slug>`` is
-    Claude Code's own path-to-directory-name convention (``project_slug``,
-    already used for transcript discovery)."""
-    return Path.home() / ".claude" / "projects" / project_slug(gripspace_root) / "memory"
+    files to: ``<root>/<slug>/memory/`` under the first root of
+    ``claude_projects_roots`` (configured roots first, then
+    ``~/.config/claude``, then ``~/.claude``) that has one, where ``<slug>``
+    is Claude Code's own path-to-directory-name convention (``project_slug``,
+    already used for transcript discovery). With none, the first root's path,
+    which the caller finds is not a directory."""
+    from synapt.recall.core import claude_projects_roots
+
+    slug = project_slug(gripspace_root)
+    candidates = [
+        root / slug / "memory" for root in claude_projects_roots(relative_to=gripspace_root)
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
 
 
 def admit_and_index_claude_memory(

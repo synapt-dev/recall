@@ -5788,7 +5788,7 @@ def project_archive_dir(project_dir: Path | None = None) -> Path:
     return project_worktree_dir(project_dir) / "transcripts"
 
 
-def claude_projects_roots() -> list[Path]:
+def claude_projects_roots(relative_to: Path | None = None) -> list[Path]:
     """Where Claude Code keeps per-project transcripts, the configured root first.
 
     Claude Code writes under ``$CLAUDE_CONFIG_DIR/projects`` when that variable is
@@ -5801,12 +5801,25 @@ def claude_projects_roots() -> list[Path]:
     order given, and ``~/.config/claude`` is read too when it holds a
     ``projects`` directory, before ``~/.claude``: the roots other transcript
     readers (ccusage) look in, so a session under any of them is not invisible.
+
+    A listed directory that is not absolute (after ``~`` expands) is relative to
+    the directory Claude Code ran in, which for a project's transcripts is the
+    project itself (measured: ``CLAUDE_CONFIG_DIR=relcfg claude -p`` wrote
+    ``./relcfg/projects/<slug>/``). So it resolves against *relative_to* when a
+    caller reading one project passes it, and is skipped otherwise: a walker over
+    every project has no single directory it could be relative to.
     """
     roots: list[Path] = []
     for configured in os.environ.get("CLAUDE_CONFIG_DIR", "").split(","):
         configured = configured.strip()
-        if configured:
-            roots.append(Path(configured).expanduser() / "projects")
+        if not configured:
+            continue
+        listed = Path(configured).expanduser()
+        if not listed.is_absolute():
+            if relative_to is None:
+                continue
+            listed = Path(relative_to).resolve() / listed
+        roots.append(listed / "projects")
     xdg_style = Path.home() / ".config" / "claude" / "projects"
     if xdg_style.is_dir():
         roots.append(xdg_style)
@@ -5827,7 +5840,7 @@ def project_transcript_dirs_any_root(project_dir: Path | None = None) -> list[Pa
     transcript are returned."""
     slug = project_slug(project_dir)
     found: list[Path] = []
-    for root in claude_projects_roots():
+    for root in claude_projects_roots(relative_to=project_dir or Path.cwd()):
         d = root / slug
         if d.is_dir() and any(d.glob("*.jsonl")):
             found.append(d)
@@ -5868,7 +5881,7 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
         if slug in seen_slugs:
             return
         seen_slugs.add(slug)
-        for root in claude_projects_roots():
+        for root in claude_projects_roots(relative_to=path):
             transcript_dir = root / slug
             if transcript_dir.is_dir() and any(transcript_dir.glob("*.jsonl")):
                 dirs.append(transcript_dir)

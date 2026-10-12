@@ -3080,15 +3080,26 @@ def recall_sync_memory() -> str:
     import yaml
     from pathlib import Path
 
-    memory_root = Path.home() / ".claude" / "projects"
-    if not memory_root.exists():
+    from synapt.recall.core import claude_projects_roots
+
+    # Every Claude Code root, configured first; a memory directory reached
+    # through two roots (a symlink) is read once.
+    memory_roots = [root for root in claude_projects_roots() if root.exists()]
+    if not memory_roots:
         return "No Claude Code memory directory found."
+    memory_dirs: list[Path] = []
+    seen: set[Path] = set()
+    for memory_root in memory_roots:
+        for memory_dir in sorted(memory_root.glob("*/memory")):
+            if memory_dir.resolve() not in seen:
+                seen.add(memory_dir.resolve())
+                memory_dirs.append(memory_dir)
 
     synced = 0
     skipped = 0
     errors = 0
 
-    for memory_dir in sorted(memory_root.glob("*/memory")):
+    for memory_dir in memory_dirs:
         for md_file in sorted(memory_dir.glob("*.md")):
             if md_file.name == "MEMORY.md":
                 continue  # Skip the index file
@@ -3151,7 +3162,7 @@ def recall_sync_memory() -> str:
 
     return (
         f"Memory sync complete: {synced} synced, {skipped} skipped, {errors} errors. "
-        f"Scanned {memory_root}."
+        f"Scanned {', '.join(str(root) for root in memory_roots)}."
     )
 
 

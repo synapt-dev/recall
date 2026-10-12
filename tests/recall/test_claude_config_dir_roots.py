@@ -30,6 +30,8 @@ def homes(tmp_path, monkeypatch):
     project = tmp_path / "work" / "proj"
     project.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    # expanduser reads USERPROFILE, not HOME, on Windows; the tilde row needs both.
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     return home, config, project
@@ -238,3 +240,58 @@ def test_caller_transcripts_finds_sessions_under_config_claude_and_the_second_li
 
     assert "cccccccc-xdg" in found, found
     assert "dddddddd-second" in found, found
+
+
+def test_a_root_reached_through_a_symlink_is_listed_once_by_resolved_path(homes):
+    """~/.config/claude/projects pointing at ~/.claude/projects is one root, not two."""
+    home, _, _ = homes
+    (home / ".claude" / "projects").mkdir(parents=True)
+    (home / ".config" / "claude").mkdir(parents=True)
+    (home / ".config" / "claude" / "projects").symlink_to(home / ".claude" / "projects")
+    assert core.claude_projects_roots() == [home / ".config" / "claude" / "projects"]
+
+
+def test_the_relative_tail_of_a_path_holding_a_comma_is_not_read(homes, monkeypatch):
+    home, config, _ = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", f"{config},b")
+    assert core.claude_projects_roots() == [config / "projects", home / ".claude" / "projects"]
+
+
+def test_a_relative_config_dir_is_not_read(homes, monkeypatch):
+    home, _, _ = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "accounts/core")
+    assert core.claude_projects_roots() == [home / ".claude" / "projects"]
+
+
+def test_a_tilde_config_dir_is_read_from_home(homes, monkeypatch):
+    home, _, _ = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/accounts/core")
+    assert core.claude_projects_roots() == [
+        home / "accounts" / "core" / "projects", home / ".claude" / "projects",
+    ]
+
+
+def test_a_relative_config_dir_resolves_against_the_project_it_is_read_for(homes, monkeypatch):
+    home, _, project = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relcfg")
+    assert core.claude_projects_roots(relative_to=project) == [
+        project.resolve() / "relcfg" / "projects", home / ".claude" / "projects",
+    ]
+
+
+def test_caller_transcripts_finds_a_session_under_a_relative_config_dir_from_another_cwd(
+    homes, monkeypatch, tmp_path
+):
+    """Claude Code resolves a relative CLAUDE_CONFIG_DIR against the directory it ran
+    in, the project (measured: CLAUDE_CONFIG_DIR=relcfg claude -p wrote
+    ./relcfg/projects/<slug>/). A reader running elsewhere must still find it."""
+    _, _, project = homes
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relcfg")
+    _session(project.resolve() / "relcfg" / "projects", project, "eeeeeeee-relative")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    found = {t.session_id for t in caller_transcripts(project)}
+
+    assert "eeeeeeee-relative" in found, found

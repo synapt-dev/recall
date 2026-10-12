@@ -126,6 +126,66 @@ class TestAdmitAndIndexClaudeMemory:
         assert result.relative_path == "vorn_mat_lane.md"
         assert "reratifies" in result.content
 
+    def test_indexes_a_memory_dir_that_exists_only_under_the_configured_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Claude Code with $CLAUDE_CONFIG_DIR writes memory there, not under ~/.claude."""
+        from synapt.recall.claude_memory_source import admit_and_index_claude_memory
+
+        grip = _make_gripspace(tmp_path)
+        config = tmp_path / "accounts" / "core"
+        written = _write_memory_files(tmp_path / "staging", grip)
+        target = config / "projects" / written.parent.name / "memory"
+        target.parent.mkdir(parents=True)
+        written.rename(target)
+        monkeypatch.chdir(grip)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+        receipt = admit_and_index_claude_memory()
+
+        assert receipt is not None and receipt.state == "complete"
+        assert receipt.documents_seen == 2
+
+    def test_memory_only_under_home_claude_is_found_when_a_config_dir_is_set(
+        self, tmp_path, monkeypatch
+    ):
+        """Memory written before CLAUDE_CONFIG_DIR was set stays under ~/.claude; it is still found."""
+        from synapt.recall.claude_memory_source import admit_and_index_claude_memory
+
+        grip = _make_gripspace(tmp_path)
+        home = tmp_path / "home"
+        _write_memory_files(home, grip)
+        (tmp_path / "accounts" / "core" / "projects").mkdir(parents=True)
+        monkeypatch.chdir(grip)
+        monkeypatch.delenv("GRIPSPACE_ROOT", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "accounts" / "core"))
+
+        receipt = admit_and_index_claude_memory()
+
+        assert receipt is not None and receipt.documents_seen == 2
+
+    def test_indexes_memory_under_a_relative_config_dir_resolved_against_the_gripspace(
+        self, tmp_path, monkeypatch
+    ):
+        from synapt.recall.claude_memory_source import admit_and_index_claude_memory
+
+        grip = _make_gripspace(tmp_path)
+        written = _write_memory_files(tmp_path / "staging", grip)
+        target = grip.resolve() / "relcfg" / "projects" / written.parent.name / "memory"
+        target.parent.mkdir(parents=True)
+        written.rename(target)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GRIPSPACE_ROOT", str(grip))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relcfg")
+
+        receipt = admit_and_index_claude_memory()
+
+        assert receipt is not None and receipt.documents_seen == 2
+
     def test_cwd_outside_gripspace_with_gripspace_root_env_finds_same_file(
         self, tmp_path, monkeypatch
     ):
