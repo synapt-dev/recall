@@ -873,7 +873,7 @@ def _format_recall_code(result: dict, root: Path, db: Path, stats) -> str:
     if getattr(stats, "parser_stack_missing", False):
         lines.append(
             "  (tree-sitter-language-pack is not installed, so the code index is empty: "
-            "pip install 'synapt[code-index]')"
+            "uv tool install 'synapt[code-index]', or pip install it in a virtualenv)"
         )
     lines.append("")
     lines.append("What the team said:")
@@ -963,7 +963,7 @@ def _recall_code_members(query: str, root: Path, members, max_symbols: int, max_
     if parser_missing:
         lines.append(
             "  (tree-sitter-language-pack is not installed, so the code index is empty: "
-            "pip install 'synapt[code-index]')"
+            "uv tool install 'synapt[code-index]', or pip install it in a virtualenv)"
         )
     lines.append("")
     lines.append("What the team said:")

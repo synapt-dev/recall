@@ -95,7 +95,7 @@ def main():
         except ImportError:
             print(
                 "Dashboard requires extra dependencies.\n"
-                "Install with: pip install synapt[dashboard]",
+                "Install with: uv tool install 'synapt[dashboard]' (or pip install it in a virtualenv)",
                 file=sys.stderr,
             )
             sys.exit(1)
