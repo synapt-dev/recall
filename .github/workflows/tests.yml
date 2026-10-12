@@ -26,7 +26,9 @@ jobs:
       # keeps the rest of the suite validating; a genuine collection error
       # still fails the job (pytest's exit code), it just no longer withholds
       # every other test's result along with it.
-      - run: pytest tests/ -v --continue-on-collection-errors
+      # `network` tests reach PyPI at test time (pip install, build isolation). They run once, in network-tests
+      # below, not in each of these required jobs: on promotion PR #1281 one PyPI hiccup reddened a required job.
+      - run: pytest tests/ -v --continue-on-collection-errors -m "not network"
 
   # unit-tests above only ever installs [test,dashboard,anthropic,openai] --
   # every other declared extra (google-adk, crewai, onnx, all, ...) has never
@@ -59,7 +61,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[test,${{ matrix.extra }}]"
-      - run: pytest tests/ -v --continue-on-collection-errors
+      - run: pytest tests/ -v --continue-on-collection-errors -m "not network"
+
+  # The tests that reach PyPI at test time (`-m network`: building the wheels with build isolation, and
+  # pip-installing langchain-core). One job, so a PyPI hiccup costs one re-run of one job, and its failure
+  # prints pip's own output (the helper puts both streams in the error). Not a required check.
+  network-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: pytest tests/ -v -m network
 
   # requirements-mcp.lock is a hand-maintained, scoped lock (see requirements-mcp.in)
   # pinning the mcp SDK across recall's full supported Python range. The unit-tests
