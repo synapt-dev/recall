@@ -23,6 +23,10 @@ def home(tmp_path, monkeypatch) -> Path:
     h = tmp_path / "home"
     (h / ".claude" / "projects").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(h))
+    # Windows: Path.home() reads USERPROFILE, not HOME, so setting HOME alone reads the runner's real home.
+    monkeypatch.setenv("USERPROFILE", str(h))
+    for live in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "SYNAPT_SESSION_ID"):
+        monkeypatch.delenv(live, raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(h / ".codex-none"))
     return h
@@ -185,6 +189,25 @@ def test_a_wake_after_a_clean_close_is_not_stale(project, home):
     _transcript(home, project, "live.jsonl", 0)
 
     assert build_card(project).stale == ""
+
+
+def test_a_live_session_named_by_its_runtime_is_skipped_however_quiet(project, home, monkeypatch):
+    """W3: a running session idle past the two-minute window is still the running session."""
+    _entry(project, _now_iso(-8 * 3600), focus="closed cleanly")
+    _transcript(home, project, "closed.jsonl", 8 * 3600 + 30)
+    _transcript(home, project, "3f1c-live-session.jsonl", 300)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "3f1c-live-session")
+
+    assert build_card(project).stale == ""
+
+
+def test_with_a_live_id_named_a_quiet_session_that_is_not_it_still_counts(project, home, monkeypatch):
+    """The window is only the fallback: with an id named, a session written a minute ago is a finished one."""
+    _entry(project, _now_iso(-3 * 3600), focus="three hours old")
+    _transcript(home, project, "other-terminal.jsonl", 60)
+    monkeypatch.setenv("CODEX_THREAD_ID", "not-on-disk")
+
+    assert "older than your newest finished session" in build_card(project).stale
 
 
 def test_no_stale_line_when_the_journal_is_as_new_as_the_session(project, home):

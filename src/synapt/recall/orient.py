@@ -17,6 +17,7 @@ by shortening the longest lists first, and it says what it left out.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,7 +28,7 @@ CHARS_PER_TOKEN = 4          # a rough estimate, the same ratio the card reports
 CARRIED_MAX = 8              # the newest open carried steps; the rest counted as withheld
 CONSTRAINTS_MAX = 8          # the newest feedback memories; the rest are counted as withheld, never dropped silently
 STALE_AFTER_S = 3600         # transcripts newer than the journal by more than this are a gap
-LIVE_WITHIN_S = 120          # a transcript written this recently is the running session, not a finished one
+LIVE_WITHIN_S = 120          # with no live session id in the env, a transcript written this recently is the running one
 
 
 @dataclass
@@ -154,22 +155,28 @@ def _read_constraints(card: Card, project: Path | None) -> None:
 
 
 def _read_stale(card: Card, project: Path | None, journal_epoch: float | None, now: float) -> None:
-    # At wake the newest transcript is the running session's own, written seconds ago; comparing the
-    # journal against it fires STALE on every wake an hour after a clean close. Skip what is live.
+    # At wake the newest transcript is the running session's own; comparing the journal against it
+    # fires STALE on every wake an hour after a clean close. Skip the live session by the id its runtime
+    # names (as the wake does), and only when none is named, skip what was written in the last two minutes.
     from synapt.recall.journal import transcripts_newest_first
 
     if journal_epoch is None:
         return
+    live = (os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+            or os.environ.get("SYNAPT_SESSION_ID") or None)
     try:
         candidates = transcripts_newest_first(project)
     except Exception:
         return
     for path in candidates:
+        stem = Path(path).stem
+        if live and (stem == live or stem.endswith("-" + live)):
+            continue
         try:
             activity = Path(path).stat().st_mtime
         except OSError:
             continue
-        if now - activity < LIVE_WITHIN_S:
+        if not live and now - activity < LIVE_WITHIN_S:
             continue
         gap = activity - journal_epoch
         if gap > STALE_AFTER_S:
