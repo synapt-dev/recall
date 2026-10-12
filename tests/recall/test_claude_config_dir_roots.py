@@ -30,6 +30,8 @@ def homes(tmp_path, monkeypatch):
     project = tmp_path / "work" / "proj"
     project.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    # expanduser reads USERPROFILE, not HOME, on Windows; the tilde row needs both.
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     return home, config, project
