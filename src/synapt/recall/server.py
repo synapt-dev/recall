@@ -3063,43 +3063,70 @@ def recall_save(
         return f"Knowledge save failed: {exc}"
 
 
-def recall_sync_memory() -> str:
-    """Sync Claude Code MEMORY.md files into recall as knowledge nodes.
+def recall_sync_memory(memory_dirs: list[str] | None = None) -> str:
+    """Sync this project's own Claude Code memory files into recall as knowledge nodes.
 
-    Scans ~/.claude/projects/*/memory/*.md, parses YAML frontmatter
-    (name, description, type), and upserts each as a knowledge node via
-    recall_save. Skips files that haven't changed since last sync.
+    Reads ``<root>/<slug>/memory/*.md`` under every Claude Code root, where
+    ``<slug>`` is the directory name Claude Code gives the directory this
+    session runs in, parses the YAML frontmatter (name, description, type),
+    and upserts each file as one knowledge node via recall_save, keyed by the
+    file's path so a re-sync updates in place. Only this project's memory: a
+    sync never reads another project's directory unless it is named.
 
-    Memory types map to knowledge categories:
-    - user → user
-    - feedback → feedback
-    - project → project
-    - reference → reference
+    Args:
+        memory_dirs: sync exactly these directories instead of this project's own.
+
+    Every file that could not be synced is named with its reason. The other
+    files are synced first; then, if any file failed, the call raises with the
+    counts and that list, so a caller sees an error rather than "complete".
     """
     import hashlib
     import yaml
     from pathlib import Path
 
-    from synapt.recall.core import claude_projects_roots
+    from synapt.recall.core import claude_projects_roots, project_slug
 
-    # Every Claude Code root, configured first; a memory directory reached
-    # through two roots (a symlink) is read once.
-    memory_roots = [root for root in claude_projects_roots() if root.exists()]
-    if not memory_roots:
-        return "No Claude Code memory directory found."
-    memory_dirs: list[Path] = []
+    named = memory_dirs is not None
+    failures: list[str] = []
+    dirs: list[Path] = []
     seen: set[Path] = set()
-    for memory_root in memory_roots:
-        for memory_dir in sorted(memory_root.glob("*/memory")):
-            if memory_dir.resolve() not in seen:
+    if named:
+        for given in memory_dirs:
+            memory_dir = Path(given).expanduser()
+            if not memory_dir.is_dir():
+                failures.append(f"{memory_dir}: not a directory")
+            elif memory_dir.resolve() not in seen:
                 seen.add(memory_dir.resolve())
-                memory_dirs.append(memory_dir)
+                dirs.append(memory_dir)
+    else:
+        # This project's slug under every Claude Code root, configured first; a
+        # memory directory reached through two roots (a symlink) is read once.
+        # Measured before this scope: a glob of */memory under each root wrote
+        # every other project's memory files into this project's store.
+        #
+        # The project is this process's cwd, NOT the recall root override:
+        # Claude Code names a session's memory directory after the directory it
+        # was launched in, and the MCP server it spawns runs there. Sibling
+        # desks share one GRIPSPACE_ROOT by design, so resolving through it
+        # synced the shared root's memory for every desk (measured: a desk whose
+        # GRIPSPACE_ROOT names the coordinator's root read the coordinator's).
+        project = Path.cwd()
+        slug = project_slug(project)
+        candidates = [root / slug / "memory" for root in claude_projects_roots(relative_to=project)]
+        for memory_dir in candidates:
+            if memory_dir.is_dir() and memory_dir.resolve() not in seen:
+                seen.add(memory_dir.resolve())
+                dirs.append(memory_dir)
+        if not dirs:
+            return (
+                f"No Claude Code memory directory found for this project ({slug}). "
+                f"Looked in {', '.join(str(c) for c in candidates)}."
+            )
 
     synced = 0
     skipped = 0
-    errors = 0
 
-    for memory_dir in memory_dirs:
+    for memory_dir in dirs:
         for md_file in sorted(memory_dir.glob("*.md")):
             if md_file.name == "MEMORY.md":
                 continue  # Skip the index file
@@ -3155,15 +3182,20 @@ def recall_sync_memory() -> str:
                 if "saved" in result.lower() or "Knowledge node saved" in result:
                     synced += 1
                 else:
-                    errors += 1
+                    failures.append(f"{md_file}: {result.strip().splitlines()[0] if result.strip() else 'recall_save returned nothing'}")
 
-            except Exception:
-                errors += 1
+            except Exception as exc:
+                detail = str(exc).splitlines()[0] if str(exc) else ""
+                failures.append(f"{md_file}: {type(exc).__name__}" + (f": {detail}" if detail else ""))
 
-    return (
-        f"Memory sync complete: {synced} synced, {skipped} skipped, {errors} errors. "
-        f"Scanned {', '.join(str(root) for root in memory_roots)}."
+    summary = (
+        f"Memory sync {'FAILED' if failures else 'complete'}: {synced} synced, {skipped} skipped, "
+        f"{len(failures)} error{'' if len(failures) == 1 else 's'}. "
+        f"Read {', '.join(str(d) for d in dirs) or 'no directory'}."
     )
+    if failures:
+        raise RuntimeError(summary + "\n" + "\n".join(f"  {line}" for line in failures))
+    return summary
 
 
 def recall_remind(
