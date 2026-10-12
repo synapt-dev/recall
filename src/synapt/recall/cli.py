@@ -4711,7 +4711,8 @@ def _download_hf_transcripts(repo_id: str) -> Path | None:
     try:
         from huggingface_hub import HfApi, hf_hub_download
     except ImportError:
-        print("Error: huggingface_hub not installed. pip install synapt[hf]", file=sys.stderr)
+        print("Error: huggingface_hub not installed. Install with: uv tool install 'synapt[hf]' "
+              "(or pip install it in a virtualenv)", file=sys.stderr)
         return None
 
     token = os.environ.get("HF_TOKEN")

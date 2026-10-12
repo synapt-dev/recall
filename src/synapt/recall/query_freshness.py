@@ -15,7 +15,7 @@ from synapt.recall.cli import (
     _release_build_lock,
     build_lock_has_waiter,
 )
-from synapt.recall.resume import CallerTranscript, caller_transcripts
+from synapt.recall.resume import CallerTranscript, caller_transcripts, session_label
 from synapt.recall.sharded_db import ShardedRecallDB
 from synapt.recall.storage import query_tail_source_key
 
@@ -875,7 +875,7 @@ def format_query_freshness(result: QueryFreshnessResult) -> str:
     """Render one stable, caller-scoped freshness line."""
     parts = [f"Freshness: {result.state.value}"]
     if result.session_id:
-        parts.append(f"session={result.session_id[:8]}")
+        parts.append(f"session={session_label(result.session_id)}")
     parts.extend(
         [
             "indexed_through=" + (

@@ -110,7 +110,8 @@ def test_an_id_with_no_transcript_on_disk_says_so(desk, tmp_path):
 
     block = _gap_blocks(_context(project, tmp_path, "cccccccc-live", journal_ts="2026-10-11T19:00:00Z"))[0]
 
-    assert "the live session cccccccc has no transcript on disk yet, so none is excluded" in block
+    # Not a UUID, so the id is printed whole.
+    assert "the live session cccccccc-live has no transcript on disk yet, so none is excluded" in block
 
 
 def test_the_reader_hides_a_compaction_summary(desk):

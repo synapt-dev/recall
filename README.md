@@ -50,10 +50,12 @@ Agent skill files for repository-native use live in:
 For the default Claude Code path:
 
 ```bash
-pip install "synapt[all]"
+uv tool install "synapt[all]"
 claude mcp add synapt -- synapt server
 synapt init
 ```
+
+No uv? `pipx install "synapt[all]"` works the same way. A plain `pip install` outside a virtualenv is refused by current Debian-family Pythons (`externally-managed-environment`, PEP 668).
 
 That gives you:
 - a project-local `.synapt/` memory store
@@ -64,11 +66,11 @@ That gives you:
 ### If you are an AI agent setting this up
 
 ```bash
-pip install "synapt[all]"   # full install: embedding provider, integrations, code index (several GB)
+uv tool install "synapt[all]"   # full install: embedding provider, integrations, code index (several GB)
 synapt init                 # run once, in the project root
 ```
 
-(`pip install synapt` alone is small, but its search is keyword-only.)
+(`uv tool install synapt` alone is small, but its search is keyword-only.)
 Start the MCP server with `synapt server` (stdio). Then:
 
 | When | Call |
@@ -100,7 +102,7 @@ A fresh project has an empty index until the first save; that is normal.
 Recommended:
 
 ```bash
-pip install "synapt[all]"
+uv tool install "synapt[all]"
 claude mcp add synapt -- synapt server
 synapt init
 ```
@@ -110,7 +112,7 @@ synapt init
 Install:
 
 ```bash
-pip install "synapt[all]"
+uv tool install "synapt[all]"
 ```
 
 Add to `~/.codex/config.toml`:
@@ -415,7 +417,7 @@ Every `create`, `view`, `str_replace`, and `search` call now goes through recall
 For MCP-based recall (search, journals, channels, 20+ tools):
 
 ```bash
-pip install "synapt[all]"
+uv tool install "synapt[all]"
 claude mcp add synapt -- synapt server
 synapt init
 ```
@@ -443,7 +445,7 @@ for the marketplace and plugin consent, then keeps the plugin updated.
 Install synapt and register the MCP server:
 
 ```bash
-pip install "synapt[all]"
+uv tool install "synapt[all]"
 ```
 
 Add to `~/.codex/config.toml`:
