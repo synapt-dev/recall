@@ -4,22 +4,95 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-11
+
+Minor release. An agent that wakes after an unclean end now sees what was typed
+to it before it acts: `synapt resume` and the session-start context read the gap
+from the live transcripts, which the index can lag by hours. recall now finds
+Claude Code transcripts wherever Claude Code writes them (`CLAUDE_CONFIG_DIR`,
+including a comma-separated list, and `~/.config/claude`), MCP servers embed on
+cpu by default, and `recall_code` answers from a gripspace root. The new
+resume and build flags are why this is a minor release rather than a patch.
+
+Forty-four files changed across `v0.27.0..dev`, excluding this entry: 4415
+insertions, 179 deletions, carrying #1255, #1256, #1258, #1259, #1260, #1261,
+#1262, #1263, #1264, #1265, #1266, #1267, #1268, #1269, #1270, #1271 and #1272
+plus the version bump. As in earlier entries, the figure includes the version files
+and excludes this changelog entry.
+
 ### Added
+
+- **The transcript gap, in `synapt resume` and in the session-start wake.**
+  `synapt resume` ends with a TRANSCRIPT GAP block: every message typed to this
+  agent in each session written since the newest authored journal (or
+  `--since`, an ISO time or `Nh`), read from the live transcript files, with the
+  files each session wrote. The live session is excluded by identity
+  (`--live-session`, else `$CLAUDE_CODE_SESSION_ID`); with neither, nothing is
+  excluded and the header says so. `SYNAPT_GAP_HIDE` takes the reader's own
+  pattern for machine-written pastes. The session-start wake carries the same
+  gap when the hook names the starting session and something was typed in the
+  gap: newest session first, six messages per session, inside its own
+  2,500-byte share of the wake. The read is proportional to the size of the
+  sessions in the gap. Codex rollouts are not read for it. (#1270, #1271)
+- **`recall_code` searches each declared member of a gripspace root.** Asked
+  from a root whose manifest declares its members, it indexes and searches each
+  cloned member under its own tag instead of refusing; a repository the
+  manifest does not declare is not searched. (#1265)
+- **`synapt build --check-floor`** runs only the build's host-memory check and
+  answers with an exit code and one line: 0 when the floor is met, 2 when the
+  build would refuse, and 3 when it cannot measure the host. (#1266)
+- **Build progress after the clustering line.** The steps after clustering
+  print time-based progress, so a long build no longer goes silent. (#1256)
 
 - **`synapt recall consolidate` says how many nodes its content filters turned away.**
   A run printed `3 created` whether the model had returned three nodes or seven. It now
   also prints, on stderr, how many nodes the model returned, how many the content filters
   rejected, and the first words of each rejected node (at most five, 48 characters each).
   The preview is one printable line. What is kept is decided exactly as before.
+  (#1264)
 
 ### Changed
 
+- **recall reads Claude Code transcripts and memory under every root.** Transcripts are found under
+  `$CLAUDE_CONFIG_DIR` (a comma-separated list is read in order) and
+  `~/.config/claude` (when it holds `projects`) as well as `~/.claude`, so sessions written under a
+  configured directory are no longer invisible to `resume`, `build` and
+  `transcript`. The bulk transcript discovery, `recall_sync_memory` and the
+  memory-file source read the same roots. A listed directory that is not
+  absolute is relative to the project Claude Code ran in: commands that read
+  one project resolve it there, and the walkers over every project skip it.
+  (#1267, #1269, #1272)
+- **MCP servers embed on cpu by default, and the embedding device and torch
+  load at first use.** A long-lived server no longer holds about 1 GB of
+  graphics memory on Apple Silicon; `SYNAPT_EMBED_DEVICE` still overrides it,
+  and batch builds keep the device the probe picks. A sentence-transformers
+  that is installed but fails to import now surfaces at the first embed
+  instead of falling back to Ollama. (#1268)
+- **`recall_channel` read bounds its pins by `limit`, and search honours
+  `limit` and `detail`.** A search that names no limit returns up to 20 hits
+  instead of 10. (#1261, #1262)
 - **The low-specificity filter reads a named-rule identifier such as `STAMP-PARITY-91`
   (two or more ALLCAPS words, then a number) as a project-specific signal**, as it already
   does a path, a version or a CamelCase name, so a short node naming one is no longer
   dropped as generic advice. Standard identifiers (`UTF-8`, `SHA-256`, `HTTP-2`, `CI-CD`),
   a bare ticket number (`ABC-123`), hyphenated lowercase words and numbers with units are
-  not signals, because generic advice carries all of them.
+  not signals, because generic advice carries all of them. (#1264)
+
+### Fixed
+
+- `synapt recall journal` honours `--path` in every mode and refuses `--write`
+  beside another mode or the repair-only flags, instead of writing to the live
+  journal. (#1258)
+- The journal's carry-forward line counts this write's own retirements, not
+  the session's. (#1259)
+- `synapt recall build` prints the store it wrote, not the one the environment
+  names. (#1260)
+- The dashboard's pane output keeps streaming across log rotation. (#1263)
+
+### Removed
+
+- The GitHub Pages deploy workflow, which could not succeed because Pages is
+  not enabled for the repository. (#1255)
 
 ## [0.27.0] - 2026-10-01
 
