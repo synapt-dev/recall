@@ -210,6 +210,25 @@ def test_with_a_live_id_named_a_quiet_session_that_is_not_it_still_counts(projec
     assert "older than your newest finished session" in build_card(project).stale
 
 
+def test_a_live_codex_rollout_is_skipped_by_its_thread_id_suffix(project, home, monkeypatch):
+    """Codex names a transcript rollout-<timestamp>-<thread id>.jsonl, so the id is a suffix, not the stem."""
+    _entry(project, _now_iso(-8 * 3600), focus="written at the end of yesterday")
+    _transcript(home, project, "yesterday.jsonl", 8 * 3600 - 60)
+    _transcript(home, project, "rollout-2026-10-12T01-00-00-0199aaaa-bbbb.jsonl", 300)
+    monkeypatch.setenv("CODEX_THREAD_ID", "0199aaaa-bbbb")
+
+    assert build_card(project).stale == ""
+
+
+def test_synapt_session_id_names_the_live_session_too(project, home, monkeypatch):
+    _entry(project, _now_iso(-8 * 3600), focus="written at the end of yesterday")
+    _transcript(home, project, "yesterday.jsonl", 8 * 3600 - 60)
+    _transcript(home, project, "5e55-own-session.jsonl", 300)
+    monkeypatch.setenv("SYNAPT_SESSION_ID", "5e55-own-session")
+
+    assert build_card(project).stale == ""
+
+
 def test_no_stale_line_when_the_journal_is_as_new_as_the_session(project, home):
     _entry(project, _now_iso(-60), focus="fresh")
     _transcript(home, project, "s1.jsonl", 180)
