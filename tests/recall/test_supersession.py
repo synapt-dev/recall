@@ -23,7 +23,7 @@ import pytest
 
 import synapt.recall.consolidate as consolidate
 from synapt.recall.storage import RecallDB
-from synapt.recall.core import TranscriptChunk, TranscriptIndex
+from synapt.recall.core import TranscriptChunk, TranscriptIndex, project_slug
 
 
 # ---------------------------------------------------------------------------
@@ -2564,7 +2564,8 @@ class TestRecallSave:
 
 
 class TestRecallSyncMemory:
-    """Tests for MEMORY.md sync into shared recall knowledge."""
+    """Tests for MEMORY.md sync into recall knowledge. Memory lives under the project's OWN slug: a
+    sync reads only that (tests/recall/test_sync_memory_scope.py has the cross-project rows)."""
 
     @staticmethod
     def _memory_file(memory_dir, name):
@@ -2586,7 +2587,7 @@ class TestRecallSyncMemory:
     def test_recall_sync_memory_reads_the_configured_root(self, tmp_path, monkeypatch):
         """Memory written only under $CLAUDE_CONFIG_DIR is synced."""
         config = tmp_path / "accounts" / "core"
-        self._memory_file(config / "projects" / "proj-a" / "memory", "configured-only")
+        self._memory_file(config / "projects" / project_slug(tmp_path / "gripspace") / "memory", "configured-only")
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
 
         result = self._sync(tmp_path / "home", tmp_path / "gripspace")
@@ -2596,8 +2597,8 @@ class TestRecallSyncMemory:
     def test_recall_sync_memory_reads_both_roots(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         config = tmp_path / "accounts" / "core"
-        self._memory_file(home / ".claude" / "projects" / "proj-a" / "memory", "old-root")
-        self._memory_file(config / "projects" / "proj-b" / "memory", "configured-root")
+        self._memory_file(home / ".claude" / "projects" / project_slug(tmp_path / "gripspace") / "memory", "old-root")
+        self._memory_file(config / "projects" / project_slug(tmp_path / "gripspace") / "memory", "configured-root")
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
 
         result = self._sync(home, tmp_path / "gripspace")
@@ -2612,7 +2613,7 @@ class TestRecallSyncMemory:
         config = tmp_path / "accounts" / "core"
         shared = tmp_path / "shared-memory"
         self._memory_file(shared, "shared")
-        for root in (home / ".claude" / "projects" / "proj-a", config / "projects" / "proj-a"):
+        for root in (home / ".claude" / "projects" / project_slug(tmp_path / "gripspace"), config / "projects" / project_slug(tmp_path / "gripspace")):
             root.mkdir(parents=True)
             (root / "memory").symlink_to(shared)
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
@@ -2628,7 +2629,7 @@ class TestRecallSyncMemory:
 
         home = tmp_path / "home"
         project = tmp_path / "gripspace"
-        memory_dir = home / ".claude" / "projects" / "proj-a" / "memory"
+        memory_dir = home / ".claude" / "projects" / project_slug(tmp_path / "gripspace") / "memory"
         memory_dir.mkdir(parents=True)
         (memory_dir / "policy.md").write_text(
             "---\n"
