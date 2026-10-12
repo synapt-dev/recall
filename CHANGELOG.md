@@ -4,6 +4,68 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-1X
+
+Minor release. A new command, `synapt orient`, prints a short wake card from
+the user's own journal and memory, so an agent starting a session knows where
+it is before it acts. `recall_sync_memory` now syncs only this project's own
+memory and names every file it could not sync. Two things a first-time user
+hit are fixed: the printed install lines use `uv tool install`, and `resume` no
+longer tells a caught-up reader to build. The new command is why this
+is a minor release rather than a patch.
+
+Nineteen files changed across `v0.28.0..dev`, excluding this entry: 1035
+insertions, 91 deletions, carrying #1275, #1276, #1277, #1278 and #1279 plus the
+version bump. As in earlier entries, the figure includes the version files and
+excludes this changelog entry.
+
+### Added
+
+- **`synapt orient` (also `synapt recall orient`): a wake card from your own
+  records.** It prints GOAL (the newest meaningful journal entry's focus, with
+  its age), NEXT (that entry's first next step), CARRIED (next steps still open
+  across recent entries), RULED OUT (that entry's decisions) and CONSTRAINTS
+  (the user's feedback memories from the session project's Claude Code memory
+  directory). `--json` prints the same card with `fields_filled` and
+  `tokens_est`. Every source fails soft: a missing journal or memory directory
+  is one named NOT READ line. STALE says when a finished session transcript is
+  more than an hour newer than the journal; the running session is skipped by
+  its runtime id (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID` or
+  `SYNAPT_SESSION_ID`), and by a two-minute window only when no id is set. The
+  card stays under a 4,000-token estimate, and every capped list says how many
+  it withheld. (#1275)
+
+### Changed
+
+- **`recall_sync_memory` syncs this project's own memory directory.** It read
+  `*/memory` under every Claude Code root, so one project's sync wrote every
+  other project's memory into its store. It now reads
+  `<root>/<slug>/memory` under each Claude Code root, where the slug is the
+  directory the session runs in, not a shared `GRIPSPACE_ROOT`.
+  `memory_dirs` syncs exactly the directories it names. (#1276)
+- **Printed install lines use `uv tool install synapt`.** `pip install --user`
+  is refused on a system Python that marks itself externally managed (PEP 668).
+  A hint for a missing extra names `uv tool install 'synapt[<extra>]'` first and
+  pip in a virtualenv second; the integration sections keep pip, since they
+  install synapt as a library.
+  (#1277)
+- **`synapt resume` no longer tells a caught-up reader to build.** When the
+  store's chunks carry byte offsets, its build note compares them with the
+  transcripts by bytes, and a caught-up reader sees no note; the turn-timestamp
+  test remains the fallback. Session ids print
+  whole unless they are UUIDs. (#1277)
+
+### Fixed
+
+- **`recall_sync_memory` names every file it could not sync.** A failed file
+  was a bare error count, and the run still said "complete". The good files are
+  synced first; then, if any failed, the call raises with the counts and one
+  line per file (path and reason), so an MCP caller sees an error. (#1276)
+- **A cold read no longer starts an unchecked background
+  build.** The detached refresh a cold `synapt resume` queues now checks host
+  memory first (a refusal is recorded in `build-deferrals.jsonl`), takes the
+  host-wide build lock, and records which process started it. (#1278)
+
 ## [0.28.0] - 2026-10-11
 
 Minor release. An agent that wakes after an unclean end now sees what was typed
