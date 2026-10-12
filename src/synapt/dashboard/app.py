@@ -29,6 +29,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import FileResponse, HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 
+from synapt.dashboard.pane_output import PaneOutputReader
+
 from synapt.recall.channel import _channels_dir
 from synapt.recall.core import project_data_dir
 from synapt.recall.channel import (
@@ -950,24 +952,22 @@ def create_app(*, tmux_session: str | None = None) -> FastAPI:
         log_path = log_dir / "output.log"
 
         async def tail_log():
-            last_pos = 0
+            reader = PaneOutputReader()
             try:
                 while True:
                     if await request.is_disconnected():
                         return
-                    if log_path.exists():
-                        with open(log_path, "r") as f:
-                            f.seek(last_pos)
-                            new_content = f.read()
-                            if new_content:
-                                last_pos = f.tell()
-                                yield {
-                                    "event": "output",
-                                    "data": escape(new_content),
-                                }
+                    new_content = reader.read_new(log_path)
+                    if new_content:
+                        yield {
+                            "event": "output",
+                            "data": escape(new_content),
+                        }
                     await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 return
+            finally:
+                reader.close()
 
         return EventSourceResponse(tail_log())
 

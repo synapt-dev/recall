@@ -46,6 +46,7 @@ logger = logging.getLogger("synapt.server")
 def _serve():
     """Start the MCP server (no reload)."""
     from synapt.plugins import register_plugins
+    from synapt.recall.embeddings import set_process_default_device
     from synapt.recall.server import (
         MCP_INSTRUCTIONS,
         ValidatingFastMCP,
@@ -53,6 +54,8 @@ def _serve():
         _sync_claude_memory_source_on_startup,
         register_tools as recall_register,
     )
+
+    set_process_default_device("cpu")  # see its docstring; SYNAPT_EMBED_DEVICE still wins
 
     # Provenance disclosure: stdout is the MCP
     # protocol channel, so this goes to stderr, same as the --dev logger

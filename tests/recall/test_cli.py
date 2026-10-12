@@ -83,6 +83,36 @@ def test_discover_transcript_dirs_no_claude_dir(tmp_path):
     assert dirs == []
 
 
+def test_discover_transcript_dirs_reads_the_configured_root(tmp_path, monkeypatch):
+    """A project whose transcripts live only under $CLAUDE_CONFIG_DIR is discovered."""
+    config = tmp_path / "accounts" / "core"
+    proj = config / "projects" / "-Users-test-proj-cfg"
+    proj.mkdir(parents=True)
+    (proj / "session.jsonl").write_text("{}")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+    with patch("synapt.recall.cli.Path.home", return_value=tmp_path / "home"):
+        dirs = discover_transcript_dirs()
+
+    assert dirs == [proj]
+
+
+def test_discover_transcript_dirs_lists_a_dir_reached_through_two_roots_once(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    proj = home / ".claude" / "projects" / "-Users-test-proj-a"
+    proj.mkdir(parents=True)
+    (proj / "session.jsonl").write_text("{}")
+    config = tmp_path / "accounts" / "core"
+    (config / "projects").mkdir(parents=True)
+    (config / "projects" / "-Users-test-proj-a").symlink_to(proj)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+    with patch("synapt.recall.cli.Path.home", return_value=home):
+        dirs = discover_transcript_dirs()
+
+    assert len(dirs) == 1 and dirs[0].resolve() == proj.resolve(), dirs
+
+
 def test_install_global_hooks_creates_entries(tmp_path):
     """_install_global_hooks registers all hooks in ~/.claude/settings.json."""
     with patch("synapt.recall.cli.Path.home", return_value=tmp_path):

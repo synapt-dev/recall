@@ -1015,6 +1015,79 @@ class TestUnpin(unittest.TestCase):
         self.assertNotIn("remove this pin", result.split("##")[1] if "##" in result else "")
 
 
+class TestSearchHonoursLimitAndDetail(unittest.TestCase):
+    """recall_channel action=search used to drop limit, detail and channel: every search returned 10 full bodies."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = _patch_data_dir(self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def _search(self, **kwargs):
+        from synapt.recall.actions import _handle_search
+        return _handle_search(message="needle", **kwargs)
+
+    def _hits(self, text):
+        return [ln for ln in text.splitlines() if ln.startswith("  [m_")]
+
+    def _post(self, channel, count, width=40):
+        for i in range(count):
+            channel_post(channel, f"needle {i:03d} " + "x" * width, agent_name="bot")
+
+    def test_limit_caps_the_number_of_results(self):
+        self._post("dev", 30)
+        self.assertEqual(len(self._hits(self._search(limit=5))), 5)
+        self.assertEqual(len(self._hits(self._search(limit=25))), 25)
+
+    def test_without_a_limit_the_old_default_of_ten_stands(self):
+        self._post("dev", 30)
+        self.assertEqual(len(self._hits(self._search())), 10)
+
+    def test_detail_low_truncates_bodies_and_says_so(self):
+        self._post("dev", 3, width=900)
+        out = self._search(limit=3, detail="low")
+        self.assertNotIn("x" * 300, out)
+        self.assertIn("x" * 150, out)  # about 200 characters survive, not a stub
+        self.assertIn("truncated", out)
+        self.assertEqual(len(self._hits(out)), 3)
+
+    def test_detail_min_is_one_short_line_per_hit(self):
+        channel_post("dev", "needle first line\nsecond line " + "y" * 500, agent_name="bot")
+        out = self._search(limit=3, detail="min")
+        hits = self._hits(out)
+        self.assertEqual(len(hits), 1)
+        self.assertNotIn("y" * 100, out)
+        self.assertLess(len(hits[0]), 200)
+        self.assertEqual(out.count("\n"), 1, "the header plus exactly one line")
+
+    def test_a_non_positive_limit_falls_back_to_the_default_not_to_nothing(self):
+        self._post("dev", 30)
+        self.assertEqual(len(self._hits(self._search(limit=0))), 10)
+        self.assertEqual(len(self._hits(self._search(limit=-1))), 10)
+
+    def test_medium_high_and_max_keep_the_full_body(self):
+        self._post("dev", 1, width=900)
+        for detail in ("medium", "high", "max"):
+            out = self._search(limit=3, detail=detail)
+            self.assertIn("x" * 900, out, detail)
+            self.assertNotIn("truncated", out, detail)
+
+    def test_a_search_still_spans_every_channel_whatever_channel_is_passed(self):
+        self._post("dev", 1)
+        self._post("ops", 1)
+        out = self._search(limit=10, channel="dev")
+        self.assertIn("#dev", out)
+        self.assertIn("#ops", out)
+
+    def test_output_size_is_bounded_by_limit_and_detail_not_by_the_corpus(self):
+        self._post("dev", 60, width=5000)
+        out = self._search(limit=3, detail="low")
+        self.assertLess(len(out), 3_000)
+
+
 class TestShowPins(unittest.TestCase):
     """Test show_pins option for channel_read (#306)."""
 
@@ -1048,6 +1121,39 @@ class TestShowPins(unittest.TestCase):
         self.assertNotIn("[pin]", result)
         self.assertNotIn("Pinned", result)
         self.assertIn("regular msg", result)
+
+    def _pin_many(self, count, width=40):
+        for i in range(count):
+            self._post_and_pin("dev", f"pinbody{i:03d} " + "x" * width)
+
+    def test_pin_block_is_capped_at_limit_with_an_omitted_count(self):
+        self._pin_many(12)
+        result = channel_read("dev", limit=3)
+        self.assertEqual(result.count("[pin]"), 3)
+        for kept in ("pinbody009", "pinbody010", "pinbody011"):
+            self.assertIn(kept, result)
+        self.assertNotIn("pinbody000", result)
+        self.assertNotIn("pinbody008", result)
+        self.assertIn("9 older pins omitted", result)
+
+    def test_detail_max_still_shows_every_pin(self):
+        self._pin_many(12)
+        result = channel_read("dev", limit=3, detail="max")
+        self.assertEqual(result.count("[pin]"), 12)
+        self.assertNotIn("omitted", result)
+
+    def test_pins_within_the_limit_are_all_shown_without_an_omitted_line(self):
+        self._pin_many(2)
+        result = channel_read("dev", limit=20)
+        self.assertEqual(result.count("[pin]"), 2)
+        self.assertNotIn("omitted", result)
+
+    def test_read_size_is_bounded_by_limit_not_by_how_many_pins_exist(self):
+        self._pin_many(80, width=2000)
+        result = channel_read("dev", limit=5)
+        # 5 messages and 5 pins of about 2 KB each, plus headings; 80 pins would be about 160 KB
+        self.assertLess(len(result), 30_000)
+        self.assertEqual(result.count("[pin]"), 5)
 
     def test_show_pins_false_still_shows_messages(self):
         self._post_and_pin("dev", "pinned content")

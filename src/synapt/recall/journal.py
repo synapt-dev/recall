@@ -14,7 +14,12 @@ from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapt.recall.core import project_worktree_dir, project_index_dir, project_transcript_dir
+from synapt.recall.core import (
+    project_index_dir,
+    project_transcript_dir,
+    project_transcript_dirs_any_root,
+    project_worktree_dir,
+)
 from synapt.recall._llm_util import truncate_at_word as _tw
 
 # Paths that are always noise in journal file lists (checked after normalising to /)
@@ -590,8 +595,10 @@ def format_write_confirmation(
     if report is not None:
         # Always, zeros included: a filter that retired something and a filter
         # that had nothing to do must not render identically (recall#984).
-        parts.append(f"\nCarry-forward: {report.carried} carried, "
-                     f"{report.retired_by_done} retired by done, {report.withheld} withheld.")
+        retired = f"{report.retired_by_done} retired by done"
+        if report.retired_earlier:
+            retired += f" ({report.retired_earlier} already retired earlier this session)"
+        parts.append(f"\nCarry-forward: {report.carried} carried, {retired}, {report.withheld} withheld.")
     if carried:
         parts.append("\n### Carried Forward Next Steps")
         parts.extend(f"- {step}" for step in carried)
@@ -648,9 +655,12 @@ class CarryReport:
     say so instead of looking identical to one with nothing to remove."""
 
     carried: int = 0
-    retired_by_done: int = 0
+    retired_by_done: int = 0  # steps THIS write's own ``done`` retired
     withheld: int = 0
     oldest_since: str | None = None
+    # Steps only this session's EARLIER writes retired. Matched the same way (so a step retired minutes ago does not
+    # come back) but reported apart: counting them as "retired by done" made write 2 re-claim write 1's work.
+    retired_earlier: int = 0
 
 
 def session_done_items(session_id: str, path: Path | None = None) -> list[str]:
@@ -706,9 +716,9 @@ def merge_carried_forward_with_report(
     # Matching still uses the RAW done list: a collapsed value recorded there
     # by repair_journal is exactly what marks the original step resolved.
     done = {_step_key(item) for item in current_done if item and item.strip()}
-    for item in same_session_done or []:
-        if item and item.strip():
-            done.add(_step_key(item))
+    # Kept apart from ``done`` only for the REPORT: a step both lists name is this write's retirement.
+    earlier = {_step_key(item) for item in (same_session_done or []) if item and item.strip()} - done
+    done |= earlier
     # Plus what this session retired in its EARLIER writes: the
     # previous entry this write compares against is from before the session, so
     # without them a retirement made minutes ago is invisible and the step comes
@@ -732,7 +742,10 @@ def merge_carried_forward_with_report(
         if key in seen:
             continue
         if key in done:
-            report.retired_by_done += 1
+            if key in earlier:
+                report.retired_earlier += 1
+            else:
+                report.retired_by_done += 1
             continue
         bare, since = strip_carry_stamp(clean)
         since = since or origin_date
@@ -1074,8 +1087,7 @@ def latest_transcript_path(project: Path | None = None) -> str | None:
     project = (project or Path.cwd()).resolve()
     candidates: list[Path] = []
 
-    transcript_dir = project_transcript_dir(project)
-    if transcript_dir:
+    for transcript_dir in project_transcript_dirs_any_root(project):
         candidates.extend(transcript_dir.glob("*.jsonl"))
 
     try:

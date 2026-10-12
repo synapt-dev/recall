@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from synapt.recall.bm25 import _tokenize
+from synapt.recall.progress import ProgressLog
 
 if TYPE_CHECKING:
     from synapt.recall.core import TranscriptChunk
@@ -1034,10 +1035,13 @@ def cluster_chunks(
 
     # Compute token sets for all chunks
     chunk_token_map: dict[int, set[str]] = {}
+    tokenize_log = ProgressLog("clustering: tokenize", len(chunks), "chunks")
     for i, chunk in enumerate(chunks):
         tokens = _chunk_tokens(chunk, boilerplate_stopwords)
         if len(tokens) >= MIN_TOKENS:
             chunk_token_map[i] = tokens
+        tokenize_log.tick(i + 1)
+    tokenize_log.done()
 
     # Sort by timestamp descending (newest first) for recency bias
     sorted_indices = sorted(
@@ -1061,7 +1065,11 @@ def cluster_chunks(
     # Precompute threshold factor: t/(1+t)
     threshold_factor = threshold / (1.0 + threshold)
 
-    for idx in sorted_indices:
+    # The loop that dominates a large build: each chunk walks the inverted index, so its cost grows with the clusters
+    # built so far (measured ~n^2). It reports by TIME, not by count, for that reason.
+    group_log = ProgressLog("clustering: group", len(sorted_indices), "chunks")
+    for position, idx in enumerate(sorted_indices, 1):
+        group_log.tick(position)
         chunk_tokens = chunk_token_map[idx]
         chunk_size = len(chunk_tokens)
         best_score = 0.0
@@ -1103,6 +1111,7 @@ def cluster_chunks(
             clusters_wip.append((set(chunk_tokens), [idx]))
             for token in chunk_tokens:
                 token_to_clusters.setdefault(token, []).append(new_ci)
+    group_log.done()
 
     # Precompute global document frequency ONCE for topic extraction.
     # Normalized (see _normalize_topic_token) so a word's sentence-final
@@ -1110,14 +1119,19 @@ def cluster_chunks(
     # separate ones (measured on the real store).
     n_docs = len(chunk_token_map)
     global_df: Counter[str] = Counter()
-    for ts in chunk_token_map.values():
+    vocab_log = ProgressLog("clustering: vocabulary", n_docs, "chunks")
+    for done, ts in enumerate(chunk_token_map.values(), 1):
         global_df.update({_normalize_topic_token(t) for t in ts} - {""})
+        vocab_log.tick(done)
+    vocab_log.done()
 
     # Convert to output format, filtering singletons and empties
     now = datetime.now(timezone.utc).isoformat()
     result: list[dict] = []
 
-    for _cluster_tokens, member_indices in clusters_wip:
+    topic_log = ProgressLog("clustering: topics", len(clusters_wip), "clusters")
+    for position, (_cluster_tokens, member_indices) in enumerate(clusters_wip, 1):
+        topic_log.tick(position)  # counted before the skip below, so a run of singletons still moves n/N
         if len(member_indices) < MIN_CLUSTER_SIZE:
             continue
 
@@ -1147,6 +1161,8 @@ def cluster_chunks(
             "updated_at": now,
             "signature_tokens": signature_tokens,
         })
+
+    topic_log.done()
 
     # Sort by date_end descending (most recent cluster first)
     result.sort(key=lambda c: c.get("date_end") or "", reverse=True)

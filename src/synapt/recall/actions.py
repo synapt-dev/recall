@@ -225,14 +225,29 @@ def _handle_search(**kwargs: Any) -> str:
     message = kwargs.get("message")
     if not message:
         return "Error: query is required for 'search' action."
-    results = channel_search(message, msg_type=kwargs.get("msg_type"), agent_id=kwargs.get("name"))
+    # limit bounds the hits; a search spans every channel, so `channel` is not a filter here (a default
+    # of "dev" could not be told from a choice, and a search that hides channels makes its negatives false).
+    limit = kwargs.get("limit")
+    max_results = limit if isinstance(limit, int) and limit > 0 else 10
+    results = channel_search(
+        message, max_results=max_results, msg_type=kwargs.get("msg_type"), agent_id=kwargs.get("name"))
     if not results:
         return "No matching channel messages."
+    detail = str(kwargs.get("detail") or "medium").lower()
+    truncate = 200 if detail == "low" else (80 if detail == "min" else 0)
     lines = ["## Channel search results"]
     for r in results:
         ts = r["timestamp"][:16]
+        body = r["body"]
+        tag = ""
+        if detail == "min":
+            body = body.replace("\n", " ").strip()
+        if truncate and len(body) > truncate:
+            from synapt.recall.channel import _estimate_token_count
+            tag = f" [truncated ~{_estimate_token_count(body[truncate:])} tok omitted]"
+            body = body[:truncate].rstrip() + "..."
         lines.append(
-            f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {r['body']}"
+            f"  [{r['message_id']}] #{r['channel']} {ts}  {r['from']}: {body}{tag}"
         )
     return "\n".join(lines)
 

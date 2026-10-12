@@ -2566,6 +2566,61 @@ class TestRecallSave:
 class TestRecallSyncMemory:
     """Tests for MEMORY.md sync into shared recall knowledge."""
 
+    @staticmethod
+    def _memory_file(memory_dir, name):
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: d\ntype: project\n---\nbody of {name}\n",
+            encoding="utf-8",
+        )
+
+    def _sync(self, home, project):
+        from synapt.recall.server import recall_sync_memory
+
+        with patch("pathlib.Path.home", return_value=home), \
+             patch("synapt.recall.server.Path.cwd", return_value=project), \
+             patch("synapt.recall.server.get_embedding_provider", return_value=None), \
+             patch("synapt.recall.server._invalidate_cache"):
+            return recall_sync_memory()
+
+    def test_recall_sync_memory_reads_the_configured_root(self, tmp_path, monkeypatch):
+        """Memory written only under $CLAUDE_CONFIG_DIR is synced."""
+        config = tmp_path / "accounts" / "core"
+        self._memory_file(config / "projects" / "proj-a" / "memory", "configured-only")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+        result = self._sync(tmp_path / "home", tmp_path / "gripspace")
+
+        assert "1 synced" in result, result
+
+    def test_recall_sync_memory_reads_both_roots(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        config = tmp_path / "accounts" / "core"
+        self._memory_file(home / ".claude" / "projects" / "proj-a" / "memory", "old-root")
+        self._memory_file(config / "projects" / "proj-b" / "memory", "configured-root")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+        result = self._sync(home, tmp_path / "gripspace")
+
+        assert "2 synced" in result, result
+
+    def test_recall_sync_memory_reads_a_memory_dir_reached_through_two_roots_once(
+        self, tmp_path, monkeypatch
+    ):
+        """Both roots symlink one project's memory to the same directory: one file, one sync."""
+        home = tmp_path / "home"
+        config = tmp_path / "accounts" / "core"
+        shared = tmp_path / "shared-memory"
+        self._memory_file(shared, "shared")
+        for root in (home / ".claude" / "projects" / "proj-a", config / "projects" / "proj-a"):
+            root.mkdir(parents=True)
+            (root / "memory").symlink_to(shared)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+        result = self._sync(home, tmp_path / "gripspace")
+
+        assert "1 synced" in result, result
+
     def test_recall_sync_memory_is_idempotent_per_file(self, tmp_path):
         from synapt.recall.core import project_index_dir
         from synapt.recall.server import recall_sync_memory

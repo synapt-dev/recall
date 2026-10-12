@@ -35,6 +35,7 @@ logger = logging.getLogger("synapt.recall")
 
 from synapt.recall.bm25 import BM25, _tokenize
 from synapt.recall.hybrid import augment_query_for_intent, extract_entities
+from synapt.recall.progress import ProgressLog, note, phase
 from synapt.recall.storage import RecallDB
 from synapt.recall.vector_math import cosine_similarity
 from synapt.recall.sharded_db import ShardedRecallDB
@@ -1665,7 +1666,8 @@ class TranscriptIndex:
         """
         if _env_flag("SYNAPT_DISABLE_CROSS_LINKS"):
             return 0
-        self._ensure_embeddings_loaded()
+        with phase("cross-session links: load embeddings"):
+            self._ensure_embeddings_loaded()
         if not self._db or not self._all_embeddings:
             return 0
         import numpy as np
@@ -1673,6 +1675,11 @@ class TranscriptIndex:
         rowids = self._emb_rowids if self._emb_matrix is not None else list(self._all_embeddings.keys())
         if len(rowids) < 2:
             return 0
+        # The pairwise matrix below is n x n float32, which is the cost a watcher needs to see before it is paid.
+        note(
+            f"cross-session links: {len(rowids)} chunks with embeddings; the similarity matrix is "
+            f"{len(rowids) ** 2 * 4 / 1e9:.3f} GB"
+        )
 
         # Build session map and chunk ID map: rowid -> session_id, rowid -> chunk_id
         session_map = self._db.chunk_session_map()
@@ -1690,22 +1697,28 @@ class TranscriptIndex:
         norms[norms == 0] = 1.0
         normed = matrix / norms
 
-        # Full pairwise cosine similarity
-        sim_matrix = normed @ normed.T
+        # Full pairwise cosine similarity: one matrix product, which cannot tick, so it is bracketed
+        with phase("cross-session links: similarity matrix"):
+            sim_matrix = normed @ normed.T
 
         # Zero out self-similarity and same-session pairs
+        mask_log = ProgressLog("cross-session links: same-session mask", len(rowids), "chunks")
         for i in range(len(rowids)):
+            mask_log.tick(i + 1)
             sim_matrix[i, i] = -1.0
             for j in range(i + 1, len(rowids)):
                 if sessions[i] == sessions[j]:
                     sim_matrix[i, j] = -1.0
                     sim_matrix[j, i] = -1.0
+        mask_log.done()
 
         links: list[tuple[str, str, float]] = []
         k = self.CROSS_LINK_MAX_PER_CHUNK
         min_sim = self.CROSS_LINK_MIN_SIM
 
+        top_log = ProgressLog("cross-session links: top-k", len(rowids), "chunks")
         for i in range(len(rowids)):
+            top_log.tick(i + 1)
             row = sim_matrix[i]
             # Get top-K indices
             if len(rowids) > k:
@@ -1717,8 +1730,10 @@ class TranscriptIndex:
                     src_id = id_map.get(rowids[i], str(rowids[i]))
                     tgt_id = id_map.get(rowids[int(j)], str(rowids[int(j)]))
                     links.append((src_id, tgt_id, float(row[j])))
+        top_log.done()
 
-        self._db.save_chunk_links(links)
+        with phase("cross-session links: save links"):
+            self._db.save_chunk_links(links)
         logger.info("Built %d cross-session links for %d chunks", len(links), len(rowids))
         return len(links)
 
@@ -5773,16 +5788,74 @@ def project_archive_dir(project_dir: Path | None = None) -> Path:
     return project_worktree_dir(project_dir) / "transcripts"
 
 
+def claude_projects_roots(relative_to: Path | None = None) -> list[Path]:
+    """Where Claude Code keeps per-project transcripts, the configured root first.
+
+    Claude Code writes under ``$CLAUDE_CONFIG_DIR/projects`` when that variable is
+    set and under ``~/.claude/projects`` otherwise. Both are read: a session run
+    under a configured directory and an earlier one run without it belong to the
+    same project, and reading only the default root left every configured-root
+    session invisible to resume and build. Listed once each, by resolved path.
+
+    The variable may name several directories separated by commas, read in the
+    order given, and ``~/.config/claude`` is read too when it holds a
+    ``projects`` directory, before ``~/.claude``: the roots other transcript
+    readers (ccusage) look in, so a session under any of them is not invisible.
+
+    A listed directory that is not absolute (after ``~`` expands) is relative to
+    the directory Claude Code ran in, which for a project's transcripts is the
+    project itself (measured: ``CLAUDE_CONFIG_DIR=relcfg claude -p`` wrote
+    ``./relcfg/projects/<slug>/``). So it resolves against *relative_to* when a
+    caller reading one project passes it, and is skipped otherwise: a walker over
+    every project has no single directory it could be relative to.
+    """
+    roots: list[Path] = []
+    for configured in os.environ.get("CLAUDE_CONFIG_DIR", "").split(","):
+        configured = configured.strip()
+        if not configured:
+            continue
+        listed = Path(configured).expanduser()
+        if not listed.is_absolute():
+            if relative_to is None:
+                continue
+            listed = Path(relative_to).resolve() / listed
+        roots.append(listed / "projects")
+    xdg_style = Path.home() / ".config" / "claude" / "projects"
+    if xdg_style.is_dir():
+        roots.append(xdg_style)
+    roots.append(Path.home() / ".claude" / "projects")
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        key = root.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def project_transcript_dirs_any_root(project_dir: Path | None = None) -> list[Path]:
+    """Every Claude Code transcript directory for one project, across the roots of
+    ``claude_projects_roots``, configured root first. Only directories holding a
+    transcript are returned."""
+    slug = project_slug(project_dir)
+    found: list[Path] = []
+    for root in claude_projects_roots(relative_to=project_dir or Path.cwd()):
+        d = root / slug
+        if d.is_dir() and any(d.glob("*.jsonl")):
+            found.append(d)
+    return found
+
+
 def project_transcript_dir(project_dir: Path | None = None) -> Path | None:
     """Return the Claude Code transcript directory for a project.
 
-    Returns None if the directory doesn't exist or has no transcripts.
+    The configured root (``$CLAUDE_CONFIG_DIR``) wins when it holds transcripts,
+    because that is where the running session writes. Returns None if no root
+    has a directory with transcripts.
     """
-    slug = project_slug(project_dir)
-    d = Path.home() / ".claude" / "projects" / slug
-    if d.is_dir() and any(d.glob("*.jsonl")):
-        return d
-    return None
+    found = project_transcript_dirs_any_root(project_dir)
+    return found[0] if found else None
 
 
 def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
@@ -5808,9 +5881,10 @@ def project_transcript_dirs(project_dir: Path | None = None) -> list[Path]:
         if slug in seen_slugs:
             return
         seen_slugs.add(slug)
-        transcript_dir = Path.home() / ".claude" / "projects" / slug
-        if transcript_dir.is_dir() and any(transcript_dir.glob("*.jsonl")):
-            dirs.append(transcript_dir)
+        for root in claude_projects_roots(relative_to=path):
+            transcript_dir = root / slug
+            if transcript_dir.is_dir() and any(transcript_dir.glob("*.jsonl")):
+                dirs.append(transcript_dir)
 
     # Always include the actual CWD's transcript dir
     _maybe_add_transcript_dir(actual_dir)

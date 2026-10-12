@@ -52,6 +52,7 @@ import importlib.resources
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,7 @@ from synapt.recall.core import (
     _extract_assistant_content,
 )
 from synapt.recall.chatgpt import parse_chatgpt_archive
+from synapt.recall.progress import ProgressLog, phase
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.journal import (
     latest_transcript_path,
@@ -1271,7 +1273,9 @@ def _archive_and_build_locked(
             # Enrich each cluster with search_text from member chunk content.
             # Include user_text, tools, and files so concise-mode search
             # can find clusters by what users asked, not just assistant answers.
-            for cl in clusters:
+            search_log = ProgressLog("clusters: search text", len(clusters), "clusters")
+            for position, cl in enumerate(clusters, 1):
+                search_log.tick(position)
                 member_chunks = [chunk_map[cid] for cid in cl["chunk_ids"] if cid in chunk_map]
                 texts: list[str] = []
                 for c in member_chunks:
@@ -1287,6 +1291,7 @@ def _archive_and_build_locked(
                 if len(joined) > 4000:
                     joined = joined[:4000].rsplit(" ", 1)[0]
                 cl["search_text"] = joined
+            search_log.done()
 
             clusters_receipt = db.save_clusters(clusters, memberships)
             # Pre-generate concat summaries at build time (read path stays pure).
@@ -1297,7 +1302,9 @@ def _archive_and_build_locked(
                     "SELECT cluster_id FROM cluster_summaries WHERE method = 'llm'"
                 ).fetchall()
             }
-            for cl in clusters:
+            summaries_log = ProgressLog("clusters: summaries", len(clusters), "clusters")
+            for position, cl in enumerate(clusters, 1):
+                summaries_log.tick(position)  # before the skip, so a run of already-summarised clusters still moves n/N
                 if cl["cluster_id"] in llm_cluster_ids:
                     continue  # Already has LLM summary
                 member_chunks = [chunk_map[cid] for cid in cl["chunk_ids"] if cid in chunk_map]
@@ -1305,6 +1312,7 @@ def _archive_and_build_locked(
                     summary = generate_concat_summary(member_chunks, max_tokens=200)
                     if summary:
                         db.save_cluster_summary(cl["cluster_id"], summary)
+            summaries_log.done()
             clusters_line = f"  Clusters: {len(clusters)} topic clusters from {sum(c['chunk_count'] for c in clusters)} chunks"
             dangling_removed = clusters_receipt.get("dangling_removed", 0)
             if dangling_removed:
@@ -1336,7 +1344,9 @@ def _archive_and_build_locked(
         if transcript_only:
             tagged = 0
             all_clusters = db.load_clusters()
-            for cl in all_clusters:
+            tags_log = ProgressLog("clusters: tags", len(all_clusters), "clusters")
+            for position, cl in enumerate(all_clusters, 1):
+                tags_log.tick(position)
                 if cl["cluster_type"] != "topic":
                     continue
                 tags = _extract_tags(cl, j_entries)
@@ -1349,6 +1359,7 @@ def _archive_and_build_locked(
                         (json.dumps(tags), new_search, cl["cluster_id"]),
                     )
                     tagged += 1
+            tags_log.done()
             if tagged:
                 db._conn.commit()
                 # FTS is kept in sync by the clusters_au trigger on UPDATE;
@@ -1366,7 +1377,8 @@ def _archive_and_build_locked(
     # Process pending promotions (advance tiers based on access stats)
     try:
         from synapt.recall.promotion import process_build_promotions
-        promo = process_build_promotions(db)
+        with phase("build: promotions"):
+            promo = process_build_promotions(db)
         promo_total = sum(promo.values())
         if promo_total:
             print(f"  Promotions: {promo['summaries_upgraded']} summaries, "
@@ -1410,9 +1422,12 @@ def _archive_and_build_locked(
 
     # Maintain adaptive memory: decay, archival, log compaction
     try:
-        decayed = db.recompute_decay_scores()
-        archived = db.archive_cold_clusters()
-        compacted = db.compact_access_log()
+        with phase("build: decay scores"):
+            decayed = db.recompute_decay_scores()
+        with phase("build: archive cold clusters"):
+            archived = db.archive_cold_clusters()
+        with phase("build: compact access log"):
+            compacted = db.compact_access_log()
         parts = []
         if archived:
             parts.append(f"{len(archived)} clusters archived")
@@ -1431,11 +1446,13 @@ def _archive_and_build_locked(
         # Always compact first — removes same-ID duplicates from append-only JSONL
         kn_path = _knowledge_path(project_dir)
         if kn_path.exists():
-            compacted = compact_knowledge(kn_path)
+            with phase("knowledge: compact"):
+                compacted = compact_knowledge(kn_path)
             if compacted:
                 print(f"  Knowledge compact: removed {compacted} stale version(s)")
         # Then merge semantically similar nodes (different IDs, same content)
-        merged = dedup_knowledge_nodes(threshold=0.7, project_dir=project_dir)
+        with phase("knowledge: dedup"):
+            merged = dedup_knowledge_nodes(threshold=0.7, project_dir=project_dir)
         if merged:
             print(f"  Knowledge dedup: merged {merged} duplicate(s)")
     except Exception as exc:
@@ -1597,16 +1614,22 @@ def _archive_and_build_locked(
 def discover_transcript_dirs() -> list[Path]:
     """Find all Claude Code project transcript directories.
 
-    Scans ~/.claude/projects/*/ for directories containing .jsonl files.
-    Returns directories sorted alphabetically.
+    Scans ``<root>/*/`` under every root of ``claude_projects_roots``
+    (configured roots first) for directories containing .jsonl files, sorted
+    alphabetically within each root. A directory reached through two roots is
+    listed once.
     """
-    base = Path.home() / ".claude" / "projects"
-    if not base.exists():
-        return []
+    from synapt.recall.core import claude_projects_roots
+
     dirs = []
-    for d in sorted(base.iterdir()):
-        if d.is_dir() and any(d.glob("*.jsonl")):
-            dirs.append(d)
+    seen: set[Path] = set()
+    for base in claude_projects_roots():
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and any(d.glob("*.jsonl")) and d.resolve() not in seen:
+                seen.add(d.resolve())
+                dirs.append(d)
     return dirs
 
 
@@ -1677,6 +1700,9 @@ def _configure_codex_cwd_cache(index_dir: Path) -> None:
 
 def cmd_build(args: argparse.Namespace) -> None:
     """Build a transcript index from local files, HuggingFace, or ChatGPT."""
+    if getattr(args, "check_floor", False):
+        # Before ANY index resolution: the check reads the host and nothing else.
+        sys.exit(_check_build_floor())
     project = Path.cwd().resolve()
     index_dir = project_index_dir(project)
     # recall#1123 hardening: index_dir is derived FROM project here, so this
@@ -1708,7 +1734,7 @@ def cmd_build(args: argparse.Namespace) -> None:
     legacy = _check_legacy_index()
     if legacy:
         print(f"[build] Note: legacy index found at {legacy}")
-        print(f"[build] New location: {project_index_dir()}")
+        print(f"[build] New location: {index_dir}")
         print()
 
     from synapt.recall.codex import _has_buildable_transcripts
@@ -1763,7 +1789,9 @@ def cmd_build(args: argparse.Namespace) -> None:
     print(f"  Sessions: {stats['session_count']}")
     if stats.get("date_range"):
         print(f"  Date range: {stats['date_range']['earliest'][:10]} -> {stats['date_range']['latest'][:10]}")
-    print(f"  Saved to: {project_index_dir()}")
+    # index_dir is the store this build wrote: derived from the working directory with an explicit project, which
+    # suppresses the environment's store roots. The zero-argument resolver reads those roots and names another store.
+    print(f"  Saved to: {index_dir}")
 
 
 def cmd_code(args: argparse.Namespace) -> None:
@@ -2350,6 +2378,8 @@ def cmd_resume(args: argparse.Namespace) -> None:
     ):
         print(f"Error: no index found at {index_dir}", file=sys.stderr)
         print("Run 'synapt recall build' or 'synapt init' first.", file=sys.stderr)
+        # The gap reads live transcripts, not the index, so it still answers here.
+        _print_transcript_gap(args, project)
         sys.exit(1)
 
     # recall#1125: every caller of _session_cwd (this function's own loop
@@ -2493,11 +2523,69 @@ def cmd_resume(args: argparse.Namespace) -> None:
     # the same declared version while the linked worktree underneath it
     # changes out from under every running process.
     print(_with_provenance(_with_query_freshness(format_resume(view), freshness_line)))
+    _print_transcript_gap(args, project)
     from synapt.recall.build_deferrals import deferral_notice
     notice = _deferral_notice_for_index(
         index_dir, own_store=not getattr(args, "index", None) and not getattr(args, "out", None))
     if notice:
         print(notice)
+
+
+def _gap_since(args) -> tuple[float, str]:
+    """The gap's start: --since, else the newest authored journal, else -6h."""
+    import time as _time
+
+    from synapt.recall.journal import _journal_path
+    from synapt.recall.resume import GAP_DEFAULT_HOURS, _timestamp_epoch, authored_journals
+
+    raw = getattr(args, "since", None)
+    if raw:
+        match = re.fullmatch(r"-?(\d+)h", raw.strip())
+        if match:
+            return _time.time() - int(match.group(1)) * 3600, f"--since {raw}"
+        epoch = _timestamp_epoch(raw.strip())
+        if not epoch:
+            raise ValueError(f"--since must be an ISO time or Nh, got {raw!r}")
+        return epoch, f"--since {raw}"
+    journals = authored_journals(_journal_path(getattr(args, "project", None)))
+    if journals:
+        newest = max(journals, key=lambda e: _timestamp_epoch(e.timestamp))
+        epoch = _timestamp_epoch(newest.timestamp)
+        if epoch:
+            return epoch, "the newest authored journal"
+    return _time.time() - GAP_DEFAULT_HOURS * 3600, f"no authored journal, so the last {GAP_DEFAULT_HOURS}h"
+
+
+def _print_transcript_gap(args, project) -> None:
+    """Print what was typed to this desk in the sessions before the live one.
+
+    Never raises past a one-line note: the gap is the wake's backstop when the
+    index is stale, so its own failure must be visible and must not take the
+    rest of the resume with it.
+    """
+    from synapt.recall.resume import (
+        GAP_HIDE_ENV,
+        caller_transcripts,
+        format_transcript_gap,
+        gap_hide_pattern,
+        gather_transcript_gap,
+    )
+
+    try:
+        since, source = _gap_since(args)
+        gap = gather_transcript_gap(
+            caller_transcripts(Path(project)),
+            since=since,
+            since_source=source,
+            hide=gap_hide_pattern(os.environ.get(GAP_HIDE_ENV)),
+            live_session_id=(getattr(args, "live_session", None)
+                             or os.environ.get("CLAUDE_CODE_SESSION_ID") or None),
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        print(f"TRANSCRIPT GAP: not read ({type(exc).__name__}: {exc})")
+        return
+    print()
+    print(format_transcript_gap(gap))
 
 
 def _attach_unclean_end(view, args):
@@ -2745,6 +2833,27 @@ def cmd_import(args: argparse.Namespace) -> None:
     )
 
 
+def _find_live_transcript(project: Path, session_id: str) -> Path | None:
+    """The live transcript ``<session_id>.jsonl`` under the first Claude Code root
+    that holds it ($CLAUDE_CONFIG_DIR first, then ~/.claude), or None."""
+    from synapt.recall.core import project_transcript_dirs_any_root
+
+    for transcript_dir in project_transcript_dirs_any_root(project):
+        target = transcript_dir / f"{session_id}.jsonl"
+        if target.exists():
+            return target
+    return None
+
+
+def _newest_live_transcript(project: Path) -> Path | None:
+    """The most recently modified live transcript of ``project`` across every
+    Claude Code root, or None."""
+    from synapt.recall.core import project_transcript_dirs_any_root
+
+    files = [f for d in project_transcript_dirs_any_root(project) for f in d.glob("*.jsonl")]
+    return max(files, key=lambda f: f.stat().st_mtime) if files else None
+
+
 def cmd_transcript(args: argparse.Namespace) -> None:
     """Display or save a session transcript."""
     from synapt.recall.archive import archive_transcripts
@@ -2758,7 +2867,7 @@ def cmd_transcript(args: argparse.Namespace) -> None:
 
     # Find the transcript file
     if args.session_id:
-        target = transcript_dir / f"{args.session_id}.jsonl"
+        target = _find_live_transcript(project, args.session_id) or transcript_dir / f"{args.session_id}.jsonl"
         if not target.exists():
             # Also check archive
             archive = project_archive_dir(project)
@@ -2769,12 +2878,11 @@ def cmd_transcript(args: argparse.Namespace) -> None:
             _list_available_sessions(transcript_dir, project)
             sys.exit(1)
     else:
-        # Find current/most recent session by mtime
-        jsonl_files = sorted(transcript_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-        if not jsonl_files:
+        # Find current/most recent session by mtime, under every Claude Code root
+        target = _newest_live_transcript(project)
+        if target is None:
             print("No transcript files found.", file=sys.stderr)
             sys.exit(1)
-        target = jsonl_files[0]
 
     # --save: archive it locally
     if args.save:
@@ -2860,6 +2968,48 @@ def _list_available_sessions(transcript_dir: Path, project: Path) -> None:
         print(f"{sid:<40} {format_size(size):>10} {loc:>10}  {dt}")
 
 
+def _journal_flag_refusal(args: argparse.Namespace) -> str | None:
+    """A reason to refuse this flag combination, or None.
+
+    Every flag `journal` accepts must either do what it says or stop the command
+    before anything is written. ``--dry-run`` and ``--all-stores`` only mean
+    something under ``--repair``; accepted anywhere else they were ignored, and a
+    ``--write --dry-run`` wrote. ``--write`` beside another mode ran the other
+    mode and silently did not write the entry. Both are refused here, exit 2.
+    """
+    if not getattr(args, "repair", False):
+        for attr, flag in (("dry_run", "--dry-run"), ("all_stores", "--all-stores")):
+            if getattr(args, attr, False):
+                return (f"{flag} applies only with --repair and would be ignored here; "
+                        "refusing so that nothing is done on a flag that does nothing.")
+    if getattr(args, "write", False):
+        clash = [flag for attr, flag in (("read", "--read"), ("list", "--list"),
+                                         ("show", "--show"), ("repair", "--repair"))
+                 if getattr(args, attr, None)]
+        if clash:
+            return (f"--write cannot be combined with {', '.join(clash)}: only one mode would "
+                    "run, and the entry you asked for would not be written.")
+    return None
+
+
+def _journal_file_arg(args: argparse.Namespace) -> Path | None:
+    """The journal FILE named by ``--path``, or None to resolve the live one.
+
+    ``--path`` names the file in every mode (``--repair`` reads it its own way, so
+    it is left to that branch). A directory is refused: guessing a file inside it
+    is how a fixture lands in the wrong store.
+    """
+    explicit = getattr(args, "path", None)
+    if not explicit or getattr(args, "repair", False):
+        return None
+    target = Path(explicit).expanduser()
+    if target.is_dir():
+        print(f"synapt recall journal: --path names the journal FILE, but {target} is a directory.",
+              file=sys.stderr)
+        sys.exit(2)
+    return target
+
+
 def cmd_journal(args: argparse.Namespace) -> None:
     """Display or write session journal entries."""
     from synapt.recall.journal import (
@@ -2876,8 +3026,14 @@ def cmd_journal(args: argparse.Namespace) -> None:
         session_done_items,
     )
 
+    refusal = _journal_flag_refusal(args)
+    if refusal:
+        print(f"synapt recall journal: {refusal}", file=sys.stderr)
+        sys.exit(2)
+    journal_file = _journal_file_arg(args)
+
     if args.read:
-        entry = read_latest(meaningful=True)
+        entry = read_latest(path=journal_file, meaningful=True)
         if not entry:
             return  # Silent — no meaningful journal yet (hook context)
         text = format_for_session_start(entry)
@@ -2887,7 +3043,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
 
     if args.list:
         n = args.show if args.show else 5
-        entries = read_entries(n=n)
+        entries = read_entries(path=journal_file, n=n)
         if not entries:
             print("No journal entries yet.")
             return
@@ -2901,7 +3057,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         if args.show < 1:
             print("--show requires a positive integer.", file=sys.stderr)
             sys.exit(1)
-        entries = read_entries(n=args.show)
+        entries = read_entries(path=journal_file, n=args.show)
         if not entries:
             print("No journal entries yet.")
             return
@@ -2954,7 +3110,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
     project = Path.cwd().resolve()
     transcript_path = latest_transcript_path(project)
     entry = auto_extract_entry(transcript_path=transcript_path, cwd=str(project))
-    previous_entry = read_previous_meaningful(entry.session_id)
+    previous_entry = read_previous_meaningful(entry.session_id, path=journal_file)
 
     # Merge CLI-provided fields
     if args.focus:
@@ -2971,7 +3127,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         entry.next_steps,
         entry.done,
         previous_entry,
-        same_session_done=session_done_items(entry.session_id),
+        same_session_done=session_done_items(entry.session_id, path=journal_file),
         # What THIS session already retired in earlier writes: previous_entry is
         # from before the session by design, so without this a step retired
         # minutes ago comes back on the next write.
@@ -2987,7 +3143,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         if not entry.has_content():
             print("No content to journal (no files modified, no fields provided).", file=sys.stderr)
             return
-        path = append_entry(entry)
+        path = append_entry(entry, path=journal_file)
         sid = entry.session_id[:8] if entry.session_id else "unknown"
         print(f"Auto-stub saved for enrichment ({sid})", file=sys.stderr)
         return
@@ -2996,7 +3152,7 @@ def cmd_journal(args: argparse.Namespace) -> None:
         print("No content to journal (no files modified, no fields provided).", file=sys.stderr)
         return
 
-    path = append_entry(entry)
+    path = append_entry(entry, path=journal_file)
     print(f"Journal entry written to {path}", file=sys.stderr)
     print(format_write_confirmation(entry, explicit_next_steps, report=carry_report))
 
@@ -3112,6 +3268,13 @@ def cmd_consolidate(args: argparse.Namespace) -> None:
         print(f"\n[consolidate] Done! Knowledge nodes: {', '.join(parts)}.")
     else:
         print(f"\n[consolidate] No knowledge extracted from {result.entries_processed} entries.")
+
+    # What the content filters turned away. Diagnostics, so stderr; stdout above is unchanged.
+    if result.nodes_rejected:
+        shown = "; ".join(f'"{w}"' for w in result.rejected_preview)
+        print(f"[consolidate] the model returned {result.nodes_emitted} node(s); "
+              f"{result.nodes_rejected} rejected by the content filters"
+              f"{': ' + shown if shown else ''}.", file=sys.stderr)
 
 
 def cmd_remind(args: argparse.Namespace) -> None:
@@ -3635,6 +3798,50 @@ def generate_startup_context(
             except Exception:
                 tail = None
             continuity_lines.insert(0, format_unclean_end(found, tail))
+    except Exception:
+        pass
+
+    # 5b. Transcript gap: what was typed to this desk in the sessions before
+    # this one, read from the live transcripts, which the index can lag by
+    # hours. Unlike the O(1) blocks above, this reads each session in the gap
+    # in full: O(transcript size), measured 0.42 s for 55 MB. Like 5a, it runs only when the caller names the session that is
+    # starting (exclusion by identity), and it renders only when an earlier
+    # session sits in the gap. Bounded per session to fit the wake's
+    # transcript_gap cap (session_start); the render says what it withheld and
+    # how to read all of it.
+    try:
+        if current_session_id:
+            from synapt.recall.resume import (
+                GAP_DEFAULT_HOURS,
+                GAP_HIDE_ENV,
+                _timestamp_epoch,
+                caller_transcripts,
+                format_transcript_gap,
+                gap_hide_pattern,
+                gather_transcript_gap,
+            )
+            import time as _time
+
+            if latest_authored_journal_timestamp and _timestamp_epoch(latest_authored_journal_timestamp):
+                gap_since = _timestamp_epoch(latest_authored_journal_timestamp)
+                gap_source = "the newest authored journal"
+            else:
+                gap_since = _time.time() - GAP_DEFAULT_HOURS * 3600
+                gap_source = f"no authored journal, so the last {GAP_DEFAULT_HOURS}h"
+            gap = gather_transcript_gap(
+                caller_transcripts(project),
+                since=gap_since,
+                since_source=gap_source,
+                hide=gap_hide_pattern(os.environ.get(GAP_HIDE_ENV)),
+                live_session_id=current_session_id,
+            )
+            # A clean end still writes after its own journal (the session goes on
+            # a little), so a gap with sessions but nothing typed is not news.
+            if any(sess.messages or sess.files_written for sess in gap.sessions):
+                position = 1 if continuity_lines and continuity_lines[0].startswith("UNCLEAN END") else 0
+                continuity_lines.insert(
+                    position, format_transcript_gap(gap, max_chars=300, max_messages=6)
+                )
     except Exception:
         pass
 
@@ -4964,6 +5171,28 @@ def _host_memory_verdict() -> "tuple[str, str]":
     return "pass", numbers
 
 
+# Exit codes of ``build --check-floor``. A caller reads the code and the last stdout line and
+# nothing else, so "could not measure" gets its OWN code: exit 0 for both "measured and fine"
+# and "could not read the host" would let an unread instrument pass as a pass.
+CHECK_FLOOR_OK = 0
+CHECK_FLOOR_REFUSE = 2
+CHECK_FLOOR_CANNOT_MEASURE = 3
+
+
+def _check_build_floor() -> int:
+    """Run only the build's own host-memory verdict and report it as an exit code.
+
+    The one place the build floor lives is :func:`_host_memory_verdict`; a gate in front of a
+    heavy run calls this instead of copying the number.
+    """
+    verdict, numbers = _host_memory_verdict()
+    if verdict == "cannot_measure":
+        print(f"cannot_measure: {numbers}")
+        return CHECK_FLOOR_CANNOT_MEASURE
+    print(numbers)
+    return CHECK_FLOOR_REFUSE if verdict == "refuse" else CHECK_FLOOR_OK
+
+
 def cmd_maintenance(args: argparse.Namespace) -> None:
     """``synapt maintenance status`` -- each guard beside its live reading and its source.
 
@@ -5166,6 +5395,11 @@ def make_parser() -> argparse.ArgumentParser:
              "scripts and hooks that pass it explicitly keep working.",
     )
     build_parser.add_argument("--rescrub", action="store_true", help="Re-scrub archived transcripts with latest patterns before building")
+    build_parser.add_argument(
+        "--check-floor", action="store_true",
+        help="Run only the host-memory check this build would run and exit: 0 met, 2 refused, "
+             "3 could not measure. Prints one line of numbers; reads no index and builds nothing.",
+    )
 
     # Split
     split_parser = subparsers.add_parser(
@@ -5237,6 +5471,12 @@ def make_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--index", default=None, help="Index directory (default: per-project)")
     resume_parser.add_argument("--turns", type=int, default=10,
                                help="How many trailing turns to show (default: 10)")
+    resume_parser.add_argument("--since", default=None,
+                               help="Start of the transcript gap: an ISO time or Nh hours back "
+                                    "(default: the newest authored journal, else -6h)")
+    resume_parser.add_argument("--live-session", default=None,
+                               help="Session id the transcript gap excludes as live "
+                                    "(default: $CLAUDE_CODE_SESSION_ID; with neither, none is excluded)")
 
     # Rebuild (hook-triggered)
     rebuild_parser = subparsers.add_parser("rebuild", help="Incremental rebuild (for hooks)")
@@ -5286,12 +5526,14 @@ def make_parser() -> argparse.ArgumentParser:
     journal_parser.add_argument("--repair", action="store_true",
                                 help="Recover fields swallowed by an unclosed tool-call parameter (append-only)")
     journal_parser.add_argument("--dry-run", action="store_true",
-                                help="With --repair: report what would change, write nothing")
+                                help="With --repair only: report what would change, write nothing "
+                                     "(refused with any other mode)")
     journal_parser.add_argument("--all-stores", action="store_true",
-                                help="With --repair: sweep every worktree journal, not just this one")
+                                help="With --repair only: sweep every worktree journal, not just this one "
+                                     "(refused with any other mode)")
     journal_parser.add_argument("--path", default=None,
-                                help="With --repair: target this store explicitly (or this data root "
-                                     "with --all-stores) instead of resolving from the working directory")
+                                help="Journal file to read or write instead of resolving the live one from "
+                                     "the working directory (every mode; with --repair --all-stores, the data root)")
 
     # Enrich
     enrich_parser = subparsers.add_parser("enrich", help="Enrich auto-journal stubs using MLX (local LLM)")
