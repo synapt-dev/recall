@@ -3067,8 +3067,8 @@ def recall_sync_memory(memory_dirs: list[str] | None = None) -> str:
     """Sync this project's own Claude Code memory files into recall as knowledge nodes.
 
     Reads ``<root>/<slug>/memory/*.md`` under every Claude Code root, where
-    ``<slug>`` is this project's own directory name there (the gripspace root's,
-    when there is one), parses the YAML frontmatter (name, description, type),
+    ``<slug>`` is the directory name Claude Code gives the directory this
+    session runs in, parses the YAML frontmatter (name, description, type),
     and upserts each file as one knowledge node via recall_save, keyed by the
     file's path so a re-sync updates in place. Only this project's memory: a
     sync never reads another project's directory unless it is named.
