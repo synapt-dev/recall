@@ -1478,7 +1478,7 @@ def upgrade_large_cluster_summaries(
         return 0
 
     # Find large clusters without LLM summaries, ordered by size descending
-    rows = db._conn.execute(
+    rows = db.index_conn.execute(
         "SELECT c.cluster_id, c.topic, c.chunk_count "
         "FROM clusters c "
         "LEFT JOIN cluster_summaries cs "
@@ -1543,12 +1543,12 @@ def upgrade_large_cluster_summaries(
     # Clean up orphaned LLM summaries that were kept for content hash matching.
     # Now that upgrade is complete, any orphans whose content_hash was reused
     # above (or not needed) can be safely removed.
-    db._conn.execute(
+    db.index_conn.execute(
         "DELETE FROM cluster_summaries "
         "WHERE method = 'llm' "
         "AND cluster_id NOT IN (SELECT cluster_id FROM clusters)"
     )
-    db._conn.commit()
+    db.index_conn.commit()
 
     return count
 
@@ -1754,7 +1754,7 @@ def stale_transcript_chunk_ids(db: "RecallDB") -> list[str]:
     """
     clustered_ids = {
         row[0]
-        for row in db._conn.execute(
+        for row in db.index_conn.execute(
             "SELECT DISTINCT cc.chunk_id FROM cluster_chunks cc "
             "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
             "WHERE cl.cluster_type = 'topic'"

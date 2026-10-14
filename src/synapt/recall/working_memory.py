@@ -152,7 +152,7 @@ class WorkingMemory:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
             # Get top accessed items by frequency in the last N days
-            rows = db._conn.execute(
+            rows = db.index_conn.execute(
                 "SELECT item_type, item_id, COUNT(*) as cnt, "
                 "  MAX(query) as last_query "
                 "FROM access_log "

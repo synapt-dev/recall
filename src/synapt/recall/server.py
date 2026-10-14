@@ -1794,7 +1794,7 @@ def recall_stats() -> str:
         if index._db:
             n_topic = index._db.cluster_count(cluster_type="topic")
             n_timeline = index._db.cluster_count(cluster_type="timeline")
-            n_archived = index._db._conn.execute(
+            n_archived = index._db.index_conn.execute(
                 "SELECT COUNT(*) FROM clusters WHERE status = 'archived'"
             ).fetchone()[0]
             if n_topic > 0 or n_timeline > 0 or n_archived > 0:
@@ -1997,7 +1997,7 @@ def recall_contradict(
             # Filtering by status='pending' here is correct (unlike the single post-resolve
             # fetch this replaces, which deliberately read without a status filter because it
             # ran AFTER the row had already flipped away from 'pending').
-            pending_row = index._db._conn.execute(
+            pending_row = index._db.index_conn.execute(
                 "SELECT * FROM pending_contradictions WHERE id = ? AND status = 'pending'",
                 (contradiction_id,),
             ).fetchone()
@@ -3357,7 +3357,7 @@ def recall_timeline(
                 sql += " AND c.branch = ?"
                 params.append(branch)
             sql += " ORDER BY c.date_start"
-            rows = db._conn.execute(sql, params).fetchall()
+            rows = db.index_conn.execute(sql, params).fetchall()
             arcs = [
                 {
                     "cluster_id": r["cluster_id"],

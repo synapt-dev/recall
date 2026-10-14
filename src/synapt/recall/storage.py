@@ -2017,6 +2017,44 @@ class RecallDB:
                 )
         return loaded
 
+    @property
+    def index_conn(self) -> sqlite3.Connection:
+        """The connection for this file's INDEX tables (knowledge, clusters, summaries, access log, contradictions,
+        overlay). ``ShardedRecallDB.index_conn`` is ``index.db``'s; neither is for reading chunks."""
+        return self._conn
+
+    def chunk_rows_by_ids(self, chunk_ids: list[str], table: str = "chunks") -> list:
+        """Rows of the given chunks (id, session_id, timestamp, user_text, assistant_text, tools_used,
+        files_touched), in no order. ``table`` is ``chunks`` or the overlay's ``query_tail_chunks``."""
+        if table not in ("chunks", "query_tail_chunks"):
+            raise ValueError(f"chunk_rows_by_ids: unknown table {table!r}")
+        rows: list = []
+        ids = list(dict.fromkeys(chunk_ids))
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            rows.extend(self._conn.execute(
+                "SELECT id, session_id, timestamp, user_text, assistant_text, tools_used, files_touched "
+                f"FROM {table} WHERE id IN (" + ",".join("?" for _ in batch) + ")",
+                batch,
+            ).fetchall())
+        return rows
+
+    def clusters_for_chunk_ids(self, chunk_ids: list[str], include_archived: bool = False) -> list[tuple[str, str]]:
+        """``(chunk_id, cluster_id)`` for non-timeline clusters holding the given chunks; index tables only."""
+        status_clause = "" if include_archived else "AND cl.status = 'active' "
+        pairs: list[tuple[str, str]] = []
+        ids = list(dict.fromkeys(chunk_ids))
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            pairs.extend((r[0], r[1]) for r in self._conn.execute(
+                "SELECT cc.chunk_id, cl.cluster_id FROM cluster_chunks cc "
+                "JOIN clusters cl ON cl.cluster_id = cc.cluster_id "
+                "WHERE cc.chunk_id IN (" + ",".join("?" for _ in batch) + ") "
+                f"AND cl.cluster_type != 'timeline' {status_clause}",
+                batch,
+            ).fetchall())
+        return pairs
+
     def chunk_location(self, chunk_id: str, table: str = "chunks"):  # noqa: ANN201
         """The row that locates one chunk in its transcript, or None: transcript_path, byte_offset, byte_length,
         session_id, turn_index, timestamp. ``table`` is ``chunks`` or the overlay's ``query_tail_chunks``."""
@@ -4103,7 +4141,7 @@ class RecallDB:
         return results
 
     def create_singleton_cluster(
-        self, chunk_id: str, topic: str = "",
+        self, chunk_id: str, topic: str = "", *, chunk_user_text: str | None = None,
     ) -> str | None:
         """Create a singleton cluster for a hot orphan chunk.
 
@@ -4112,11 +4150,14 @@ class RecallDB:
         it from Jaccard-derived topic clusters during rebuild.
         """
         import hashlib
-        row = self._conn.execute(
-            "SELECT id FROM chunks WHERE id = ?", (chunk_id,)
-        ).fetchone()
-        if row is None:
-            return None
+        # ``chunk_user_text`` is given by a caller that found the chunk elsewhere (``ShardedRecallDB``, whose chunks
+        # live in the shards); this file's chunks table is then not consulted.
+        if chunk_user_text is None:
+            row = self._conn.execute(
+                "SELECT id FROM chunks WHERE id = ?", (chunk_id,)
+            ).fetchone()
+            if row is None:
+                return None
 
         cluster_id = "clust-" + hashlib.sha1(
             chunk_id.encode()
@@ -4131,7 +4172,9 @@ class RecallDB:
             return existing["cluster_id"]
 
         now = datetime.now(timezone.utc).isoformat()
-        if not topic:
+        if not topic and chunk_user_text is not None:
+            topic = chunk_user_text[:100]
+        elif not topic:
             # Extract a topic from the chunk's user_text
             cdata = self._conn.execute(
                 "SELECT user_text FROM chunks WHERE id = ?", (chunk_id,)
