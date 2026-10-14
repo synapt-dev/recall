@@ -76,21 +76,7 @@ def _session_info(db: RecallDB) -> list[dict]:
     Returns list of dicts with session_id, first_ts, last_ts, chunk_count,
     ordered chronologically.
     """
-    rows = db._conn.execute(
-        "SELECT session_id, MIN(timestamp) as first_ts, "
-        "MAX(timestamp) as last_ts, COUNT(*) as cnt "
-        "FROM chunks WHERE turn_index >= 0 "
-        "GROUP BY session_id ORDER BY first_ts"
-    ).fetchall()
-    return [
-        {
-            "session_id": r["session_id"],
-            "first_ts": r["first_ts"],
-            "last_ts": r["last_ts"],
-            "chunk_count": r["cnt"],
-        }
-        for r in rows
-    ]
+    return db.session_turn_spans()
 
 
 def build_timeline_clusters(
