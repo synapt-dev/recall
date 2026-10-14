@@ -457,6 +457,51 @@ class ShardedRecallDB:
                 }
         return result
 
+    def chunk_location(self, chunk_id: str):  # noqa: ANN201
+        """``RecallDB.chunk_location`` read from the overlay first, then each chunk shard; never ``index.db``'s
+        chunks table. A base chunk of a session the overlay suppresses is not visible."""
+        row = self._index.chunk_location(chunk_id, table="query_tail_chunks")
+        if row is not None:
+            return row
+        suppressed = self._suppressed_base_sessions()
+        for _, db in self._iter_data_shards():
+            row = db.chunk_location(chunk_id)
+            if row is not None and row[3] not in suppressed:
+                return row
+        return None
+
+    def session_turn_spans(self) -> list[dict]:
+        """``RecallDB.session_turn_spans`` merged across the chunk shards, plus the query-tail overlay.
+
+        Same visibility rule as ``session_overview``: a session the overlay suppresses is read from the overlay
+        only. ``index.db``'s own chunks table is never read.
+        """
+        merged: dict[str, dict] = {}
+
+        def fold(session_id: str, first_ts: str, last_ts: str, count: int) -> None:
+            current = merged.get(session_id)
+            if current is None:
+                merged[session_id] = {
+                    "session_id": session_id,
+                    "first_ts": first_ts,
+                    "last_ts": last_ts,
+                    "chunk_count": count,
+                }
+                return
+            current["first_ts"] = min(current["first_ts"], first_ts)
+            current["last_ts"] = max(current["last_ts"], last_ts)
+            current["chunk_count"] += count
+
+        suppressed = self._suppressed_base_sessions()
+        for _, db in self._iter_data_shards():
+            for span in db.session_turn_spans():
+                if span["session_id"] not in suppressed:
+                    fold(span["session_id"], span["first_ts"], span["last_ts"], span["chunk_count"])
+        for row in self._index.load_query_tail_overview_rows():
+            if row["turn_index"] >= 0:
+                fold(row["session_id"], row["timestamp"], row["timestamp"], 1)
+        return sorted(merged.values(), key=lambda span: span["first_ts"])
+
     def session_activity(self) -> dict[str, tuple[int, str]]:
         """Return newest activity per session across all chunk shards."""
         return {

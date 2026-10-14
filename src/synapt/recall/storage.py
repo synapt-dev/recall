@@ -2017,6 +2017,39 @@ class RecallDB:
                 )
         return loaded
 
+    def chunk_location(self, chunk_id: str, table: str = "chunks"):  # noqa: ANN201
+        """The row that locates one chunk in its transcript, or None: transcript_path, byte_offset, byte_length,
+        session_id, turn_index, timestamp. ``table`` is ``chunks`` or the overlay's ``query_tail_chunks``."""
+        if table not in ("chunks", "query_tail_chunks"):
+            raise ValueError(f"chunk_location: unknown table {table!r}")
+        return self._conn.execute(
+            "SELECT transcript_path, byte_offset, byte_length, session_id, turn_index, timestamp "
+            f"FROM {table} WHERE id = ?",
+            (chunk_id,),
+        ).fetchone()
+
+    def session_turn_spans(self) -> list[dict]:
+        """Per-session first and last timestamp and turn count, over turns only (``turn_index >= 0``).
+
+        The timeline's input. A sharded store answers this from its shards (``ShardedRecallDB``), never from
+        ``index.db``'s chunks table, which in a store split by older code is a frozen pre-split copy.
+        """
+        rows = self._conn.execute(
+            "SELECT session_id, MIN(timestamp) AS first_ts, "
+            "MAX(timestamp) AS last_ts, COUNT(*) AS cnt "
+            "FROM chunks WHERE turn_index >= 0 "
+            "GROUP BY session_id ORDER BY first_ts"
+        ).fetchall()
+        return [
+            {
+                "session_id": r["session_id"],
+                "first_ts": r["first_ts"],
+                "last_ts": r["last_ts"],
+                "chunk_count": r["cnt"],
+            }
+            for r in rows
+        ]
+
     def session_overview(self) -> dict[str, dict]:
         """Return routing and listing metadata without materializing chunks.
 

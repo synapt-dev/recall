@@ -4253,13 +4253,9 @@ def consolidate(
         try:
             from synapt.recall.content_profile import detect_content_profile
             idx_dir = project_index_dir(project_dir)
-            from synapt.recall.storage import RecallDB
-            from synapt.recall.sharding import live_store_path
-            db_path = live_store_path(idx_dir)
-            if db_path.exists():
-                _db = RecallDB(db_path)
-                from synapt.recall.core import parse_transcript
-                # Sample chunks from the DB for classification
+            _db = _open_chunk_store(idx_dir)
+            if _db is not None:
+                # Sample chunks from the store for classification
                 chunk_texts = _db.sample_chunk_texts(limit=100)
                 if chunk_texts:
                     # Create lightweight objects with .text attribute
@@ -4690,6 +4686,24 @@ def _sync_knowledge_to_db(project_dir: Path | None, kn_path: Path) -> None:
         logger.warning("Failed to sync knowledge to DB: %s", exc)
 
 
+def _open_chunk_store(index_dir: Path):  # noqa: ANN202
+    """The store that holds this project's chunks, or None when there is none yet.
+
+    A sharded index opens as ``ShardedRecallDB``, which reads chunks from the shards; a plain ``RecallDB`` on
+    ``live_store_path`` would read ``index.db``, whose chunks table is empty or a frozen pre-split copy.
+    """
+    from synapt.recall.sharded_db import ShardedRecallDB
+    from synapt.recall.sharding import is_sharded, live_store_path
+    from synapt.recall.storage import RecallDB
+
+    if is_sharded(index_dir):
+        return ShardedRecallDB.open(index_dir)
+    db_path = live_store_path(index_dir)
+    if not db_path.exists():
+        return None
+    return RecallDB(db_path)
+
+
 def _load_chunks_for_resolve(
     project_dir: Path | None = None,
     *,
@@ -4709,15 +4723,9 @@ def _load_chunks_for_resolve(
     if not kn_path.exists():
         return None
 
-    from synapt.recall.sharding import live_store_path
-    index_dir = project_index_dir(project_dir)
-    db_path = live_store_path(index_dir)
-    if not db_path.exists():
+    db = _open_chunk_store(project_index_dir(project_dir))
+    if db is None:
         return None
-
-    from synapt.recall.storage import RecallDB
-
-    db = RecallDB(db_path)
 
     # Load active knowledge nodes
     nodes = read_nodes(kn_path, status="active")
@@ -4735,12 +4743,8 @@ def _load_chunks_for_resolve(
         return None
 
     # Filter chunks to only relevant sessions
-    placeholders = ",".join("?" for _ in needed_sessions)
-    rows = db._conn.execute(
-        f"SELECT session_id, turn_index, user_text, assistant_text, transcript_path "
-        f"FROM chunks WHERE session_id IN ({placeholders})",
-        list(needed_sessions),
-    ).fetchall()
+    loaded = db.load_session_chunks_many(sorted(needed_sessions))
+    rows = [chunk for chunks in loaded.values() for chunk in chunks]
     if not rows:
         db.close()
         return None
@@ -4748,11 +4752,11 @@ def _load_chunks_for_resolve(
     # Build session_id → chunk list
     session_chunks: dict = {}
     for r in rows:
-        sid = r["session_id"]
-        tidx = r["turn_index"]
-        text = (r["user_text"] or "") + " " + (r["assistant_text"] or "")
+        sid = r.session_id
+        tidx = r.turn_index
+        text = (r.user_text or "") + " " + (r.assistant_text or "")
         toks = _extract_keywords(text)
-        tpath = r["transcript_path"] or ""
+        tpath = r.transcript_path or ""
         if include_text:
             session_chunks.setdefault(sid, []).append((tidx, text, toks, tpath))
         else:

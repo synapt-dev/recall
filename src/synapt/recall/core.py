@@ -4390,12 +4390,7 @@ class TranscriptIndex:
         chunk = self._get_chunk(idx) if idx is not None else None
         if chunk is None and self._db:
             # Try DB lookup
-            row = self._db._conn.execute(
-                "SELECT transcript_path, byte_offset, byte_length, "
-                "session_id, turn_index, timestamp "
-                "FROM chunks WHERE id = ?",
-                (chunk_id,),
-            ).fetchone()
+            row = self._db.chunk_location(chunk_id)
             if row:
                 chunk = TranscriptChunk(
                     id=chunk_id,
