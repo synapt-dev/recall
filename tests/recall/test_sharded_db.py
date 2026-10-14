@@ -86,11 +86,14 @@ class TestShardedRecallDBMonolithic(unittest.TestCase):
         db.close()
 
     def test_passthrough_via_getattr(self):
-        """Unhandled methods fall through to index DB."""
+        """A declared index-only member falls through to index DB; an undeclared one (``_path``) is refused."""
         db = ShardedRecallDB.open(self.index_dir)
-        # load_manifest is explicitly delegated, but _path is on RecallDB
-        self.assertIsNotNone(db._path)
-        db.close()
+        try:
+            self.assertEqual(db.path, db._index.path)
+            with self.assertRaises(AttributeError):
+                db._path  # noqa: B018
+        finally:
+            db.close()
 
     def test_close_is_safe(self):
         db = ShardedRecallDB.open(self.index_dir)

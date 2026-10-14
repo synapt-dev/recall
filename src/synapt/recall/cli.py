@@ -1330,7 +1330,7 @@ def _archive_and_build_locked(
             # Skip clusters that already have LLM summaries (preserved across rebuilds).
             llm_cluster_ids = {
                 r["cluster_id"]
-                for r in db._conn.execute(
+                for r in db.index_conn.execute(
                     "SELECT cluster_id FROM cluster_summaries WHERE method = 'llm'"
                 ).fetchall()
             }
@@ -1385,7 +1385,7 @@ def _archive_and_build_locked(
                 if tags:
                     cl["tags"] = tags
                     new_search = cl.get("search_text", "") + " " + " ".join(tags)
-                    db._conn.execute(
+                    db.index_conn.execute(
                         "UPDATE clusters SET tags = ?, search_text = ? "
                         "WHERE cluster_id = ?",
                         (json.dumps(tags), new_search, cl["cluster_id"]),
@@ -1393,7 +1393,7 @@ def _archive_and_build_locked(
                     tagged += 1
             tags_log.done()
             if tagged:
-                db._conn.commit()
+                db.index_conn.commit()
                 # FTS is kept in sync by the clusters_au trigger on UPDATE;
                 # save_timeline_clusters() also does a full FTS rebuild.
                 print(f"  Tags: {tagged} topic clusters tagged")
@@ -4891,7 +4891,7 @@ def cmd_maintain(args: argparse.Namespace) -> None:
         # Count what is LEFT with the grinder's own eligibility criteria rather
         # than a paraphrase of them: a backlog measured by a slightly different
         # query is a number about a different question.
-        remaining = db._conn.execute(
+        remaining = db.index_conn.execute(
             "SELECT COUNT(*) "
             "FROM clusters c "
             "LEFT JOIN cluster_summaries cs "

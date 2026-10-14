@@ -236,7 +236,7 @@ def save_timeline_clusters(db: RecallDB, clusters: list[dict]) -> None:
     Timeline clusters are session-level — they don't populate
     cluster_chunks. Only the clusters table is modified.
     """
-    cur = db._conn.cursor()
+    cur = db.index_conn.cursor()
 
     # Remove old timeline clusters + their FTS entries
     cur.execute("DROP TRIGGER IF EXISTS clusters_ad")
@@ -281,4 +281,4 @@ def save_timeline_clusters(db: RecallDB, clusters: list[dict]) -> None:
     # Rebuild FTS from all clusters (topic + timeline + access singletons): one statement, so it is bracketed
     with phase("timeline: FTS rebuild"):
         cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
-        db._conn.commit()
+        db.index_conn.commit()
