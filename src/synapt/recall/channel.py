@@ -1279,12 +1279,9 @@ def _append_message(
     opening a new connection (avoids SQLite lock contention when the caller
     already holds a transaction).
     """
-    # Unescape literal \n and \t that LLM tool calls often produce.
-    # MCP arguments are JSON strings, but models sometimes double-escape
-    # newlines (sending "\\n" instead of "\n"), resulting in literal
-    # backslash-n in the body.  Fixes recall#493.
-    if msg.body:
-        msg.body = msg.body.replace("\\n", "\n").replace("\\t", "\t")
+    # The body is stored exactly as given. An earlier unescape here turned
+    # every literal backslash-n / backslash-t into a newline / tab, which
+    # silently shortened any body that carried them (code, paths, logs).
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
