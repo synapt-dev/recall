@@ -1144,7 +1144,7 @@ def test_channel_cli_dispatches_read_with_defaults():
     with patch.object(sys, "argv", ["synapt", "channel", "read"]), \
          patch("synapt.recall.channel.channel_read", return_value="") as mock:
         main()
-    mock.assert_called_once_with(channel="dev", limit=20, since=None)
+    mock.assert_called_once_with(channel="dev", limit=20, since=None, surface="cli")
 
 
 def test_channel_cli_read_with_detail_flag():

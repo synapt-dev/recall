@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import time
@@ -2005,12 +2006,15 @@ def channel_read(
     msg_type: str | None = None,
     max_body_chars: int = MAX_BODY_CHARS,
     max_read_chars: int = MAX_READ_CHARS,
+    surface: str = "mcp",
 ) -> str:
     """Read recent messages from a channel.
 
     Every body is capped at ``max_body_chars`` and the read as a whole at
     ``max_read_chars`` (0 means unbounded); the rest is reachable through
-    ``channel_read_message`` with an offset.
+    ``channel_read_message`` with an offset. ``surface`` is who will read the
+    notes that say so: "mcp" names the MCP action, "cli" names the CLI
+    command, so the advice can be run from where it was printed.
 
     Filters muted agents, highlights directives targeted at the reader.
     Uses a single DB connection for all operations.
@@ -2272,7 +2276,17 @@ def channel_read(
 
     header = f"## #{channel} ({len(messages)} messages)"
     notes = []
-    if capped_messages:
+    cli_read = f"synapt recall channel read_message {shlex.quote(channel)}"
+    if capped_messages and surface == "cli":
+        refs = ", ".join(
+            f"`{cli_read} {shlex.quote(message_id)} --offset {max_body_chars}` (~{tokens} tok)"
+            for message_id, tokens in capped_messages
+        )
+        notes.append(
+            f"  capped {len(capped_messages)} message(s) at {max_body_chars} chars; "
+            f"read the rest with: {refs}."
+        )
+    elif capped_messages:
         refs = ", ".join(
             f"message={message_id} offset={max_body_chars} (~{tokens} tok)"
             for message_id, tokens in capped_messages
@@ -2282,9 +2296,11 @@ def channel_read(
             "Use action='read_message' with that message and offset to read the rest."
         )
     if budget_refs:
+        how = (f"run {cli_read} <id>" if surface == "cli"
+               else "use action='read_message' with message=<id>")
         notes.append(
             f"  {len(budget_refs)} older message(s) not shown (read budget {max_read_chars} chars); "
-            "use action='read_message' with message=<id>."
+            f"{how}."
         )
     if notes and header in lines:
         at = lines.index(header) + 1
