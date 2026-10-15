@@ -2227,6 +2227,7 @@ def channel_read_message(
     project_dir: Path | None = None,
 ) -> str:
     """Read a specific channel message by id."""
+    channel = _normalize_channel_name(channel)
     path = _channel_path(channel, project_dir)
     if not path.exists():
         return f"Channel #{channel} has no messages yet."
@@ -2447,6 +2448,7 @@ def channel_pin(
     project_dir: Path | None = None,
 ) -> str:
     """Pin a message by its ID. Looks up the message in the JSONL log."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2483,6 +2485,7 @@ def channel_unpin(
     project_dir: Path | None = None,
 ) -> str:
     """Unpin a message by its message_id."""
+    channel = _normalize_channel_name(channel)
     conn = _open_db(project_dir)
     try:
         row = conn.execute(
@@ -2515,6 +2518,7 @@ def channel_directive(
     display_name: str | None = None,
 ) -> str:
     """Post a directive message targeted at a specific agent."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
     display = display_name or _resolve_display_name(project_dir)
@@ -2545,6 +2549,7 @@ def channel_mute(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2572,6 +2577,7 @@ def channel_unmute(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
 
     conn = _open_db(project_dir)
@@ -2597,6 +2603,7 @@ def channel_kick(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2659,6 +2666,7 @@ def channel_board(
     Reading returns all agents' current board entries.
     Pass an empty string to clear your entry.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
     conn = _open_db(project_dir)
@@ -2777,6 +2785,7 @@ def channel_claim(
     automatically posted to the channel so other agents see it in
     the message stream without polling the claims table.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2888,6 +2897,7 @@ def channel_claim_intent(
         (True, message) if intent claimed successfully.
         (False, message) if someone else already claimed the same intent.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -3025,6 +3035,7 @@ def channel_messages_json(
     ``channels_dir`` overrides path resolution for cross-project reads.
     ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
+    channel = _normalize_channel_name(channel)
     path = (channels_dir / f"{_channel_to_filename(channel)}.jsonl") if channels_dir else _channel_path(channel, project_dir)
     if not path.exists():
         return []
