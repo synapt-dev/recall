@@ -3456,6 +3456,8 @@ def recall_channel(
     show_pins: bool = True,
     detail: str = "medium",
     msg_type: str | None = None,
+    offset: int = 0,
+    length: int = 0,
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -3469,6 +3471,8 @@ def recall_channel(
                 "list", "search", "rename", "claim", "unclaim", "intent", "board".
         channel: Channel name (default "dev"). Any name works -- created on first post.
         message: Message body (required for "post", "directive", "broadcast") or message_id for "read_message"/pin actions.
+        offset: For "read_message": character offset to start the chunk at (default 0).
+        length: For "read_message": chunk size in characters (default 0 = 8,000).
         to: Target agent for "directive" action.
         target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
         limit: Max messages to return for "read" and max hits for "search" (default 20).
@@ -3543,6 +3547,8 @@ def recall_channel(
             show_pins=show_pins,
             detail=detail,
             msg_type=msg_type,
+            offset=offset,
+            length=length,
         )
         # The store lines cost every call the same bytes while saying
         # nothing new: print them on the first call of the session and again
