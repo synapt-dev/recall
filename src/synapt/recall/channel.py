@@ -3072,8 +3072,9 @@ def channel_search(
     msg_type: str | None = None,
     project_dir: Path | None = None,
     agent_id: str | None = None,
+    channel: str | None = None,
 ) -> list[dict]:
-    """Search all channels for messages matching a query.
+    """Search all channels (or only ``channel``) for messages matching a query.
 
     Args:
         query: Text to search for in message bodies.
@@ -3106,6 +3107,10 @@ def channel_search(
                     all_channels.append(name)
             else:
                 all_channels.append(name)
+
+    if channel is not None:
+        channel = _normalize_channel_name(channel)
+        all_channels = [ch for ch in all_channels if ch == channel]
 
     results: list[dict] = []
     for ch in all_channels:

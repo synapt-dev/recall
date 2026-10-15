@@ -168,6 +168,11 @@ class TestEveryEntryPointNormalizes(unittest.TestCase):
         mid = self._post_id("seen")
         self.assertIn("seen", ch.channel_read_message(mid, "#dev"))
 
+    def test_search(self):
+        self._post_id("needle")
+        hits = ch.channel_search("needle", channel="#dev")
+        self.assertEqual([h["channel"] for h in hits], ["dev"])
+
     def test_no_entry_point_left_out(self):
         """A new public channel_* call that names a channel must normalize it."""
         import ast

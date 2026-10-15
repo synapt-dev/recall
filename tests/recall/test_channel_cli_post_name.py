@@ -57,7 +57,7 @@ def test_post_with_name_is_refused_and_posts_nothing(workdir, argv):
     assert r.stdout == ""
     lines = r.stderr.strip().splitlines()
     assert len(lines) == 1, r.stderr
-    assert "--name applies to join" in lines[0]
+    assert "--name is not used by 'post'" in lines[0]
     assert "channel join <channel> --name <name>" in lines[0]
     assert _posts(project) == []
 
