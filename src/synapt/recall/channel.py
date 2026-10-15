@@ -305,6 +305,16 @@ def _filename_to_channel(stem: str) -> str:
     return stem.replace("--", ":")
 
 
+def _normalize_channel_name(channel: str) -> str:
+    """Strip leading '#' so '#dev' and 'dev' name one channel.
+
+    '#dev' is how a channel is written in prose; kept verbatim it opened a
+    separate ``#dev.jsonl`` that readers of 'dev' never saw. A lone '#' is
+    left as given rather than turned into an empty name.
+    """
+    return channel.lstrip("#") or channel
+
+
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
     """Return the JSONL log path for a channel."""
     ch_dir = _channels_dir(project_dir)
@@ -1588,6 +1598,7 @@ def channel_join(
             Also derives a distinct agent_id so agents sharing a griptree
             with a human session get their own presence row (recall#590).
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     griptree = _resolve_griptree(project_dir)
     display = display_name or _resolve_display_name(project_dir)
@@ -1776,6 +1787,7 @@ def channel_leave(
     display_name: str | None = None,
 ) -> str:
     """Leave a channel."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
 
@@ -1923,6 +1935,7 @@ def channel_post(
     tool handler) can pass the agent's declared name directly.  Also
     derives a distinct agent_id per name (recall#590).
     """
+    channel = _normalize_channel_name(channel)
     now = _now_iso()
     if agent_name:
         # Explicit caller identity (e.g. the human TUI passes agent_name="human").
@@ -2002,6 +2015,7 @@ def channel_read(
         low    -- no pins, truncated messages (200 chars), with refs for truncated messages
         min    -- no pins, one-line per message, skip join/leave noise
     """
+    channel = _normalize_channel_name(channel)
     _detail = detail.lower()
     if _detail in ("max", "high"):
         show_pins = True
@@ -2213,6 +2227,7 @@ def channel_read_message(
     project_dir: Path | None = None,
 ) -> str:
     """Read a specific channel message by id."""
+    channel = _normalize_channel_name(channel)
     path = _channel_path(channel, project_dir)
     if not path.exists():
         return f"Channel #{channel} has no messages yet."
@@ -2433,6 +2448,7 @@ def channel_pin(
     project_dir: Path | None = None,
 ) -> str:
     """Pin a message by its ID. Looks up the message in the JSONL log."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2469,6 +2485,7 @@ def channel_unpin(
     project_dir: Path | None = None,
 ) -> str:
     """Unpin a message by its message_id."""
+    channel = _normalize_channel_name(channel)
     conn = _open_db(project_dir)
     try:
         row = conn.execute(
@@ -2501,6 +2518,7 @@ def channel_directive(
     display_name: str | None = None,
 ) -> str:
     """Post a directive message targeted at a specific agent."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
     display = display_name or _resolve_display_name(project_dir)
@@ -2531,6 +2549,7 @@ def channel_mute(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2558,6 +2577,7 @@ def channel_unmute(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
 
     conn = _open_db(project_dir)
@@ -2583,6 +2603,7 @@ def channel_kick(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2645,6 +2666,7 @@ def channel_board(
     Reading returns all agents' current board entries.
     Pass an empty string to clear your entry.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
     conn = _open_db(project_dir)
@@ -2763,6 +2785,7 @@ def channel_claim(
     automatically posted to the channel so other agents see it in
     the message stream without polling the claims table.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2874,6 +2897,7 @@ def channel_claim_intent(
         (True, message) if intent claimed successfully.
         (False, message) if someone else already claimed the same intent.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -3011,6 +3035,7 @@ def channel_messages_json(
     ``channels_dir`` overrides path resolution for cross-project reads.
     ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
+    channel = _normalize_channel_name(channel)
     path = (channels_dir / f"{_channel_to_filename(channel)}.jsonl") if channels_dir else _channel_path(channel, project_dir)
     if not path.exists():
         return []
@@ -3047,8 +3072,9 @@ def channel_search(
     msg_type: str | None = None,
     project_dir: Path | None = None,
     agent_id: str | None = None,
+    channel: str | None = None,
 ) -> list[dict]:
-    """Search all channels for messages matching a query.
+    """Search all channels (or only ``channel``) for messages matching a query.
 
     Args:
         query: Text to search for in message bodies.
@@ -3081,6 +3107,10 @@ def channel_search(
                     all_channels.append(name)
             else:
                 all_channels.append(name)
+
+    if channel is not None:
+        channel = _normalize_channel_name(channel)
+        all_channels = [ch for ch in all_channels if ch == channel]
 
     results: list[dict] = []
     for ch in all_channels:
@@ -3122,12 +3152,18 @@ def channel_search(
 def check_directives(
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    shown_mentions: set[str] | None = None,
 ) -> str:
     """Check for unread directives targeted at this agent. Fast path for hooks.
 
     Scans only messages after this agent's cursor in channels it belongs to.
     Returns formatted directives for stdout, or empty string if none pending.
     Designed to complete in < 50ms for PostToolUse hook.
+
+    ``shown_mentions``, when given, is the caller's record of mention ids
+    already printed in full: those collapse to one count line with a read
+    hint, and every newly printed id is added to it. ``None`` keeps the
+    old behaviour (every unread mention in full), which the hooks rely on.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -3241,7 +3277,13 @@ def check_directives(
             if msg.type == "intent" and msg.from_agent != aid:
                 intents.append((ch, msg))
 
-    if not pending and not mentions and not intents:
+    seen_mentions: list[tuple[str, ChannelMessage]] = []
+    if shown_mentions is not None:
+        seen_mentions = [(ch, m) for ch, m in mentions if m.id in shown_mentions]
+        mentions = [(ch, m) for ch, m in mentions if m.id not in shown_mentions]
+        shown_mentions.update(m.id for _, m in mentions)
+
+    if not pending and not mentions and not seen_mentions and not intents:
         return ""
 
     # Format for output (will appear as system reminder in context)
@@ -3254,6 +3296,13 @@ def check_directives(
         lines.append(f"[channel] {len(mentions)} @mention(s):")
         for ch, msg in mentions:
             lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    if seen_mentions:
+        ids = ", ".join(f"#{ch} {msg.id}" for ch, msg in seen_mentions)
+        lines.append(
+            f"[channel] {len(seen_mentions)} unread @mention(s) shown in full "
+            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>) "
+            f"clears them"
+        )
     if intents:
         lines.append(f"[channel] {len(intents)} active intent(s):")
         for ch, msg in intents:

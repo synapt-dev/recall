@@ -3436,6 +3436,13 @@ def recall_timeline(
         return f"Timeline query failed: {exc}"
 
 
+# The channel store preamble last printed by recall_channel in this process.
+_last_store_preamble: str | None = None
+
+# Mention ids recall_channel results have already printed in full.
+_shown_mentions: set[str] = set()
+
+
 def recall_channel(
     action: str = "read",
     channel: str = "dev",
@@ -3494,6 +3501,7 @@ def recall_channel(
         from synapt.recall.channel import (
             _channels_dir,
             _db_path,
+            _normalize_channel_name,
             _orphaned_local_channel_store,
         )
 
@@ -3524,7 +3532,7 @@ def recall_channel(
             )
         result = registry.dispatch(
             action,
-            channel=channel,
+            channel=_normalize_channel_name(channel),
             message=message,
             to=to,
             target=target,
@@ -3536,11 +3544,19 @@ def recall_channel(
             detail=detail,
             msg_type=msg_type,
         )
-        return (
+        # The store lines cost every call the same bytes while saying
+        # nothing new: print them on the first call of the session and again
+        # only when what they name changes.
+        global _last_store_preamble
+        preamble = (
             f"Channel state store: {state_store} (source: {root_source})\n"
             f"Channel log store: {log_store} (source: {root_source})\n"
-            f"{orphan_line}{result}"
+            f"{orphan_line}"
         )
+        if preamble == _last_store_preamble:
+            return result
+        _last_store_preamble = preamble
+        return f"{preamble}{result}"
     except Exception as exc:
         prefix = ""
         if state_store:
@@ -3711,7 +3727,7 @@ def _directive_suffix() -> str:
     if not _is_solo_mode():
         try:
             from synapt.recall.channel import check_directives
-            result = check_directives()
+            result = check_directives(shown_mentions=_shown_mentions)
             if result:
                 parts.append(result)
         except Exception:

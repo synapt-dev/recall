@@ -3357,6 +3357,70 @@ def cmd_remind(args: argparse.Namespace) -> None:
     print(f"Added reminder{sticky_label}: {reminder.text} (id: {reminder.id})")
 
 
+# The inputs each `channel` action uses. Any other input the caller gives is
+# refused before anything runs: accepting a flag and ignoring it reports
+# success for something that did not happen. A new flag or action must be
+# added here, and tests/recall/test_channel_cli_unused_flags.py checks every
+# action against every input the parser defines.
+_CHANNEL_ACTION_INPUTS: dict[str, frozenset[str]] = {
+    "post": frozenset({"channel", "message", "pin", "type"}),
+    "read": frozenset({"channel", "limit", "since", "detail"}),
+    "who": frozenset(),
+    "join": frozenset({"channel", "name"}),
+    "leave": frozenset({"channel"}),
+    "heartbeat": frozenset(),
+    "unread": frozenset(),
+    "pin": frozenset({"channel", "message"}),
+    "directive": frozenset({"channel", "message", "to"}),
+    "mute": frozenset({"channel", "target"}),
+    "unmute": frozenset({"channel", "target"}),
+    "kick": frozenset({"channel", "target"}),
+    "broadcast": frozenset({"message"}),
+    "list": frozenset(),
+    "search": frozenset({"channel", "message"}),
+    "chat": frozenset({"channel", "name", "target", "limit"}),
+}
+
+_CHANNEL_INPUT_LABELS = {"channel": "<channel>", "message": "<message>"}
+
+_CHANNEL_INPUT_HINTS = {
+    ("post", "name"): (
+        "; to post as another agent, run 'synapt recall channel join "
+        "<channel> --name <name>' first, then post without --name"
+    ),
+}
+
+
+# Every input the `channel` parser defines, in the order refusals check them.
+_CHANNEL_INPUT_DESTS = ("channel", "message", "limit", "since", "pin", "type",
+                        "to", "target", "detail", "name")
+
+
+def _channel_inputs_given(args: argparse.Namespace) -> list[str]:
+    """Inputs the caller actually gave (every channel input defaults to None or False)."""
+    given = []
+    for dest in _CHANNEL_INPUT_DESTS:
+        value = getattr(args, dest, None)
+        if value is not None and value is not False:
+            given.append(dest)
+    return given
+
+
+def _refuse_unused_channel_inputs(action: str, args: argparse.Namespace) -> None:
+    used = _CHANNEL_ACTION_INPUTS[action]
+    for dest in _channel_inputs_given(args):
+        if dest in used:
+            continue
+        label = _CHANNEL_INPUT_LABELS.get(dest, "--" + dest)
+        # The value is never echoed: it may carry anything, escapes included.
+        print(
+            f"synapt recall channel {action}: {label} is not used by '{action}'"
+            f"{_CHANNEL_INPUT_HINTS.get((action, dest), '; remove it')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def cmd_channel(args: argparse.Namespace) -> None:
     """Cross-worktree agent communication channels."""
     from synapt.recall.channel import (
@@ -3377,6 +3441,11 @@ def cmd_channel(args: argparse.Namespace) -> None:
     )
 
     action = args.action
+    if action == "broadcast" and args.message is None:
+        # Documented form: broadcast "message". With one positional, argparse
+        # fills the channel slot; broadcast has no channel, so it is the body.
+        args.message, args.channel = args.channel, None
+    _refuse_unused_channel_inputs(action, args)
     channel = args.channel or "dev"
 
     if action == "join":
@@ -3399,7 +3468,8 @@ def cmd_channel(args: argparse.Namespace) -> None:
             post_kwargs["msg_type"] = args.type
         print(channel_post(**post_kwargs))
     elif action == "read":
-        read_kwargs: dict = {"channel": channel, "limit": args.limit, "since": args.since}
+        limit = args.limit if args.limit is not None else 20
+        read_kwargs: dict = {"channel": channel, "limit": limit, "since": args.since}
         if getattr(args, "detail", None):
             read_kwargs["detail"] = args.detail
         print(channel_read(**read_kwargs))
@@ -3457,7 +3527,7 @@ def cmd_channel(args: argparse.Namespace) -> None:
             print("Usage: synapt recall channel search <channel> \"query\"", file=sys.stderr)
             sys.exit(1)
         from synapt.recall.channel import channel_search
-        results = channel_search(args.message)
+        results = channel_search(args.message, channel=channel)
         if not results:
             print("No matching messages.")
         else:
@@ -3474,8 +3544,8 @@ def cmd_channel(args: argparse.Namespace) -> None:
         from synapt.recall.channel_chat import main as chat_main
         chat_main(
             channel=channel,
-            name=args.target,  # reuse --target for --name
-            poll=float(args.limit) if args.limit != 20 else 1.0,
+            name=args.name or args.target,  # --target kept for older callers
+            poll=float(args.limit) if args.limit is not None else 1.0,
         )
 
 
@@ -5667,11 +5737,12 @@ def make_parser() -> argparse.ArgumentParser:
                                          "directive", "mute", "unmute", "kick",
                                          "broadcast", "list", "search", "chat"],
                                 help="Channel action")
-    channel_parser.add_argument("channel", nargs="?", default="dev",
+    channel_parser.add_argument("channel", nargs="?", default=None,
                                 help="Channel name (default: dev)")
     channel_parser.add_argument("message", nargs="?", default=None,
-                                help="Message body (for post/pin/directive/broadcast)")
-    channel_parser.add_argument("--limit", type=int, default=20,
+                                help="Message body (for post/pin/directive/search; "
+                                     "broadcast takes it as its only positional)")
+    channel_parser.add_argument("--limit", type=int, default=None,
                                 help="Max messages to return (for 'read' action, default: 20)")
     channel_parser.add_argument("--since", default=None,
                                 help="Only messages after this ISO timestamp (for 'read' action)")
@@ -5688,7 +5759,7 @@ def make_parser() -> argparse.ArgumentParser:
                                 choices=["max", "high", "medium", "low", "min"],
                                 help="Output detail level for read (default: medium)")
     channel_parser.add_argument("--name", default=None,
-                                help="Display name for join action")
+                                help="Display name for join and chat (other actions refuse it)")
 
     catchup_parser = subparsers.add_parser(
         "catchup",
