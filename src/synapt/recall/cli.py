@@ -3387,6 +3387,17 @@ def cmd_channel(args: argparse.Namespace) -> None:
     elif action == "leave":
         print(channel_leave(channel=channel))
     elif action == "post":
+        if getattr(args, "name", None) is not None:
+            # --name sets the display name on join; post resolves the sender
+            # from this session's joined identity. Accepting it here and
+            # posting under another name would be a silent lie.
+            print(
+                "synapt recall channel post: --name applies to join only; to post "
+                "as another agent, run 'synapt recall channel join <channel> "
+                "--name <name>' first, then post without --name",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if not args.message:
             print("Usage: synapt recall channel post <channel> \"message\"", file=sys.stderr)
             sys.exit(1)
@@ -5688,7 +5699,7 @@ def make_parser() -> argparse.ArgumentParser:
                                 choices=["max", "high", "medium", "low", "min"],
                                 help="Output detail level for read (default: medium)")
     channel_parser.add_argument("--name", default=None,
-                                help="Display name for join action")
+                                help="Display name for join action (post refuses it)")
 
     catchup_parser = subparsers.add_parser(
         "catchup",
