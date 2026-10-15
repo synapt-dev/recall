@@ -3379,6 +3379,7 @@ _CHANNEL_ACTION_INPUTS: dict[str, frozenset[str]] = {
     "list": frozenset(),
     "search": frozenset({"channel", "message"}),
     "chat": frozenset({"channel", "name", "target", "limit"}),
+    "read_message": frozenset({"channel", "message", "offset", "length"}),
 }
 
 _CHANNEL_INPUT_LABELS = {"channel": "<channel>", "message": "<message>"}
@@ -3393,7 +3394,7 @@ _CHANNEL_INPUT_HINTS = {
 
 # Every input the `channel` parser defines, in the order refusals check them.
 _CHANNEL_INPUT_DESTS = ("channel", "message", "limit", "since", "pin", "type",
-                        "to", "target", "detail", "name")
+                        "to", "target", "detail", "name", "offset", "length")
 
 
 def _channel_inputs_given(args: argparse.Namespace) -> list[str]:
@@ -3428,6 +3429,7 @@ def cmd_channel(args: argparse.Namespace) -> None:
         channel_leave,
         channel_post,
         channel_read,
+        channel_read_message,
         channel_who,
         channel_heartbeat,
         channel_unread,
@@ -3469,10 +3471,22 @@ def cmd_channel(args: argparse.Namespace) -> None:
         print(channel_post(**post_kwargs))
     elif action == "read":
         limit = args.limit if args.limit is not None else 20
-        read_kwargs: dict = {"channel": channel, "limit": limit, "since": args.since}
+        read_kwargs: dict = {"channel": channel, "limit": limit, "since": args.since,
+                             "surface": "cli"}
         if getattr(args, "detail", None):
             read_kwargs["detail"] = args.detail
         print(channel_read(**read_kwargs))
+    elif action == "read_message":
+        if not args.message:
+            print("Usage: synapt recall channel read_message <channel> <id> "
+                  "[--offset N] [--length N]", file=sys.stderr)
+            sys.exit(1)
+        rm_kwargs: dict = {"channel": channel}
+        if args.offset is not None:
+            rm_kwargs["offset"] = args.offset
+        if args.length is not None:
+            rm_kwargs["length"] = args.length
+        print(channel_read_message(args.message, **rm_kwargs))
     elif action == "who":
         print(channel_who())
     elif action == "heartbeat":
@@ -5735,13 +5749,15 @@ def make_parser() -> argparse.ArgumentParser:
                                 choices=["post", "read", "who", "join", "leave",
                                          "heartbeat", "unread", "pin",
                                          "directive", "mute", "unmute", "kick",
-                                         "broadcast", "list", "search", "chat"],
+                                         "broadcast", "list", "search", "chat",
+                                         "read_message"],
                                 help="Channel action")
     channel_parser.add_argument("channel", nargs="?", default=None,
                                 help="Channel name (default: dev)")
     channel_parser.add_argument("message", nargs="?", default=None,
                                 help="Message body (for post/pin/directive/search; "
-                                     "broadcast takes it as its only positional)")
+                                     "broadcast takes it as its only positional); "
+                                     "the message id for read_message")
     channel_parser.add_argument("--limit", type=int, default=None,
                                 help="Max messages to return (for 'read' action, default: 20)")
     channel_parser.add_argument("--since", default=None,
@@ -5760,6 +5776,10 @@ def make_parser() -> argparse.ArgumentParser:
                                 help="Output detail level for read (default: medium)")
     channel_parser.add_argument("--name", default=None,
                                 help="Display name for join and chat (other actions refuse it)")
+    channel_parser.add_argument("--offset", type=int, default=None,
+                                help="First char to read (for 'read_message'; default: 0)")
+    channel_parser.add_argument("--length", type=int, default=None,
+                                help="Chars to read from --offset (for 'read_message'; default: 8000)")
 
     catchup_parser = subparsers.add_parser(
         "catchup",

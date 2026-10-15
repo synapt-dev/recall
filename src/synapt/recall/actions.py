@@ -158,6 +158,8 @@ def _handle_read_message(**kwargs: Any) -> str:
     return channel_read_message(
         channel=kwargs.get("channel", "dev"),
         message_id=message,
+        offset=kwargs.get("offset") or 0,
+        length=kwargs.get("length") or 0,
     )
 
 

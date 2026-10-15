@@ -37,6 +37,7 @@ EXPECTED = {
     "list": set(),
     "search": {"channel", "message"},
     "chat": {"channel", "name", "target", "limit"},
+    "read_message": {"channel", "message", "offset", "length"},
 }
 
 VALUES = {
@@ -48,6 +49,8 @@ VALUES = {
     "target": ["--target", "x"],
     "detail": ["--detail", "low"],
     "name": ["--name", "x"],
+    "offset": ["--offset", "1"],
+    "length": ["--length", "1"],
 }
 
 

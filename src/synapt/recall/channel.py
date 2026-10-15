@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import time
@@ -48,6 +49,10 @@ _ONLINE_MINUTES = 5       # < 5 min  => online
 _IDLE_MINUTES = 30        # 5-30 min => idle
 _AWAY_MINUTES = 120       # 30-120 min => away
                           # > 120 min => offline (auto-leave)
+# Size bounds for a channel read, in characters of rendered body. Both are guesses
+# (~2k / ~8k tokens at 4 chars/token) to be measured; `limit` bounds only the count.
+MAX_BODY_CHARS = 8_000    # per message, at every detail level, actionable included
+MAX_READ_CHARS = 32_000   # per read; newest messages win, older ones drop to a ref
 _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on join
 
 # ---------------------------------------------------------------------------
@@ -1275,12 +1280,9 @@ def _append_message(
     opening a new connection (avoids SQLite lock contention when the caller
     already holds a transaction).
     """
-    # Unescape literal \n and \t that LLM tool calls often produce.
-    # MCP arguments are JSON strings, but models sometimes double-escape
-    # newlines (sending "\\n" instead of "\n"), resulting in literal
-    # backslash-n in the body.  Fixes recall#493.
-    if msg.body:
-        msg.body = msg.body.replace("\\n", "\n").replace("\\t", "\t")
+    # The body is stored exactly as given. An earlier unescape here turned
+    # every literal backslash-n / backslash-t into a newline / tab, which
+    # silently shortened any body that carried them (code, paths, logs).
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
@@ -2002,8 +2004,17 @@ def channel_read(
     show_pins: bool = True,
     detail: str = "medium",
     msg_type: str | None = None,
+    max_body_chars: int = MAX_BODY_CHARS,
+    max_read_chars: int = MAX_READ_CHARS,
+    surface: str = "mcp",
 ) -> str:
     """Read recent messages from a channel.
+
+    Every body is capped at ``max_body_chars`` and the read as a whole at
+    ``max_read_chars`` (0 means unbounded); the rest is reachable through
+    ``channel_read_message`` with an offset. ``surface`` is who will read the
+    notes that say so: "mcp" names the MCP action, "cli" names the CLI
+    command, so the advice can be run from where it was printed.
 
     Filters muted agents, highlights directives targeted at the reader.
     Uses a single DB connection for all operations.
@@ -2117,6 +2128,34 @@ def channel_read(
 
     lines = []
 
+    def _capped_len(m) -> int:
+        n = len(m.body)
+        return min(n, max_body_chars) if max_body_chars else n
+
+    # Per-read budget: newest first; once spent, older messages render as a one-line ref.
+    # The newest message always renders (the per-message cap bounds it).
+    budget_refs: set[int] = set()
+    budget_left = max_read_chars
+    if max_read_chars:
+        for i in range(len(messages) - 1, -1, -1):
+            cost = _capped_len(messages[i])
+            if cost > budget_left and i != len(messages) - 1:
+                budget_refs.add(i)
+            else:
+                budget_left -= cost
+        budget_left = max(budget_left, 0)
+
+    def _cap(body: str, mid: str) -> tuple[str, str]:
+        if not max_body_chars or len(body) <= max_body_chars:
+            return body, ""
+        omitted = _estimate_token_count(body[max_body_chars:])
+        capped_messages.append((mid, omitted))
+        return body[:max_body_chars], (
+            f"... [truncated: {max_body_chars} of {len(body)} chars shown; ~{omitted} tok omitted]"
+        )
+
+    capped_messages: list[tuple[str, int]] = []
+
     # Pins at top. The block is bounded by the same limit as the messages (most recent pins),
     # because every pin rendered on every read is how one read became hundreds of KB; detail=max
     # still shows them all.
@@ -2132,8 +2171,15 @@ def channel_read(
         for pin in pins:
             ts = _render_ts(pin["pinned_at"])
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
-            mid = f" [{pin['message_id']}]" if pin["message_id"] and _show_ids else ""
-            lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
+            pin_id = pin["message_id"] or "(no-id)"
+            pin_body = pin["body"] or ""
+            if max_read_chars and min(len(pin_body), max_body_chars or len(pin_body)) > budget_left:
+                lines.append(f"  [pin] [{pin_id}] {ts}  {by}  [{len(pin_body)} chars, not shown]")
+                continue
+            pin_body, pin_tag = _cap(pin_body, pin_id)
+            budget_left -= len(pin_body)
+            mid = f" [{pin['message_id']}]" if pin["message_id"] and (_show_ids or pin_tag) else ""
+            lines.append(f"  [pin]{mid} {ts}  {by}: {pin_body}{pin_tag}")
         lines.append("")
 
     # Status board after pins
@@ -2151,9 +2197,13 @@ def channel_read(
     if own_display:
         self_names.add(own_display.casefold())
     truncated_messages: list[tuple[str, int]] = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         ts = _render_ts(msg.timestamp)
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
+        if idx in budget_refs:
+            role = " [human]" if role_map.get(msg.from_agent) == "human" else ""
+            lines.append(f"  {ts} [{msg.id}]  {display}{role}  [{len(msg.body)} chars, not shown]")
+            continue
         mid = f" [{msg.id}]" if msg.id and _show_ids else ""
         inline_mid = mid
         # Role marker — human messages get a distinct prefix
@@ -2183,6 +2233,12 @@ def channel_read(
             if msg.id and not _show_ids:
                 inline_mid = f" [{msg.id}]"
             truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
+        else:
+            body, cap_tag = _cap(body, msg.id or "(no-id)")
+            if cap_tag:
+                truncation_tag = cap_tag
+                if msg.id and not _show_ids:
+                    inline_mid = f" [{msg.id}]"
         if _one_line:
             body = body.replace("\n", " ").strip()
         # Worktree tag at max detail (recall#443)
@@ -2218,6 +2274,38 @@ def channel_read(
             ),
         )
 
+    header = f"## #{channel} ({len(messages)} messages)"
+    notes = []
+    cli_read = f"synapt recall channel read_message {shlex.quote(channel)}"
+    if capped_messages and surface == "cli":
+        refs = ", ".join(
+            f"`{cli_read} {shlex.quote(message_id)} --offset {max_body_chars}` (~{tokens} tok)"
+            for message_id, tokens in capped_messages
+        )
+        notes.append(
+            f"  capped {len(capped_messages)} message(s) at {max_body_chars} chars; "
+            f"read the rest with: {refs}."
+        )
+    elif capped_messages:
+        refs = ", ".join(
+            f"message={message_id} offset={max_body_chars} (~{tokens} tok)"
+            for message_id, tokens in capped_messages
+        )
+        notes.append(
+            f"  capped {len(capped_messages)} message(s) at {max_body_chars} chars: {refs}. "
+            "Use action='read_message' with that message and offset to read the rest."
+        )
+    if budget_refs:
+        how = (f"run {cli_read} <id>" if surface == "cli"
+               else "use action='read_message' with message=<id>")
+        notes.append(
+            f"  {len(budget_refs)} older message(s) not shown (read budget {max_read_chars} chars); "
+            f"{how}."
+        )
+    if notes and header in lines:
+        at = lines.index(header) + 1
+        lines[at:at] = notes
+
     return "\n".join(lines)
 
 
@@ -2225,8 +2313,10 @@ def channel_read_message(
     message_id: str,
     channel: str = "dev",
     project_dir: Path | None = None,
+    offset: int = 0,
+    length: int = MAX_BODY_CHARS,
 ) -> str:
-    """Read a specific channel message by id."""
+    """Read a specific channel message by id, one chunk of ``length`` chars from ``offset``."""
     channel = _normalize_channel_name(channel)
     path = _channel_path(channel, project_dir)
     if not path.exists():
@@ -2247,7 +2337,22 @@ def channel_read_message(
         if msg.attachments:
             lines.append(f"Attachments: {', '.join(msg.attachments)}")
         lines.append("")
-        lines.append(msg.body or "(empty body)")
+        body = msg.body or ""
+        offset = max(0, offset or 0)
+        if not length or length <= 0:
+            length = MAX_BODY_CHARS
+        if not body:
+            lines.append("(empty body)")
+        elif offset == 0 and len(body) <= length:
+            lines.append(body)
+        else:
+            chunk = body[offset:offset + length]
+            end = offset + len(chunk)
+            lines.append(chunk)
+            if end < len(body):
+                lines.append(f"[chars {offset}-{end} of {len(body)}; next offset={end}]")
+            else:
+                lines.append("[end of message]")
         return "\n".join(lines)
 
     return f"Message {message_id} not found in #{channel}."
