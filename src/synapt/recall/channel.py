@@ -305,6 +305,16 @@ def _filename_to_channel(stem: str) -> str:
     return stem.replace("--", ":")
 
 
+def _normalize_channel_name(channel: str) -> str:
+    """Strip leading '#' so '#dev' and 'dev' name one channel.
+
+    '#dev' is how a channel is written in prose; kept verbatim it opened a
+    separate ``#dev.jsonl`` that readers of 'dev' never saw. A lone '#' is
+    left as given rather than turned into an empty name.
+    """
+    return channel.lstrip("#") or channel
+
+
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
     """Return the JSONL log path for a channel."""
     ch_dir = _channels_dir(project_dir)
@@ -1588,6 +1598,7 @@ def channel_join(
             Also derives a distinct agent_id so agents sharing a griptree
             with a human session get their own presence row (recall#590).
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     griptree = _resolve_griptree(project_dir)
     display = display_name or _resolve_display_name(project_dir)
@@ -1776,6 +1787,7 @@ def channel_leave(
     display_name: str | None = None,
 ) -> str:
     """Leave a channel."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
 
@@ -1923,6 +1935,7 @@ def channel_post(
     tool handler) can pass the agent's declared name directly.  Also
     derives a distinct agent_id per name (recall#590).
     """
+    channel = _normalize_channel_name(channel)
     now = _now_iso()
     if agent_name:
         # Explicit caller identity (e.g. the human TUI passes agent_name="human").
@@ -2002,6 +2015,7 @@ def channel_read(
         low    -- no pins, truncated messages (200 chars), with refs for truncated messages
         min    -- no pins, one-line per message, skip join/leave noise
     """
+    channel = _normalize_channel_name(channel)
     _detail = detail.lower()
     if _detail in ("max", "high"):
         show_pins = True

@@ -3494,6 +3494,7 @@ def recall_channel(
         from synapt.recall.channel import (
             _channels_dir,
             _db_path,
+            _normalize_channel_name,
             _orphaned_local_channel_store,
         )
 
@@ -3524,7 +3525,7 @@ def recall_channel(
             )
         result = registry.dispatch(
             action,
-            channel=channel,
+            channel=_normalize_channel_name(channel),
             message=message,
             to=to,
             target=target,
