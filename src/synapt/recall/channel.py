@@ -3152,12 +3152,18 @@ def channel_search(
 def check_directives(
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    shown_mentions: set[str] | None = None,
 ) -> str:
     """Check for unread directives targeted at this agent. Fast path for hooks.
 
     Scans only messages after this agent's cursor in channels it belongs to.
     Returns formatted directives for stdout, or empty string if none pending.
     Designed to complete in < 50ms for PostToolUse hook.
+
+    ``shown_mentions``, when given, is the caller's record of mention ids
+    already printed in full: those collapse to one count line with a read
+    hint, and every newly printed id is added to it. ``None`` keeps the
+    old behaviour (every unread mention in full), which the hooks rely on.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -3271,7 +3277,13 @@ def check_directives(
             if msg.type == "intent" and msg.from_agent != aid:
                 intents.append((ch, msg))
 
-    if not pending and not mentions and not intents:
+    seen_mentions: list[tuple[str, ChannelMessage]] = []
+    if shown_mentions is not None:
+        seen_mentions = [(ch, m) for ch, m in mentions if m.id in shown_mentions]
+        mentions = [(ch, m) for ch, m in mentions if m.id not in shown_mentions]
+        shown_mentions.update(m.id for _, m in mentions)
+
+    if not pending and not mentions and not seen_mentions and not intents:
         return ""
 
     # Format for output (will appear as system reminder in context)
@@ -3284,6 +3296,13 @@ def check_directives(
         lines.append(f"[channel] {len(mentions)} @mention(s):")
         for ch, msg in mentions:
             lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    if seen_mentions:
+        ids = ", ".join(f"#{ch} {msg.id}" for ch, msg in seen_mentions)
+        lines.append(
+            f"[channel] {len(seen_mentions)} unread @mention(s) shown in full "
+            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>) "
+            f"clears them"
+        )
     if intents:
         lines.append(f"[channel] {len(intents)} active intent(s):")
         for ch, msg in intents:
