@@ -99,6 +99,12 @@ def current_generation_dir(index_dir: Path) -> Path | None:
     return generation_dir(index_dir, name)
 
 
+def _drop_sidecars(db_path: Path) -> None:
+    """Remove the -wal, -shm and -journal files SQLite may have made beside *db_path*."""
+    for suffix in ("-wal", "-shm", "-journal"):
+        (db_path.parent / (db_path.name + suffix)).unlink(missing_ok=True)
+
+
 def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> None:
     """Mirror the newly-published generation's shards into the flat
     ``index_dir/data_NNN.db`` location too, so a reader running an OLDER
@@ -159,6 +165,9 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
                     conn.execute("PRAGMA journal_mode=DELETE")
                 finally:
                     conn.close()
+                # Opening the temp copy created sidecars under ITS name (a -shm for the WAL header), and the replace
+                # below moves only the main file, so they are removed here or every rebuild would leave them behind.
+                _drop_sidecars(tmp_copy)
                 os.replace(tmp_copy, target)
                 # SQLite's WAL header carries a salt that invalidates a
                 # stale -wal against a base file it wasn't written
@@ -168,8 +177,9 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
                 # this path starts clean against the file we just wrote.
                 for suffix in ("-wal", "-shm"):
                     (index_dir / (shard_path.name + suffix)).unlink(missing_ok=True)
-            except OSError:
+            except (OSError, sqlite3.Error):
                 tmp_copy.unlink(missing_ok=True)
+                _drop_sidecars(tmp_copy)
                 raise
 
         # A smaller new generation must not leave a stale extra shard
@@ -179,7 +189,9 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
                 for suffix in ("", "-wal", "-shm", ".schema.lock"):
                     p = old_path.parent / (old_path.name + suffix)
                     p.unlink(missing_ok=True)
-    except OSError:
+    except (OSError, sqlite3.Error):
+        # sqlite3.Error is not an OSError: the journal-mode switch opens a connection, and its failure must stay as
+        # best-effort as a copy failure.
         logger.warning(
             "Failed to sync flat-layout shard mirror for legacy readers at %s",
             index_dir, exc_info=True,

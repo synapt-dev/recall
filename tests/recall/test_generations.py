@@ -242,6 +242,38 @@ def test_old_layout_reader_opens_every_flat_shard_read_only(tmp_path):
         assert shard_path.read_bytes()[18:20] == b"\x01\x01", f"{shard_path.name}: the flat copy is still WAL"
 
 
+def test_a_rebuild_leaves_no_temp_copy_in_the_index_dir(tmp_path):
+    """Opening the temp copy to change its journal mode creates the temp name's -shm, and the atomic replace
+    moves only the main file, so the sidecars have to be removed; otherwise every rebuild leaves one per shard."""
+    rebuild_and_publish(tmp_path, [_chunk("litter", i, "first") for i in range(3)])
+    rebuild_and_publish(tmp_path, [_chunk("litter", i, "second") for i in range(3)])
+
+    left = sorted(p.name for p in tmp_path.iterdir() if ".copy-tmp-" in p.name)
+    assert left == [], f"temp copies left in the index dir: {left}"
+
+
+def test_a_sqlite_error_in_the_mirror_does_not_fail_the_publish(tmp_path, monkeypatch):
+    """The flat mirror is best-effort: a failure there must never fail the publish a current reader depends on.
+    The journal-mode switch opens a connection, so a sqlite3.Error (not an OSError) can come from it."""
+    import synapt.recall.generations as generations_mod
+
+    real_connect = sqlite3.connect
+
+    def failing_connect(target, *args, **kwargs):
+        if ".copy-tmp-" in str(target):
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(generations_mod.sqlite3, "connect", failing_connect)
+    chunks = [_chunk("mirror-error", 0, "still-published")]
+
+    rebuild_and_publish(tmp_path, chunks)
+
+    assert {c.id for c in _read_generation_chunks(current_generation_dir(tmp_path))} == {"mirror-error:t0"}
+    left = sorted(p.name for p in tmp_path.iterdir() if ".copy-tmp-" in p.name)
+    assert left == [], f"temp copies left after a failed mirror copy: {left}"
+
+
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="Windows refuses to replace a file another handle holds open, so the mirror keeps the "
                            "old shard there and logs it; this row is about the POSIX replace")
