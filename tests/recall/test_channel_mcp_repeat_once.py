@@ -2,7 +2,8 @@
 
 The store preamble prints on the first call of a session and again only when
 the store it names changes; an unread @mention prints in full once, then as a
-one-line count with a read hint until it is read.
+one-line count with a read hint until it is read. A mention the session has
+read (read_message) or answered (a post naming its id) is not listed again.
 """
 
 from __future__ import annotations
@@ -26,9 +27,11 @@ class TestRecallChannelSaysItOnce(unittest.TestCase):
         self._server = server
         self._saved = (getattr(server, "_last_store_preamble", None),
                        set(getattr(server, "_shown_mentions", ())),
-                       server._is_solo_mode)
+                       server._is_solo_mode,
+                       set(getattr(server, "_cleared_mentions", ())))
         server._last_store_preamble = None
         server._shown_mentions = set()
+        server._cleared_mentions = set()
         # The fixture keeps channel logs in the shared dir; the solo probe
         # only looks at the local one and would skip the mention check.
         server._is_solo_mode = lambda: False
@@ -46,14 +49,16 @@ class TestRecallChannelSaysItOnce(unittest.TestCase):
         conn.commit()
         conn.close()
         channel_read("dev")
-        self._post(BODY)
+        self.first_id = self._post(BODY)
 
     def tearDown(self) -> None:
         from synapt.recall.actions import reset_action_registry
 
         server = self._server
-        server._last_store_preamble, shown, server._is_solo_mode = self._saved
+        (server._last_store_preamble, shown, server._is_solo_mode,
+         cleared) = self._saved
         server._shown_mentions = shown
+        server._cleared_mentions = cleared
         reset_action_registry()
         if self._previous_agent_id is None:
             os.environ.pop("SYNAPT_AGENT_ID", None)
@@ -64,12 +69,13 @@ class TestRecallChannelSaysItOnce(unittest.TestCase):
     def _as(self, agent: str) -> None:
         os.environ["SYNAPT_AGENT_ID"] = agent
 
-    def _post(self, body: str) -> None:
+    def _post(self, body: str) -> str:
         from synapt.recall.channel import channel_post
 
         self._as("s_lead")
-        channel_post("dev", body)
+        out = channel_post("dev", body)
         self._as("s_reader")
+        return out.rsplit("[id=", 1)[1].rstrip("]")
 
     def _who(self) -> str:
         return self.call(action="who", channel="dev")
@@ -119,6 +125,38 @@ class TestRecallChannelSaysItOnce(unittest.TestCase):
         self.call(action="read", channel="dev")
         out = self._who()
         self.assertNotIn("@mention", out)
+        self.assertNotIn(BODY, out)
+
+    def test_read_message_clears_the_mention(self) -> None:
+        self.assertIn(BODY, self._who())
+        self.call(action="read_message", channel="dev", message=self.first_id)
+        out = self._who()
+        self.assertNotIn("@mention", out)
+        self.assertNotIn(BODY, out)
+
+    def test_read_message_that_finds_nothing_clears_nothing(self) -> None:
+        self._who()
+        self.call(action="read_message", channel="ops", message=self.first_id)
+        self.assertIn("1 unread @mention(s) shown in full earlier", self._who())
+
+    def test_a_post_naming_the_id_clears_the_mention(self) -> None:
+        self._who()
+        self.call(action="post", channel="dev",
+                  message=f"done, re {self.first_id}")
+        out = self._who()
+        self.assertNotIn("@mention", out)
+
+    def test_a_post_without_a_body_still_names_the_missing_message(self) -> None:
+        out = self.call(action="post", channel="dev")
+        self.assertIn("message is required", out)
+
+    def test_new_mention_still_shown_after_an_old_one_is_read(self) -> None:
+        self._who()
+        self.call(action="read_message", channel="dev", message=self.first_id)
+        self._post(LATER)
+        out = self._who()
+        self.assertIn("1 @mention(s):", out)
+        self.assertIn(LATER, out)
         self.assertNotIn(BODY, out)
 
 

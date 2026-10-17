@@ -3677,6 +3677,20 @@ _last_store_preamble: str | None = None
 # Mention ids recall_channel results have already printed in full.
 _shown_mentions: set[str] = set()
 
+# Mention ids this session has read (read_message) or answered (a post naming
+# the id): recall_channel results no longer list them at all.
+_cleared_mentions: set[str] = set()
+
+_MESSAGE_ID_RE = re.compile(r"\bm_[0-9a-f]{8}\b")
+
+
+def _clear_mentions_from(action: str, message: str | None, result: str) -> None:
+    """Record mention ids a successful read_message or post has dealt with."""
+    if action == "read_message" and result.startswith("## #"):
+        _cleared_mentions.add(message.strip())
+    elif action == "post" and message:
+        _cleared_mentions.update(_MESSAGE_ID_RE.findall(message))
+
 
 def recall_channel(
     action: str = "read",
@@ -3796,6 +3810,7 @@ def recall_channel(
             offset=offset,
             length=length,
         )
+        _clear_mentions_from(action, message, result)
         # The store lines cost every call the same bytes while saying
         # nothing new: print them on the first call of the session and again
         # only when what they name changes.
@@ -3979,7 +3994,10 @@ def _directive_suffix() -> str:
     if not _is_solo_mode():
         try:
             from synapt.recall.channel import check_directives
-            result = check_directives(shown_mentions=_shown_mentions)
+            result = check_directives(
+                shown_mentions=_shown_mentions,
+                cleared_mentions=_cleared_mentions,
+            )
             if result:
                 parts.append(result)
         except Exception:
