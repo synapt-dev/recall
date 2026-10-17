@@ -4,7 +4,10 @@ fixes save_chunks()'s non-atomic full-rebuild (R3.1, PR two)."""
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
+
+import pytest
 
 from synapt.recall.core import TranscriptChunk
 from synapt.recall.generations import (
@@ -208,6 +211,62 @@ def test_old_layout_reader_finds_rebuilt_content_via_the_flat_mirror(tmp_path):
         "old-layout reader's content does not match the real rebuilt "
         "generation -- stale or partial mirror"
     )
+
+
+def test_old_layout_reader_opens_every_flat_shard_read_only(tmp_path):
+    """A read-only open (mode=ro, what open_readonly uses) is a supported read
+    path for a flat-mirror shard. A shard copied from a WAL-mode generation
+    keeps WAL in its header, and the mirror removes its -wal/-shm, so a mode=ro
+    open had no -shm and could not create one: "unable to open database file".
+    The mirror copy is now in rollback-journal mode, which needs no sidecar to
+    read; the generation shards themselves stay WAL."""
+    chunks = [_chunk("readonly", i, f"readonly-marker-{i}") for i in range(30)]
+
+    rebuild_and_publish(tmp_path, chunks)
+
+    flat = list_shards(tmp_path)
+    assert flat, "test setup invalid: the rebuild left no flat shard"
+    read: list[TranscriptChunk] = []
+    for shard_path in flat:
+        db = RecallDB.open_readonly(shard_path)
+        try:
+            read.extend(db.load_chunks())
+        finally:
+            db.close()
+    assert {c.id for c in read} == {c.id for c in chunks}
+    # The file header's read/write version bytes (offsets 18 and 19) are 2 for WAL and 1 for a rollback journal;
+    # reading them opens nothing, so the check cannot itself change or fail on the file.
+    for shard_path in list_shards(current_generation_dir(tmp_path)):
+        assert shard_path.read_bytes()[18:20] == b"\x02\x02", f"{shard_path.name}: a generation shard left WAL mode"
+    for shard_path in flat:
+        assert shard_path.read_bytes()[18:20] == b"\x01\x01", f"{shard_path.name}: the flat copy is still WAL"
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows refuses to replace a file another handle holds open, so the mirror keeps the "
+                           "old shard there and logs it; this row is about the POSIX replace")
+def test_a_reader_holding_a_flat_shard_keeps_its_rows_across_a_rebuild(tmp_path):
+    """The flat mirror swaps each shard in with one atomic replace. A reader
+    that opened a flat shard before a rebuild keeps reading the file it opened
+    (the old rows), and a fresh open reads the new rows."""
+    first = [_chunk("held", 0, "first-gen")]
+    second = [_chunk("fresh", 0, "second-gen")]
+
+    rebuild_and_publish(tmp_path, first)
+    (shard_path,) = list_shards(tmp_path)
+    held = RecallDB.open_readonly(shard_path)
+    try:
+        assert {c.id for c in held.load_chunks()} == {"held:t0"}
+        rebuild_and_publish(tmp_path, second)
+        assert {c.id for c in held.load_chunks()} == {"held:t0"}, "the held reader saw the file change under it"
+    finally:
+        held.close()
+
+    fresh = RecallDB.open_readonly(shard_path)
+    try:
+        assert {c.id for c in fresh.load_chunks()} == {"fresh:t0"}
+    finally:
+        fresh.close()
 
 
 def test_old_layout_reader_survives_a_second_rebuild_with_fewer_shards(tmp_path):

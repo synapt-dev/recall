@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -149,6 +150,15 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
             tmp_copy = index_dir / f".{shard_path.name}.copy-tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
             try:
                 _shutil.copyfile(shard_path, tmp_copy)
+                # The copy keeps WAL in its header, and the cleanup below removes its -wal/-shm, so a read-only
+                # (mode=ro) open could neither find a -shm nor create one and failed. A rollback-journal file needs
+                # no sidecar to be read, so the copy is switched before it goes live. The generation shard it came
+                # from is not touched and stays WAL.
+                conn = sqlite3.connect(tmp_copy)
+                try:
+                    conn.execute("PRAGMA journal_mode=DELETE")
+                finally:
+                    conn.close()
                 os.replace(tmp_copy, target)
                 # SQLite's WAL header carries a salt that invalidates a
                 # stale -wal against a base file it wasn't written
