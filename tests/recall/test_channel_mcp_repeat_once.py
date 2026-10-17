@@ -146,6 +146,19 @@ class TestRecallChannelSaysItOnce(unittest.TestCase):
         out = self._who()
         self.assertNotIn("@mention", out)
 
+    def test_a_post_naming_the_id_among_others_clears_it(self) -> None:
+        self._who()
+        one, two = "m_" + "1" * 8, "m_" + "2" * 8
+        self.call(action="post", channel="dev",
+                  message=f"re {one}, {self.first_id}; {two}")
+        self.assertNotIn("@mention", self._who())
+
+    def test_a_post_with_the_id_inside_a_longer_word_clears_nothing(self) -> None:
+        self._who()
+        self.call(action="post", channel="dev",
+                  message=f"x{self.first_id} {self.first_id}x")
+        self.assertIn("1 unread @mention(s) shown in full earlier", self._who())
+
     def test_a_post_without_a_body_still_names_the_missing_message(self) -> None:
         out = self.call(action="post", channel="dev")
         self.assertIn("message is required", out)
