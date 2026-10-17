@@ -3500,6 +3500,7 @@ def recall_channel(
     state_store = None
     log_store = None
     root_source = None
+    log_source = None
     try:
         from synapt.recall.actions import get_action_registry
         from synapt.recall.channel import (
@@ -3507,6 +3508,8 @@ def recall_channel(
             _db_path,
             _normalize_channel_name,
             _orphaned_local_channel_store,
+            _room_channels_dir,
+            _room_map_path,
         )
 
         registry = get_action_registry()
@@ -3521,7 +3524,15 @@ def recall_channel(
         # the global path, since nothing in the output ever said
         # the log was elsewhere. Named unconditionally, not only when they
         # diverge: a caller should never have to infer agreement from silence.
-        log_store = _channels_dir().resolve()
+        # A room in the shared-room map lives in its mapped store, so the log
+        # line names that store and says the map put it there. Resolved before
+        # either is set, so a refused mapping never prints the caller's store.
+        own_store = _channels_dir().resolve()
+        room_store = _room_channels_dir(_normalize_channel_name(channel)).resolve()
+        log_store = room_store
+        log_source = root_source
+        if room_store != own_store:
+            log_source = f"room map {_room_map_path()}"
         orphan_dir = _orphaned_local_channel_store()
         orphan_line = ""
         if orphan_dir is not None:
@@ -3556,7 +3567,7 @@ def recall_channel(
         global _last_store_preamble
         preamble = (
             f"Channel state store: {state_store} (source: {root_source})\n"
-            f"Channel log store: {log_store} (source: {root_source})\n"
+            f"Channel log store: {log_store} (source: {log_source})\n"
             f"{orphan_line}"
         )
         if preamble == _last_store_preamble:
@@ -3568,7 +3579,7 @@ def recall_channel(
         if state_store:
             prefix += f"Channel state store: {state_store} (source: {root_source})\n"
         if log_store:
-            prefix += f"Channel log store: {log_store} (source: {root_source})\n"
+            prefix += f"Channel log store: {log_store} (source: {log_source or root_source})\n"
         return f"{prefix}Channel failed: {exc}"
 
 

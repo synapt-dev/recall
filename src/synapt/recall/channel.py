@@ -320,9 +320,111 @@ def _normalize_channel_name(channel: str) -> str:
     return channel.lstrip("#") or channel
 
 
+class SharedRoomMapError(RuntimeError):
+    """The shared-room map names a room but cannot place it.
+
+    Raised instead of falling back to the caller's own store: a fallback
+    would put the post exactly where the map exists to keep it out of.
+    """
+
+
+def _room_map_path() -> Path:
+    """Return the shared-room map: ``SYNAPT_ROOM_MAP``, else ``~/.synapt/channels/rooms.toml``."""
+    override = os.environ.get("SYNAPT_ROOM_MAP")
+    if override:
+        return Path(override)
+    return Path.home() / ".synapt" / "channels" / "rooms.toml"
+
+
+def _load_room_map() -> dict[str, str]:
+    """Read ``[rooms]`` from the map file; an absent file maps nothing."""
+    path = _room_map_path()
+    if not path.is_file():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        with open(path, "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SharedRoomMapError(f"cannot read the shared-room map {path}: {exc}") from exc
+    rooms = cfg.get("rooms", {})
+    if not isinstance(rooms, dict):
+        raise SharedRoomMapError(f"[rooms] in {path} is not a table")
+    # Keys are looked up by normalised channel name, so a key written the way
+    # prose names the room ("#head") must map that room too, not be skipped.
+    normalised: dict[str, str] = {}
+    for key, target in rooms.items():
+        name = _normalize_channel_name(key)
+        if name in normalised and normalised[name] != target:
+            raise SharedRoomMapError(f"room '{name}' is mapped twice in {path}")
+        normalised[name] = target
+    return normalised
+
+
+def _mapped_room_dir(channel: str) -> Path | None:
+    """Return the store directory the map assigns to *channel*, or None.
+
+    A room shared across gripspaces (``#head``) lives in one store, and the
+    map names it as ``<org>/<project>`` under ``~/.synapt/channels``. Only
+    the room's JSONL log moves; presence, cursors and pins stay in the
+    caller's local state db. A mapped room whose directory is missing or
+    malformed is refused by name.
+    """
+    name = _normalize_channel_name(channel)
+    rooms = _load_room_map()
+    if name not in rooms:
+        return None
+    target = rooms[name]
+    parts = target.split("/") if isinstance(target, str) else []
+    if len(parts) != 2 or any(p in ("", ".", "..") for p in parts):
+        raise SharedRoomMapError(
+            f"room '{name}' in {_room_map_path()} must name '<org>/<project>', got {target!r}"
+        )
+    room_dir = Path.home() / ".synapt" / "channels" / parts[0] / parts[1]
+    if not room_dir.is_dir():
+        raise SharedRoomMapError(
+            f"room '{name}' is mapped to {room_dir} in {_room_map_path()}, and that "
+            f"directory does not exist; refusing rather than writing this room to "
+            f"another store"
+        )
+    return _guard_store_path("resolve_room_dir", room_dir)
+
+
+def _room_channels_dir(channel: str, project_dir: Path | None = None) -> Path:
+    """Return the directory holding *channel*'s log.
+
+    An explicit ``SYNAPT_SHARED_CHANNELS_DIR`` still pins every room; otherwise
+    a room in the shared-room map resolves to its mapped store, and every other
+    room to this caller's store.
+    """
+    if _shared_channels_dir() is None:
+        mapped = _mapped_room_dir(channel)
+        if mapped is not None:
+            return mapped
+    return _channels_dir(project_dir)
+
+
+def _mapped_room_paths(project_dir: Path | None = None) -> list[Path]:
+    """Return the log files of mapped rooms that live outside this caller's store."""
+    if _shared_channels_dir() is not None:
+        return []
+    own = _channels_dir(project_dir).resolve()
+    paths = []
+    for name in sorted(_load_room_map()):
+        room_dir = _mapped_room_dir(name)
+        if room_dir is not None and room_dir.resolve() != own:
+            path = room_dir / f"{_channel_to_filename(name)}.jsonl"
+            if path.exists():
+                paths.append(path)
+    return paths
+
+
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
     """Return the JSONL log path for a channel."""
-    ch_dir = _channels_dir(project_dir)
+    ch_dir = _room_channels_dir(channel, project_dir)
     safe_name = _channel_to_filename(channel)
     new_path = ch_dir / f"{safe_name}.jsonl"
     # Migrate legacy colon-format files (not valid on Windows)
@@ -3039,12 +3141,12 @@ def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     Use :func:`list_dm_channels` to discover an agent's DM conversations.
     """
     ch_dir = _channels_dir(project_dir)
-    if not ch_dir.exists():
-        return []
-    return sorted(
-        _filename_to_channel(p.stem) for p in ch_dir.glob("*.jsonl")
+    files = list(ch_dir.glob("*.jsonl")) if ch_dir.exists() else []
+    files += _mapped_room_paths(project_dir)
+    return sorted({
+        _filename_to_channel(p.stem) for p in files
         if not is_dm_channel(_filename_to_channel(p.stem))
-    )
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -3204,14 +3306,19 @@ def channel_search(
     # Build the list of channels to search: public channels + agent's DMs
     ch_dir = _channels_dir(project_dir)
     all_channels: list[str] = []
-    if ch_dir.exists():
-        for p in ch_dir.glob("*.jsonl"):
+    files = list(ch_dir.glob("*.jsonl")) if ch_dir.exists() else []
+    files += _mapped_room_paths(project_dir)
+    if files:
+        for p in files:
             name = _filename_to_channel(p.stem)
             if is_dm_channel(name):
                 if agent_id and is_dm_participant(name, agent_id):
                     all_channels.append(name)
             else:
                 all_channels.append(name)
+    # A mapped room can also have a stale file in this store; it is read once,
+    # from its mapped path.
+    all_channels = list(dict.fromkeys(all_channels))
 
     if channel is not None:
         channel = _normalize_channel_name(channel)
