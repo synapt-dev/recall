@@ -1371,7 +1371,8 @@ def _append_message(
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
     conn: sqlite3.Connection | None = None,
-) -> None:
+    retry_window: float = 0.0,
+) -> sqlite3.Error | None:
     """Append a message to a channel's JSONL log with file locking.
 
     Auto-generates a message ID if not already set.
@@ -1381,6 +1382,14 @@ def _append_message(
     When ``conn`` is provided it is reused for dirty-flag writes instead of
     opening a new connection (avoids SQLite lock contention when the caller
     already holds a transaction).
+
+    The written line is the message. A state-store error after it (the
+    unread flags) is returned, not raised, so a caller never reports a
+    message that is in the log as failed. With ``retry_window`` > 0, a line
+    already in the log from the same sender, with the same channel, type
+    and body, no older than that many seconds, is taken as this message:
+    nothing is written, ``msg`` takes its id and timestamp, and None is
+    returned.
     """
     # The body is stored exactly as given. An earlier unescape here turned
     # every literal backslash-n / backslash-t into a newline / tab, which
@@ -1398,16 +1407,67 @@ def _append_message(
     from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
         lock_exclusive(f)
+        if retry_window > 0:
+            landed = _find_retried_message(path, msg, retry_window)
+            if landed is not None:
+                msg.id = landed.id
+                msg.timestamp = landed.timestamp
+                return None
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
     # Set dirty flag for all other members of this channel (OSS substrate)
-    _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+    try:
+        _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+        state_error = None
+    except sqlite3.Error as exc:
+        state_error = exc
     # Fire registered hooks (mention storage, wake emission, etc.)
     for hook in _message_posted_hooks:
         try:
             hook(msg, project_dir)
         except Exception:
             pass  # hooks are best-effort
+    return state_error
+
+
+# How far back the log is read for a retried post: enough lines for a busy
+# channel's last few minutes without reading the whole file on every post.
+_RETRY_SCAN_BYTES = 256 * 1024
+
+
+def _find_retried_message(
+    path: Path, msg: ChannelMessage, window: float,
+) -> ChannelMessage | None:
+    """Return a logged message that ``msg`` repeats, if one is recent enough.
+
+    Same sender, type and body (the log is the channel's own), timestamped no
+    more than ``window`` seconds before ``msg``. Reads only the tail of the
+    log.
+    """
+    try:
+        now = datetime.strptime(msg.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _RETRY_SCAN_BYTES))
+            tail = f.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            prior = ChannelMessage.from_dict(json.loads(line))
+            then = datetime.strptime(prior.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            continue
+        if (now - then).total_seconds() > window:
+            return None
+        if (
+            prior.from_agent == msg.from_agent
+            and prior.type == msg.type
+            and prior.body == msg.body
+        ):
+            return prior
+    return None
 
 
 def _set_dirty_flags(
@@ -2018,6 +2078,11 @@ def list_dm_channels(
     return sorted(result)
 
 
+# A post repeated by the same sender within this many seconds (same channel,
+# type and body) is the same post retried, and is not logged twice.
+POST_RETRY_WINDOW_SECONDS = 120.0
+
+
 def channel_post(
     channel: str,
     message: str,
@@ -2066,29 +2131,44 @@ def channel_post(
     if attachment_paths:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
         msg.attachments = _copy_attachments(msg.id, attachment_paths, project_dir)
-    _append_message(msg, project_dir, channels_dir=channels_dir)
+    # Once the line is in the log the post has happened: every state-store
+    # error from here on is reported beside the id, never raised, so a caller
+    # does not post again. A post repeated within the retry window (a caller
+    # that saw an error anyway) gets the logged post's id instead of a copy.
+    state_error = _append_message(
+        msg, project_dir, channels_dir=channels_dir,
+        retry_window=0.0 if attachment_paths else POST_RETRY_WINDOW_SECONDS,
+    )
 
-    conn = _open_db(project_dir)
+    pinned = False
     try:
-        conn.execute(
-            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
-            (now, aid),
-        )
-        if pin:
+        conn = _open_db(project_dir)
+        try:
             conn.execute(
-                "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (channel, message, msg.id, aid, now),
+                "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
+                (now, aid),
             )
-        conn.commit()
-    finally:
-        conn.close()
+            if pin:
+                conn.execute(
+                    "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
+                    "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS "
+                    "(SELECT 1 FROM pins WHERE channel = ? AND message_id = ?)",
+                    (channel, message, msg.id, aid, now, channel, msg.id),
+                )
+            conn.commit()
+            pinned = pin
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        state_error = state_error or exc
     attachment_suffix = ""
     if msg.attachments:
         attachment_suffix = f" [attachments: {', '.join(msg.attachments)}]"
     result = f"[#{channel}] {display}: {message}{attachment_suffix}".rstrip()
-    if pin:
+    if pinned:
         result += " (pinned)"
+    if state_error is not None:
+        result += f" (posted; {'pin not recorded, ' if pin and not pinned else ''}channel state not updated: {state_error})"
     # A caller that wants to dispatch the author on this exact post (e.g. a
     # verdict) needs the id back. _append_message() already generates one
     # unconditionally; surface it rather than making every such caller
