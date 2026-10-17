@@ -12,6 +12,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -74,15 +75,14 @@ class PostCommitTest(unittest.TestCase):
         self.assertEqual(self._id(result), lines[0]["id"])
         self.assertIn("database is locked", result)
 
-    def test_r2_retry_of_a_landed_post_does_not_duplicate(self):
+    def test_r2_same_body_posted_twice_under_a_held_lock_logs_both(self):
         self._hold_write_lock()
         first = channel_post(channel="dev", message="once", display_name="poster")
         second = channel_post(channel="dev", message="once", display_name="poster")
-        self._release()
-        third = channel_post(channel="dev", message="once", display_name="poster")
-        self.assertEqual([l["body"] for l in self._lines()], ["once"])
-        self.assertEqual(self._id(first), self._id(second))
-        self.assertEqual(self._id(first), self._id(third))
+        lines = self._lines()
+        self.assertEqual([l["body"] for l in lines], ["once", "once"])
+        self.assertEqual([self._id(first), self._id(second)], [l["id"] for l in lines])
+        self.assertNotEqual(self._id(first), self._id(second))
 
     def test_r3_pin_not_recorded_is_not_reported_pinned(self):
         self._hold_write_lock()
@@ -96,19 +96,20 @@ class PostCommitTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_r4_retry_after_unrecorded_pin_pins_the_landed_post(self):
+    def test_r4_pin_posted_again_after_an_unrecorded_pin_is_its_own_post(self):
         self._hold_write_lock()
         first = channel_post(channel="dev", message="pin me", display_name="poster", pin=True)
         self._release()
         second = channel_post(channel="dev", message="pin me", display_name="poster", pin=True)
-        self.assertTrue(second.endswith(f"(pinned) [id={self._id(first)}]"), second)
-        self.assertEqual(len(self._lines()), 1)
+        self.assertTrue(second.endswith(f"(pinned) [id={self._id(second)}]"), second)
+        self.assertNotEqual(self._id(first), self._id(second))
+        self.assertEqual(len(self._lines()), 2)
         conn = _open_db()
         try:
             rows = conn.execute("SELECT message_id FROM pins").fetchall()
         finally:
             conn.close()
-        self.assertEqual([r[0] for r in rows], [self._id(first)])
+        self.assertEqual([r[0] for r in rows], [self._id(second)])
 
     def test_r5_post_that_did_not_land_fails(self):
         with patch.object(ch, "_guard_store_path", side_effect=OSError("disk gone")):
@@ -133,30 +134,21 @@ class PostCommitTest(unittest.TestCase):
         channel_post(channel="dev", message="same", display_name="other")
         self.assertEqual(len(self._lines()), 2)
 
-    def test_r8_same_body_after_the_retry_window_is_a_new_post(self):
-        first = channel_post(channel="dev", message="again", display_name="poster")
-        path = _channel_path("dev")
-        rec = self._lines()[0]
-        rec["timestamp"] = "2020-01-01T00:00:00.000000Z"
-        path.write_text(json.dumps(rec) + "\n", encoding="utf-8")
-        second = channel_post(channel="dev", message="again", display_name="poster")
-        self.assertEqual(len(self._lines()), 2)
-        self.assertNotEqual(self._id(first), self._id(second))
-
     def test_r9_same_body_of_another_type_is_its_own_post(self):
         channel_post(channel="dev", message="typed", display_name="poster")
         channel_post(channel="dev", message="typed", display_name="poster", msg_type="status")
         self.assertEqual(len(self._lines()), 2)
 
-    def test_r10_retried_pin_is_recorded_once(self):
+    def test_r10_same_pin_posted_twice_is_two_pins(self):
         first = channel_post(channel="dev", message="pin twice", display_name="poster", pin=True)
         second = channel_post(channel="dev", message="pin twice", display_name="poster", pin=True)
-        self.assertEqual(self._id(first), self._id(second))
+        self.assertNotEqual(self._id(first), self._id(second))
         conn = _open_db()
         try:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pins").fetchone()[0], 1)
+            rows = conn.execute("SELECT message_id FROM pins ORDER BY rowid").fetchall()
         finally:
             conn.close()
+        self.assertEqual([r[0] for r in rows], [self._id(first), self._id(second)])
 
     def test_r11_posts_with_attachments_are_each_logged(self):
         att = Path(self.tmpdir) / "note.txt"
@@ -181,6 +173,51 @@ class PostCommitTest(unittest.TestCase):
         self.assertNotIn("pin not recorded", result)
         self.assertIn("channel state not updated: database is locked", result)
         self.assertEqual(len(self._lines()), 1)
+
+    def test_r14_identical_posts_a_second_apart_both_land(self):
+        first = channel_post(channel="dev", message="ack", display_name="poster")
+        time.sleep(1)
+        second = channel_post(channel="dev", message="ack", display_name="poster")
+        lines = self._lines()
+        self.assertEqual([l["body"] for l in lines], ["ack", "ack"])
+        self.assertEqual([self._id(first), self._id(second)], [l["id"] for l in lines])
+
+    def test_r15_other_error_setting_unread_flags_is_reported_not_raised(self):
+        with patch.object(ch, "_set_dirty_flags", side_effect=RuntimeError("flags broke")):
+            result = channel_post(channel="dev", message="landed", display_name="poster")
+        lines = self._lines()
+        self.assertEqual([l["body"] for l in lines], ["landed"])
+        self.assertEqual(self._id(result), lines[0]["id"])
+        self.assertIn("channel state not updated: flags broke", result)
+
+    def test_r16_other_error_opening_the_store_is_reported_not_raised(self):
+        real_open = ch._open_db
+
+        def open_db(*args, **kwargs):
+            if self._lines():
+                raise RuntimeError("store broke")
+            return real_open(*args, **kwargs)
+
+        with patch.object(ch, "_open_db", side_effect=open_db):
+            result = channel_post(channel="dev", message="pin me", display_name="poster", pin=True)
+        lines = self._lines()
+        self.assertEqual([l["body"] for l in lines], ["pin me"])
+        self.assertEqual(self._id(result), lines[0]["id"])
+        self.assertNotIn("(pinned)", result)
+        self.assertIn("pin not recorded, channel state not updated: store broke", result)
+
+    def test_r17_two_pinned_posts_with_one_id_record_one_pin(self):
+        one_id = ch._generate_msg_id("2026-01-01T00:00:00.000000Z", "a_poster", "pin")
+        with patch.object(ch, "_generate_msg_id", return_value=one_id):
+            channel_post(channel="dev", message="pin a", display_name="poster", pin=True)
+            channel_post(channel="dev", message="pin b", display_name="poster", pin=True)
+        self.assertEqual(len(self._lines()), 2)
+        conn = _open_db()
+        try:
+            rows = conn.execute("SELECT message_id, body FROM pins").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([tuple(r) for r in rows], [(one_id, "pin a")])
 
 
 if __name__ == "__main__":
