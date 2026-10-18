@@ -13,6 +13,9 @@ about 0.95, above the 0.40 floor), which queues exactly one row.
 import inspect
 from unittest.mock import patch
 
+import pytest
+
+from synapt.recall import server
 from synapt.recall.core import TranscriptIndex, project_index_dir
 from synapt.recall.storage import RecallDB
 
@@ -21,6 +24,17 @@ from tests.recall.test_co_retrieval_floor import (
     VEC_B,
     _fake_provider_with_db_embeddings,
 )
+
+# Taken at import, before any row patches it to a no-op.
+_REAL_INVALIDATE_CACHE = server._invalidate_cache
+
+
+@pytest.fixture(autouse=True)
+def _drop_cached_index():
+    """Each row patches _invalidate_cache away, so the server keeps the
+    row's tmp index cached; drop it so the next file starts clean."""
+    yield
+    _REAL_INVALIDATE_CACHE()
 
 
 def _pending(tmp_path):
