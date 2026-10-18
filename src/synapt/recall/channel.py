@@ -3780,7 +3780,8 @@ def check_directives(
         ids = ", ".join(f"#{ch} {msg.id}" for ch, msg in seen_mentions)
         lines.append(
             f"[channel] {len(seen_mentions)} unread @mention(s) shown in full "
-            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>) "
+            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>), "
+            f"action=\"read_message\" on the id, or a post naming the id "
             f"clears them"
         )
     if intents:

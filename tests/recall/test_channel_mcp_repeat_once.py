@@ -163,6 +163,21 @@ class TestRecallChannelSaysItOnce(unittest.TestCase):
         out = self.call(action="post", channel="dev")
         self.assertIn("message is required", out)
 
+    def test_hook_path_marks_nothing(self) -> None:
+        from synapt.recall.channel import check_directives
+
+        self.assertIn(BODY, self._who())
+        self.call(action="read_message", channel="dev", message=self.first_id)
+        for _ in range(2):
+            self.assertIn(BODY, check_directives(agent_name="s_reader"))
+
+    def test_count_line_names_every_way_to_clear(self) -> None:
+        self._who()
+        out = self._who()
+        self.assertIn('action="read"', out)
+        self.assertIn('action="read_message"', out)
+        self.assertIn("a post naming the id", out)
+
     def test_new_mention_still_shown_after_an_old_one_is_read(self) -> None:
         self._who()
         self.call(action="read_message", channel="dev", message=self.first_id)
