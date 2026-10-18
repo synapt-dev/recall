@@ -91,6 +91,27 @@ class TestLookupSkipContradictions:
                 p.stop()
         assert len(_pending(tmp_path)) >= 1
 
+    def test_progressive_route_flag_false_queues_no_rows(self, tmp_path):
+        """max_sessions routes lookup through the newest-first session
+        search, which passes the flag on to the knowledge search."""
+        patches = _seed(tmp_path)
+        try:
+            _index().lookup("gateway Postgres", max_sessions=5,
+                            detect_contradictions=False)
+        finally:
+            for p in patches:
+                p.stop()
+        assert _pending(tmp_path) == []
+
+    def test_progressive_route_control_queues_rows(self, tmp_path):
+        patches = _seed(tmp_path)
+        try:
+            _index().lookup("gateway Postgres", max_sessions=5)
+        finally:
+            for p in patches:
+                p.stop()
+        assert len(_pending(tmp_path)) >= 1
+
     def test_existing_caller_default_unchanged(self, tmp_path):
         from synapt.recall.server import recall_search
 
