@@ -1086,16 +1086,33 @@ def _strip_section_prefix(content: str) -> str:
     return content
 
 
+# The create-branch content ceiling, shared by B3 (``_normalize_create_content``) and the
+# B4 compose check, so the two cannot drift apart. A node is stored whole up to
+# ``KNOWLEDGE_CONTENT_MAX_CHARS`` (4,000); consolidation cuts at this lower ceiling first,
+# so no consolidate create can reach the stored-node limit.
+B3_CREATE_MAX_CHARS = 1500
+
+
 def _normalize_create_content(raw_content: str) -> str:
     """The exact normalization ``_apply_consolidation_result``'s create branch runs before
-    any filter sees the content: truncate to 300 chars, scrub, strip markdown formatting,
+    any filter sees the content: truncate to ``B3_CREATE_MAX_CHARS`` (a cut is logged with
+    both lengths), scrub, strip markdown formatting,
     strip section-header prefixes. Factored out so B4 (``_evaluate_create_content`` below)
     can run the IDENTICAL sequence on its own composed candidates — a raw string that isn't
     whitespace can still normalize down to empty or low-specificity (e.g. a pure markdown/
     section-prefix wrapper), which only checking the raw string misses (Sentinel, recall#884
     re-review, fruit 2: a 152-char "Operational Deployment Readiness: ..." composition strips
     to a 118-char low-specificity remainder at real B3)."""
-    content = scrub_text(_tw(str(raw_content), 300))
+    raw = str(raw_content)
+    content = _tw(raw, B3_CREATE_MAX_CHARS)
+    if len(content) < len(raw):
+        logger.info(
+            "B3 create content cut: %d chars -> %d chars", len(raw), len(content)
+        )
+    # A redaction marker can be longer than the secret it replaces, so cut again after
+    # scrub. Every consolidate create then stays under B3_CREATE_MAX_CHARS by construction,
+    # well below the stored-node limit KnowledgeNode.create refuses at.
+    content = _tw(scrub_text(content), B3_CREATE_MAX_CHARS)
     content = strip_markdown_formatting(content)
     content = _strip_section_prefix(content)
     return content
@@ -3550,22 +3567,22 @@ def _group_temporal_bound(members: list[dict]) -> tuple[str | None, str | None] 
 
 
 # The composed content's own safety ceiling, matched to _apply_consolidation_result's real
-# create-branch pipeline (content = scrub_text(_tw(str(raw_node.get("content", "")), 300))) —
+# create-branch pipeline (content = _normalize_create_content, cut at B3_CREATE_MAX_CHARS);
 # NOT a new independent limit. A composition that would arrive at B3 empty-after-scrub (e.g.
 # whitespace-only) is silently DROPPED there (0 nodes created, both members lost); one that
-# exceeds 300 chars is silently WORD-TRUNCATED (the load-bearing final clause can vanish with
+# exceeds that ceiling is silently WORD-TRUNCATED (the load-bearing final clause can vanish with
 # no warning). Both are real, fruit-confirmed (Sentinel, recall#884 re-review): B4 must reject
 # a group whose composed content would hit either path, BEFORE it ever reaches B3, and fall
 # the group's members back to individual pass-through instead.
-_B4_COMPOSE_CONTENT_MAX_CHARS = 300
+_B4_COMPOSE_CONTENT_MAX_CHARS = B3_CREATE_MAX_CHARS
 
 
 def _b4_composed_content_is_safe(content: str, content_profile=None) -> bool:
     """Whether *content* is safe to persist as a B4-composed node.
 
     Two parts. First, ONE check B4 alone needs, stricter than B3 itself: reject (don't
-    silently truncate) raw content over B3's real 300-char ceiling. B3 tolerates truncation —
-    ``_tw`` silently cuts at 300 chars and moves on, the monolith's long-standing behavior for
+    silently truncate) raw content over B3's real B3_CREATE_MAX_CHARS ceiling. B3 tolerates truncation;
+    ``_tw`` silently cuts at that ceiling and moves on, the monolith's long-standing behavior for
     ANY create-action content. B4 does not: a COMPOSED sentence that needs truncation has
     already lost information the model was told to preserve faithfully (guard 2), and unlike
     an atomic fact, B4 has a safe fallback B3 doesn't — degrade the whole group back to its
