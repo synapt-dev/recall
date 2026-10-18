@@ -442,6 +442,7 @@ def recall_search(
     context: int = 0,
     min_confidence: float = 0.0,
     top_k: int = 0,
+    detect_contradictions: bool = True,
 ) -> str:
     """Search past coding sessions for relevant context. USE PROACTIVELY.
 
@@ -496,6 +497,9 @@ def recall_search(
         include_historical: If True, include superseded/contradicted knowledge nodes
                             in results. When multiple versions exist in the same lineage,
                             the highest-confidence one is kept (confidence-based fallback).
+        detect_contradictions: If False, skip co-retrieval contradiction
+                               detection, so the search queues no pending
+                               contradictions. For background searches.
     """
     index_dir = project_index_dir()
     freshness_line = _query_freshness_line(index_dir)
@@ -601,6 +605,7 @@ def recall_search(
             include_historical=include_historical,
             min_confidence=effective_min_confidence,
             context=context,
+            detect_contradictions=detect_contradictions,
         )
         # Combine live (current session) + indexed (past sessions) results
         parts = []
@@ -653,7 +658,7 @@ def recall_search(
 
 
 @_memory_op_tap("mem_read")
-def recall_quick(query: str) -> str:
+def recall_quick(query: str, detect_contradictions: bool = True) -> str:
     """Quick, low-cost memory check. Use this speculatively — when you're
     not sure if past context exists but want to check.
 
@@ -667,13 +672,19 @@ def recall_quick(query: str) -> str:
 
     Args:
         query: Natural language query or keywords to search for.
+        detect_contradictions: If False, skip co-retrieval contradiction
+                               detection, so the search queues no pending
+                               contradictions. For background searches.
     """
     # The tool's contract includes the knowledge-semantic fallback (measured
     # live: a paraphrase query misses keyword-wise and only the embeddings
     # reach the saved fact). The grep-intercept hook calls the same body
     # through _recall_quick_impl with semantic_fallback=False — it runs
     # inside a 500 ms budget and must never start a model load on a miss.
-    return _recall_quick_impl(query, semantic_fallback=True)
+    return _recall_quick_impl(
+        query, semantic_fallback=True,
+        detect_contradictions=detect_contradictions,
+    )
 
 
 def _bind_quick_no_fallback():
@@ -683,7 +694,9 @@ def _bind_quick_no_fallback():
     return functools.partial(_recall_quick_impl, semantic_fallback=False)
 
 
-def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
+def _recall_quick_impl(
+    query: str, semantic_fallback: bool, detect_contradictions: bool = True,
+) -> str:
     index_dir = project_index_dir()
     freshness_line = _query_freshness_line(index_dir)
     quick_budget = _cap_tokens(500)
@@ -717,6 +730,7 @@ def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
             threshold_ratio=0.2,
             knowledge_boost=params.get("knowledge_boost"),
             max_knowledge=params.get("max_knowledge"),
+            detect_contradictions=detect_contradictions,
         )
         if result:
             return _with_query_freshness(result, freshness_line)
@@ -741,6 +755,7 @@ def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
                 threshold_ratio=0.2,
                 knowledge_boost=params.get("knowledge_boost"),
                 max_knowledge=params.get("max_knowledge"),
+                detect_contradictions=detect_contradictions,
             )
             if result:
                 return _with_query_freshness(result, freshness_line)

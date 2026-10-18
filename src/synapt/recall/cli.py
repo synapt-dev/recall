@@ -1874,6 +1874,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         max_sessions=args.max_sessions,
         after=args.after,
         before=args.before,
+        detect_contradictions=not getattr(args, "no_detect_contradictions", False),
     )
     t_search = time.perf_counter()
 
@@ -5535,6 +5536,10 @@ def make_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--after", default=None, help="Only results after this date (ISO 8601, e.g. 2026-02-28)")
     search_parser.add_argument("--before", default=None, help="Only results before this date (ISO 8601, e.g. 2026-03-01)")
     search_parser.add_argument("--profile", action="store_true", help="Show per-phase timing breakdown")
+    search_parser.add_argument(
+        "--no-detect-contradictions", action="store_true",
+        help="Skip co-retrieval contradiction detection (queue no pending contradictions)",
+    )
 
     # Benchmark
     code_parser = subparsers.add_parser(

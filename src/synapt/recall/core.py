@@ -2120,6 +2120,7 @@ class TranscriptIndex:
         min_confidence: float = 0.0,
         context: int = 0,
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Search transcripts and return formatted context string.
 
@@ -2153,6 +2154,9 @@ class TranscriptIndex:
                 the context. None = no cap (all qualifying nodes compete).
                 Set to e.g. 5 to prevent knowledge from crowding out raw
                 conversation chunks.
+            detect_contradictions: When False, skip co-retrieval
+                contradiction detection, so the search queues no pending
+                contradictions. Default True.
 
         Returns:
             Formatted string ready for prompt injection, or empty string.
@@ -2179,7 +2183,7 @@ class TranscriptIndex:
             query, max_chunks, max_tokens, max_sessions, after, before,
             half_life, threshold_ratio, depth, include_archived,
             include_historical, now, knowledge_boost, max_knowledge,
-            agent_id,
+            agent_id, detect_contradictions,
         )
         cached = self._query_cache.get(cache_key)
         if cached is not None:
@@ -2276,6 +2280,7 @@ class TranscriptIndex:
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
                 intent=intent, agent_id=agent_id,
+                detect_contradictions=detect_contradictions,
             )
         else:
             result = self._global_lookup(
@@ -2287,6 +2292,7 @@ class TranscriptIndex:
                 now=now, max_knowledge=max_knowledge,
                 intent=intent, min_confidence=min_confidence, context=context,
                 agent_id=agent_id,
+                detect_contradictions=detect_contradictions,
             )
 
         # Cache the result (LRU eviction when full)
@@ -2333,6 +2339,7 @@ class TranscriptIndex:
         min_confidence: float = 0.0,
         context: int = 0,
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and (self._rowid_to_idx or self._db.knowledge_count() > 0):
@@ -2345,6 +2352,7 @@ class TranscriptIndex:
                 now=now, max_knowledge=max_knowledge, intent=intent,
                 min_confidence=min_confidence, context=context,
                 agent_id=agent_id,
+                detect_contradictions=detect_contradictions,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -2373,6 +2381,7 @@ class TranscriptIndex:
         min_confidence: float = 0.0,
         context: int = 0,
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
@@ -2384,6 +2393,7 @@ class TranscriptIndex:
             knowledge_boost=knowledge_boost, emb_weight=emb_weight,
             query_entities=query_entities, intent=intent,
             after=after, before=before,
+            detect_contradictions=detect_contradictions,
         )
         semantic_search_used = self._last_knowledge_semantic_used
 
@@ -2947,6 +2957,7 @@ class TranscriptIndex:
         max_knowledge: int | None = None,
         intent: str = "",
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
@@ -2955,6 +2966,7 @@ class TranscriptIndex:
                 query, max_chunks, include_historical=include_historical,
                 knowledge_boost=knowledge_boost, emb_weight=emb_weight,
                 intent=intent, after=after, before=before,
+                detect_contradictions=detect_contradictions,
             )
             if self._db else []
         )
@@ -3218,6 +3230,7 @@ class TranscriptIndex:
         intent: str = "",
         after: str | None = None,
         before: str | None = None,
+        detect_contradictions: bool = True,
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
@@ -3419,8 +3432,12 @@ class TranscriptIndex:
             # Co-retrieval conflict detection (Phase 8c): when two active
             # nodes in the same category have divergent content, queue a
             # pending contradiction for user review. Has its own try/except
-            # internally — never disrupts search results.
-            self._last_conflicts = self._detect_co_retrieval_conflicts(results)
+            # internally — never disrupts search results. Callers that run many
+            # searches nobody asked about pass detect_contradictions=False.
+            self._last_conflicts = (
+                self._detect_co_retrieval_conflicts(results)
+                if detect_contradictions else []
+            )
 
             return results
         except Exception:
