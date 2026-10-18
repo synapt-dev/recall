@@ -1371,7 +1371,8 @@ def _append_message(
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
     conn: sqlite3.Connection | None = None,
-) -> None:
+    hook_errors: list[Exception] | None = None,
+) -> Exception | None:
     """Append a message to a channel's JSONL log with file locking.
 
     Auto-generates a message ID if not already set.
@@ -1381,6 +1382,11 @@ def _append_message(
     When ``conn`` is provided it is reused for dirty-flag writes instead of
     opening a new connection (avoids SQLite lock contention when the caller
     already holds a transaction).
+
+    The written line is the message. An error after it (setting the unread
+    flags) is returned, not raised, so a caller never reports a message that
+    is in the log as failed. A hook that raises is still best-effort; when
+    ``hook_errors`` is given each such error is appended to it.
     """
     # The body is stored exactly as given. An earlier unescape here turned
     # every literal backslash-n / backslash-t into a newline / tab, which
@@ -1401,13 +1407,20 @@ def _append_message(
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
     # Set dirty flag for all other members of this channel (OSS substrate)
-    _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+    try:
+        _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+        state_error = None
+    except Exception as exc:
+        state_error = exc
     # Fire registered hooks (mention storage, wake emission, etc.)
     for hook in _message_posted_hooks:
         try:
             hook(msg, project_dir)
-        except Exception:
-            pass  # hooks are best-effort
+        except Exception as exc:
+            # hooks are best-effort
+            if hook_errors is not None:
+                hook_errors.append(exc)
+    return state_error
 
 
 def _set_dirty_flags(
@@ -2028,8 +2041,14 @@ def channel_post(
     channels_dir: Path | None = None,
     display_name: str | None = None,
     msg_type: str = "message",
+    *,
+    _notes: list[str] | None = None,
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message.
+
+    ``_notes`` (internal) collects the "posted; ..." text when the line
+    landed but something after it did not, so a caller such as broadcast
+    can carry it without parsing the result.
 
     ``channels_dir`` overrides the JSONL write location so messages can be
     posted to cross-project channels (e.g. from the dashboard switching views).
@@ -2066,29 +2085,57 @@ def channel_post(
     if attachment_paths:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
         msg.attachments = _copy_attachments(msg.id, attachment_paths, project_dir)
-    _append_message(msg, project_dir, channels_dir=channels_dir)
+    # Once the line is in the log the post has happened: every error from
+    # here on is reported beside the id, never raised, so a caller does not
+    # post again.
+    hook_errors: list[Exception] = []
+    state_error = _append_message(
+        msg, project_dir, channels_dir=channels_dir, hook_errors=hook_errors,
+    )
 
-    conn = _open_db(project_dir)
+    pinned = False
     try:
-        conn.execute(
-            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
-            (now, aid),
-        )
-        if pin:
+        conn = _open_db(project_dir)
+        try:
             conn.execute(
-                "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (channel, message, msg.id, aid, now),
+                "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
+                (now, aid),
             )
-        conn.commit()
-    finally:
-        conn.close()
+            if pin:
+                conn.execute(
+                    "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
+                    "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS "
+                    "(SELECT 1 FROM pins WHERE channel = ? AND message_id = ?)",
+                    (channel, message, msg.id, aid, now, channel, msg.id),
+                )
+            conn.commit()
+            pinned = pin
+        finally:
+            conn.close()
+    except Exception as exc:
+        state_error = state_error or exc
     attachment_suffix = ""
     if msg.attachments:
         attachment_suffix = f" [attachments: {', '.join(msg.attachments)}]"
     result = f"[#{channel}] {display}: {message}{attachment_suffix}".rstrip()
-    if pin:
+    if pinned:
         result += " (pinned)"
+    notes = []
+    if state_error is not None:
+        notes.append(f"{'pin not recorded, ' if pin and not pinned else ''}channel state not updated: {state_error}")
+    # The mention row and the addressee's unread flag are written after the
+    # line; when either step failed the addressee may not have been told, and
+    # re-posting would log the body twice.
+    if (state_error is not None or hook_errors) and _extract_mentions(message):
+        notes.append(
+            "@mention not recorded: the addressee was not notified; "
+            "ping them citing this id, do not re-post"
+        )
+    if notes:
+        note = "posted; " + "; ".join(notes)
+        result += f" ({note})"
+        if _notes is not None:
+            _notes.append(note)
     # A caller that wants to dispatch the author on this exact post (e.g. a
     # verdict) needs the id back. _append_message() already generates one
     # unconditionally; surface it rather than making every such caller
@@ -2734,7 +2781,7 @@ def channel_directive(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="directive", body=message, to=to,
     )
-    _append_message(msg, project_dir)
+    state_error = _append_message(msg, project_dir)
 
     # Optionally bridge to reminders
     if remind:
@@ -2743,7 +2790,10 @@ def channel_directive(
             add_reminder(f"[directive from {aid}] {message}")
         except Exception:
             pass
-    return f"[#{channel}] {display} → @{to}: {message}"
+    result = f"[#{channel}] {display} → @{to}: {message}"
+    if state_error is not None:
+        result += f" (posted; channel state not updated: {state_error})"
+    return result
 
 
 def channel_mute(
@@ -2855,9 +2905,18 @@ def channel_broadcast(
     channels = channel_list_channels(project_dir)
     if not channels:
         return "No channels to broadcast to."
+    warnings = []
     for ch in channels:
-        channel_post(ch, message, agent_name=agent_name, project_dir=project_dir, display_name=display_name)
-    return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+        notes: list[str] = []
+        channel_post(
+            ch, message, agent_name=agent_name, project_dir=project_dir,
+            display_name=display_name, _notes=notes,
+        )
+        warnings.extend(f"#{ch}: {n}" for n in notes)
+    result = f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+    if warnings:
+        result += " (" + "; ".join(warnings) + ")"
+    return result
 
 
 def channel_board(
@@ -3125,13 +3184,24 @@ def channel_claim_intent(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="intent", body=intent,
     )
-    _append_message(msg, project_dir)
+    state_error = _append_message(msg, project_dir)
 
-    # Auto-claim the intent message (silent — the intent post is the notification)
-    channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
+    # Auto-claim the intent message (silent — the intent post is the notification).
+    # The intent line has landed, so a failed claim is reported, not raised:
+    # a caller that retried would log the intent twice.
+    notes = []
+    if state_error is not None:
+        notes.append(f"channel state not updated: {state_error}")
+    try:
+        channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
+    except Exception as exc:
+        notes.append(f"claim not recorded: {exc}")
 
     display = _resolve_display_name_for(aid, project_dir)
-    return (True, f"[INTENT] {display}: {intent}")
+    result = f"[INTENT] {display}: {intent}"
+    if notes:
+        result += " (posted; " + "; ".join(notes) + ")"
+    return (True, result)
 
 
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:
