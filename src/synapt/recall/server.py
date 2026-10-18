@@ -2877,6 +2877,7 @@ def recall_save(
     node_id: str | None = None,
     retract: bool = False,
     restore_retracted: bool = False,
+    restore: bool = False,
 ) -> str:
     """Create, update, or retract a knowledge node.
 
@@ -2900,6 +2901,10 @@ def recall_save(
             without it — retraction is load-bearing and a buried fact is not
             revived silently; restore says "re-activated" and returns the
             node to search under the new content.
+        restore: Explicit deliberate restore of a contradicted or superseded
+            node (requires node_id). An update on such a node is REFUSED
+            without it and the refusal names the successor node; restore
+            makes the node active again under the new content.
     """
     try:
         import hashlib
@@ -2995,6 +3000,21 @@ def recall_save(
                     "restore_retracted=true) — or file the corrected fact as a "
                     "new node."
                 )
+            replaced = existing and (
+                existing.get("status") in ("contradicted", "superseded")
+                or existing.get("superseded_by")
+            )
+            if replaced and not restore:
+                # An update must not silently revive a node a newer fact
+                # replaced. Refuse and name the successor.
+                successor = existing.get("superseded_by") or "(none recorded)"
+                return (
+                    f"Error: node {resolved_node_id} is "
+                    f"{existing.get('status')}; its successor is {successor}. "
+                    "Update the successor instead, or to revive this node "
+                    f"deliberately call recall_save(node_id='{resolved_node_id}', "
+                    "content=<the fact>, restore=true)."
+                )
             node = KnowledgeNode.create(
                 content=clean_content,
                 category=category,
@@ -3008,6 +3028,12 @@ def recall_save(
                 node.created_at = existing.get("created_at", node.created_at)
                 node.version = existing.get("version", 1) + 1
                 node.lineage_id = existing.get("lineage_id", "") or existing["id"]
+                if not replaced and existing.get("status") != "retracted":
+                    # An update keeps the node's lifecycle fields; only a
+                    # restore (or restore_retracted) makes it active again.
+                    node.status = existing.get("status") or "active"
+                    node.superseded_by = existing.get("superseded_by") or ""
+                    node.contradiction_note = existing.get("contradiction_note") or ""
             # COMPUTE AND PACK THE VECTOR BEFORE THE NODE IS COMMITTED.
             # The operation that FAILS is the PACK, not the embed: on a width
             # mismatch embed() SUCCEEDS and returns a vector of the wrong width,
@@ -3089,7 +3115,7 @@ def recall_save(
         _invalidate_cache()
         was_retracted = bool(
             existing and existing.get("status") == "retracted" and restore_retracted
-        )
+        ) or bool(replaced and restore)
         action = "re-activated" if was_retracted else ("updated" if existing else "saved")
         emb_status = "embedded for vector search" if embedded else "saved without embeddings"
         version_tag = f", v{node.version}" if node.version > 1 else ""
