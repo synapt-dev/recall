@@ -1371,6 +1371,7 @@ def _append_message(
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
     conn: sqlite3.Connection | None = None,
+    hook_errors: list[Exception] | None = None,
 ) -> Exception | None:
     """Append a message to a channel's JSONL log with file locking.
 
@@ -1384,7 +1385,8 @@ def _append_message(
 
     The written line is the message. An error after it (setting the unread
     flags) is returned, not raised, so a caller never reports a message that
-    is in the log as failed.
+    is in the log as failed. A hook that raises is still best-effort; when
+    ``hook_errors`` is given each such error is appended to it.
     """
     # The body is stored exactly as given. An earlier unescape here turned
     # every literal backslash-n / backslash-t into a newline / tab, which
@@ -1414,8 +1416,10 @@ def _append_message(
     for hook in _message_posted_hooks:
         try:
             hook(msg, project_dir)
-        except Exception:
-            pass  # hooks are best-effort
+        except Exception as exc:
+            # hooks are best-effort
+            if hook_errors is not None:
+                hook_errors.append(exc)
     return state_error
 
 
@@ -2037,8 +2041,14 @@ def channel_post(
     channels_dir: Path | None = None,
     display_name: str | None = None,
     msg_type: str = "message",
+    *,
+    _notes: list[str] | None = None,
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message.
+
+    ``_notes`` (internal) collects the "posted; ..." text when the line
+    landed but something after it did not, so a caller such as broadcast
+    can carry it without parsing the result.
 
     ``channels_dir`` overrides the JSONL write location so messages can be
     posted to cross-project channels (e.g. from the dashboard switching views).
@@ -2078,7 +2088,10 @@ def channel_post(
     # Once the line is in the log the post has happened: every error from
     # here on is reported beside the id, never raised, so a caller does not
     # post again.
-    state_error = _append_message(msg, project_dir, channels_dir=channels_dir)
+    hook_errors: list[Exception] = []
+    state_error = _append_message(
+        msg, project_dir, channels_dir=channels_dir, hook_errors=hook_errors,
+    )
 
     pinned = False
     try:
@@ -2107,8 +2120,22 @@ def channel_post(
     result = f"[#{channel}] {display}: {message}{attachment_suffix}".rstrip()
     if pinned:
         result += " (pinned)"
+    notes = []
     if state_error is not None:
-        result += f" (posted; {'pin not recorded, ' if pin and not pinned else ''}channel state not updated: {state_error})"
+        notes.append(f"{'pin not recorded, ' if pin and not pinned else ''}channel state not updated: {state_error}")
+    # The mention row and the addressee's unread flag are written after the
+    # line; when either step failed the addressee may not have been told, and
+    # re-posting would log the body twice.
+    if (state_error is not None or hook_errors) and _extract_mentions(message):
+        notes.append(
+            "@mention not recorded: the addressee was not notified; "
+            "ping them citing this id, do not re-post"
+        )
+    if notes:
+        note = "posted; " + "; ".join(notes)
+        result += f" ({note})"
+        if _notes is not None:
+            _notes.append(note)
     # A caller that wants to dispatch the author on this exact post (e.g. a
     # verdict) needs the id back. _append_message() already generates one
     # unconditionally; surface it rather than making every such caller
@@ -2875,9 +2902,18 @@ def channel_broadcast(
     channels = channel_list_channels(project_dir)
     if not channels:
         return "No channels to broadcast to."
+    warnings = []
     for ch in channels:
-        channel_post(ch, message, agent_name=agent_name, project_dir=project_dir, display_name=display_name)
-    return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+        notes: list[str] = []
+        channel_post(
+            ch, message, agent_name=agent_name, project_dir=project_dir,
+            display_name=display_name, _notes=notes,
+        )
+        warnings.extend(f"#{ch}: {n}" for n in notes)
+    result = f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+    if warnings:
+        result += " (" + "; ".join(warnings) + ")"
+    return result
 
 
 def channel_board(
@@ -3145,13 +3181,24 @@ def channel_claim_intent(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="intent", body=intent,
     )
-    _append_message(msg, project_dir)
+    state_error = _append_message(msg, project_dir)
 
-    # Auto-claim the intent message (silent — the intent post is the notification)
-    channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
+    # Auto-claim the intent message (silent — the intent post is the notification).
+    # The intent line has landed, so a failed claim is reported, not raised:
+    # a caller that retried would log the intent twice.
+    notes = []
+    if state_error is not None:
+        notes.append(f"channel state not updated: {state_error}")
+    try:
+        channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
+    except Exception as exc:
+        notes.append(f"claim not recorded: {exc}")
 
     display = _resolve_display_name_for(aid, project_dir)
-    return (True, f"[INTENT] {display}: {intent}")
+    result = f"[INTENT] {display}: {intent}"
+    if notes:
+        result += " (posted; " + "; ".join(notes) + ")"
+    return (True, result)
 
 
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:

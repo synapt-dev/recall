@@ -222,3 +222,95 @@ class PostCommitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostLandedNotesTest(unittest.TestCase):
+    """What a caller is told when the line landed and a later step did not."""
+
+    # The store fixture only; the PostCommitTest rows are not run twice.
+    setUp = PostCommitTest.setUp
+    tearDown = PostCommitTest.tearDown
+    _hold_write_lock = PostCommitTest._hold_write_lock
+    _release = PostCommitTest._release
+    _lines = PostCommitTest._lines
+
+    MENTION_NOTE = (
+        "@mention not recorded: the addressee was not notified; "
+        "ping them citing this id, do not re-post"
+    )
+
+    def _count(self, sql):
+        conn = _open_db()
+        try:
+            return conn.execute(sql).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_r18_intent_under_a_held_lock_reports_the_unrecorded_claim(self):
+        self._hold_write_lock()
+        ok, result = ch.channel_claim_intent("file perf issue", agent_name="a_me")
+        self._release()
+        self.assertTrue(ok)
+        self.assertIn("(posted; ", result)
+        self.assertIn("claim not recorded: database is locked", result)
+        self.assertEqual([l["type"] for l in self._lines()], ["intent"])
+
+    def test_r19_clean_intent_says_nothing_extra(self):
+        ok, result = ch.channel_claim_intent("file perf issue", agent_name="a_me")
+        self.assertTrue(ok)
+        self.assertNotIn("posted;", result)
+        self.assertEqual(self._count("SELECT count(*) FROM claims"), 1)
+
+    def test_r20_broadcast_under_a_held_lock_carries_each_channel_note(self):
+        channel_post("dev", "seed", agent_name="a_me")
+        channel_post("ops", "seed", agent_name="a_me")
+        self._hold_write_lock()
+        result = ch.channel_broadcast("hello all", agent_name="a_me")
+        self._release()
+        self.assertTrue(result.startswith("Broadcast to 2 channel(s): #dev, #ops ("))
+        for c in ("dev", "ops"):
+            self.assertIn(f"#{c}: posted; channel state not updated: database is locked", result)
+
+    def test_r21_clean_broadcast_says_nothing_extra(self):
+        channel_post("dev", "seed", agent_name="a_me")
+        channel_post("ops", "seed", agent_name="a_me")
+        result = ch.channel_broadcast("hello all", agent_name="a_me")
+        self.assertEqual(result, "Broadcast to 2 channel(s): #dev, #ops")
+
+    def test_r22_mention_under_a_held_lock_says_the_addressee_was_not_told(self):
+        self._hold_write_lock()
+        result = channel_post("dev", "@a_other please look", agent_name="a_me")
+        self._release()
+        self.assertIn(self.MENTION_NOTE, result)
+        self.assertEqual(self._count("SELECT count(*) FROM mentions"), 0)
+        self.assertEqual(len(self._lines()), 1)
+
+    def test_r23_mention_with_a_failing_hook_says_the_addressee_was_not_told(self):
+        def bad(msg, pd):
+            raise RuntimeError("hook boom")
+        ch._message_posted_hooks.append(bad)
+        try:
+            result = channel_post("dev", "@a_other please look", agent_name="a_me")
+            plain = channel_post("dev", "no one named", agent_name="a_me")
+        finally:
+            ch._message_posted_hooks.remove(bad)
+        self.assertIn(f"(posted; {self.MENTION_NOTE})", result)
+        # A hook failure on a post that names no one stays best-effort.
+        self.assertNotIn("posted;", plain)
+
+    def test_r24_clean_mention_says_nothing_extra(self):
+        result = channel_post("dev", "@a_other please look", agent_name="a_me")
+        self.assertNotIn("posted;", result)
+        self.assertEqual(self._count("SELECT count(*) FROM mentions"), 1)
+
+    def test_r25_mention_with_unset_unread_flags_says_the_addressee_was_not_told(self):
+        with patch.object(ch, "_set_dirty_flags", side_effect=RuntimeError("flags broke")):
+            result = channel_post("dev", "@a_other please look", agent_name="a_me")
+        self.assertIn(f"channel state not updated: flags broke; {self.MENTION_NOTE}", result)
+
+    def test_r26_intent_with_unset_unread_flags_reports_it(self):
+        with patch.object(ch, "_set_dirty_flags", side_effect=RuntimeError("flags broke")):
+            ok, result = ch.channel_claim_intent("file perf issue", agent_name="a_me")
+        self.assertTrue(ok)
+        self.assertIn("(posted; channel state not updated: flags broke)", result)
+        self.assertEqual(self._count("SELECT count(*) FROM claims"), 1)
