@@ -58,7 +58,6 @@ from synapt.recall.core import (
     project_data_dir,
     project_index_dir,
 )
-from synapt.recall._llm_util import truncate_at_word as _tw
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.hybrid import classify_query_intent, intent_search_params
 from synapt.recall.session_start import _pid_alive
@@ -2062,6 +2061,16 @@ def recall_contradict(
                     "nodes restored to active."
                 )
 
+            if resolution == "confirmed":
+                # A row queued before flag checked the length must not be
+                # marked confirmed when the node it becomes would be refused.
+                from synapt.recall.knowledge import check_content_length
+
+                try:
+                    check_content_length(pending_row["new_content"])
+                except ValueError as exc:
+                    return f"Error: {exc} Contradiction #{contradiction_id} stays pending."
+
             ok = index._db.resolve_contradiction(contradiction_id, resolution)
             if not ok:
                 return f"Contradiction #{contradiction_id} not found or already resolved."
@@ -2142,6 +2151,15 @@ def _handle_flag(
     effective_claim = claim or ""
     effective_content = new_content or claim or ""
     effective_reason = reason or ""
+
+    # A confirmed flag becomes a node, so it is held to the node limit before
+    # anything is queued.
+    from synapt.recall.knowledge import check_content_length
+
+    try:
+        check_content_length(effective_content)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     # If a specific node ID was provided, use it directly
     if old_node_id:
@@ -2269,6 +2287,11 @@ def _apply_supersession(
     marked contradicted with ``superseded_by`` pointing at a replacement that was never created,
     permanently (the confirm status flip already committed, so there is no retry path).
     """
+    from synapt.recall.knowledge import check_content_length
+
+    # The replacement is stored whole, so it is held to the same limit as a
+    # save, and the check runs before the old node is touched.
+    check_content_length(new_content)
     from synapt.recall.consolidate import _validate_iso_date
     valid_from = _validate_iso_date(valid_from)
     valid_until = _validate_iso_date(valid_until)
@@ -2334,7 +2357,7 @@ def _apply_supersession(
     # Create replacement node
     new_node = {
         "id": new_id,
-        "content": _tw(new_content, 300),
+        "content": new_content,
         "category": category or old_node.get("category", "workflow"),
         "confidence": old_node.get("confidence", 0.5),
         "source_sessions": source_sessions or old_node.get("source_sessions", []),
@@ -2542,6 +2565,15 @@ def recall_correct(
                   "temporal", "debug", "architecture").
     """
     from synapt.recall.corrections import log_correction
+    from synapt.recall.knowledge import check_content_length
+
+    # The node is checked before the correction is logged, so a refuse
+    # leaves corrections.jsonl untouched.
+    node_content = f"{correct_answer} (re: {question})"
+    try:
+        check_content_length(node_content)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     try:
         # Step 1: Log the correction for benchmark data
@@ -2555,7 +2587,6 @@ def recall_correct(
         # Step 2: Immediately create a knowledge node (bypass contradiction queue)
         # User corrections are already confirmed — no need for a second confirmation step.
         from synapt.recall.knowledge import KnowledgeNode, append_node
-        node_content = f"{correct_answer} (re: {question})"
         node_category = category if category else "fact"
         node = KnowledgeNode.create(
             content=node_content,
@@ -2925,6 +2956,13 @@ def recall_save(
             clean_content = (content or "").strip()
             if not clean_content:
                 return "Error: content is required."
+
+            from synapt.recall.knowledge import check_content_length
+
+            try:
+                check_content_length(clean_content)
+            except ValueError as exc:
+                return f"Error: {exc}"
 
             resolved_node_id = node_id or hashlib.sha1(
                 clean_content.encode("utf-8")
