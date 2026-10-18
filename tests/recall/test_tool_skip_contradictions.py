@@ -90,6 +90,36 @@ class TestRecallQuickTool:
         assert len(rows) >= 1
 
 
+def _quick_via_fallback(tmp_path, **kwargs):
+    """Run recall_quick with the keyword pass forced to miss, so the
+    lookup that answers is the semantic fallback's."""
+    from synapt.recall.core import TranscriptIndex
+    from synapt.recall.server import recall_quick
+
+    def fake_get_index(use_embeddings=True):
+        index = TranscriptIndex.load(
+            project_index_dir(tmp_path), use_embeddings=use_embeddings)
+        if not use_embeddings:
+            index.lookup = lambda *a, **k: ""
+        return index
+
+    def call():
+        with patch("synapt.recall.server._get_index", side_effect=fake_get_index):
+            recall_quick("gateway Postgres", **kwargs)
+
+    return _run(tmp_path, call)
+
+
+class TestRecallQuickSemanticFallback:
+    def test_flag_false_queues_no_rows(self, tmp_path):
+        rows = _quick_via_fallback(tmp_path, detect_contradictions=False)
+        assert rows == []
+
+    def test_default_queues_rows(self, tmp_path):
+        rows = _quick_via_fallback(tmp_path)
+        assert len(rows) >= 1
+
+
 class TestSearchCli:
     def test_no_detect_flag_queues_no_rows(self, tmp_path):
         rows = _run(tmp_path, lambda: _cli(tmp_path, "--no-detect-contradictions"))
