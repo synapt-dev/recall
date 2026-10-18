@@ -314,3 +314,10 @@ class PostLandedNotesTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("(posted; channel state not updated: flags broke)", result)
         self.assertEqual(self._count("SELECT count(*) FROM claims"), 1)
+
+    def test_r27_directive_under_a_held_lock_reports_unset_state(self):
+        self._hold_write_lock()
+        result = ch.channel_directive("dev", "do the thing", to="a_other", agent_name="a_me")
+        self._release()
+        self.assertEqual([l["type"] for l in self._lines()], ["directive"])
+        self.assertIn("(posted; channel state not updated", result)

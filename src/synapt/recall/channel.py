@@ -2781,7 +2781,7 @@ def channel_directive(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="directive", body=message, to=to,
     )
-    _append_message(msg, project_dir)
+    state_error = _append_message(msg, project_dir)
 
     # Optionally bridge to reminders
     if remind:
@@ -2790,7 +2790,10 @@ def channel_directive(
             add_reminder(f"[directive from {aid}] {message}")
         except Exception:
             pass
-    return f"[#{channel}] {display} → @{to}: {message}"
+    result = f"[#{channel}] {display} → @{to}: {message}"
+    if state_error is not None:
+        result += f" (posted; channel state not updated: {state_error})"
+    return result
 
 
 def channel_mute(
