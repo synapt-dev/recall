@@ -665,9 +665,9 @@ class TestApplyConsolidation(unittest.TestCase):
         self.assertEqual(result.nodes_corroborated, 1)
         self.assertEqual(result.nodes_created, 1)
 
-    def test_content_truncated_at_300_chars(self):
+    def test_content_truncated_at_b3_ceiling(self):
         # Long content (>120 chars) skips specificity check, so plain text is fine
-        long_content = "ConnectionPool uses threading.local() for per-thread isolation " + "x" * 500
+        long_content = "ConnectionPool uses threading.local() for per-thread isolation " + "x" * 2000
         parsed = {
             "nodes": [{
                 "action": "create",
@@ -677,7 +677,7 @@ class TestApplyConsolidation(unittest.TestCase):
         }
         _apply_consolidation_result(parsed, [], self.cluster, self.kn_path)
         nodes = read_nodes(self.kn_path)
-        self.assertLessEqual(len(nodes[0].content), 300)
+        self.assertLessEqual(len(nodes[0].content), consolidate.B3_CREATE_MAX_CHARS)
 
     def test_create_action_can_disable_temporal_extraction(self):
         parsed = {

@@ -46,6 +46,29 @@ def _new_id(content: str = "") -> str:
     return uuid.uuid4().hex[:12]
 
 
+KNOWLEDGE_CONTENT_MAX_CHARS = 4000
+
+
+def check_content_length(content: str) -> None:
+    """Raise ValueError when content is over the stored-node limit."""
+    if len(content) > KNOWLEDGE_CONTENT_MAX_CHARS:
+        raise ValueError(
+            f"knowledge content is {len(content)} chars; the limit is "
+            f"{KNOWLEDGE_CONTENT_MAX_CHARS}. Nothing was saved. Split the fact "
+            "into smaller nodes."
+        )
+
+
+def _id_basis(content: str) -> str:
+    """The auto id of a created node.
+
+    It hashes the word-cut first 300 characters, exactly as before content
+    was stored whole, so existing ids stay stable. A plain ``content[:300]``
+    would move every id whose word cut lands before character 300.
+    """
+    return _new_id(_tw(content, 300))
+
+
 @dataclass
 class KnowledgeNode:
     """A durable fact distilled from multiple sessions."""
@@ -99,11 +122,17 @@ class KnowledgeNode:
         node_id: str | None = None,
         source_unit_id: str | None = None,
     ) -> KnowledgeNode:
-        """Create a new knowledge node with auto-generated ID and timestamps."""
+        """Create a new knowledge node with auto-generated ID and timestamps.
+
+        The content is stored whole. Content over
+        ``KNOWLEDGE_CONTENT_MAX_CHARS`` raises ``ValueError`` and nothing is
+        created, so a long fact is refused loudly instead of cut silently.
+        """
+        check_content_length(content)
         now = datetime.now(timezone.utc).isoformat()
         return cls(
-            id=node_id or _new_id(_tw(content, 300)),
-            content=_tw(content, 300),
+            id=node_id or _id_basis(content),
+            content=content,
             category=category if category in VALID_CATEGORIES else "workflow",
             confidence=max(0.0, min(1.0, confidence)),
             source_sessions=source_sessions or [],
