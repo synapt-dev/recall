@@ -3467,7 +3467,8 @@ def channel_search(
                   channels are excluded from search results.
 
     Returns a list of dicts with channel, message_id, from, timestamp, body,
-    type, and a match_score (number of query terms found).
+    type, a match_score (number of query terms found), and cited_by (the
+    raw count of resolved citations of that post across all channels).
     """
     terms = query.lower().split()
     if not terms and not msg_type:
