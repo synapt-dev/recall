@@ -1259,8 +1259,11 @@ def _extract_mentions(text: str) -> list[str]:
 
 
 # A post id, optionally preceded by the channel it lives in ("dev m_1a2b3c4d"
-# or "#dev m_1a2b3c4d").
-_POST_REF_RE = re.compile(r"(?:#?([\w.-]+)\s+)?\b(m_[0-9a-f]{8})\b")
+# or "#dev m_1a2b3c4d"). The word before an id is read from a short window
+# behind it, never by an optional group tried at every position, and another
+# id is never taken as that word.
+_POST_ID_RE = re.compile(r"\bm_[0-9a-f]{8}\b")
+_WORD_BEFORE_RE = re.compile(r"#?([\w.-]+)\s+$")
 
 
 def extract_post_refs(text: str) -> list[tuple[str | None, str]]:
@@ -1270,9 +1273,14 @@ def extract_post_refs(text: str) -> list[tuple[str | None, str]]:
     before the id, or None; whether it names a channel is decided at
     resolution, against the channels that exist.
     """
-    return list(dict.fromkeys(
-        (word or None, pid) for word, pid in _POST_REF_RE.findall(text)
-    ))
+    refs = []
+    for m in _POST_ID_RE.finditer(text):
+        w = _WORD_BEFORE_RE.search(text[max(0, m.start() - 64):m.start()])
+        word = w.group(1) if w else None
+        if word is not None and _POST_ID_RE.fullmatch(word):
+            word = None
+        refs.append((word, m.group(0)))
+    return list(dict.fromkeys(refs))
 
 
 def build_citation_graph(

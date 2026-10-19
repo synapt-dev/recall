@@ -33,6 +33,16 @@ def test_parse_ids_in_order_deduplicated_with_word_before():
     assert extract_post_refs(A) == [(None, A)]
 
 
+def test_adjacent_ids_are_both_parsed_and_neither_is_a_word():
+    assert extract_post_refs(f"{A} {B}") == [(None, A), (None, B)]
+
+
+def test_adjacent_ids_are_both_cited():
+    g = build_citation_graph({"dev": [(A, "x"), (B, "y"), (C, f"{A} {B}")]})
+    assert g["cited_by"][("dev", A)] == 1
+    assert g["cited_by"][("dev", B)] == 1
+
+
 def test_three_post_fixture_cited_by(tmp_path):
     channel_post("dev", "alpha first post", "x", project_dir=tmp_path)
     a = _id_of("alpha", tmp_path)
