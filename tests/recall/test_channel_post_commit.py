@@ -321,3 +321,36 @@ class PostLandedNotesTest(unittest.TestCase):
         self._release()
         self.assertEqual([l["type"] for l in self._lines()], ["directive"])
         self.assertIn("(posted; channel state not updated", result)
+
+    def test_r28_pin_whose_commit_raises_is_not_reported_pinned(self):
+        real_open = ch._open_db
+
+        class CommitRaisesAfterPin:
+            def __init__(self, conn):
+                self._conn = conn
+                self._pin_sent = False
+
+            def execute(self, sql, *args):
+                if sql.startswith("INSERT INTO pins"):
+                    self._pin_sent = True
+                return self._conn.execute(sql, *args)
+
+            def commit(self):
+                if self._pin_sent:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return self._conn.commit()
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        def open_db(*args, **kwargs):
+            return CommitRaisesAfterPin(real_open(*args, **kwargs))
+
+        with patch.object(ch, "_open_db", side_effect=open_db):
+            result = channel_post(channel="dev", message="pin me", display_name="poster", pin=True)
+        lines = self._lines()
+        self.assertEqual([l["body"] for l in lines], ["pin me"])
+        self.assertEqual(PostCommitTest._id(result), lines[0]["id"])
+        self.assertNotIn("(pinned)", result)
+        self.assertIn("pin not recorded, channel state not updated: disk I/O error", result)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM pins"), 0)
