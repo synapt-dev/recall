@@ -162,6 +162,24 @@ def _index_cache_stamp(index_dir: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(stamp)
 
 
+@contextlib.contextmanager
+def _own_write(index_dir: Path):
+    """Wrap a write this server makes to its own index (access tracking, promotions).
+
+    The write moves the WAL, so the stamp moves, and without this the next call
+    reloads the whole index as if another writer had changed it. The cache is
+    re-stamped only when it matched just before the write: a change by another
+    writer before ours still reloads.
+    """
+    global _cached_mtime
+    before = _index_cache_stamp(index_dir)
+    try:
+        yield
+    finally:
+        if index_dir == _cached_dir and before == _cached_mtime:
+            _cached_mtime = _index_cache_stamp(index_dir)
+
+
 def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
     """Load per-project index with caching. Reloads if recall.db was modified.
 
@@ -199,6 +217,7 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
             _cached_has_embeddings = use_embeddings
             _cached_mtime = stamp
             _cached_dir = index_dir
+            _cached_index._own_write = lambda: _own_write(index_dir)
             # Set current session ID for access tracking (distinct_sessions)
             try:
                 from synapt.recall.journal import (
@@ -2727,16 +2746,17 @@ def _record_context_access(idx, item_type: str, item_id: str) -> None:
     """Record an explicit drill-down access and check promotions (fire-and-forget)."""
     try:
         if idx._db:
-            idx._db.record_access(
-                [{"item_type": item_type, "item_id": item_id, "score": 1.0}],
-                context="context",
-            )
-            from synapt.recall.promotion import (
-                check_promotions, execute_cheap_promotions,
-            )
-            actions = check_promotions(idx._db, item_type, item_id)
-            if actions:
-                execute_cheap_promotions(idx._db, item_type, item_id, actions)
+            with getattr(idx, "_own_write", contextlib.nullcontext)():
+                idx._db.record_access(
+                    [{"item_type": item_type, "item_id": item_id, "score": 1.0}],
+                    context="context",
+                )
+                from synapt.recall.promotion import (
+                    check_promotions, execute_cheap_promotions,
+                )
+                actions = check_promotions(idx._db, item_type, item_id)
+                if actions:
+                    execute_cheap_promotions(idx._db, item_type, item_id, actions)
     except Exception:
         pass
 
