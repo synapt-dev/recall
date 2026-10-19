@@ -138,12 +138,15 @@ def _apply_search_ranker(query: str, results: list[dict]) -> list[dict]:
     if ranker is None:
         return results
     by_key = {(r["channel"], r["message_id"]): r for r in results}
+    # Everything that touches the ranker's output is guarded: it is foreign
+    # data, so a key that is missing or unhashable (a list channel) raises
+    # here. by_key above is built from our own results and stays unguarded.
     try:
         ranked = list(ranker(query, [dict(r) for r in results]))
         keys = [(r["channel"], r["message_id"]) for r in ranked]
+        if len(set(keys)) != len(keys) or any(k not in by_key for k in keys):
+            return results
     except Exception:
-        return results
-    if len(set(keys)) != len(keys) or any(k not in by_key for k in keys):
         return results
     return [by_key[k] for k in keys]
 

@@ -138,6 +138,18 @@ def test_ranker_that_raises_gives_default_order(tmp_path):
     assert channel_search("needle", project_dir=tmp_path) == default
 
 
+def test_ranker_unhashable_channel_gives_default_order(tmp_path):
+    default = _three(tmp_path)
+    set_search_ranker(lambda q, rs: [dict(rs[0], channel=["dev"])])
+    assert channel_search("needle", project_dir=tmp_path) == default
+
+
+def test_ranker_unhashable_message_id_gives_default_order(tmp_path):
+    default = _three(tmp_path)
+    set_search_ranker(lambda q, rs: [dict(rs[0], message_id={"id": 1})])
+    assert channel_search("needle", project_dir=tmp_path) == default
+
+
 def test_ranker_runs_before_the_cut(tmp_path):
     default = _three(tmp_path)
     set_search_ranker(lambda q, rs: list(reversed(rs)))
