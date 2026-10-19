@@ -113,6 +113,44 @@ def register_message_hook(
     _message_posted_hooks.append(hook)
 
 
+_search_ranker: Callable[[str, list[dict]], list[dict]] | None = None
+
+
+def set_search_ranker(
+    ranker: Callable[[str, list[dict]], list[dict]] | None,
+) -> Callable[[str, list[dict]], list[dict]] | None:
+    """Install a channel search ranker; returns the previous one.
+
+    The ranker receives the query and every matched result (before the
+    max_results cut) and returns them in any order; it may drop results.
+    It may not add one: a returned result that was not passed in, or one
+    returned twice, refuses the whole ranking. On a refusal or a raise the
+    default order is used. With no ranker installed the order is unchanged.
+    """
+    global _search_ranker
+    previous = _search_ranker
+    _search_ranker = ranker
+    return previous
+
+
+def _apply_search_ranker(query: str, results: list[dict]) -> list[dict]:
+    ranker = _search_ranker
+    if ranker is None:
+        return results
+    by_key = {(r["channel"], r["message_id"]): r for r in results}
+    # Everything that touches the ranker's output is guarded: it is foreign
+    # data, so a key that is missing or unhashable (a list channel) raises
+    # here. by_key above is built from our own results and stays unguarded.
+    try:
+        ranked = list(ranker(query, [dict(r) for r in results]))
+        keys = [(r["channel"], r["message_id"]) for r in ranked]
+        if len(set(keys)) != len(keys) or any(k not in by_key for k in keys):
+            return results
+    except Exception:
+        return results
+    return [by_key[k] for k in keys]
+
+
 def _clear_message_hooks() -> None:
     """Reset hooks — for tests only."""
     _message_posted_hooks.clear()
@@ -1218,6 +1256,82 @@ _MENTION_RE = re.compile(r"@(\w[\w.-]*)")
 def _extract_mentions(text: str) -> list[str]:
     """Extract @mentioned names from message text."""
     return list(dict.fromkeys(_MENTION_RE.findall(text)))
+
+
+# A post id, optionally preceded by the channel it lives in ("dev m_1a2b3c4d"
+# or "#dev m_1a2b3c4d"). The word before an id is read from a short window
+# behind it, never by an optional group tried at every position, and another
+# id is never taken as that word.
+_POST_ID_RE = re.compile(r"\bm_[0-9a-f]{8}\b")
+_WORD_BEFORE_RE = re.compile(r"#?([\w.-]+)\s+$")
+
+
+def extract_post_refs(text: str) -> list[tuple[str | None, str]]:
+    """Extract cited post ids from message text, in order, deduplicated.
+
+    Returns (word_before, post_id) pairs. ``word_before`` is the word just
+    before the id, or None; whether it names a channel is decided at
+    resolution, against the channels that exist.
+    """
+    refs = []
+    for m in _POST_ID_RE.finditer(text):
+        w = _WORD_BEFORE_RE.search(text[max(0, m.start() - 64):m.start()])
+        word = w.group(1) if w else None
+        if word is not None and _POST_ID_RE.fullmatch(word):
+            word = None
+        refs.append((word, m.group(0)))
+    return list(dict.fromkeys(refs))
+
+
+def build_citation_graph(
+    posts: dict[str, list[tuple[str, str]]],
+) -> dict:
+    """Build the citation graph from ``{channel: [(post_id, body), ...]}``.
+
+    Each cited id resolves to one post, in this order:
+      (a) a channel named right before the id, if that channel holds it;
+      (b) else the citing post's own channel, if it holds it;
+      (c) else the store, only if exactly one channel holds it;
+      (d) else it is ambiguous: kept apart and never attributed to a post.
+
+    Returns a dict with:
+      edges: list of (citing_channel, citing_id, cited_channel, cited_id)
+      ambiguous: list of (citing_channel, citing_id, cited_id)
+      cited_by: {(channel, post_id): int}, the count of resolved citations
+    """
+    holders: dict[str, set[str]] = {}
+    for ch, items in posts.items():
+        for pid, _body in items:
+            holders.setdefault(pid, set()).add(ch)
+
+    edges: list[tuple[str, str, str, str]] = []
+    ambiguous: list[tuple[str, str, str]] = []
+    cited_by: dict[tuple[str, str], int] = {
+        (ch, pid): 0 for ch, items in posts.items() for pid, _ in items
+    }
+    for ch, items in posts.items():
+        for pid, body in items:
+            seen: set[tuple[str, str] | tuple[None, str]] = set()
+            for word, ref in extract_post_refs(body):
+                where = holders.get(ref, set())
+                named = _normalize_channel_name(word) if word else None
+                if named in where:
+                    target = named
+                elif ch in where:
+                    target = ch
+                elif len(where) == 1:
+                    target = next(iter(where))
+                else:
+                    target = None
+                if (target, ref) in seen:
+                    continue
+                seen.add((target, ref))
+                if target is None:
+                    ambiguous.append((ch, pid, ref))
+                    continue
+                edges.append((ch, pid, target, ref))
+                cited_by[(target, ref)] += 1
+    return {"edges": edges, "ambiguous": ambiguous, "cited_by": cited_by}
 
 
 def _store_mentions(
@@ -3364,7 +3478,8 @@ def channel_search(
                   channels are excluded from search results.
 
     Returns a list of dicts with channel, message_id, from, timestamp, body,
-    type, and a match_score (number of query terms found).
+    type, a match_score (number of query terms found), and cited_by (the
+    raw count of resolved citations of that post across all channels).
     """
     terms = query.lower().split()
     if not terms and not msg_type:
@@ -3390,14 +3505,20 @@ def channel_search(
     # from its mapped path.
     all_channels = list(dict.fromkeys(all_channels))
 
+    messages = {
+        ch: _read_messages(_channel_path(ch, project_dir)) for ch in all_channels
+    }
+    cited_by = build_citation_graph(
+        {ch: [(m.id, m.body) for m in msgs] for ch, msgs in messages.items()}
+    )["cited_by"]
+
     if channel is not None:
         channel = _normalize_channel_name(channel)
         all_channels = [ch for ch in all_channels if ch == channel]
 
     results: list[dict] = []
     for ch in all_channels:
-        path = _channel_path(ch, project_dir)
-        for msg in _read_messages(path):
+        for msg in messages[ch]:
             # Type filter: apply ONLY when a type is given. recall#982 --
             # an untyped search used to implicitly restrict to
             # ("message", "directive"), silently excluding every "pr",
@@ -3424,10 +3545,12 @@ def channel_search(
                 "body": msg.body,
                 "type": msg.type,
                 "score": score,
+                "cited_by": cited_by.get((ch, msg.id), 0),
             })
 
     # Sort by score descending, then timestamp descending (newest first)
     results.sort(key=lambda r: (r["score"], r["timestamp"]), reverse=True)
+    results = _apply_search_ranker(query, results)
     return results[:max_results]
 
 
