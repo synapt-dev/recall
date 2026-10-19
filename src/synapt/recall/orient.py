@@ -42,6 +42,8 @@ class Card:
     stale: str = ""
     missing: list[str] = field(default_factory=list)   # "<source>: <why>", one per source that did not read
     withheld: dict[str, int] = field(default_factory=dict)
+    entry_source: str = ""                               # the journal entry GOAL, NEXT and RULED OUT come from
+    constraint_sources: list[str] = field(default_factory=list)   # one memory file per constraint, same order
 
     def filled(self) -> int:
         return sum(bool(x) for x in (self.goal, self.next, self.carried, self.ruled_out, self.constraints))
@@ -51,6 +53,7 @@ class Card:
             "goal": self.goal, "goal_age_s": self.goal_age_s, "next": self.next, "carried": self.carried,
             "ruled_out": self.ruled_out, "constraints": self.constraints, "stale": self.stale,
             "missing": self.missing, "withheld": self.withheld, "fields_filled": self.filled(),
+            "sources": {"entry": self.entry_source, "constraints": self.constraint_sources},
         }
 
 
@@ -98,6 +101,9 @@ def _read_journal(card: Card, project: Path | None, now: float) -> float | None:
         return None
     when = _epoch(entry.timestamp)
     card.goal = entry.focus.strip()
+    card.entry_source = (f"journal {path} at {entry.timestamp}"
+                         + (f", session {entry.session_id}" if entry.session_id else "")
+                         + (f", repo HEAD {entry.git_log[0].split()[0]} when written" if entry.git_log and entry.git_log[0].split() else ""))
     card.goal_age_s = None if when is None else max(0.0, now - when)
     steps = [s for s in entry.next_steps if s.strip()]
     card.next = steps[0].strip() if steps else ""
@@ -147,11 +153,13 @@ def _read_constraints(card: Card, project: Path | None) -> None:
             continue
         name = fm.get("name") or p.stem
         card.constraints.append(f"{name}: {fm['description']}" if fm.get("description") else name)
+        card.constraint_sources.append(f"memory {p}")
     if not card.constraints:
         card.missing.append(f"constraints: no feedback memory in {mem}")
     elif len(card.constraints) > CONSTRAINTS_MAX:
         card.withheld["constraints"] = len(card.constraints) - CONSTRAINTS_MAX
         card.constraints = card.constraints[:CONSTRAINTS_MAX]
+        card.constraint_sources = card.constraint_sources[:CONSTRAINTS_MAX]
 
 
 def _read_stale(card: Card, project: Path | None, journal_epoch: float | None, now: float) -> None:
@@ -202,16 +210,25 @@ def _clip(text: str, n: int = 240) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def _src(sources: list[str] | str, i: int = 0) -> str:
+    # A line the card cannot trace to a file, entry or session says so, never passes as attributed.
+    src = sources if isinstance(sources, str) else (sources[i] if i < len(sources) else "")
+    return f"  [source: {src or 'unknown'}]"
+
+
 def _render(card: Card) -> str:
     lines = ["GET ORIENTED (synapt orient: from your own record)", ""]
     if card.stale:
         lines += [f"STALE: {card.stale}", ""]
-    lines.append(f"GOAL ({_age(card.goal_age_s)}): {_clip(card.goal) if card.goal else '(none recorded)'}")
-    lines.append(f"NEXT: {_clip(card.next) if card.next else '(none recorded)'}")
-    for title, key, items in (("CARRIED", "carried", card.carried), ("RULED OUT", "ruled_out", card.ruled_out),
-                              ("CONSTRAINTS", "constraints", card.constraints)):
+    lines.append(f"GOAL ({_age(card.goal_age_s)}): "
+                 + (_clip(card.goal) + _src(card.entry_source) if card.goal else "(none recorded)"))
+    lines.append("NEXT: " + (_clip(card.next) + _src(card.entry_source) if card.next else "(none recorded)"))
+    # CARRIED steps come from pending_next_steps, which keeps no entry per step: unknown until it does.
+    for title, key, items, sources in (("CARRIED", "carried", card.carried, []),
+                                       ("RULED OUT", "ruled_out", card.ruled_out, card.entry_source),
+                                       ("CONSTRAINTS", "constraints", card.constraints, card.constraint_sources)):
         lines.append(f"{title}:" + ("" if items else " (none)"))
-        lines += [f"  - {_clip(i)}" for i in items]
+        lines += [f"  - {_clip(item)}{_src(sources, n)}" for n, item in enumerate(items)]
         if card.withheld.get(key):
             lines.append(f"  ({card.withheld[key]} more withheld; the newest are shown)")
     if card.missing:
@@ -232,6 +249,8 @@ def format_card(card: Card, budget: int = TOKEN_BUDGET) -> str:
         if not items:
             return text.replace("{tokens}", str(tokens))
         items.pop()
+        if key == "constraints":
+            del card.constraint_sources[len(items):]
         card.withheld[key] = card.withheld.get(key, 0) + 1
 
 

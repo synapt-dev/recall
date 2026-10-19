@@ -161,6 +161,43 @@ def test_the_card_stays_under_the_token_budget_and_says_what_it_left_out(project
     assert len(format_card(build_card(project))) // 4 <= TOKEN_BUDGET
 
 
+def test_every_card_line_names_its_source_or_says_it_has_none(project, home):
+    _entry(project, _now_iso(-7200), focus="earlier", next_steps=["an older open step"])
+    _entry(project, _now_iso(-60), session_id="sess-42", git_log=["abc1234 seed"], focus="ship it",
+           next_steps=["run the rows"], decisions=["no network at wake"])
+    mem = _memory(home / ".claude" / "projects", project, {"feedback_rule.md": _feedback("rule", "say RAN or READ")})
+
+    lines = format_card(build_card(project)).splitlines()
+
+    def line(prefix: str) -> str:
+        return next(x for x in lines if x.startswith(prefix))
+
+    entry = f"journal {_journal_path(project)} at "
+    for prefix in ("GOAL", "NEXT", "  - no network at wake"):
+        assert f"[source: {entry}" in line(prefix) and line(prefix).endswith(", session sess-42, repo HEAD abc1234 when written]"), prefix
+    assert line("  - rule: say RAN or READ").endswith(f"[source: memory {mem / 'feedback_rule.md'}]")
+    assert line("  - an older open step").endswith("[source: unknown]"), "a carried step keeps no entry: unknown"
+    content = [x for x in lines if x.startswith(("GOAL", "NEXT", "  - ")) and "NOT READ" not in x]
+    assert content and all("[source: " in x for x in content), "no content line goes unmarked"
+
+
+def test_a_budget_trim_keeps_each_constraint_on_its_own_source(project, home):
+    _entry(project, _now_iso(-60), focus="g", next_steps=["n"])
+    mem = _memory(home / ".claude" / "projects", project,
+                  {f"feedback_{i}.md": _feedback(f"rule-{i}", "x" * 230) for i in range(CONSTRAINTS_MAX + 2)})
+    card = build_card(project)
+    assert len(card.constraint_sources) == len(card.constraints) == CONSTRAINTS_MAX, "the cap trims sources too"
+
+    text = format_card(card, budget=700)
+
+    shown = [x for x in text.splitlines() if x.startswith("  - rule-")]
+    assert card.withheld.get("constraints", 0) > 2, "the trim removed constraints"
+    assert shown and len(card.constraint_sources) == len(card.constraints) == len(shown)
+    for x in shown:
+        name = x.split(":", 1)[0].removeprefix("  - rule-")
+        assert x.endswith(f"[source: memory {mem / f'feedback_{name}.md'}]"), x
+
+
 def _transcript(home: Path, project: Path, name: str, age_s: float) -> Path:
     tdir = home / ".claude" / "projects" / project_slug(project)
     tdir.mkdir(parents=True, exist_ok=True)
