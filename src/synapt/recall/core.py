@@ -1292,6 +1292,9 @@ class TranscriptIndex:
 
         # Current session ID (set by MCP server for access tracking)
         self._current_session_id: str = ""
+        # The MCP server wraps its own writes (access tracking, promotions) so they do not
+        # read as another writer and reload the index on the next call.
+        self._own_write = contextlib.nullcontext
 
         # Chunk ID -> index mapping (for rowid conversion)
         self._id_to_idx: dict[str, int] = {
@@ -2791,26 +2794,27 @@ class TranscriptIndex:
             if self._current_session_id:
                 item["session_id"] = self._current_session_id
         if access_items and self._db:
-            try:
-                self._db.record_access(access_items, context="search")
-            except Exception:
-                pass
+            with self._own_write():
+                try:
+                    self._db.record_access(access_items, context="search")
+                except Exception:
+                    pass
 
-            try:
-                from synapt.recall.promotion import (
-                    check_promotions, execute_cheap_promotions,
-                )
-                for item in access_items:
-                    actions = check_promotions(
-                        self._db, item["item_type"], item["item_id"],
+                try:
+                    from synapt.recall.promotion import (
+                        check_promotions, execute_cheap_promotions,
                     )
-                    if actions:
-                        execute_cheap_promotions(
-                            self._db, item["item_type"],
-                            item["item_id"], actions,
+                    for item in access_items:
+                        actions = check_promotions(
+                            self._db, item["item_type"], item["item_id"],
                         )
-            except Exception:
-                pass
+                        if actions:
+                            execute_cheap_promotions(
+                                self._db, item["item_type"],
+                                item["item_id"], actions,
+                            )
+                except Exception:
+                    pass
 
         if len(lines) <= 1:
             return ""
@@ -4026,27 +4030,28 @@ class TranscriptIndex:
             if self._current_session_id:
                 item["session_id"] = self._current_session_id
         if all_access and self._db:
-            try:
-                self._db.record_access(all_access, context="search")
-            except Exception:
-                pass  # Never fail a search due to access tracking
+            with self._own_write():
+                try:
+                    self._db.record_access(all_access, context="search")
+                except Exception:
+                    pass  # Never fail a search due to access tracking
 
-            # Check promotions for emitted items (cheap actions only)
-            try:
-                from synapt.recall.promotion import (
-                    check_promotions, execute_cheap_promotions,
-                )
-                for item in all_access:
-                    actions = check_promotions(
-                        self._db, item["item_type"], item["item_id"],
+                # Check promotions for emitted items (cheap actions only)
+                try:
+                    from synapt.recall.promotion import (
+                        check_promotions, execute_cheap_promotions,
                     )
-                    if actions:
-                        execute_cheap_promotions(
-                            self._db, item["item_type"],
-                            item["item_id"], actions,
+                    for item in all_access:
+                        actions = check_promotions(
+                            self._db, item["item_type"], item["item_id"],
                         )
-            except Exception:
-                pass  # Never fail a search due to promotions
+                        if actions:
+                            execute_cheap_promotions(
+                                self._db, item["item_type"],
+                                item["item_id"], actions,
+                            )
+                except Exception:
+                    pass  # Never fail a search due to promotions
 
         # Populate working memory with emitted items
         # Build a lookup for knowledge node content
