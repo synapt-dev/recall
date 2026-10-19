@@ -173,3 +173,38 @@ class TestIntegration:
         # The cross-encoder should rank the France-related chunks higher
         top_idx = result[0][0]
         assert top_idx in (0, 2), f"Expected France-related chunk, got idx={top_idx}"
+
+
+class TestDevice:
+    """The cross-encoder loads on cpu unless SYNAPT_RERANKER_DEVICE names a device: left to the library it takes
+    MPS on Apple silicon, where the load added 1058 MB against 21 MB on cpu."""
+
+    def _load_with_fake_cross_encoder(self, monkeypatch):
+        import sys
+        import types
+
+        from synapt.recall import reranker
+
+        seen = {}
+
+        class FakeCrossEncoder:
+            def __init__(self, name, **kwargs):
+                seen["name"], seen["kwargs"] = name, kwargs
+
+        fake = types.ModuleType("sentence_transformers")
+        fake.CrossEncoder = FakeCrossEncoder
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        assert reranker._load_model("some/model") is not None
+        return seen
+
+    def test_the_model_loads_on_cpu_by_default(self, monkeypatch):
+        monkeypatch.delenv("SYNAPT_RERANKER_DEVICE", raising=False)
+        assert self._load_with_fake_cross_encoder(monkeypatch)["kwargs"] == {"device": "cpu"}
+
+    def test_the_env_names_the_device(self, monkeypatch):
+        monkeypatch.setenv("SYNAPT_RERANKER_DEVICE", " MPS ")
+        assert self._load_with_fake_cross_encoder(monkeypatch)["kwargs"] == {"device": "mps"}
+
+    def test_an_unknown_device_falls_back_to_cpu(self, monkeypatch):
+        monkeypatch.setenv("SYNAPT_RERANKER_DEVICE", "tpu")
+        assert self._load_with_fake_cross_encoder(monkeypatch)["kwargs"] == {"device": "cpu"}

@@ -11,6 +11,8 @@ Reranking top-20 candidates takes ~20-50ms on CPU with MiniLM.
 Model: cross-encoder/ms-marco-MiniLM-L-6-v2 (22M params, ~80MB)
 Enable: SYNAPT_RERANKER=true or use_reranker=True in TranscriptIndex
 Override model: SYNAPT_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-12-v2
+Device: cpu by default; SYNAPT_RERANKER_DEVICE=cpu|mps|cuda overrides. Left to the library, it loads
+on MPS on Apple silicon: the load added 1058 MB there against 21 MB on cpu for this model.
 """
 
 from __future__ import annotations
@@ -41,6 +43,20 @@ def get_reranker_model() -> str:
     """Get the configured cross-encoder model name."""
     from synapt.recall.config import load_config
     return load_config().get_model("reranker")
+
+
+_RERANKER_DEVICES = ("cpu", "mps", "cuda")
+
+
+def get_reranker_device() -> str:
+    """The device the cross-encoder loads on: SYNAPT_RERANKER_DEVICE if it names one, else cpu."""
+    device = os.environ.get("SYNAPT_RERANKER_DEVICE", "").strip().lower()
+    if not device:
+        return "cpu"
+    if device not in _RERANKER_DEVICES:
+        logger.warning("SYNAPT_RERANKER_DEVICE=%r is not one of %s; using cpu", device, ", ".join(_RERANKER_DEVICES))
+        return "cpu"
+    return device
 
 
 def is_reranker_enabled() -> bool:
@@ -108,8 +124,9 @@ def _load_model(model_name: str) -> object | None:
     try:
         from sentence_transformers import CrossEncoder
 
-        logger.info("Loading cross-encoder: %s", model_name)
-        model = CrossEncoder(model_name)
+        device = get_reranker_device()
+        logger.info("Loading cross-encoder: %s on %s", model_name, device)
+        model = CrossEncoder(model_name, device=device)
         _reranker_cache[model_name] = model
         return model
     except ImportError:
