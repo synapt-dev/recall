@@ -460,14 +460,35 @@ def _mapped_room_paths(project_dir: Path | None = None) -> list[Path]:
     return paths
 
 
+class ChannelNameError(ValueError):
+    """A room name whose log file would not sit inside its store directory."""
+
+
+def _contained_channel_file(ch_dir: Path, name: str) -> Path:
+    """Return ``ch_dir / f"{name}.jsonl"``, or raise ChannelNameError.
+
+    The joined path must resolve under ``ch_dir`` itself. NUL is refused, and
+    so is a backslash, since on Windows it is a path separator.
+    """
+    if "\0" in name or "\\" in name:
+        raise ChannelNameError(f"refusing room name {name!r}: it holds a NUL or a backslash")
+    path = ch_dir / f"{name}.jsonl"
+    if not path.resolve().is_relative_to(ch_dir.resolve()):
+        raise ChannelNameError(f"refusing room name {name!r}: it would leave the store directory")
+    if "/" in name:
+        # A room is one file in the store, never a path into a subdirectory another writer owns.
+        raise ChannelNameError(f"refusing room name {name!r}: it holds a '/'")
+    return path
+
+
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
     """Return the JSONL log path for a channel."""
     ch_dir = _room_channels_dir(channel, project_dir)
     safe_name = _channel_to_filename(channel)
-    new_path = ch_dir / f"{safe_name}.jsonl"
+    new_path = _contained_channel_file(ch_dir, safe_name)
     # Migrate legacy colon-format files (not valid on Windows)
     if ":" in channel and not new_path.exists():
-        old_path = ch_dir / f"{channel}.jsonl"
+        old_path = _contained_channel_file(ch_dir, channel)
         if old_path.exists():
             old_path.rename(new_path)
     return new_path
@@ -1522,7 +1543,7 @@ def _append_message(
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
-        path = channels_dir / f"{_channel_to_filename(msg.channel)}.jsonl"
+        path = _contained_channel_file(channels_dir, _channel_to_filename(msg.channel))
     else:
         path = _channel_path(msg.channel, project_dir)
     # An explicit channels_dir bypasses resolution entirely, so the write
@@ -3441,7 +3462,8 @@ def channel_messages_json(
     ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
     channel = _normalize_channel_name(channel)
-    path = (channels_dir / f"{_channel_to_filename(channel)}.jsonl") if channels_dir else _channel_path(channel, project_dir)
+    path = (_contained_channel_file(channels_dir, _channel_to_filename(channel))
+            if channels_dir else _channel_path(channel, project_dir))
     if not path.exists():
         return []
     messages = _read_messages(path, since=since)
@@ -4074,8 +4096,14 @@ def _check_watch_room(room: str) -> str:
     name = _normalize_channel_name(room)
     if not name or name.startswith("-"):
         raise WatchRoomError(f"refusing room name {room!r}: it is empty or starts with '-'")
-    if "/" in name or "\\" in name or ".." in name or "\0" in name:
+    if "/" in name:
         raise WatchRoomError(f"refusing room name {room!r}: it would leave the store directory")
+    # The same containment post makes, against a nominal store that does not
+    # exist, so the check is lexical and opens nothing.
+    try:
+        _contained_channel_file(Path(os.sep, "synapt-store", "channels"), _channel_to_filename(name))
+    except ChannelNameError as e:
+        raise WatchRoomError(str(e)) from None
     return name
 
 

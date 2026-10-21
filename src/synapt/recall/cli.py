@@ -3474,7 +3474,12 @@ def cmd_channel(args: argparse.Namespace) -> None:
         }
         if getattr(args, "type", None):
             post_kwargs["msg_type"] = args.type
-        print(channel_post(**post_kwargs))
+        from synapt.recall.channel import ChannelNameError
+        try:
+            print(channel_post(**post_kwargs))
+        except ChannelNameError as e:
+            print(f"synapt recall channel post: {e}", file=sys.stderr)
+            sys.exit(2)
     elif action == "read":
         limit = args.limit if args.limit is not None else 20
         read_kwargs: dict = {"channel": channel, "limit": limit, "since": args.since,
