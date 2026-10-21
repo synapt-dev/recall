@@ -4210,7 +4210,7 @@ def main():
 
     set_process_default_device("cpu")  # see its docstring; SYNAPT_EMBED_DEVICE still wins
     use_child_embedder(True)  # torch lives in a child that exits when idle, never in this process
-    _start_idle_release(_idle_release_seconds())
+    interval = _idle_release_seconds()  # a bad value refuses before anything is built
     server = _build_validating_fastmcp_class()(
         "synapt-recall",
         instructions=MCP_INSTRUCTIONS,
@@ -4220,6 +4220,7 @@ def main():
     server._mcp_server.version = _PRODUCT_VERSION or _product_version()
     register_tools(server)
     _sync_claude_memory_source_on_startup()
+    _start_idle_release(interval)  # last: a main() that stops early leaves no thread behind
     server.run()
 
 

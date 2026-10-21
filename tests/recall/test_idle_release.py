@@ -228,3 +228,22 @@ def test_a_the_release_interval_refuses_anything_but_a_positive_finite_number(mo
             server._idle_release_seconds()
     monkeypatch.delenv("RECALL_IDLE_RELEASE_S")
     assert server._idle_release_seconds() == server.DEFAULT_IDLE_RELEASE_S
+
+
+def test_a_a_server_main_that_stops_before_running_leaves_no_release_thread(monkeypatch):
+    # a thread left behind makes every later fork() in the process warn (and risk deadlock)
+    from synapt.recall import server
+
+    class Stop(Exception):
+        pass
+
+    def stop():
+        raise Stop
+
+    monkeypatch.setattr(server, "_build_validating_fastmcp_class", stop)
+    try:
+        with pytest.raises(Stop):
+            server.main()
+    finally:
+        embeddings.use_child_embedder(False)
+    assert not [t for t in threading.enumerate() if t.name == "synapt-idle-release"]
