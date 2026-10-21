@@ -4176,7 +4176,7 @@ def _watch_poll(state: _WatchedFile) -> list[bytes]:
         with open(state.path, "rb") as f:
             if state.pos and _watch_read_tail(f, state.pos) != state.tail:
                 # Rewritten in place: read the new contents from the start.
-                state.pos, state.partial = 0, b""
+                state.pos, state.partial, state.tail = 0, b"", b""
             if st.st_size == state.pos:
                 return []
             f.seek(state.pos)
