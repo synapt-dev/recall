@@ -134,6 +134,7 @@ def test_nul_and_backslash_are_refused(workdir, tmp_path, room):
     assert [p for p in tmp_path.rglob("*.jsonl")] == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a ':' file name cannot exist on Windows, so there is no legacy file to rename")
 def test_legacy_colon_rename_does_not_move_a_file_outside_the_store(workdir):
     project, _ = workdir
     from synapt.recall.channel import ChannelNameError, channel_post
