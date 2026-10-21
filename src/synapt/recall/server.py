@@ -162,6 +162,23 @@ def _index_cache_stamp(index_dir: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(stamp)
 
 
+def _adopt_post_load_stamp(stamp, post):
+    """Pick the stamp to cache after a load.
+
+    Opening index.db creates an empty index.db-wal, which moves the stamp and
+    would make the next call reload for no reason. Take the post-load stamp only
+    when that empty -wal is the single change; anything else keeps the pre-load
+    stamp, so a write that landed during the load still reloads next call.
+    """
+    added = set(post) - set(stamp)
+    if not set(stamp) <= set(post) or len(added) != 1:
+        return stamp
+    name, size, _ = added.pop()
+    if name == "index.db-wal" and size == 0 and all(e[0] != name for e in stamp):
+        return post
+    return stamp
+
+
 @contextlib.contextmanager
 def _own_write(index_dir: Path):
     """Wrap a write this server makes to its own index (access tracking, promotions).
@@ -215,7 +232,7 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
                 len(_cached_index.chunks), _time.monotonic() - _load_t0,
             )
             _cached_has_embeddings = use_embeddings
-            _cached_mtime = stamp
+            _cached_mtime = _adopt_post_load_stamp(stamp, _index_cache_stamp(index_dir))
             _cached_dir = index_dir
             _cached_index._own_write = lambda: _own_write(index_dir)
             # Set current session ID for access tracking (distinct_sessions)
