@@ -222,7 +222,7 @@ def _line(body: str) -> str:
 
 def _rewrite_in_place(log: Path, text: str) -> None:
     # One open and one write: same inode, and the new size lands within a poll.
-    with open(log, "r+", encoding="utf-8") as f:
+    with open(log, "r+", encoding="utf-8", newline="") as f:  # no \r\n on Windows
         f.truncate(0)
         f.write(text)
 
