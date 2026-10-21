@@ -4133,6 +4133,20 @@ class _WatchedFile:
     ident: tuple[int, int] | None = None
     pos: int = 0
     partial: bytes = b""
+    # The last bytes before pos, re-read on every poll: a writer that
+    # truncates in place and regrows past pos within one poll leaves size
+    # and inode unchanged, and only these bytes show the rewrite.  A rewrite
+    # whose last _WATCH_TAIL bytes before pos happen to match is not seen.
+    tail: bytes = b""
+
+
+_WATCH_TAIL = 64
+
+
+def _watch_read_tail(f, pos: int) -> bytes:
+    start = max(0, pos - _WATCH_TAIL)
+    f.seek(start)
+    return f.read(pos - start)
 
 
 def _watch_rotated(state: _WatchedFile, st: os.stat_result) -> bool:
@@ -4155,15 +4169,22 @@ def _watch_poll(state: _WatchedFile) -> list[bytes]:
         return []
     if _watch_rotated(state, st):
         state.ident, state.pos, state.partial = (st.st_dev, st.st_ino), 0, b""
-    if st.st_size == state.pos:
+        state.tail = b""
+    if st.st_size == state.pos == 0:
         return []
     try:
         with open(state.path, "rb") as f:
+            if state.pos and _watch_read_tail(f, state.pos) != state.tail:
+                # Rewritten in place: read the new contents from the start.
+                state.pos, state.partial = 0, b""
+            if st.st_size == state.pos:
+                return []
             f.seek(state.pos)
             data = f.read()
     except OSError:
         return []
     state.pos += len(data)
+    state.tail = (state.tail + data)[-_WATCH_TAIL:]
     data = state.partial + data
     lines = data.split(b"\n")
     state.partial = lines.pop()
@@ -4223,6 +4244,8 @@ def channel_watch(
             try:
                 st = os.stat(state.path)
                 state.ident, state.pos = (st.st_dev, st.st_ino), st.st_size
+                with open(state.path, "rb") as f:
+                    state.tail = _watch_read_tail(f, state.pos)
             except OSError:
                 pass
         watched.append(state)
