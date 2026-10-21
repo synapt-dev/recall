@@ -1,0 +1,145 @@
+"""The embedding child: holds the embedding model (and torch) out of the recall server's process.
+
+The recall server never imports torch. When it needs vectors it sends one JSON line to this
+child on stdin and reads one JSON line back on stdout:
+
+    {"op": "dim"}                    -> {"dim": 384}
+    {"op": "embed", "texts": [...]}  -> {"n": <count>, "f32": "<base64 float32, row-major>"}
+    any failure                      -> {"error": "<type>: <message>"}
+
+The child exits by itself after ``RECALL_EMBED_IDLE_S`` seconds (default 600) with no request,
+and at once when its stdin closes, so a server that is killed leaves no child holding the model.
+
+``RECALL_EMBED_CHILD_FAKE=1`` (tests only) answers with deterministic vectors and never loads a
+model. ``RECALL_EMBED_CHILD_EXIT_ONCE=<path>`` (tests only) makes the first child that reads a
+request exit without replying, the way a child exiting for idle meets a request in flight; it
+creates <path>, so the next child answers.
+"""
+
+from __future__ import annotations
+
+import array
+import base64
+import hashlib
+import json
+import os
+import queue
+import sys
+import threading
+
+DEFAULT_IDLE_S = 600.0
+FAKE_DIM = 384  # storage.EMBEDDING_DIM: fake vectors must be writable to a real store
+
+
+def idle_seconds() -> float:
+    """The idle interval from ``RECALL_EMBED_IDLE_S``; a missing value is the default."""
+    raw = os.environ.get("RECALL_EMBED_IDLE_S", "").strip()
+    if not raw:
+        return DEFAULT_IDLE_S
+    value = float(raw)  # a non-number raises, and the child exits with that error
+    if not value > 0 or value != value or value == float("inf"):
+        raise ValueError(f"RECALL_EMBED_IDLE_S must be a positive finite number, got {raw!r}")
+    return value
+
+
+class _FakeProvider:
+    dim = FAKE_DIM
+
+    def embed(self, texts):
+        out = []
+        for text in texts:
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            out.append([digest[i % len(digest)] / 255.0 + i * 1e-4 for i in range(FAKE_DIM)])
+        return out
+
+
+def _provider():
+    if os.environ.get("RECALL_EMBED_CHILD_FAKE") == "1":
+        return _FakeProvider()
+    from synapt.recall.embeddings import LocalEmbeddings, set_process_default_device
+
+    set_process_default_device("cpu")  # the server's default (server.py main), so vectors match it
+    return LocalEmbeddings()
+
+
+def _pack(vectors) -> dict:
+    """Vectors as base64 float32, little-endian, row-major: the model's own precision, and about 100x cheaper than a JSON
+    list of floats (1.8 ms against 0.02 ms per 384-dim vector, measured on the host)."""
+    flat = array.array("f")
+    for row in vectors:
+        flat.extend(row)
+    if sys.byteorder != "little":
+        flat.byteswap()  # the wire is little-endian on every host
+    return {"n": len(vectors), "f32": base64.b64encode(flat.tobytes()).decode("ascii")}
+
+
+def unpack(answer: dict) -> list:
+    """The inverse of `_pack`, run in the server."""
+    flat = array.array("f")
+    flat.frombytes(base64.b64decode(answer["f32"]))
+    if sys.byteorder != "little":
+        flat.byteswap()
+    n = answer["n"]
+    if n == 0:
+        return []
+    dim = len(flat) // n
+    if dim * n != len(flat):
+        raise ValueError(f"{len(flat)} floats do not split into {n} vectors")
+    values = flat.tolist()
+    return [values[i * dim:(i + 1) * dim] for i in range(n)]
+
+
+def _answer(provider, request: dict) -> dict:
+    op = request.get("op")
+    if op == "dim":
+        return {"dim": provider.dim}
+    if op == "embed":
+        texts = request.get("texts")
+        if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+            return {"error": "ValueError: texts must be a list of strings"}
+        return _pack(provider.embed(texts))
+    return {"error": f"ValueError: unknown op {op!r}"}
+
+
+def _requests() -> "queue.Queue[str | None]":
+    """Lines from stdin through a reader thread: select() on a pipe does not work on Windows,
+    and a queue wait is how the idle timeout is kept on every platform."""
+    lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def read() -> None:
+        for line in sys.stdin:
+            lines.put(line)
+        lines.put(None)  # EOF: the server closed our stdin (it exited or released us)
+
+    threading.Thread(target=read, name="embed-child-stdin", daemon=True).start()
+    return lines
+
+
+def main() -> int:
+    idle = idle_seconds()
+    exit_once = os.environ.get("RECALL_EMBED_CHILD_EXIT_ONCE", "")
+    provider = None
+    lines = _requests()
+    while True:
+        try:
+            line = lines.get(timeout=idle)
+        except queue.Empty:
+            return 0  # idle: give the model's memory back
+        if line is None:
+            return 0  # the server closed our stdin (it exited or released us)
+        if exit_once and not os.path.exists(exit_once):
+            open(exit_once, "w").close()
+            return 0  # test seam: exit with a request accepted and unanswered
+        try:
+            request = json.loads(line)
+            if provider is None:
+                provider = _provider()
+            reply = _answer(provider, request)
+        except Exception as exc:  # noqa: BLE001 - every failure goes back as a reply
+            reply = {"error": f"{type(exc).__name__}: {exc}"}
+        sys.stdout.write(json.dumps(reply) + "\n")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
