@@ -883,6 +883,20 @@ def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+def _since_instant(s: str) -> datetime | None:
+    """Parse a ``--since`` value to an aware instant; a naive value is UTC.
+
+    Returns None when *s* is not an ISO 8601 timestamp.
+    """
+    try:
+        dt = _parse_iso(s)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 # ---------------------------------------------------------------------------
 # Message dataclass
 # ---------------------------------------------------------------------------
@@ -4183,6 +4197,11 @@ def channel_watch(
     out = out or sys.stdout
     err = err or sys.stderr
     names = [_check_watch_room(r) for r in rooms]
+    since_dt = None
+    if since:
+        since_dt = _since_instant(since)
+        if since_dt is None:
+            raise WatchRoomError(f"refusing --since {since!r}: it is not an ISO 8601 timestamp")
     if all_rooms:
         names.extend(n for n in _watch_all_rooms(project_dir) if n not in names)
     if not names:
@@ -4225,8 +4244,10 @@ def channel_watch(
                         continue
                     if msg.type in _WATCH_SKIP_TYPES:
                         continue
-                    if since and str(msg.timestamp) <= since:
-                        continue
+                    if since_dt is not None:
+                        posted = _since_instant(str(msg.timestamp))
+                        if posted is not None and posted <= since_dt:
+                            continue
                     if mine and msg.from_agent == mine and not include_mine:
                         continue
                     print(_watch_line(msg), file=out, flush=True)

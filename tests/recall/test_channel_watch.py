@@ -267,6 +267,56 @@ def test_good_room_after_bad_one_is_still_refused(box):
     assert "watching" not in r.stderr
 
 
+# (e2) --since is an instant, not text
+
+def _seed(box: Box, *posts: tuple[str, str]) -> None:
+    log = Path(box.py("from synapt.recall import channel as c; "
+                      "print(c._watch_room_path('dev', None))"))
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("".join(
+        json.dumps({"timestamp": ts, "channel": "dev", "type": "message",
+                    "from": "b", "body": body}) + "\n" for ts, body in posts))
+
+
+def test_watch_since_offset_is_an_instant(box):
+    _seed(box, ("2026-01-01T11:59:59Z", "before"), ("2026-01-01T12:00:01Z", "after"))
+    w = box.watch("a", "dev", "--since", "2026-01-01T07:00:00-05:00")
+    w.expect("from [b]: after", within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
+def test_watch_since_whole_second_vs_micro(box):
+    _seed(box, ("2026-01-01T12:00:00Z", "same"), ("2026-01-01T12:00:00.500000Z", "half"))
+    w = box.watch("a", "dev", "--since", "2026-01-01T12:00:00Z")
+    w.expect("from [b]: half", within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
+def test_watch_naive_since_is_utc(box):
+    _seed(box, ("2026-01-01T11:59:59Z", "before"), ("2026-01-01T12:00:01Z", "after"))
+    w = box.watch("a", "dev", "--since", "2026-01-01T12:00:00")
+    w.expect("from [b]: after", within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
+def test_unparseable_since_is_refused_before_any_file_is_opened(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "proj"
+    home.mkdir()
+    project.mkdir()
+    store = tmp_path / "store-not-made"
+    b = Box(project, home, store)
+    r = b.run("a", "watch", "dev", "--since", "yesterday")
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "refusing --since" in r.stderr
+    assert "watching" not in r.stderr
+    assert r.stdout == ""
+    assert not store.exists()
+    assert not (project / ".synapt").exists()
+
+
 # (f) watch moves no unread cursor
 
 def test_watch_moves_no_cursor(box):
