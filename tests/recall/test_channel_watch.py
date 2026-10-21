@@ -350,3 +350,79 @@ def test_body_is_capped_and_cannot_forge_a_line():
     assert "\n" not in line
     assert line.startswith("from [b\\nfrom [x]]: ok\\nfrom [admin]: yes")
     assert line.endswith("z" * (300 - len("ok\nfrom [admin]: yes")))
+
+
+# Store tiers: watch resolves each tier exactly as post does, and creates
+# nothing. Rows below pin the mapped (rooms.toml), global and project tiers;
+# the shared env-variable tier is covered by the rows above.
+
+
+def _gripspace(tmp_path: Path) -> Box:
+    grip, home = tmp_path / "gripspace", tmp_path / "home"
+    (grip / ".gitgrip" / "spaces" / "main").mkdir(parents=True)
+    (grip / ".gitgrip" / "griptrees.json").write_text('{"griptrees": {}}')
+    (grip / ".gitgrip" / "spaces" / "main" / "gripspace.yml").write_text(
+        "manifest:\n  url: git@github.com:synapt-dev/synapt-gripspace.git\n")
+    home.mkdir()
+    return Box(grip, home, None)
+
+
+def _project(tmp_path: Path) -> Box:
+    project, home = tmp_path / "proj", tmp_path / "home"
+    project.mkdir()
+    home.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    return Box(project, home, None)
+
+
+def _tree(root: Path) -> set[str]:
+    out = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            out.add(os.path.relpath(os.path.join(dirpath, name), root))
+    return out
+
+
+def _mapped_store(b: Box) -> Path:
+    channels = b.home / ".synapt" / "channels"
+    store = channels / "synapt-dev" / "mapped-store"
+    store.mkdir(parents=True)
+    (channels / "rooms.toml").write_text('[rooms]\nhead = "synapt-dev/mapped-store"\n')
+    return store
+
+
+@pytest.mark.parametrize("tier", ["project", "global", "mapped"])
+def test_watch_reads_the_file_post_writes(tmp_path, tier):
+    b = _project(tmp_path) if tier == "project" else _gripspace(tmp_path)
+    room = "head" if tier == "mapped" else "dev"
+    mapped = _mapped_store(b) if tier == "mapped" else None
+    b.post("b", "first", room=room)
+    written = [p for p in tmp_path.rglob(f"{room}.jsonl")]
+    assert len(written) == 1, written
+    watched = Path(b.py("from synapt.recall import channel as c; "
+                        f"print(c._watch_room_path({room!r}))"))
+    assert watched.resolve() == written[0].resolve()
+    if tier == "mapped":
+        assert written[0].parent.resolve() == mapped.resolve()
+    elif tier == "global":
+        assert str(b.home) in str(written[0])
+    else:
+        assert str(b.home / ".synapt" / "channels") not in str(written[0])
+    w = b.watch("a", room, "--since", "2000-01-01T00:00:00Z")
+    w.expect("from [b]: first", within=4.0)
+    b.post("b", "second", room=room)
+    w.expect("from [b]: second", within=4.0)
+    _clean_exit(w)
+
+
+def test_global_watch_creates_no_directory(tmp_path):
+    b = _gripspace(tmp_path)
+    store = Path(b.py("from synapt.recall import channel as c; "
+                      "print(c._global_channels_dir())"))
+    assert not store.exists()
+    before = _tree(tmp_path)
+    w = b.watch("a", "dev")
+    w.quiet()
+    _clean_exit(w)
+    assert not store.exists()
+    assert _tree(tmp_path) == before
