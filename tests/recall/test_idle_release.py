@@ -247,3 +247,17 @@ def test_a_a_server_main_that_stops_before_running_leaves_no_release_thread(monk
     finally:
         embeddings.use_child_embedder(False)
     assert not [t for t in threading.enumerate() if t.name == "synapt-idle-release"]
+
+
+def test_b2_vectors_cross_the_pipe_exactly_at_the_models_float32_precision():
+    import array
+
+    rows = [array.array("f", [0.1 * i - 3.3, 1e-7 * i, -2.5e3 + i]).tolist() for i in range(4)]
+    assert embed_child.unpack(embed_child._pack(rows)) == rows
+    assert embed_child.unpack(embed_child._pack([])) == []
+
+
+def test_b4_a_reply_whose_floats_do_not_split_into_its_count_is_refused():
+    packed = embed_child._pack([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    with pytest.raises(ValueError, match="do not split"):
+        embed_child.unpack({**packed, "n": 4})

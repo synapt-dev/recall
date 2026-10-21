@@ -276,7 +276,9 @@ class ChildEmbeddings(EmbeddingProvider):
         return self._dim_cached
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        return self._request({"op": "embed", "texts": list(texts)})["vectors"]
+        from synapt.recall.embed_child import unpack
+
+        return unpack(self._request({"op": "embed", "texts": list(texts)}))
 
     def close(self) -> None:
         """Close the child's stdin; it exits (the no-orphan rule, from the parent's side)."""
