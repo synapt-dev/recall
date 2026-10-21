@@ -4040,3 +4040,199 @@ def _default_wake_hook(msg: ChannelMessage, project_dir: Path | None = None) -> 
 
 register_message_hook(_default_mention_hook)
 register_message_hook(_default_wake_hook)
+
+
+# ---------------------------------------------------------------------------
+# Watch: follow room logs as they grow, read-only
+# ---------------------------------------------------------------------------
+
+_WATCH_BODY_LIMIT = 300
+_WATCH_SKIP_TYPES = frozenset({"join", "leave"})
+_WATCH_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+class WatchRoomError(ValueError):
+    """A room name watch refuses before any file is opened."""
+
+
+def _check_watch_room(room: str) -> str:
+    """Return the normalized room name, or raise WatchRoomError."""
+    name = _normalize_channel_name(room)
+    if not name or name.startswith("-"):
+        raise WatchRoomError(f"refusing room name {room!r}: it is empty or starts with '-'")
+    if "/" in name or "\\" in name or ".." in name or "\0" in name:
+        raise WatchRoomError(f"refusing room name {room!r}: it would leave the store directory")
+    return name
+
+
+def _watch_room_path(channel: str, project_dir: Path | None = None) -> Path:
+    """Return *channel*'s log path by the same coordinates as post and read.
+
+    Read-only: unlike ``_channel_path`` it renames no legacy file and creates
+    no directory, and it never falls back to the local store when the log
+    lives elsewhere. A log that does not exist yet is watched for.
+    """
+    shared = _shared_channels_dir()
+    if shared is not None:
+        ch_dir = _guard_store_path("resolve_channels_dir", shared)
+    else:
+        mapped = _mapped_room_dir(channel)
+        if mapped is not None:
+            ch_dir = mapped
+        else:
+            global_dir = _global_channels_dir(project_dir)
+            if global_dir is not None:
+                ch_dir = _guard_store_path("resolve_channels_dir", global_dir)
+            else:
+                ch_dir = _guard_store_path(
+                    "resolve_channels_dir", _local_channels_dir(project_dir))
+    return ch_dir / f"{_channel_to_filename(channel)}.jsonl"
+
+
+def _watch_all_rooms(project_dir: Path | None = None) -> list[str]:
+    """Every room with a log in this caller's store, plus the mapped rooms."""
+    names = set(_load_room_map()) if _shared_channels_dir() is None else set()
+    shared = _shared_channels_dir()
+    if shared is not None:
+        store = shared
+    else:
+        store = _global_channels_dir(project_dir) or _local_channels_dir(project_dir)
+    if store.is_dir():
+        names.update(_filename_to_channel(p.stem) for p in store.glob("*.jsonl"))
+    return sorted(names)
+
+
+def _watch_line(msg: ChannelMessage) -> str:
+    """One output line; control characters are escaped so a body cannot forge lines."""
+    def clean(text: str) -> str:
+        return "".join(
+            _WATCH_ESCAPES.get(ch, f"\\x{ord(ch):02x}")
+            if ord(ch) < 0x20 or ord(ch) == 0x7F else ch
+            for ch in text
+        )
+    return f"from [{clean(str(msg.from_agent))}]: {clean(str(msg.body)[:_WATCH_BODY_LIMIT])}"
+
+
+@dataclass
+class _WatchedFile:
+    path: Path
+    ident: tuple[int, int] | None = None
+    pos: int = 0
+    partial: bytes = b""
+
+
+def _watch_rotated(state: _WatchedFile, st: os.stat_result) -> bool:
+    """True when the log was replaced or truncated since the last poll."""
+    return (st.st_dev, st.st_ino) != state.ident or st.st_size < state.pos
+
+
+def _watch_poll(state: _WatchedFile) -> list[bytes]:
+    """Return the complete new lines in *state*'s log since the last poll.
+
+    The file is opened and closed on every poll rather than held open, so
+    the watcher never keeps a rotated file alive and never blocks a writer
+    replacing it (Windows refuses to replace a file another process holds).
+    """
+    try:
+        st = os.stat(state.path)
+    except OSError:
+        # Gone (rotated away and not yet recreated): read the next one from 0.
+        state.ident, state.pos, state.partial = None, 0, b""
+        return []
+    if _watch_rotated(state, st):
+        state.ident, state.pos, state.partial = (st.st_dev, st.st_ino), 0, b""
+    if st.st_size == state.pos:
+        return []
+    try:
+        with open(state.path, "rb") as f:
+            f.seek(state.pos)
+            data = f.read()
+    except OSError:
+        return []
+    state.pos += len(data)
+    data = state.partial + data
+    lines = data.split(b"\n")
+    state.partial = lines.pop()
+    return lines
+
+
+def channel_watch(
+    rooms: list[str],
+    *,
+    since: str | None = None,
+    include_mine: bool = False,
+    all_rooms: bool = False,
+    interval: float = 0.2,
+    project_dir: Path | None = None,
+    out=None,
+    err=None,
+) -> None:
+    """Print each new post in *rooms* as ``from [id]: body`` until interrupted.
+
+    Read-only: no cursor, membership or presence is touched, and no file or
+    directory is created. Polls every *interval* seconds from the current end
+    of each log (or from *since*), and reopens a log that was rotated or
+    truncated. Posts sent under this caller's ``SYNAPT_AGENT_ID`` are skipped
+    unless *include_mine*. SIGINT and SIGTERM end the watch normally.
+    Raises WatchRoomError for a bad room name before any file is opened.
+    """
+    import signal
+    import sys
+    import threading
+
+    out = out or sys.stdout
+    err = err or sys.stderr
+    names = [_check_watch_room(r) for r in rooms]
+    if all_rooms:
+        names.extend(n for n in _watch_all_rooms(project_dir) if n not in names)
+    if not names:
+        raise WatchRoomError("no room to watch: name one or more rooms, or pass --all")
+
+    orphan = _orphaned_local_channel_store(project_dir) if _shared_channels_dir() is None else None
+    if orphan is not None:
+        print(
+            f"warning: {orphan} holds channel logs that are no longer live; "
+            f"watching the live store instead",
+            file=err, flush=True,
+        )
+
+    mine = os.environ.get("SYNAPT_AGENT_ID") or None
+    watched = []
+    for name in names:
+        state = _WatchedFile(_watch_room_path(name, project_dir))
+        if since is None:
+            try:
+                st = os.stat(state.path)
+                state.ident, state.pos = (st.st_dev, st.st_ino), st.st_size
+            except OSError:
+                pass
+        watched.append(state)
+
+    print(f"watching: {', '.join(names)}", file=err, flush=True)
+
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _stop)
+    try:
+        while True:
+            for state in watched:
+                for raw in _watch_poll(state):
+                    try:
+                        msg = ChannelMessage.from_dict(json.loads(raw.decode("utf-8")))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if msg.type in _WATCH_SKIP_TYPES:
+                        continue
+                    if since and str(msg.timestamp) <= since:
+                        continue
+                    if mine and msg.from_agent == mine and not include_mine:
+                        continue
+                    print(_watch_line(msg), file=out, flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
