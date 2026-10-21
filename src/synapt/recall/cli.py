@@ -3381,9 +3381,13 @@ _CHANNEL_ACTION_INPUTS: dict[str, frozenset[str]] = {
     "search": frozenset({"channel", "message"}),
     "chat": frozenset({"channel", "name", "target", "limit"}),
     "read_message": frozenset({"channel", "message", "offset", "length"}),
+    "watch": frozenset({"channel", "message", "rooms", "since", "include_mine",
+                         "all_rooms"}),
 }
 
-_CHANNEL_INPUT_LABELS = {"channel": "<channel>", "message": "<message>"}
+_CHANNEL_INPUT_LABELS = {"channel": "<channel>", "message": "<message>",
+                         "rooms": "<room>...", "include_mine": "--include-mine",
+                         "all_rooms": "--all"}
 
 _CHANNEL_INPUT_HINTS = {
     ("post", "name"): (
@@ -3395,7 +3399,8 @@ _CHANNEL_INPUT_HINTS = {
 
 # Every input the `channel` parser defines, in the order refusals check them.
 _CHANNEL_INPUT_DESTS = ("channel", "message", "limit", "since", "pin", "type",
-                        "to", "target", "detail", "name", "offset", "length")
+                        "to", "target", "detail", "name", "offset", "length",
+                        "rooms", "include_mine", "all_rooms")
 
 
 def _channel_inputs_given(args: argparse.Namespace) -> list[str]:
@@ -3403,7 +3408,7 @@ def _channel_inputs_given(args: argparse.Namespace) -> list[str]:
     given = []
     for dest in _CHANNEL_INPUT_DESTS:
         value = getattr(args, dest, None)
-        if value is not None and value is not False:
+        if value is not None and value is not False and value != []:
             given.append(dest)
     return given
 
@@ -3477,6 +3482,15 @@ def cmd_channel(args: argparse.Namespace) -> None:
         if getattr(args, "detail", None):
             read_kwargs["detail"] = args.detail
         print(channel_read(**read_kwargs))
+    elif action == "watch":
+        from synapt.recall.channel import WatchRoomError, channel_watch
+        rooms = [r for r in (args.channel, args.message, *(args.rooms or [])) if r is not None]
+        try:
+            channel_watch(rooms, since=args.since, include_mine=args.include_mine,
+                          all_rooms=args.all_rooms)
+        except WatchRoomError as e:
+            print(f"synapt recall channel watch: {e}", file=sys.stderr)
+            sys.exit(2)
     elif action == "read_message":
         if not args.message:
             print("Usage: synapt recall channel read_message <channel> <id> "
@@ -5755,7 +5769,7 @@ def make_parser() -> argparse.ArgumentParser:
                                          "heartbeat", "unread", "pin",
                                          "directive", "mute", "unmute", "kick",
                                          "broadcast", "list", "search", "chat",
-                                         "read_message"],
+                                         "read_message", "watch"],
                                 help="Channel action")
     channel_parser.add_argument("channel", nargs="?", default=None,
                                 help="Channel name (default: dev)")
@@ -5785,6 +5799,12 @@ def make_parser() -> argparse.ArgumentParser:
                                 help="First char to read (for 'read_message'; default: 0)")
     channel_parser.add_argument("--length", type=int, default=None,
                                 help="Chars to read from --offset (for 'read_message'; default: 8000)")
+    channel_parser.add_argument("rooms", nargs="*", default=None,
+                                help="More rooms to follow (for 'watch', after the first two)")
+    channel_parser.add_argument("--include-mine", dest="include_mine", action="store_true",
+                                help="Also show posts sent under SYNAPT_AGENT_ID (for 'watch')")
+    channel_parser.add_argument("--all", dest="all_rooms", action="store_true",
+                                help="Watch every room in the store and the room map (for 'watch')")
 
     catchup_parser = subparsers.add_parser(
         "catchup",

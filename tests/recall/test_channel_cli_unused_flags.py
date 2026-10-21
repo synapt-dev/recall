@@ -38,6 +38,7 @@ EXPECTED = {
     "search": {"channel", "message"},
     "chat": {"channel", "name", "target", "limit"},
     "read_message": {"channel", "message", "offset", "length"},
+    "watch": {"channel", "message", "rooms", "since", "include_mine", "all_rooms"},
 }
 
 VALUES = {
@@ -51,6 +52,8 @@ VALUES = {
     "name": ["--name", "x"],
     "offset": ["--offset", "1"],
     "length": ["--length", "1"],
+    "include_mine": ["--include-mine"],
+    "all_rooms": ["--all"],
 }
 
 
@@ -78,6 +81,8 @@ def _argv(action: str, dest: str) -> list[str]:
         return [action, "dev"]
     if dest == "message":
         return [action, "dev", "body"]
+    if dest == "rooms":
+        return [action, "dev", "body", "more"]
     return [action, *VALUES[dest]]
 
 
@@ -92,6 +97,11 @@ def _pairs(used: bool) -> list[tuple[str, str]]:
             if dest == "message" and not used and \
                     "channel" not in table.get(action, ()) \
                     and action != "broadcast":
+                continue
+            # <room>... rides behind both; an action that refuses either
+            # of them refuses that one first, and its own row covers it.
+            if dest == "rooms" and not used and \
+                    not {"channel", "message"} <= table.get(action, set()):
                 continue
             if in_use == used:
                 out.append((action, dest))
@@ -139,7 +149,8 @@ def test_every_parser_input_is_checked_for_being_given():
 def test_unused_input_is_refused_before_anything_runs(action, dest, calls, capsys):
     rc = _call(_argv(action, dest))
     err = capsys.readouterr().err.strip().splitlines()
-    label = {"channel": "<channel>", "message": "<message>"}.get(dest, "--" + dest)
+    label = {"channel": "<channel>", "message": "<message>", "rooms": "<room>...",
+             "include_mine": "--include-mine", "all_rooms": "--all"}.get(dest, "--" + dest)
     assert rc == 1
     assert len(err) == 1, err
     assert f"{label} is not used by '{action}'" in err[0]
