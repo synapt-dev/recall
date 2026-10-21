@@ -206,31 +206,53 @@ class ChildEmbeddings(EmbeddingProvider):
         self._dim_cached: int | None = None
 
     def _start(self) -> None:
+        import queue
         import subprocess
 
         self._proc = subprocess.Popen(
             self._cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1,
         )
+        # Replies come through a reader thread and a queue, not select(): on Windows select()
+        # takes sockets only, so a pipe there cannot be waited on with a timeout any other way.
+        replies: "queue.Queue[str | None]" = queue.Queue()
+
+        def read(stdout=self._proc.stdout) -> None:
+            try:
+                for reply in stdout:
+                    replies.put(reply)
+            except (OSError, ValueError):
+                pass
+            replies.put(None)  # EOF: the child exited
+
+        self._replies = replies
+        self._reader = threading.Thread(target=read, name="synapt-embed-child-reader", daemon=True)
+        self._reader.start()
 
     def _stop(self) -> None:
         proc, self._proc = self._proc, None
         if proc is None:
             return
-        for stream in (proc.stdin, proc.stdout):
-            try:
-                stream.close()
-            except Exception:  # noqa: BLE001 - a closed pipe is the point
-                pass
+        try:
+            proc.stdin.close()  # the child reads EOF and exits
+        except Exception:  # noqa: BLE001 - a closed pipe is the point
+            pass
         try:
             proc.wait(timeout=5)
         except Exception:  # noqa: BLE001
             proc.kill()
             proc.wait()
+        # The child is gone, so its stdout reaches EOF and the reader ends; only then is the
+        # pipe closed, never under a read that is still blocked on it.
+        self._reader.join(timeout=5)
+        try:
+            proc.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _exchange(self, line: str) -> str:
         """Send one line and read one reply; '' when the child exited without answering."""
-        import selectors
+        import queue
 
         if self._proc is None or self._proc.poll() is not None:
             self._stop()
@@ -240,15 +262,12 @@ class ChildEmbeddings(EmbeddingProvider):
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             return ""
-        sel = selectors.DefaultSelector()
-        sel.register(self._proc.stdout, selectors.EVENT_READ)
         try:
-            if not sel.select(timeout=self._timeout):
-                self._stop()
-                raise EmbedChildError(f"the embedding child gave no reply in {self._timeout:g}s")
-        finally:
-            sel.close()
-        return self._proc.stdout.readline()
+            reply = self._replies.get(timeout=self._timeout)
+        except queue.Empty:
+            self._stop()
+            raise EmbedChildError(f"the embedding child gave no reply in {self._timeout:g}s") from None
+        return reply or ""
 
     def _request(self, request: dict) -> dict:
         if not self._lock.acquire(timeout=self._timeout):

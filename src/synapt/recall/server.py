@@ -316,7 +316,7 @@ def _release_if_idle(interval: float, now: float | None = None) -> bool:
 
     now = _time.monotonic() if now is None else now
     with _activity_lock:
-        if _calls_in_flight or _cached_index is None or now - _last_activity < interval:
+        if _calls_in_flight or _cached_index is None or now < _last_activity + interval:
             return False
         _invalidate_cache()
     gc.collect()

@@ -39,6 +39,20 @@ def fake_child(monkeypatch, tmp_path):
 
 
 def _alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        # os.kill(pid, 0) TERMINATES a process on Windows, so ask for its exit code instead.
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        try:
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        finally:
+            kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -263,3 +277,46 @@ def test_b4_a_reply_whose_floats_do_not_split_into_its_count_is_refused():
     packed = embed_child._pack([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     with pytest.raises(ValueError, match="do not split"):
         embed_child.unpack({**packed, "n": 4})
+
+
+_NO_PIPE_SELECT = textwrap.dedent("""
+    import selectors
+
+    class _WindowsSelector:
+        # On Windows select() takes sockets only: registering a pipe fails like this.
+        def __init__(self, *a, **k):
+            pass
+
+        def register(self, *a, **k):
+            raise OSError(10038, "not a socket")
+
+        def close(self):
+            pass
+
+    selectors.DefaultSelector = _WindowsSelector
+""")
+
+
+def test_b4_the_child_pipe_is_never_waited_on_with_select_which_windows_refuses(monkeypatch):
+    monkeypatch.setenv("RECALL_EMBED_CHILD_FAKE", "1")
+    monkeypatch.delenv("RECALL_EMBED_IDLE_S", raising=False)
+    monkeypatch.delenv("RECALL_EMBED_CHILD_EXIT_ONCE", raising=False)
+    import selectors
+
+    names: dict = {}
+    exec(_NO_PIPE_SELECT.replace("selectors.DefaultSelector = _WindowsSelector", ""), names)
+    monkeypatch.setattr(selectors, "DefaultSelector", names["_WindowsSelector"])  # the parent side
+    child = _NO_PIPE_SELECT + "from synapt.recall import embed_child\nraise SystemExit(embed_child.main())\n"
+    provider = ChildEmbeddings(cmd=[sys.executable, "-c", child], timeout=10)
+    try:
+        assert len(provider.embed(["a", "b"])) == 2
+    finally:
+        provider.close()
+
+
+def test_a_the_interval_boundary_releases_whatever_the_clock_value(server_state):
+    server, dropped = server_state
+    last = 443.880615916  # (last + 600) - last rounds to 599.9999999999999
+    server._last_activity = last
+    assert server._release_if_idle(600, now=last + 600) is True
+    assert dropped == [1]

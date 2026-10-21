@@ -23,8 +23,9 @@ import base64
 import hashlib
 import json
 import os
-import selectors
+import queue
 import sys
+import threading
 
 DEFAULT_IDLE_S = 600.0
 FAKE_DIM = 384  # storage.EMBEDDING_DIM: fake vectors must be writable to a real store
@@ -100,17 +101,31 @@ def _answer(provider, request: dict) -> dict:
     return {"error": f"ValueError: unknown op {op!r}"}
 
 
+def _requests() -> "queue.Queue[str | None]":
+    """Lines from stdin through a reader thread: select() on a pipe does not work on Windows,
+    and a queue wait is how the idle timeout is kept on every platform."""
+    lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def read() -> None:
+        for line in sys.stdin:
+            lines.put(line)
+        lines.put(None)  # EOF: the server closed our stdin (it exited or released us)
+
+    threading.Thread(target=read, name="embed-child-stdin", daemon=True).start()
+    return lines
+
+
 def main() -> int:
     idle = idle_seconds()
     exit_once = os.environ.get("RECALL_EMBED_CHILD_EXIT_ONCE", "")
     provider = None
-    selector = selectors.DefaultSelector()
-    selector.register(sys.stdin, selectors.EVENT_READ)
+    lines = _requests()
     while True:
-        if not selector.select(timeout=idle):
+        try:
+            line = lines.get(timeout=idle)
+        except queue.Empty:
             return 0  # idle: give the model's memory back
-        line = sys.stdin.readline()
-        if not line:
+        if line is None:
             return 0  # the server closed our stdin (it exited or released us)
         if exit_once and not os.path.exists(exit_once):
             open(exit_once, "w").close()
