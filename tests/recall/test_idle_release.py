@@ -95,10 +95,12 @@ def test_b4_a_child_that_dies_on_every_request_raises_the_embed_failure_with_its
         provider.embed(["x"])
 
 
-def test_b4_an_error_reply_is_the_embed_failure_with_the_childs_words(fake_child):
-    provider = fake_child()
+def test_b4_an_unknown_op_gets_an_error_reply_with_the_childs_words_never_a_hang(fake_child):
+    provider = fake_child(timeout=10)
+    began = time.monotonic()
     with pytest.raises(EmbedChildError, match="unknown op"):
         provider._request({"op": "nonsense"})
+    assert time.monotonic() - began < 5, "the child did not answer the unknown op promptly"
 
 
 def test_b4_a_child_that_never_answers_times_out_and_does_not_hang():
