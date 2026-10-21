@@ -53,6 +53,24 @@ def set_process_default_device(device: str) -> None:
     _process_default_device = device
 
 
+_use_child_embedder = False
+
+
+def use_child_embedder(on: bool = True) -> None:
+    """Make this process embed through `ChildEmbeddings` instead of `LocalEmbeddings`.
+
+    The MCP server calls this at startup: once torch is imported a process keeps about
+    410 MB of it however much else it releases (measured on Linux), so the server leaves
+    torch to a child that exits when idle.
+    Builds and the CLI do not call it; they exit anyway. Clears the provider cache so the
+    next `get_embedding_provider()` resolves under the new setting.
+    """
+    global _use_child_embedder
+    with _singleton_lock:
+        _use_child_embedder = bool(on)
+        _singleton_cache.clear()
+
+
 def _module_present(name: str) -> bool:
     """Whether `name` can be resolved here, without importing it."""
     try:
@@ -164,6 +182,108 @@ class LocalEmbeddings(EmbeddingProvider):
         return embeddings.tolist()
 
 
+class EmbedChildError(RuntimeError):
+    """The embedding child could not answer: it would not start, died, timed out, or replied
+    with an error. Raised where an in-process embed failure would raise, so a search takes the
+    same BM25 path with this reason."""
+
+
+class ChildEmbeddings(EmbeddingProvider):
+    """Embeddings from `synapt.recall.embed_child`, a process that holds the model and torch.
+
+    One child at a time. Requests are serialised by a lock; a request that waits longer than
+    `timeout` for the lock, or for a reply, is an `EmbedChildError`, never a hang. A request that
+    meets the child as it exits (for idle, or because it died) is retried ONCE on a new child.
+    """
+
+    def __init__(self, cmd: list[str] | None = None, timeout: float = 60.0):
+        import sys
+
+        self._cmd = cmd or [sys.executable, "-I", "-m", "synapt.recall.embed_child"]
+        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._proc = None
+        self._dim_cached: int | None = None
+
+    def _start(self) -> None:
+        import subprocess
+
+        self._proc = subprocess.Popen(
+            self._cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+
+    def _stop(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001 - a closed pipe is the point
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+            proc.wait()
+
+    def _exchange(self, line: str) -> str:
+        """Send one line and read one reply; '' when the child exited without answering."""
+        import selectors
+
+        if self._proc is None or self._proc.poll() is not None:
+            self._stop()
+            self._start()
+        try:
+            self._proc.stdin.write(line)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            return ""
+        sel = selectors.DefaultSelector()
+        sel.register(self._proc.stdout, selectors.EVENT_READ)
+        try:
+            if not sel.select(timeout=self._timeout):
+                self._stop()
+                raise EmbedChildError(f"the embedding child gave no reply in {self._timeout:g}s")
+        finally:
+            sel.close()
+        return self._proc.stdout.readline()
+
+    def _request(self, request: dict) -> dict:
+        if not self._lock.acquire(timeout=self._timeout):
+            raise EmbedChildError(f"waited {self._timeout:g}s for the embedding child")
+        try:
+            line = json.dumps(request) + "\n"
+            reply = self._exchange(line)
+            if not reply:
+                self._stop()  # it exited as we asked (idle, or it died): one retry on a new child
+                reply = self._exchange(line)
+            if not reply:
+                self._stop()
+                raise EmbedChildError("the embedding child exited without answering, twice")
+            answer = json.loads(reply)
+        finally:
+            self._lock.release()
+        if "error" in answer:
+            raise EmbedChildError(f"the embedding child failed: {answer['error']}")
+        return answer
+
+    @property
+    def dim(self) -> int:
+        if self._dim_cached is None:
+            self._dim_cached = int(self._request({"op": "dim"})["dim"])
+        return self._dim_cached
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        return self._request({"op": "embed", "texts": list(texts)})["vectors"]
+
+    def close(self) -> None:
+        """Close the child's stdin; it exits (the no-orphan rule, from the parent's side)."""
+        with self._lock:
+            self._stop()
+
+
 class OllamaEmbeddings(EmbeddingProvider):
     """Embeddings via Ollama API. Requires running Ollama server."""
 
@@ -253,7 +373,7 @@ def _resolve_provider(prefer_local: bool) -> Optional[EmbeddingProvider]:
         # its real error surfaces at the first embed instead of being read as
         # absent (the rule _mlx.py states for its backends).
         if _module_present("sentence_transformers"):
-            return LocalEmbeddings()
+            return ChildEmbeddings() if _use_child_embedder else LocalEmbeddings()
         log.info(
             "sentence-transformers not installed. "
             "Install with: pip install sentence-transformers"

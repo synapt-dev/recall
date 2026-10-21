@@ -247,6 +247,97 @@ def _invalidate_cache() -> None:
     _cached_has_embeddings = False
 
 
+# ---------------------------------------------------------------------------
+# Idle release.
+# A server that has searched holds its index (about 510 MB on a 30,000-chunk store, measured)
+# for its whole life. After RECALL_IDLE_RELEASE_S with no tool call, the cache is dropped and the
+# allocator trimmed; the next search reloads. A release never runs while a call is in flight:
+# every tool call is counted (ValidatingFastMCP.call_tool), and the release checks the count
+# under the same lock. Torch is not this release's to free: the server embeds through a child
+# (embeddings.ChildEmbeddings), so torch never enters this process.
+# ---------------------------------------------------------------------------
+
+DEFAULT_IDLE_RELEASE_S = 600.0
+_activity_lock = threading.Lock()
+_calls_in_flight = 0
+_last_activity = 0.0
+
+
+def _idle_release_seconds() -> float:
+    """The interval from ``RECALL_IDLE_RELEASE_S``; a missing value is the default, and anything
+    that is not a positive finite number is refused (ValueError), never read as "release now"."""
+    raw = os.environ.get("RECALL_IDLE_RELEASE_S", "").strip()
+    if not raw:
+        return DEFAULT_IDLE_RELEASE_S
+    value = float(raw)
+    if not value > 0 or value == float("inf"):
+        raise ValueError(f"RECALL_IDLE_RELEASE_S must be a positive finite number, got {raw!r}")
+    return value
+
+
+def _call_started() -> None:
+    global _calls_in_flight, _last_activity
+    import time as _time
+
+    with _activity_lock:
+        _calls_in_flight += 1
+        _last_activity = _time.monotonic()
+
+
+def _call_finished() -> None:
+    global _calls_in_flight, _last_activity
+    import time as _time
+
+    with _activity_lock:
+        _calls_in_flight -= 1
+        _last_activity = _time.monotonic()
+
+
+def _trim_allocator() -> None:
+    """Hand freed heap back to the OS: without it the index's share stayed resident (950 to 539
+    MB, against 442 with the trim, measured on Linux)."""
+    import ctypes
+    import sys as _sys
+
+    try:
+        if _sys.platform.startswith("linux"):
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        elif _sys.platform == "darwin":
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+            libc.malloc_zone_pressure_relief(None, ctypes.c_size_t(0))
+    except Exception:  # noqa: BLE001 - a trim is an optimisation, never a failure
+        pass
+
+
+def _release_if_idle(interval: float, now: float | None = None) -> bool:
+    """Drop the cached index when no call is in flight and none started for `interval` seconds."""
+    import gc
+    import time as _time
+
+    now = _time.monotonic() if now is None else now
+    with _activity_lock:
+        if _calls_in_flight or _cached_index is None or now - _last_activity < interval:
+            return False
+        _invalidate_cache()
+    gc.collect()
+    _trim_allocator()
+    logging.getLogger("synapt.recall").info("Idle %.0fs: index released", interval)
+    return True
+
+
+def _start_idle_release(interval: float) -> threading.Thread:
+    import time as _time
+
+    def loop() -> None:
+        while True:
+            _time.sleep(min(interval / 4, 30.0))
+            _release_if_idle(interval)
+
+    thread = threading.Thread(target=loop, name="synapt-idle-release", daemon=True)
+    thread.start()
+    return thread
+
+
 def _index_missing_message(index_dir: Path, *, historical: bool = False) -> str:
     """Message for a caller-visible "no index" state.
 
@@ -3995,7 +4086,11 @@ def _build_validating_fastmcp_class():
                         f"Unknown argument(s) for {name}: {sorted(unknown)}. "
                         f"Accepted: {sorted(allowed)}"
                     )
-            return await super().call_tool(name, arguments)
+            _call_started()  # counted, so an idle release never drops the index under a call
+            try:
+                return await super().call_tool(name, arguments)
+            finally:
+                _call_finished()
 
     return ValidatingFastMCP
 
@@ -4111,9 +4206,11 @@ except Exception:  # pragma: no cover - never block server start on a version pr
 
 def main():
     """Entry point for standalone synapt-recall-server."""
-    from synapt.recall.embeddings import set_process_default_device
+    from synapt.recall.embeddings import set_process_default_device, use_child_embedder
 
     set_process_default_device("cpu")  # see its docstring; SYNAPT_EMBED_DEVICE still wins
+    use_child_embedder(True)  # torch lives in a child that exits when idle, never in this process
+    _start_idle_release(_idle_release_seconds())
     server = _build_validating_fastmcp_class()(
         "synapt-recall",
         instructions=MCP_INSTRUCTIONS,
