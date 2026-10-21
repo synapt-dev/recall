@@ -8,6 +8,7 @@ rows that need the real model (b2 vectors, b5 cold start, the memory bar) run on
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -320,3 +321,118 @@ def test_a_the_interval_boundary_releases_whatever_the_clock_value(server_state)
     server._last_activity = last
     assert server._release_if_idle(600, now=last + 600) is True
     assert dropped == [1]
+
+
+# --- regression rows on a real store: b1 in the server process, and A's search after a release ----
+
+def _small_store(path, n=40):
+    """A synthetic store with chunk embeddings from the fake child (no model, no torch)."""
+    import random
+
+    from synapt.recall.core import TranscriptChunk, TranscriptIndex
+    from synapt.recall.storage import RecallDB
+
+    rng = random.Random(7)
+    words = [f"w{i}" for i in range(300)] + ["store", "gr2", "review", "merge", "lease"]
+    chunks = []
+    for i in range(n):
+        sess = f"sess-{i % 5:03d}"
+        chunks.append(TranscriptChunk(
+            id=f"{sess}:t{i}", session_id=sess, timestamp=f"2026-03-{1 + i % 28:02d}T10:{i % 60:02d}:00Z",
+            turn_index=i, user_text=" ".join(rng.choices(words, k=20)),
+            assistant_text=" ".join(rng.choices(words, k=40)), tools_used=["Bash"], files_touched=[]))
+    path.mkdir(parents=True, exist_ok=True)
+    db = RecallDB(path / "recall.db")
+    db.save_chunks(chunks)
+    index = TranscriptIndex(chunks, db=db)
+    index.save(path)
+    provider = ChildEmbeddings(cmd=[sys.executable, "-m", "synapt.recall.embed_child"])
+    try:
+        texts = [c.text[:500] for c in index._materialize_all_chunks()]
+        vectors = provider.embed(texts)
+    finally:
+        provider.close()
+    db.save_embeddings({index._idx_to_rowid[i]: v for i, v in enumerate(vectors) if index._idx_to_rowid.get(i) is not None})
+    db.set_metadata("embedding_hash", index._content_hash())
+    assert db.has_embeddings()
+    return path
+
+
+_B1_SERVER = textwrap.dedent("""
+    import json, os, sys
+    from pathlib import Path
+    from synapt.recall import embeddings, server
+    embeddings.use_child_embedder(os.environ["B1_SWITCH"] == "on")
+    store = Path(sys.argv[1])
+    server.project_index_dir = lambda: store
+    index = server._get_index(use_embeddings=True)
+    answer = index.lookup("gr2 review merge lease", max_chunks=5)
+    provider = embeddings.get_embedding_provider()
+    child = getattr(provider, "_proc", None)
+    print(json.dumps({"pid": os.getpid(), "has_embeddings": server._cached_has_embeddings,
+                      "child_started": child is not None, "answered": bool(answer),
+                      "torch": "torch" in sys.modules, "st": "sentence_transformers" in sys.modules}))
+    if hasattr(provider, "close"):
+        provider.close()
+""")
+
+
+def _run_b1_server(tmp_path, switch):
+    stubs = tmp_path / "stubs"
+    marks = tmp_path / "marks"
+    stubs.mkdir(exist_ok=True)
+    marks.mkdir(exist_ok=True)
+    for name in ("torch", "sentence_transformers"):
+        (stubs / f"{name}.py").write_text(
+            f"import os\nopen(os.path.join({str(marks)!r}, '{name}-' + str(os.getpid())), 'w').close()\n")
+    env = {**os.environ, "RECALL_EMBED_CHILD_FAKE": "1", "B1_SWITCH": switch,
+           "PYTHONPATH": os.pathsep.join([str(stubs), os.environ.get("PYTHONPATH", "")])}
+    env.pop("RECALL_EMBED_CHILD_EXIT_ONCE", None)
+    done = subprocess.run([sys.executable, "-c", _B1_SERVER, str(tmp_path / "store")],
+                          env=env, capture_output=True, text=True, timeout=120)
+    return done, sorted(p.name for p in marks.iterdir())
+
+
+def test_b1_a_search_with_embeddings_never_imports_torch_in_the_server(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECALL_EMBED_CHILD_FAKE", "1")
+    _small_store(tmp_path / "store")
+    done, marks = _run_b1_server(tmp_path, "on")
+    assert done.returncode == 0, done.stderr[-2000:]
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    # neither torch nor sentence-transformers was imported in the server process ...
+    assert not report["torch"] and not report["st"], report
+    assert not [m for m in marks if m.endswith(f"-{report['pid']}")], marks
+    # ... and the semantic path ran, so the row cannot pass by skipping embeddings
+    assert report["has_embeddings"] and report["child_started"] and report["answered"], report
+
+
+def test_a_a_search_after_the_release_answers_as_before_it(tmp_path, monkeypatch):
+    from synapt.recall import server
+
+    monkeypatch.setenv("RECALL_EMBED_CHILD_FAKE", "1")
+    store = _small_store(tmp_path / "store")
+    for name, value in (("_cached_index", None), ("_cached_mtime", 0.0), ("_cached_dir", None),
+                        ("_cached_has_embeddings", False), ("_calls_in_flight", 0), ("_last_activity", 0.0)):
+        monkeypatch.setattr(server, name, value)
+    monkeypatch.setattr(server, "project_index_dir", lambda: store)
+    # The provider is chosen by whether sentence-transformers is installed here; the fake child never
+    # imports it, so the row stands in for it rather than depending on the test env having it.
+    present = embeddings._module_present
+    monkeypatch.setattr(embeddings, "_module_present", lambda name: name == "sentence_transformers" or present(name))
+    embeddings.use_child_embedder(True)
+    try:
+        before = server._get_index(use_embeddings=True).lookup("gr2 review merge lease", max_chunks=5)
+        # a child that never answered is stopped (no process left), and the lookup falls back to keywords
+        assert embeddings.get_embedding_provider()._proc is not None
+        assert server._release_if_idle(1, now=10**9) is True  # the drop itself is the row above's
+        reloaded = server._get_index(use_embeddings=True)
+        after = reloaded.lookup("gr2 review merge lease", max_chunks=5)
+        # the same answer could come from keyword search alone, so the embeddings must be back too
+        assert reloaded._embed_provider is not None and reloaded._embedding_status == "active"
+        assert reloaded._embed_provider._proc is not None
+    finally:
+        provider = embeddings.get_embedding_provider()
+        if hasattr(provider, "close"):
+            provider.close()
+        embeddings.use_child_embedder(False)
+    assert before and after == before
