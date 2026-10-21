@@ -64,6 +64,11 @@ def _store(tmp_path):
          "RecallDB(sys.argv[1] + '/index.db').close()", str(store)],
         check=True,
     )
+    # Some sqlite builds keep the WAL after the last close. Remove it, so the
+    # server's first load always creates the empty WAL these rows are about.
+    for suffix in ("-wal", "-shm"):
+        (store / f"index.db{suffix}").unlink(missing_ok=True)
+    assert not any((store / f"index.db{s}").exists() for s in ("-wal", "-shm"))
     return store
 
 
