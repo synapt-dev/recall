@@ -3009,11 +3009,21 @@ def recall_journal(
         return f"Journal failed: {exc}"
 
 
+def _stored_list(value) -> list[str]:
+    """A list field as read back from a stored node (it may be JSON text)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value else []
+        except ValueError:
+            return []
+    return [v for v in (value or []) if v]
+
+
 @_memory_op_tap("mem_write")
 def recall_save(
     content: str = "",
     category: str | None = None,
-    confidence: float = 0.8,
+    confidence: float | None = None,
     tags: list[str] | None = None,
     source_sessions: list[str] | None = None,
     source_turns: list[str] | None = None,
@@ -3031,10 +3041,14 @@ def recall_save(
             Omitted on an update keeps the node's existing category (an
             omitted category is not "workflow"); on a create it defaults to
             "workflow". An explicit category always wins.
-        confidence: Confidence score from 0.0 to 1.0.
-        tags: Optional search tags.
-        source_sessions: Optional originating session IDs.
-        source_turns: Optional originating turn refs ("session_id:turn_num").
+        confidence: Confidence score from 0.0 to 1.0. Omitted on an update
+            keeps the node's existing confidence; on a create it is 0.8.
+        tags: Optional search tags. Omitted on an update keeps the node's
+            existing tags; an explicit [] clears them.
+        source_sessions: Optional originating session IDs (omitted on an
+            update keeps the existing ones, as tags do).
+        source_turns: Optional originating turn refs ("session_id:turn_num"),
+            kept on an update when omitted, as tags do.
         node_id: Optional stable knowledge-node ID to upsert. If omitted,
             recall_save derives a stable ID from the saved content.
         retract: If True, mark the node as retracted (hidden from search
@@ -3158,6 +3172,20 @@ def recall_save(
                     f"deliberately call recall_save(node_id='{resolved_node_id}', "
                     "content=<the fact>, restore=true)."
                 )
+            # Same rule as category: an omitted (None) tags/sources/confidence
+            # on an update keeps the existing node's value instead of resetting
+            # it to [] / 0.8; an explicit value, including [], always wins.
+            if existing:
+                if tags is None:
+                    tags = _stored_list(existing.get("tags"))
+                if source_sessions is None:
+                    source_sessions = _stored_list(existing.get("source_sessions"))
+                if source_turns is None:
+                    source_turns = _stored_list(existing.get("source_turns"))
+                if confidence is None and existing.get("confidence") is not None:
+                    confidence = existing.get("confidence")
+            if confidence is None:
+                confidence = 0.8
             node = KnowledgeNode.create(
                 content=clean_content,
                 category=category,
