@@ -215,6 +215,68 @@ def test_truncated_log_is_reopened(box):
     _clean_exit(w)
 
 
+def _line(body: str) -> str:
+    return json.dumps({"timestamp": "2026-01-01T00:00:00Z", "channel": "dev",
+                       "type": "message", "from": "r", "body": body}) + "\n"
+
+
+def _rewrite_in_place(log: Path, text: str) -> None:
+    # One open and one write: same inode, and the new size lands within a poll.
+    with open(log, "r+", encoding="utf-8", newline="") as f:  # no \r\n on Windows
+        f.truncate(0)
+        f.write(text)
+
+
+def _watch_after_a_and_b(box):
+    log = box.store / "dev.jsonl"
+    box.post("b", "old")
+    w = box.watch("a", "dev")
+    box.post("b", "A")
+    w.expect("from [b]: A", within=4.0)
+    box.post("b", "B")
+    w.expect("from [b]: B", within=4.0)
+    return log, w
+
+
+def test_in_place_rewrite_regrown_past_pos_is_read_from_the_start(box):
+    log, w = _watch_after_a_and_b(box)
+    ino, size = log.stat().st_ino, log.stat().st_size
+    _rewrite_in_place(log, _line("c" * (size * 3)))
+    assert log.stat().st_ino == ino and log.stat().st_size > size
+    w.expect("from [r]: " + "c" * 300, within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
+def test_in_place_rewrite_regrown_shorter_is_read_from_the_start(box):
+    log, w = _watch_after_a_and_b(box)
+    size = log.stat().st_size
+    _rewrite_in_place(log, _line("C"))
+    assert log.stat().st_size < size
+    w.expect("from [r]: C", within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
+def test_plain_append_prints_only_the_new_post(box):
+    log, w = _watch_after_a_and_b(box)
+    box.post("b", "C")
+    w.expect("from [b]: C", within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
+def test_same_size_in_place_rewrite_prints_the_new_post(box):
+    log, w = _watch_after_a_and_b(box)
+    ino, size = log.stat().st_ino, log.stat().st_size
+    pad = size - len(_line("").encode("utf-8"))
+    _rewrite_in_place(log, _line("d" * pad))
+    assert log.stat().st_ino == ino and log.stat().st_size == size
+    w.expect("from [r]: " + "d" * min(pad, 300), within=4.0)
+    w.quiet()
+    _clean_exit(w)
+
+
 # (d) a stale local log is warned about and never read
 
 def test_stale_local_log_is_warned_about_and_never_read(tmp_path):
