@@ -96,6 +96,34 @@ def test_dotted_names_inside_the_store_still_post(workdir, room, file):
     assert (_store(project) / file).is_file()
 
 
+@pytest.mark.parametrize("room", ["a/b", "direct/x", "attachments/1/x"])
+def test_a_slash_in_a_name_is_refused_by_post(workdir, tmp_path, room):
+    # A room is one file in the store, never a path into a subdirectory another writer owns.
+    project, home = workdir
+    from synapt.recall.server import recall_channel
+
+    r = _cli(project, home, "post", room, "x")
+    assert r.returncode != 0 and "refusing room name" in r.stderr, (r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr
+    assert "refusing room name" in recall_channel(action="post", channel=room, message="x")
+    leaf = room.rsplit("/", 1)[-1] + ".jsonl"
+    assert [p for p in tmp_path.rglob(leaf)] == []
+
+
+def test_an_explicit_channels_dir_is_held_to_the_same_rule(workdir, tmp_path):
+    # channel_post(channels_dir=...) and the read with channels_dir join the name themselves.
+    from synapt.recall.channel import ChannelNameError, channel_messages_json, channel_post
+
+    channels = tmp_path / "explicit" / "channels"
+    channels.mkdir(parents=True)
+    with pytest.raises(ChannelNameError):
+        channel_post("../x", "escape", channels_dir=channels)
+    assert not (channels.parent / "x.jsonl").exists()
+    (channels.parent / "x.jsonl").write_text("{}\n")
+    with pytest.raises(ChannelNameError):
+        channel_messages_json("../x", channels_dir=channels)
+
+
 @pytest.mark.parametrize("room", ["a\0b", "a\\b"])
 def test_nul_and_backslash_are_refused(workdir, tmp_path, room):
     project, _ = workdir

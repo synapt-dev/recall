@@ -475,6 +475,9 @@ def _contained_channel_file(ch_dir: Path, name: str) -> Path:
     path = ch_dir / f"{name}.jsonl"
     if not path.resolve().is_relative_to(ch_dir.resolve()):
         raise ChannelNameError(f"refusing room name {name!r}: it would leave the store directory")
+    if "/" in name:
+        # A room is one file in the store, never a path into a subdirectory another writer owns.
+        raise ChannelNameError(f"refusing room name {name!r}: it holds a '/'")
     return path
 
 
@@ -1540,7 +1543,7 @@ def _append_message(
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
-        path = channels_dir / f"{_channel_to_filename(msg.channel)}.jsonl"
+        path = _contained_channel_file(channels_dir, _channel_to_filename(msg.channel))
     else:
         path = _channel_path(msg.channel, project_dir)
     # An explicit channels_dir bypasses resolution entirely, so the write
@@ -3459,7 +3462,8 @@ def channel_messages_json(
     ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
     channel = _normalize_channel_name(channel)
-    path = (channels_dir / f"{_channel_to_filename(channel)}.jsonl") if channels_dir else _channel_path(channel, project_dir)
+    path = (_contained_channel_file(channels_dir, _channel_to_filename(channel))
+            if channels_dir else _channel_path(channel, project_dir))
     if not path.exists():
         return []
     messages = _read_messages(path, since=since)
