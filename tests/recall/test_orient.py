@@ -283,3 +283,169 @@ def test_the_front_door_verb_prints_json(project, capsys, monkeypatch):
     out = json.loads(capsys.readouterr().out)
     assert out["goal"] == "front door" and out["next"] == "go" and out["fields_filled"] == 2
     assert 0 < out["tokens_est"] <= TOKEN_BUDGET
+
+
+def _cross_cwd(tmp_path, monkeypatch, a_offset: float, b_offset: float) -> tuple[Path, str]:
+    """Write one entry from cwd A and one from cwd B on the same recall root; wake from B."""
+    a, b = tmp_path / "cwd-a", tmp_path / "cwd-b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.delenv("SYNAPT_RECALL_WORKTREE", raising=False)   # each cwd keys its own worktree store
+    a_ts = _now_iso(a_offset)
+    monkeypatch.chdir(a)
+    append_entry(JournalEntry(timestamp=a_ts, focus="written from A"), _journal_path(None))
+    monkeypatch.chdir(b)
+    append_entry(JournalEntry(timestamp=_now_iso(b_offset), focus="written from B"), _journal_path(None))
+    return _journal_path(None).parent.parent / "cwd-a" / "journal.jsonl", a_ts
+
+
+def test_a_newer_entry_written_from_another_cwd_on_the_same_root_is_named(project, owned_recall_root, tmp_path, monkeypatch):
+    a_path, a_ts = _cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+
+    text = format_card(build_card(None))
+
+    assert text.count(f"newer journal at {a_path} ({a_ts})") == 1
+
+
+def test_waking_from_the_cwd_that_wrote_the_newest_entry_names_no_newer_journal(project, owned_recall_root, tmp_path, monkeypatch):
+    _cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    monkeypatch.chdir(tmp_path / "cwd-a")
+
+    assert "newer journal" not in format_card(build_card(None))
+
+
+def test_a_cwd_with_no_journal_file_names_the_other_cwds_journal(project, owned_recall_root, tmp_path, monkeypatch):
+    a_path, a_ts = _cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    _journal_path(None).unlink()
+
+    text = format_card(build_card(None))
+
+    assert text.count(f"newer journal at {a_path} ({a_ts})") == 1
+    assert "GOAL (age unknown): (none recorded)" in text
+
+
+def test_a_cwd_with_only_contentless_entries_names_the_other_cwds_journal(project, owned_recall_root, tmp_path, monkeypatch):
+    a_path, a_ts = _cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    b_path = _journal_path(None)
+    b_path.unlink()
+    append_entry(JournalEntry(timestamp=_now_iso(-30)), b_path)
+
+    text = format_card(build_card(None))
+
+    assert text.count(f"newer journal at {a_path} ({a_ts})") == 1
+    assert "GOAL (age unknown): (none recorded)" in text
+
+
+def test_an_older_entry_on_another_cwd_names_no_newer_journal(project, owned_recall_root, tmp_path, monkeypatch):
+    _cross_cwd(tmp_path, monkeypatch, a_offset=-600, b_offset=-60)
+
+    assert "newer journal" not in format_card(build_card(None))
+
+
+def test_a_sibling_journal_past_the_read_bound_is_not_read_and_says_so(project, owned_recall_root, tmp_path, monkeypatch):
+    from synapt.recall.journal import NEWER_JOURNAL_READ_CAP
+
+    a_path, _ = _cross_cwd(tmp_path, monkeypatch, a_offset=-600, b_offset=-300)
+    with a_path.open("a") as fh:
+        fh.write(json.dumps({"timestamp": _now_iso(-60), "focus": "newest"}) + "\n")
+    # Sparse: past the bound by stat without writing the bytes.
+    os.truncate(a_path, NEWER_JOURNAL_READ_CAP * 4)
+
+    start = time.monotonic()
+    text = format_card(build_card(None))
+    elapsed = time.monotonic() - start
+
+    print(f"large-sibling row: {elapsed * 1000:.1f} ms")
+    assert elapsed < 0.5
+    assert text.count("newer journal: not checked, 1 sibling journals over the read bound") == 1
+
+
+@pytest.fixture
+def chicago():
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"
+    time.tzset()
+    yield
+    if old is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = old
+    time.tzset()
+
+
+def _zoneless_sibling(tmp_path, monkeypatch, ts: str) -> Path:
+    a, b = tmp_path / "cwd-a", tmp_path / "cwd-b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.delenv("SYNAPT_RECALL_WORKTREE", raising=False)
+    monkeypatch.chdir(a)
+    append_entry(JournalEntry(timestamp=ts, focus="no zone"), _journal_path(None))
+    monkeypatch.chdir(b)
+    return _journal_path(None)
+
+
+def test_a_zoneless_sibling_before_the_floor_in_utc_is_not_named_off_utc(project, owned_recall_root, tmp_path, monkeypatch, chicago):
+    from synapt.recall.journal import newer_journal_elsewhere
+
+    path = _zoneless_sibling(tmp_path, monkeypatch, "2026-10-22T09:30:00")
+
+    assert newer_journal_elsewhere(path, "2026-10-22T10:00:00Z") is None
+
+
+def test_a_zoneless_sibling_after_the_floor_in_utc_is_named_off_utc(project, owned_recall_root, tmp_path, monkeypatch, chicago):
+    from synapt.recall.journal import newer_journal_elsewhere
+
+    path = _zoneless_sibling(tmp_path, monkeypatch, "2026-10-22T11:00:00")
+
+    found = newer_journal_elsewhere(path, "2026-10-22T10:00:00Z")
+    assert found is not None and found[1] == "2026-10-22T11:00:00"
+
+
+@pytest.fixture
+def tokyo():
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Tokyo"
+    time.tzset()
+    yield
+    if old is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = old
+    time.tzset()
+
+
+def test_a_zoneless_sibling_after_the_floor_in_utc_is_named_east_of_utc(project, owned_recall_root, tmp_path, monkeypatch, tokyo):
+    from datetime import datetime
+
+    from synapt.recall.journal import newer_journal_elsewhere
+
+    path = _zoneless_sibling(tmp_path, monkeypatch, "2026-10-22T10:30:00")
+
+    found = newer_journal_elsewhere(path, "2026-10-22T10:00:00Z")
+    local = datetime.fromisoformat("2026-10-22T10:30:00").astimezone().isoformat()
+    assert found is not None and found[1] == "2026-10-22T10:30:00", (
+        f"sibling 10:30 no zone is 2026-10-22T10:30:00+00:00 by the UTC rule, after the floor 10:00Z; "
+        f"read as local it is {local}, before the floor"
+    )
+
+
+def test_an_unparsable_shown_timestamp_names_no_newer_journal(project, owned_recall_root, tmp_path, monkeypatch):
+    from synapt.recall.journal import newer_journal_elsewhere
+
+    _cross_cwd(tmp_path, monkeypatch, a_offset=-600, b_offset=-60)
+
+    assert newer_journal_elsewhere(_journal_path(None), "not a time") is None
+
+
+def test_a_sibling_written_before_the_shown_entry_is_never_opened(project, owned_recall_root, tmp_path, monkeypatch):
+    import synapt.recall.journal as journal
+
+    a_path, _ = _cross_cwd(tmp_path, monkeypatch, a_offset=-600, b_offset=-60)
+    old = time.time() - 3600
+    os.utime(a_path, (old, old))
+    opened: list[Path] = []
+    real = journal._read_all_entries
+    monkeypatch.setattr(journal, "_read_all_entries", lambda p, *a, **k: opened.append(Path(p)) or real(p, *a, **k))
+
+    assert "newer journal" not in format_card(build_card(None))
+    assert a_path not in opened
