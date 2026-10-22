@@ -411,6 +411,10 @@ def _access_migrate_lock(index_path: Path | str):
         yield
 
 
+# NTFS journals the rename, and Windows cannot open a directory with os.open.
+_FSYNC_DIRS = os.name != "nt"
+
+
 def _create_access_db(path: Path) -> None:
     """Write the schema to a unique tmp name, fsync, then rename into place."""
     tmp = path.with_name(f"access.db.tmp.{os.getpid()}.{secrets.token_hex(6)}")
@@ -420,17 +424,18 @@ def _create_access_db(path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
-    fd = os.open(str(tmp), os.O_RDONLY)
+    fd = os.open(str(tmp), os.O_RDWR | getattr(os, "O_BINARY", 0))
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)
-    dfd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    if _FSYNC_DIRS:
+        dfd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
 
 def _access_conn(index_path: Path | str, *, locked: bool = False) -> sqlite3.Connection:
