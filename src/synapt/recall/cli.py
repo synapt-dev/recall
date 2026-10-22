@@ -3486,7 +3486,12 @@ def cmd_channel(args: argparse.Namespace) -> None:
                              "surface": "cli"}
         if getattr(args, "detail", None):
             read_kwargs["detail"] = args.detail
-        print(channel_read(**read_kwargs))
+        from synapt.recall.channel import SinceError
+        try:
+            print(channel_read(**read_kwargs))
+        except SinceError as e:
+            print(f"synapt recall channel read: {e}", file=sys.stderr)
+            sys.exit(2)
     elif action == "watch":
         from synapt.recall.channel import WatchRoomError, channel_watch
         rooms = [r for r in (args.channel, args.message, *(args.rooms or [])) if r is not None]

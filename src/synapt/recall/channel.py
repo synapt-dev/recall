@@ -918,6 +918,32 @@ def _since_instant(s: str) -> datetime | None:
     return dt
 
 
+class SinceError(ValueError):
+    """A ``since`` value that is not a timestamp; boundaries print it and exit 2."""
+
+
+def _since_or_refuse(since: str) -> datetime:
+    """Parse ``since`` once; refuse a value that is not a timestamp."""
+    since_dt = _since_instant(since)
+    if since_dt is None:
+        raise SinceError(f"refusing --since {since!r}: it is not an ISO 8601 timestamp")
+    return since_dt
+
+
+def _since_or_epoch(since: str) -> datetime:
+    """Parse a stored cursor; one that is not a timestamp reads as the epoch.
+
+    Stored values never refuse: only a ``since`` the user typed does.
+    """
+    return _since_instant(since) or datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _posted_after(timestamp: object, since_dt: datetime) -> bool:
+    """True when a post's timestamp is a later instant than ``since_dt``."""
+    posted = _since_instant(str(timestamp))
+    return posted is not None and posted > since_dt
+
+
 # ---------------------------------------------------------------------------
 # Message dataclass
 # ---------------------------------------------------------------------------
@@ -1771,6 +1797,7 @@ def _read_messages(
 ) -> list[ChannelMessage]:
     """Read all messages from a channel JSONL file, optionally filtered by timestamp."""
     messages: list[ChannelMessage] = []
+    since_dt = _since_or_epoch(since) if since else None
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -1779,7 +1806,7 @@ def _read_messages(
                     continue
                 try:
                     msg = ChannelMessage.from_dict(json.loads(line))
-                    if since and msg.timestamp <= since:
+                    if since_dt and not _posted_after(msg.timestamp, since_dt):
                         continue
                     messages.append(msg)
                 except (json.JSONDecodeError, TypeError):
@@ -1827,6 +1854,7 @@ def _read_last_timestamp(path: Path) -> str | None:
 def _count_messages_since(path: Path, since: str) -> int:
     """Count JSONL lines with timestamp > since. Used for unread counts."""
     count = 0
+    since_dt = _since_or_epoch(since)
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -1835,7 +1863,7 @@ def _count_messages_since(path: Path, since: str) -> int:
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("timestamp", "") > since:
+                    if _posted_after(data.get("timestamp", ""), since_dt):
                         count += 1
                 except (json.JSONDecodeError, TypeError):
                     continue
@@ -2324,6 +2352,8 @@ def channel_read(
         low    -- no pins, truncated messages (200 chars), with refs for truncated messages
         min    -- no pins, one-line per message, skip join/leave noise
     """
+    if since:
+        _since_or_refuse(since)
     channel = _normalize_channel_name(channel)
     _detail = detail.lower()
     if _detail in ("max", "high"):
@@ -2818,6 +2848,10 @@ def channel_unread_read(
                 (aid, ch),
             ).fetchone()
             last_read = cursor_row["last_read_at"] if cursor_row else "1970-01-01T00:00:00Z"
+            # a stored cursor never refuses: one that is not a timestamp reads as the epoch here,
+            # before channel_read, which refuses only a since the user typed
+            if _since_instant(str(last_read)) is None:
+                last_read = "1970-01-01T00:00:00Z"
             path = _channel_path(ch, project_dir)
             count = _count_messages_since(path, last_read) if path.exists() else 0
             if count > 0:
