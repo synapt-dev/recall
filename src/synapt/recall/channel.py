@@ -3628,6 +3628,7 @@ def check_directives(
     agent_name: str | None = None,
     project_dir: Path | None = None,
     shown_mentions: set[str] | None = None,
+    cleared_mentions: set[str] | None = None,
 ) -> str:
     """Check for unread directives targeted at this agent. Fast path for hooks.
 
@@ -3639,6 +3640,8 @@ def check_directives(
     already printed in full: those collapse to one count line with a read
     hint, and every newly printed id is added to it. ``None`` keeps the
     old behaviour (every unread mention in full), which the hooks rely on.
+    ``cleared_mentions`` holds mention ids the caller has read or answered;
+    those are not listed at all.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -3743,6 +3746,8 @@ def check_directives(
     # Dedup: remove mentions that are already in pending directives
     pending_ids = {msg.id for _, msg in pending}
     mentions = [(ch, msg) for ch, msg in mentions if msg.id not in pending_ids]
+    if cleared_mentions:
+        mentions = [(ch, m) for ch, m in mentions if m.id not in cleared_mentions]
 
     # Collect recent intents from other agents (last 10 min)
     # so this agent sees what others are working on
@@ -3779,7 +3784,8 @@ def check_directives(
         ids = ", ".join(f"#{ch} {msg.id}" for ch, msg in seen_mentions)
         lines.append(
             f"[channel] {len(seen_mentions)} unread @mention(s) shown in full "
-            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>) "
+            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>), "
+            f"action=\"read_message\" on the id, or a post naming the id "
             f"clears them"
         )
     if intents:
