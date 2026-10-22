@@ -4162,7 +4162,7 @@ def _watch_room_path(channel: str, project_dir: Path | None = None) -> Path:
             else:
                 ch_dir = _guard_store_path(
                     "resolve_channels_dir", _local_channels_dir(project_dir))
-    return ch_dir / f"{_channel_to_filename(channel)}.jsonl"
+    return _contained_channel_file(ch_dir, _channel_to_filename(channel))
 
 
 def _watch_all_rooms(project_dir: Path | None = None) -> list[str]:
