@@ -2060,6 +2060,8 @@ def recall_contradict(
     new_content: str | None = None,
     old_node_id: str | None = None,
     reason: str | None = None,
+    limit: int = 5,
+    order: str = "oldest",
 ) -> str:
     """Manage pending knowledge contradictions.
 
@@ -2087,6 +2089,9 @@ def recall_contradict(
         old_node_id: Optional knowledge node ID that the claim contradicts.
                      If omitted, the system searches for matching nodes.
         reason: Why this is a contradiction (for "flag").
+        limit: Rows to show for "list" (default 5); 0 shows all. A footer names
+               shown, pending and withheld when rows are cut.
+        order: "oldest" (default) or "newest" for "list", by detected_at then id.
     """
     index = _get_index()
     if index is None or not index._db:
@@ -2100,16 +2105,31 @@ def recall_contradict(
             )
 
         if action == "list":
+            if order not in ("oldest", "newest"):
+                return f"Error: order must be 'oldest' or 'newest', got '{order}'."
+            if limit < 0:
+                return f"Error: limit must be >= 0, got {limit}."
             pending = index._db.list_pending_contradictions()
             if not pending:
                 return "No pending contradictions."
+            total = len(pending)
+            pending = sorted(
+                pending,
+                key=lambda c: (c["detected_at"] or "", c["id"]),
+                reverse=(order == "newest"),
+            )
+            if limit:
+                pending = pending[:limit]
+
+            def _one_line(text: str) -> str:
+                return " ".join(str(text).split())
             # Build lookup dict once (not per-iteration)
             old_ids = {c["old_node_id"] for c in pending if c["old_node_id"]}
             node_lookup = {
                 nid: index._db.get_knowledge_node(nid)
                 for nid in old_ids
             }
-            lines = [f"Pending contradictions ({len(pending)}):"]
+            lines = [f"Pending contradictions ({total}):"]
             for c in pending:
                 old_node = node_lookup.get(c["old_node_id"]) if c["old_node_id"] else None
                 old_content = old_node["content"] if old_node else ""
@@ -2119,12 +2139,17 @@ def recall_contradict(
                 if c.get("claim_text"):
                     lines.append(f"    Claim: {c['claim_text']}")
                 if old_content:
-                    lines.append(f"    Old: {old_content}")
+                    lines.append(f"    Old: {_one_line(old_content)}")
                 elif not c["old_node_id"]:
                     lines.append("    Old: (no matching node — free-text claim)")
-                lines.append(f"    New: {c['new_content']}")
+                lines.append(f"    New: {_one_line(c['new_content'])}")
                 if c["reason"]:
                     lines.append(f"    Reason: {c['reason']}")
+            if len(pending) < total:
+                lines.append(
+                    f"\n{len(pending)} of {total} shown, "
+                    f"{total - len(pending)} withheld (limit=0 lists all)"
+                )
             return "\n".join(lines)
 
         if action == "resolve":
