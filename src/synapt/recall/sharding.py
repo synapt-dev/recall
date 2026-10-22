@@ -240,6 +240,12 @@ def split_monolithic_db(
     if dry_run:
         return estimate_split(db_path, threshold)
 
+    # Access rows never ride the copy: an open moves any left in recall.db
+    # into access.db by the move rule and lock, and index.db gets the empty
+    # tables, so each row lands in access.db exactly once.
+    from synapt.recall.storage import _ACCESS_TABLES, RecallDB
+    RecallDB(db_path).close()
+
     plan: dict[str, int] = {"index.db": 0}
     tmp_dir = Path(tempfile.mkdtemp(dir=index_dir, prefix=".split_tmp_"))
 
@@ -262,7 +268,8 @@ def split_monolithic_db(
                     ("_data", "_idx", "_docsize", "_config")
                 ):
                     idx.execute(tsql)
-                    idx.execute(f"INSERT INTO [{tname}] SELECT * FROM src.[{tname}]")
+                    if tname not in _ACCESS_TABLES:
+                        idx.execute(f"INSERT INTO [{tname}] SELECT * FROM src.[{tname}]")
             for idx_info in src.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
             ).fetchall():
@@ -345,7 +352,12 @@ def split_monolithic_db(
             )
 
         # Step 4: Move validated files from temp dir to index dir
+        # A guard: a shard opened in tmp_dir finds no access rows and creates no
+        # access.db, but an access.* file here must never replace the store's own.
         for f in tmp_dir.iterdir():
+            if f.name.startswith("access."):
+                f.unlink()
+                continue
             shutil.move(str(f), str(index_dir / f.name))
         tmp_dir.rmdir()
 

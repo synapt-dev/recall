@@ -18,7 +18,9 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
+import secrets
 import sqlite3
 import struct
 import time
@@ -297,8 +299,8 @@ CREATE TABLE IF NOT EXISTS cluster_token_signatures (
 
 -- Access tracking tables for adaptive memory (Phase 2).
 -- access_log is append-only: every returned search result or drill-down is
--- recorded.  access_stats is a materialized aggregate rebuilt from the log
--- during recall_build (or incrementally updated on each access).
+-- recorded.  access_stats is a materialized aggregate updated on each access
+-- (nothing rebuilds it from the log).  Both live in access.db (_access_conn).
 
 CREATE TABLE IF NOT EXISTS access_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +355,107 @@ CREATE TABLE IF NOT EXISTS access_log_archive (
     PRIMARY KEY (item_type, item_id, date)
 );
 """
+
+_ACCESS_SCHEMA_SQL = ";".join(
+    stmt for stmt in _SCHEMA_SQL.split(";")
+    if re.search(r"(EXISTS|ON) (access_log|access_stats|access_log_archive)\b", stmt)
+) + ";" + """
+CREATE TABLE IF NOT EXISTS access_moves (
+    move_id     TEXT PRIMARY KEY,
+    log_max     INTEGER NOT NULL,   -- max index.db rowid read, per source table
+    stats_max   INTEGER NOT NULL,
+    archive_max INTEGER NOT NULL,
+    done        INTEGER NOT NULL DEFAULT 0
+);
+-- What a move copied from each index.db stats row, so a resume merges only
+-- what changed after the copy. Dropped when the move finishes.
+CREATE TABLE IF NOT EXISTS access_move_stats (
+    move_id        TEXT NOT NULL,
+    src_rowid      INTEGER NOT NULL,
+    item_type      TEXT NOT NULL,
+    item_id        TEXT NOT NULL,
+    access_count   INTEGER,
+    explicit_count INTEGER,
+    weighted_count REAL,
+    first_accessed TEXT,
+    last_accessed  TEXT,
+    PRIMARY KEY (move_id, src_rowid)
+);"""
+
+_ACCESS_TABLES = ("access_log", "access_stats", "access_log_archive")
+_STATS_COUNTS = ("access_count", "explicit_count", "weighted_count")
+_TIER_RANK = {"raw": 0, "clustered": 1, "summarized": 2, "promoted": 3, "knowledge": 4}
+
+
+def _decay_from(last_accessed: str, half_life_days: float = 30.0) -> float:
+    """decay = 2^(-days_since_last_access / half_life), capped at 1.0."""
+    try:
+        last = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        days_since = (datetime.now(timezone.utc) - last).total_seconds() / 86400
+        if half_life_days <= 0:
+            return 1.0
+        return min(1.0, 2.0 ** (-days_since / half_life_days))
+    except (ValueError, TypeError, ZeroDivisionError, AttributeError):
+        return 1.0
+
+
+@contextlib.contextmanager
+def _access_migrate_lock(index_path: Path | str):
+    """Exclusive access.migrate.lock beside the store, held for one move (fcntl on Unix, msvcrt on Windows)."""
+    from ._filelock import lock_exclusive
+
+    with open(Path(index_path).parent / "access.migrate.lock", "a+b") as f:
+        lock_exclusive(f)
+        yield
+
+
+def _create_access_db(path: Path) -> None:
+    """Write the schema to a unique tmp name, fsync, then rename into place."""
+    tmp = path.with_name(f"access.db.tmp.{os.getpid()}.{secrets.token_hex(6)}")
+    conn = sqlite3.connect(str(tmp))
+    try:
+        conn.executescript(_ACCESS_SCHEMA_SQL)
+        conn.commit()
+    finally:
+        conn.close()
+    fd = os.open(str(tmp), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    dfd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def _access_conn(index_path: Path | str, *, locked: bool = False) -> sqlite3.Connection:
+    """Open access.db beside index.db, creating it if missing.
+
+    Access writes land here so they never touch index.db or its -wal, which
+    the server's cache stamp watches.  Creation runs under the migration lock
+    (``locked`` says the caller already holds it).
+    """
+    path = Path(index_path).parent / "access.db"
+    if not path.exists():
+        if locked:
+            _create_access_db(path)
+        else:
+            with _access_migrate_lock(index_path):
+                if not path.exists():
+                    _create_access_db(path)
+    conn = sqlite3.connect(str(path), timeout=5.0)
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_ACCESS_SCHEMA_SQL)
+    return conn
+
 
 # FTS5 table + sync triggers (created separately since IF NOT EXISTS
 # doesn't work for virtual tables — we check first).
@@ -737,6 +840,260 @@ class RecallDB:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._open_with_race_retry()
+        self._move_access_rows()
+
+    def _index_has_access_rows(self) -> bool:
+        return any(
+            self._conn.execute(f"SELECT 1 FROM {t} LIMIT 1").fetchone()
+            for t in _ACCESS_TABLES
+        )
+
+    def _move_access_rows(self) -> None:
+        """Move access rows an older build left in index.db into access.db.
+
+        Rows in index.db's access tables are the signal, whatever wrote them.
+        Each move records a watermark in access.db and copies the rows in the
+        same access.db transaction, then deletes from index.db only rows at or
+        below the watermark, so a crash between the two never loses or
+        duplicates a row; the next open finishes the delete first.
+        """
+        if not self._index_has_access_rows():
+            return
+        with _access_migrate_lock(self._path):
+            if self.__dict__.get("_access_db") is None:
+                self._access_db = _access_conn(self._path, locked=True)
+            acc = self._access_db
+            for mv in acc.execute(
+                "SELECT move_id, log_max, stats_max, archive_max "
+                "FROM access_moves WHERE done = 0"
+            ).fetchall():
+                self._finish_access_move(mv, resumed=True)
+            if not self._index_has_access_rows():
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                marks = [
+                    self._conn.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {t}").fetchone()[0]
+                    for t in _ACCESS_TABLES
+                ]
+                log, stats, archive = (
+                    self._conn.execute(
+                        f"SELECT rowid AS src_rowid, * FROM {t} WHERE rowid <= ? "
+                        "ORDER BY rowid", (m,)
+                    ).fetchall()
+                    for t, m in zip(_ACCESS_TABLES, marks)
+                )
+                move_id = f"{os.getpid()}.{secrets.token_hex(8)}"
+                with acc:
+                    acc.execute(
+                        "INSERT INTO access_moves (move_id, log_max, stats_max, archive_max) "
+                        "VALUES (?, ?, ?, ?)", (move_id, *marks),
+                    )
+                    self._copy_access_rows(acc, log, stats, archive)
+                    acc.executemany(
+                        "INSERT INTO access_move_stats (move_id, src_rowid, item_type, "
+                        "item_id, access_count, explicit_count, weighted_count, "
+                        "first_accessed, last_accessed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [(move_id, r["src_rowid"], r["item_type"], r["item_id"],
+                          r["access_count"], r["explicit_count"], r["weighted_count"],
+                          r["first_accessed"], r["last_accessed"]) for r in stats],
+                    )
+                self._finish_access_move((move_id, *marks), resumed=False)
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    @staticmethod
+    def _copy_access_rows(acc, log, stats, archive) -> None:
+        """Log rows RAW without their old rowid; stats MERGE; then recomputes."""
+        for r in log:
+            acc.execute(
+                "INSERT INTO access_log (item_type, item_id, query, score, session_id, "
+                "context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (r["item_type"], r["item_id"], r["query"], r["score"],
+                 r["session_id"], r["context"], r["created_at"]),
+            )
+        for r in archive:
+            acc.execute(
+                "INSERT INTO access_log_archive (item_type, item_id, date, access_count, "
+                "avg_score, queries) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(item_type, item_id, date) DO UPDATE SET "
+                "avg_score = (avg_score * access_count + excluded.avg_score * "
+                "excluded.access_count) / MAX(1, access_count + excluded.access_count), "
+                "access_count = access_count + excluded.access_count",
+                (r["item_type"], r["item_id"], r["date"], r["access_count"],
+                 r["avg_score"], r["queries"]),
+            )
+        for r in stats:
+            key = (r["item_type"], r["item_id"])
+            old = acc.execute(
+                "SELECT * FROM access_stats WHERE item_type = ? AND item_id = ?", key
+            ).fetchone()
+            if old is None:
+                acc.execute(
+                    "INSERT INTO access_stats (item_type, item_id, access_count, "
+                    "explicit_count, weighted_count, last_accessed, first_accessed, "
+                    "promotion_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (*key, r["access_count"], r["explicit_count"], r["weighted_count"],
+                     r["last_accessed"], r["first_accessed"], r["promotion_tier"]),
+                )
+            else:
+                tier = max((old["promotion_tier"], r["promotion_tier"]),
+                           key=lambda t: _TIER_RANK.get(t, -1))
+                acc.execute(
+                    "UPDATE access_stats SET access_count = access_count + ?, "
+                    "explicit_count = explicit_count + ?, weighted_count = weighted_count + ?, "
+                    "first_accessed = MIN(first_accessed, ?), "
+                    "last_accessed = MAX(last_accessed, ?), promotion_tier = ? "
+                    "WHERE item_type = ? AND item_id = ?",
+                    (r["access_count"], r["explicit_count"], r["weighted_count"],
+                     r["first_accessed"], r["last_accessed"], tier, *key),
+                )
+        for r in stats:
+            key = (r["item_type"], r["item_id"])
+            # Same SQL as record_access's distinct recompute.
+            d = acc.execute(
+                "SELECT COUNT(DISTINCT session_id) AS ds, "
+                "       COUNT(DISTINCT query) AS dq "
+                "FROM access_log "
+                "WHERE item_type = ? AND item_id = ? "
+                "  AND context IN ('search', 'context') "
+                "  AND session_id != '' AND query != ''",
+                key,
+            ).fetchone()
+            last = acc.execute(
+                "SELECT last_accessed FROM access_stats WHERE item_type = ? AND item_id = ?",
+                key,
+            ).fetchone()[0]
+            acc.execute(
+                "UPDATE access_stats SET distinct_sessions = ?, distinct_queries = ?, "
+                "decay_score = ? WHERE item_type = ? AND item_id = ?",
+                (d["ds"], d["dq"], _decay_from(last), *key),
+            )
+
+    def _finish_access_move(self, mv, *, resumed: bool) -> None:
+        """Delete a committed move's rows from index.db by its watermark.
+
+        A resumed delete removes a row only when its (item, timestamp) is
+        already in access.db.
+        """
+        move_id, log_max, stats_max, archive_max = mv
+        if resumed:
+            # index.db's write lock is held across both steps, so no older
+            # build can bump a moved row between the merge and the delete.
+            # Step 1 commits on access.db's own connection, step 2 on index.db.
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not self._move_merged(move_id):
+                    with self._access_db:
+                        self._resume_stats(move_id, stats_max)
+                        self._mark_merged(move_id)
+                self._resume_delete(log_max, stats_max, archive_max)
+                self._conn.commit()
+            finally:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+        else:
+            self._delete_moved_rows((log_max, stats_max, archive_max))
+            self._conn.commit()
+        with self._access_db:
+            self._access_db.execute(
+                "UPDATE access_moves SET done = 1 WHERE move_id = ?", (move_id,)
+            )
+            self._access_db.execute(
+                "DELETE FROM access_move_stats WHERE move_id = ?", (move_id,)
+            )
+
+    def _resume_stats(self, move_id: str, stats_max: int) -> None:
+        """Merge what changed in each moved stats row since the copy, then delete it.
+
+        The same row (rowid, key, first_accessed, counts not below the record)
+        merges only its difference from the record; any other row merges whole.
+        """
+        conn, a = self._conn, self._access_db
+        for r in conn.execute(
+            "SELECT rowid AS src_rowid, * FROM access_stats WHERE rowid <= ?", (stats_max,)
+        ).fetchall():
+            key = (r["item_type"], r["item_id"])
+            rec = a.execute(
+                "SELECT * FROM access_move_stats WHERE move_id = ? AND src_rowid = ?",
+                (move_id, r["src_rowid"]),
+            ).fetchone()
+            same = (
+                rec is not None
+                and (rec["item_type"], rec["item_id"]) == key
+                and rec["first_accessed"] == r["first_accessed"]
+                and all((r[c] or 0) >= (rec[c] or 0) for c in _STATS_COUNTS)
+            )
+            delta = {c: (r[c] or 0) - (rec[c] or 0) if same else r[c] for c in _STATS_COUNTS}
+            old = a.execute(
+                "SELECT promotion_tier FROM access_stats "
+                "WHERE item_type = ? AND item_id = ?", key
+            ).fetchone()
+            changed = (not same or any(delta.values())
+                       or r["last_accessed"] != rec["last_accessed"]
+                       or old is None or r["promotion_tier"] != old[0])
+            if changed:
+                if old is None:
+                    a.execute(
+                        "INSERT INTO access_stats (item_type, item_id, access_count, "
+                        "explicit_count, weighted_count, last_accessed, first_accessed, "
+                        "promotion_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (*key, *(delta[c] for c in _STATS_COUNTS), r["last_accessed"],
+                         r["first_accessed"], r["promotion_tier"]),
+                    )
+                else:
+                    tier = max((old[0], r["promotion_tier"]),
+                               key=lambda t: _TIER_RANK.get(t, -1))
+                    a.execute(
+                        "UPDATE access_stats SET access_count = access_count + ?, "
+                        "explicit_count = explicit_count + ?, "
+                        "weighted_count = weighted_count + ?, "
+                        "first_accessed = MIN(first_accessed, ?), "
+                        "last_accessed = MAX(last_accessed, ?), "
+                        "promotion_tier = ? "
+                        "WHERE item_type = ? AND item_id = ?",
+                        (*(delta[c] for c in _STATS_COUNTS), r["first_accessed"],
+                         r["last_accessed"], tier, *key),
+                    )
+                last = a.execute(
+                    "SELECT last_accessed FROM access_stats "
+                    "WHERE item_type = ? AND item_id = ?", key,
+                ).fetchone()[0]
+                a.execute(
+                    "UPDATE access_stats SET decay_score = ? "
+                    "WHERE item_type = ? AND item_id = ?", (_decay_from(last), *key),
+                )
+
+    # The merged mark is a record row with src_rowid -1 (rowids start at 1).
+    def _move_merged(self, move_id: str) -> bool:
+        return self._access_db.execute(
+            "SELECT 1 FROM access_move_stats WHERE move_id = ? AND src_rowid = -1",
+            (move_id,),
+        ).fetchone() is not None
+
+    def _mark_merged(self, move_id: str) -> None:
+        self._access_db.execute(
+            "INSERT INTO access_move_stats (move_id, src_rowid, item_type, item_id) "
+            "VALUES (?, -1, '', '')", (move_id,),
+        )
+
+    def _resume_delete(self, log_max: int, stats_max: int, archive_max: int) -> None:
+        # access.db is read on its own connection: index.db holds the write lock.
+        for t, m, col in (("access_log", log_max, "created_at"),
+                          ("access_log_archive", archive_max, "date")):
+            have = {tuple(r) for r in self._access_db.execute(
+                f"SELECT item_type, item_id, {col} FROM {t}")}
+            self._conn.executemany(f"DELETE FROM {t} WHERE rowid = ?", [
+                (r[0],) for r in self._conn.execute(
+                    f"SELECT rowid, item_type, item_id, {col} FROM {t} WHERE rowid <= ?",
+                    (m,)).fetchall() if tuple(r)[1:] in have])
+        self._conn.execute("DELETE FROM access_stats WHERE rowid <= ?", (stats_max,))
+
+    def _delete_moved_rows(self, marks) -> None:
+        for t, m in zip(_ACCESS_TABLES, marks):
+            self._conn.execute(f"DELETE FROM {t} WHERE rowid <= ?", (m,))
 
     def _open_with_race_retry(self) -> None:
         """Open + schema, tolerating concurrent openers.
@@ -1342,9 +1699,19 @@ class RecallDB:
             return False
         return _normalize_ddl(row[0] or "") != _normalize_ddl(_KNOWLEDGE_FTS_TABLE_SQL)
 
+    @property
+    def _access(self) -> sqlite3.Connection:
+        """access.db's connection, opened on first use (see ``_access_conn``)."""
+        conn = self.__dict__.get("_access_db")
+        if conn is None:
+            conn = self._access_db = _access_conn(self._path)
+        return conn
+
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connections."""
         self._conn.close()
+        if self.__dict__.get("_access_db") is not None:
+            self._access_db.close()
 
     def __enter__(self) -> RecallDB:
         return self
@@ -3952,11 +4319,11 @@ class RecallDB:
         if not items:
             return
         now = datetime.now(timezone.utc).isoformat()
-        with self._conn:
+        with self._access:
             for item in items:
                 item_type = item["item_type"]
                 item_id = item["item_id"]
-                self._conn.execute(
+                self._access.execute(
                     "INSERT INTO access_log "
                     "(item_type, item_id, query, score, session_id, context, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -3978,7 +4345,7 @@ class RecallDB:
                 # frequency boost than low-relevance ones.
                 is_explicit = 1 if context in ("search", "context") else 0
                 score = item.get("score", 0.0) if is_explicit else 0.0
-                self._conn.execute(
+                self._access.execute(
                     "INSERT INTO access_stats "
                     "(item_type, item_id, access_count, explicit_count, "
                     " weighted_count, first_accessed, last_accessed) "
@@ -3992,7 +4359,7 @@ class RecallDB:
                 )
                 # Update distinct session/query counts from the log
                 if is_explicit:
-                    row = self._conn.execute(
+                    row = self._access.execute(
                         "SELECT COUNT(DISTINCT session_id) AS ds, "
                         "       COUNT(DISTINCT query) AS dq "
                         "FROM access_log "
@@ -4002,7 +4369,7 @@ class RecallDB:
                         (item_type, item_id),
                     ).fetchone()
                     if row:
-                        self._conn.execute(
+                        self._access.execute(
                             "UPDATE access_stats "
                             "SET distinct_sessions = ?, distinct_queries = ? "
                             "WHERE item_type = ? AND item_id = ?",
@@ -4015,7 +4382,7 @@ class RecallDB:
         item_id: str,
     ) -> dict | None:
         """Get access stats for a specific item."""
-        row = self._conn.execute(
+        row = self._access.execute(
             "SELECT * FROM access_stats WHERE item_type = ? AND item_id = ?",
             (item_type, item_id),
         ).fetchone()
@@ -4045,24 +4412,24 @@ class RecallDB:
 
     def access_summary(self) -> dict:
         """Aggregate access statistics for recall_stats display."""
-        row = self._conn.execute(
+        row = self._access.execute(
             "SELECT COUNT(*) as total_events FROM access_log"
         ).fetchone()
         total_events = row["total_events"] if row else 0
 
-        row = self._conn.execute(
+        row = self._access.execute(
             "SELECT COUNT(*) as tracked_items FROM access_stats"
         ).fetchone()
         tracked_items = row["tracked_items"] if row else 0
 
-        row = self._conn.execute(
+        row = self._access.execute(
             "SELECT COUNT(*) as explicit FROM access_stats "
             "WHERE explicit_count > 0"
         ).fetchone()
         items_drilled = row["explicit"] if row else 0
 
         # Top 5 most-accessed items
-        top_items = self._conn.execute(
+        top_items = self._access.execute(
             "SELECT item_type, item_id, access_count, explicit_count, "
             "last_accessed FROM access_stats "
             "ORDER BY access_count DESC LIMIT 5"
@@ -4070,7 +4437,7 @@ class RecallDB:
 
         # Promotion tier distribution
         try:
-            tier_rows = self._conn.execute(
+            tier_rows = self._access.execute(
                 "SELECT promotion_tier, COUNT(*) as cnt FROM access_stats "
                 "GROUP BY promotion_tier"
             ).fetchall()
@@ -4097,7 +4464,7 @@ class RecallDB:
 
     def access_log_count(self) -> int:
         """Total number of access log entries."""
-        row = self._conn.execute(
+        row = self._access.execute(
             "SELECT COUNT(*) AS cnt FROM access_log"
         ).fetchone()
         return row["cnt"] if row else 0
@@ -4108,12 +4475,12 @@ class RecallDB:
         self, item_type: str, item_id: str, tier: str,
     ) -> None:
         """Set the promotion tier for an item in access_stats."""
-        self._conn.execute(
+        self._access.execute(
             "UPDATE access_stats SET promotion_tier = ? "
             "WHERE item_type = ? AND item_id = ?",
             (tier, item_type, item_id),
         )
-        self._conn.commit()
+        self._access.commit()
 
     def items_at_tier(self, tier: str) -> list[dict]:
         """Return all access_stats rows at a given promotion tier.
@@ -4121,7 +4488,7 @@ class RecallDB:
         Ordered by explicit_count DESC so budget-capped operations
         promote the most-accessed items first.
         """
-        rows = self._conn.execute(
+        rows = self._access.execute(
             "SELECT * FROM access_stats WHERE promotion_tier = ? "
             "ORDER BY explicit_count DESC",
             (tier,),
@@ -4207,7 +4574,7 @@ class RecallDB:
         Returns the number of items updated.
         """
         now = datetime.now(timezone.utc)
-        rows = self._conn.execute(
+        rows = self._access.execute(
             "SELECT item_type, item_id, last_accessed FROM access_stats"
         ).fetchall()
         count = 0
@@ -4223,13 +4590,13 @@ class RecallDB:
                     decay = min(1.0, 2.0 ** (-days_since / half_life_days))
             except (ValueError, TypeError, ZeroDivisionError):
                 decay = 1.0
-            self._conn.execute(
+            self._access.execute(
                 "UPDATE access_stats SET decay_score = ? "
                 "WHERE item_type = ? AND item_id = ?",
                 (decay, row["item_type"], row["item_id"]),
             )
             count += 1
-        self._conn.commit()
+        self._access.commit()
         return count
 
     def archive_cold_clusters(
@@ -4247,7 +4614,7 @@ class RecallDB:
         cutoff = datetime.now(timezone.utc)
         cutoff_iso = (cutoff - timedelta(days=min_age_days)).isoformat()
 
-        rows = self._conn.execute(
+        rows = self._access.execute(
             "SELECT item_id FROM access_stats "
             "WHERE item_type = 'cluster' "
             "  AND decay_score < ? "
@@ -4283,7 +4650,7 @@ class RecallDB:
         ).strftime("%Y-%m-%d")
 
         # Count entries to compact
-        row = self._conn.execute(
+        row = self._access.execute(
             "SELECT COUNT(*) AS cnt FROM access_log "
             "WHERE DATE(created_at) < ?",
             (cutoff,),
@@ -4293,7 +4660,7 @@ class RecallDB:
             return 0
 
         # Roll up into daily aggregates
-        self._conn.execute(
+        self._access.execute(
             "INSERT OR REPLACE INTO access_log_archive "
             "(item_type, item_id, date, access_count, avg_score, queries) "
             "SELECT item_type, item_id, DATE(created_at), COUNT(*), "
@@ -4304,17 +4671,17 @@ class RecallDB:
             (cutoff,),
         )
         # Delete compacted entries
-        self._conn.execute(
+        self._access.execute(
             "DELETE FROM access_log WHERE DATE(created_at) < ?",
             (cutoff,),
         )
-        self._conn.commit()
+        self._access.commit()
         return count
 
     def decay_distribution(self) -> dict[str, int]:
         """Return distribution of items across decay score buckets."""
         buckets = {"fresh": 0, "warm": 0, "cool": 0, "cold": 0}
-        rows = self._conn.execute(
+        rows = self._access.execute(
             "SELECT decay_score FROM access_stats"
         ).fetchall()
         for row in rows:

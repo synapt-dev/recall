@@ -152,7 +152,11 @@ class WorkingMemory:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
             # Get top accessed items by frequency in the last N days
-            rows = db.index_conn.execute(
+            from synapt.recall.storage import _access_conn
+
+            index_file = db.index_conn.execute("PRAGMA database_list").fetchone()[2]
+            access = _access_conn(index_file)
+            rows = access.execute(
                 "SELECT item_type, item_id, COUNT(*) as cnt, "
                 "  MAX(query) as last_query "
                 "FROM access_log "
