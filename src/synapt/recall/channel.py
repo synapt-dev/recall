@@ -4172,7 +4172,7 @@ def _watch_room_path(channel: str, project_dir: Path | None = None) -> Path:
             else:
                 ch_dir = _guard_store_path(
                     "resolve_channels_dir", _local_channels_dir(project_dir))
-    return ch_dir / f"{_channel_to_filename(channel)}.jsonl"
+    return _contained_channel_file(ch_dir, _channel_to_filename(channel))
 
 
 def _watch_all_rooms(project_dir: Path | None = None) -> list[str]:
@@ -4309,9 +4309,17 @@ def channel_watch(
         )
 
     mine = os.environ.get("SYNAPT_AGENT_ID") or None
-    watched = []
+    # Resolve every path before opening any: a name from --all skipped
+    # _check_watch_room, and its refusal must reach the caller as WatchRoomError.
+    paths = []
     for name in names:
-        state = _WatchedFile(_watch_room_path(name, project_dir))
+        try:
+            paths.append(_watch_room_path(name, project_dir))
+        except ChannelNameError as e:
+            raise WatchRoomError(str(e)) from None
+    watched = []
+    for path in paths:
+        state = _WatchedFile(path)
         if since is None:
             try:
                 st = os.stat(state.path)
