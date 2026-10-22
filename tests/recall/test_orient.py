@@ -362,6 +362,8 @@ def test_a_sibling_journal_past_the_read_bound_is_not_read_and_says_so(project, 
 
 @pytest.fixture
 def chicago():
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX only; these rows set the process zone")
     old = os.environ.get("TZ")
     os.environ["TZ"] = "America/Chicago"
     time.tzset()
@@ -403,6 +405,8 @@ def test_a_zoneless_sibling_after_the_floor_in_utc_is_named_off_utc(project, own
 
 @pytest.fixture
 def tokyo():
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX only; these rows set the process zone")
     old = os.environ.get("TZ")
     os.environ["TZ"] = "Asia/Tokyo"
     time.tzset()
