@@ -61,6 +61,18 @@ class VerbatimBodyTest(unittest.TestCase):
         out = channel_read_message(mid, channel="dev")
         self.assertEqual(out.splitlines()[-1], body)
 
+    def test_r4_literal_backslash_u_through_the_post_action_is_kept(self):
+        from synapt.recall.actions import get_action_registry
+
+        body = "snow \\u2603 and caf\\u00e9"
+        result = get_action_registry().dispatch(
+            "post", channel="dev", message=body, name="poster"
+        )
+        mid = re.search(r"\[id=([^\]]+)\]$", result).group(1)
+        self.assertEqual(self._stored_body().encode("utf-8"), body.encode("utf-8"))
+        out = channel_read_message(mid, channel="dev")
+        self.assertEqual(out.splitlines()[-1].encode("utf-8"), body.encode("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
