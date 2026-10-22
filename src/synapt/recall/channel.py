@@ -3686,7 +3686,11 @@ def check_directives(
 
     # Check for unread @mentions (by agent_id or display_name)
     # Filter by earliest cursor to avoid resurfacing old mentions
-    earliest_cursor = min(cursors.values()) if cursors else "1970-01-01T00:00:00Z"
+    cursor_dt = min(
+        (_since_or_epoch(c) for c in cursors.values()),
+        default=datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    cursor_second = cursor_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     mention_conn = _open_db(project_dir)
     try:
         # Get this agent's display name for mention matching
@@ -3698,17 +3702,17 @@ def check_directives(
         # Find mentions targeting this agent, only after cursor
         if display_name:
             rows = mention_conn.execute(
-                "SELECT message_id FROM mentions "
-                "WHERE mentioned IN (?, ?) AND timestamp > ?",
-                (aid, display_name, earliest_cursor),
+                "SELECT message_id, timestamp FROM mentions "
+                "WHERE mentioned IN (?, ?) AND timestamp >= ?",
+                (aid, display_name, cursor_second),
             ).fetchall()
         else:
             rows = mention_conn.execute(
-                "SELECT message_id FROM mentions "
-                "WHERE mentioned = ? AND timestamp > ?",
-                (aid, earliest_cursor),
+                "SELECT message_id, timestamp FROM mentions "
+                "WHERE mentioned = ? AND timestamp >= ?",
+                (aid, cursor_second),
             ).fetchall()
-        mention_ids = {r["message_id"] for r in rows}
+        mention_ids = {r["message_id"] for r in rows if _posted_after(r["timestamp"], cursor_dt)}
     finally:
         mention_conn.close()
 

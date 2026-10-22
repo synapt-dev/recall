@@ -2801,6 +2801,100 @@ class TestCheckDirectives(unittest.TestCase):
         self.assertIn("@mention", result)
         self.assertIn("please review", result)
 
+    def test_mention_after_second_width_cursor_surfaces(self):
+        """A cursor stored without fractional seconds still admits a later mention."""
+        channel_join("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_read("dev", agent_name="s_opus")
+        channel_post("dev", "hey @opus please review", agent_name="s_apollo")
+        conn = _open_db()
+        ts = conn.execute("SELECT timestamp FROM mentions").fetchone()["timestamp"]
+        # Cursor is the same second without a fraction: earlier than the mention,
+        # but '.' < 'Z' makes it the larger string.
+        cursor = ts[:19] + "Z"
+        conn.execute("UPDATE mentions SET timestamp = ?", (ts[:19] + ".500000Z",))
+        conn.execute("UPDATE cursors SET last_read_at = ? WHERE agent_id = 's_opus'", (cursor,))
+        conn.commit()
+        conn.close()
+        result = check_directives(agent_name="s_opus")
+        self.assertIn("@mention", result)
+
+    def test_mention_in_earlier_second_than_cursor_not_surfaced(self):
+        """A mention a second before a fractional cursor, stored without a fraction, stays read."""
+        channel_join("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_post("dev", "hey @opus please review", agent_name="s_apollo")
+        channel_read("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE mentions SET timestamp = '2026-01-01T00:00:04Z'")
+        conn.execute(
+            "UPDATE cursors SET last_read_at = '2026-01-01T00:00:05.000001Z' WHERE agent_id = 's_opus'"
+        )
+        conn.commit()
+        conn.close()
+        result = check_directives(agent_name="s_opus")
+        self.assertNotIn("@mention", result)
+
+    def test_malformed_cursor_reads_as_epoch(self):
+        """A cursor that is not a timestamp reads as the epoch; a mention still surfaces."""
+        channel_join("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_read("dev", agent_name="s_opus")
+        channel_post("dev", "hey @opus please review", agent_name="s_apollo")
+        conn = _open_db()
+        conn.execute("UPDATE cursors SET last_read_at = 'not-a-time' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        result = check_directives(agent_name="s_opus")
+        self.assertIn("please review", result)
+
+    def test_malformed_mention_timestamp_skipped(self):
+        """A mention with a malformed timestamp is skipped; a good later one surfaces."""
+        channel_join("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_read("dev", agent_name="s_opus")
+        channel_post("dev", "hey @opus bad stamp", agent_name="s_apollo")
+        conn = _open_db()
+        conn.execute("UPDATE mentions SET timestamp = 'garbage'")
+        conn.commit()
+        conn.close()
+        channel_post("dev", "hey @opus good stamp", agent_name="s_apollo")
+        result = check_directives(agent_name="s_opus")
+        self.assertIn("good stamp", result)
+        self.assertNotIn("bad stamp", result)
+
+    def test_cursor_with_an_offset_is_compared_in_utc(self):
+        """A cursor stored with a non-UTC offset bounds the prefilter at its UTC second."""
+        channel_join("dev", agent_name="s_opus")
+        conn = _open_db()
+        conn.execute("UPDATE presence SET display_name = 'opus' WHERE agent_id = 's_opus'")
+        conn.commit()
+        conn.close()
+        channel_read("dev", agent_name="s_opus")
+        channel_post("dev", "hey @opus please review", agent_name="s_apollo")
+        conn = _open_db()
+        ts = conn.execute("SELECT timestamp FROM mentions").fetchone()["timestamp"]
+        # An hour before the mention, written at +02:00: its wall time reads an hour AFTER it.
+        mention_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        cursor = (mention_dt - timedelta(hours=1)).astimezone(timezone(timedelta(hours=2))).isoformat()
+        conn.execute("UPDATE cursors SET last_read_at = ? WHERE agent_id = 's_opus'", (cursor,))
+        conn.commit()
+        conn.close()
+        result = check_directives(agent_name="s_opus")
+        self.assertIn("please review", result)
+
     def test_self_mention_not_surfaced(self):
         """Agent's own @mentions don't show up as notifications."""
         channel_join("dev", agent_name="s_opus")
