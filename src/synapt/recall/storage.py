@@ -1729,6 +1729,11 @@ class RecallDB:
             self._conn.close()
         except Exception:
             pass
+        try:
+            if self.__dict__.get("_access_db") is not None:
+                self._access_db.close()
+        except Exception:
+            pass
 
     @property
     def path(self) -> Path:

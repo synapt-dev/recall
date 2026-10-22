@@ -10,6 +10,7 @@ topics from recent sessions carry forward with natural decay.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import re
 import time
@@ -156,16 +157,17 @@ class WorkingMemory:
 
             index_file = db.index_conn.execute("PRAGMA database_list").fetchone()[2]
             access = _access_conn(index_file)
-            rows = access.execute(
-                "SELECT item_type, item_id, COUNT(*) as cnt, "
-                "  MAX(query) as last_query "
-                "FROM access_log "
-                "WHERE created_at > ? "
-                "GROUP BY item_type, item_id "
-                "ORDER BY cnt DESC "
-                "LIMIT ?",
-                (cutoff, MAX_SLOTS),
-            ).fetchall()
+            with contextlib.closing(access):
+                rows = access.execute(
+                    "SELECT item_type, item_id, COUNT(*) as cnt, "
+                    "  MAX(query) as last_query "
+                    "FROM access_log "
+                    "WHERE created_at > ? "
+                    "GROUP BY item_type, item_id "
+                    "ORDER BY cnt DESC "
+                    "LIMIT ?",
+                    (cutoff, MAX_SLOTS),
+                ).fetchall()
 
             seeded = 0
             for row in rows:
