@@ -43,6 +43,7 @@ class Card:
     missing: list[str] = field(default_factory=list)   # "<source>: <why>", one per source that did not read
     withheld: dict[str, int] = field(default_factory=dict)
     entry_source: str = ""                               # the journal entry GOAL, NEXT and RULED OUT come from
+    newer_journal: str = ""                              # wake line naming a newer sibling worktree journal (or not checked)
     constraint_sources: list[str] = field(default_factory=list)   # one memory file per constraint, same order
 
     def filled(self) -> int:
@@ -77,6 +78,12 @@ def _age(seconds: float | None) -> str:
     return f"{seconds / 86400:.1f} days ago"
 
 
+def _name_newer_journal(card: Card, path: Path, newest: str | None) -> None:
+    from synapt.recall.journal import newer_journal_elsewhere, newer_journal_line
+
+    card.newer_journal = newer_journal_line(newer_journal_elsewhere(path, newest)) or ""
+
+
 def _read_journal(card: Card, project: Path | None, now: float) -> float | None:
     """Fill goal, next, ruled out and carried; return the newest entry's epoch."""
     from synapt.recall.journal import (
@@ -94,10 +101,12 @@ def _read_journal(card: Card, project: Path | None, now: float) -> float | None:
         return None
     if not path.exists():
         card.missing.append(f"journal: none at {path}; write one with `synapt recall journal --write`")
+        _name_newer_journal(card, path, None)
         return None
     entry = read_latest(path, meaningful=True)
     if entry is None:
         card.missing.append(f"journal: {path} has no entry with content")
+        _name_newer_journal(card, path, None)
         return None
     when = _epoch(entry.timestamp)
     card.goal = entry.focus.strip()
@@ -105,6 +114,7 @@ def _read_journal(card: Card, project: Path | None, now: float) -> float | None:
                          + (f", session {entry.session_id}" if entry.session_id else "")
                          + (f", repo HEAD {entry.git_log[0].split()[0]} when written" if entry.git_log and entry.git_log[0].split() else ""))
     card.goal_age_s = None if when is None else max(0.0, now - when)
+    _name_newer_journal(card, path, entry.timestamp)
     steps = [s for s in entry.next_steps if s.strip()]
     card.next = steps[0].strip() if steps else ""
     card.ruled_out = [d.strip() for d in entry.decisions if d.strip()]
@@ -223,6 +233,8 @@ def _render(card: Card) -> str:
     lines.append(f"GOAL ({_age(card.goal_age_s)}): "
                  + (_clip(card.goal) + _src(card.entry_source) if card.goal else "(none recorded)"))
     lines.append("NEXT: " + (_clip(card.next) + _src(card.entry_source) if card.next else "(none recorded)"))
+    if card.newer_journal:
+        lines.append(card.newer_journal)
     # CARRIED steps come from pending_next_steps, which keeps no entry per step: unknown until it does.
     for title, key, items, sources in (("CARRIED", "carried", card.carried, []),
                                        ("RULED OUT", "ruled_out", card.ruled_out, card.entry_source),

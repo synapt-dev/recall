@@ -987,3 +987,50 @@ class TestWakeStoreFollowsWorkspace:
         with patch("synapt.recall.journal._get_branch", return_value=None):
             text = "\n".join(generate_startup_context(Path.cwd()))
         assert "OPERATOR-CWD-LEAK-MARKER" not in text
+
+
+def _startup_cross_cwd(tmp_path, monkeypatch, a_offset: float, b_offset: float):
+    """One entry from cwd A and one from cwd B on the same recall root; wake from B."""
+    import time
+    from synapt.recall.journal import JournalEntry, append_entry, _journal_path
+
+    def iso(offset):
+        return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + offset))
+
+    a, b = tmp_path / "cwd-a", tmp_path / "cwd-b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.delenv("SYNAPT_RECALL_WORKTREE", raising=False)   # each cwd keys its own worktree store
+    a_ts = iso(a_offset)
+    monkeypatch.chdir(a)
+    append_entry(JournalEntry(timestamp=a_ts, focus="written from A", next_steps=["a"]), _journal_path(None))
+    monkeypatch.chdir(b)
+    append_entry(JournalEntry(timestamp=iso(b_offset), focus="written from B", next_steps=["b"]), _journal_path(None))
+    return _journal_path(None).parent.parent / "cwd-a" / "journal.jsonl", a_ts
+
+
+def _startup_text() -> str:
+    with patch("synapt.recall.journal._get_branch", return_value=None):
+        return "\n".join(generate_startup_context(Path.cwd()))
+
+
+def test_startup_names_a_newer_entry_written_from_another_cwd(tmp_path, monkeypatch):
+    a_path, a_ts = _startup_cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+
+    assert _startup_text().count(f"newer journal at {a_path} ({a_ts})") == 1
+
+
+def test_startup_from_a_cwd_with_no_journal_file_names_the_other_cwds_journal(tmp_path, monkeypatch):
+    from synapt.recall.journal import _journal_path
+
+    a_path, a_ts = _startup_cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    _journal_path(None).unlink()
+
+    assert _startup_text().count(f"newer journal at {a_path} ({a_ts})") == 1
+
+
+def test_startup_from_the_cwd_that_wrote_the_newest_entry_names_no_newer_journal(tmp_path, monkeypatch):
+    _startup_cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    monkeypatch.chdir(tmp_path / "cwd-a")
+
+    assert "newer journal" not in _startup_text()

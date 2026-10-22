@@ -3844,7 +3844,7 @@ def generate_startup_context(
     # the result rather than an invisible implementation detail.
     try:
         from synapt.recall.journal import _read_all_entries, _journal_path, _dedup_entries
-        from synapt.recall.journal import format_for_session_start
+        from synapt.recall.journal import format_for_session_start, newer_journal_elsewhere, newer_journal_line
         # Ambient (None): resolve the session-consistent journal store, not cwd
         # (see the branch-context leg above; dual-use wake fix).
         jf = _journal_path()
@@ -3878,6 +3878,15 @@ def generate_startup_context(
                 latest_authored_journal_timestamp = authored[0].timestamp
             for entry in shown_entries:
                 journal_lines.append(format_for_session_start(entry))
+            newer = newer_journal_line(newer_journal_elsewhere(
+                jf, shown_entries[0].timestamp if shown_entries else None
+            ))
+            if newer:
+                journal_lines.append(newer)
+        else:
+            newer = newer_journal_line(newer_journal_elsewhere(jf, None))
+            if newer:
+                journal_lines.append(newer)
     except Exception:
         pass
 
