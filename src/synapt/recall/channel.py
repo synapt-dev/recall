@@ -4299,9 +4299,17 @@ def channel_watch(
         )
 
     mine = os.environ.get("SYNAPT_AGENT_ID") or None
-    watched = []
+    # Resolve every path before opening any: a name from --all skipped
+    # _check_watch_room, and its refusal must reach the caller as WatchRoomError.
+    paths = []
     for name in names:
-        state = _WatchedFile(_watch_room_path(name, project_dir))
+        try:
+            paths.append(_watch_room_path(name, project_dir))
+        except ChannelNameError as e:
+            raise WatchRoomError(str(e)) from None
+    watched = []
+    for path in paths:
+        state = _WatchedFile(path)
         if since is None:
             try:
                 st = os.stat(state.path)
