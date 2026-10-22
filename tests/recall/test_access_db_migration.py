@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -285,9 +286,12 @@ LATE_WRITER = """
 import pathlib, sys, time
 from synapt.recall.storage import RecallDB
 store, copying = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+deadline = time.monotonic() + float(sys.argv[3])
 db = RecallDB(store / "index.db")
 print("ready", flush=True)
 while not copying.exists():
+    if time.monotonic() > deadline:
+        sys.exit(f"no {copying} within {sys.argv[3]}s")
     time.sleep(0.001)
 t = time.monotonic()
 db.record_access([{"item_type": "chunk", "item_id": "c1", "query": "late",
@@ -368,16 +372,43 @@ def test_two_first_opens_create_access_db_once(store):
     assert _counts(store / "index.db") == dict.fromkeys(TABLES, 0)
 
 
+_WAIT_S = 60
+
+
+def _readline(proc, what):
+    """One stdout line from proc, or raise once _WAIT_S passes without one."""
+    got = []
+    t = threading.Thread(target=lambda: got.append(proc.stdout.readline()), daemon=True)
+    t.start()
+    t.join(_WAIT_S)
+    if not got or not got[0]:
+        proc.kill()
+        raise AssertionError(f"no {what} from the writer within {_WAIT_S}s")
+    return got[0]
+
+
+def _late_write(store, mover_script):
+    copying = store / "copying"
+    writer = _spawn(LATE_WRITER, store, copying, _WAIT_S, stdout=subprocess.PIPE, text=True)
+    assert _readline(writer, "ready line").strip() == "ready"
+    _seed(store / "index.db", 3)
+    mover = _spawn(mover_script, store, copying)
+    return mover, writer, float(_readline(writer, "wait time"))
+
+
+def test_a_mover_that_dies_early_fails_within_the_deadline(store, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_WAIT_S", 2)
+    t = time.monotonic()
+    with pytest.raises(AssertionError, match="wait time"):
+        _late_write(store, "import sys; sys.exit(0)")
+    assert time.monotonic() - t < _WAIT_S + 5
+
+
 def test_access_written_during_the_move_lands_in_access_db(store):
     # The writer opens before the old rows appear, so its open moves nothing;
     # its record_access then runs while another open holds the copy.
-    copying = store / "copying"
-    writer = _spawn(LATE_WRITER, store, copying, stdout=subprocess.PIPE, text=True)
-    assert writer.stdout.readline().strip() == "ready"
-    _seed(store / "index.db", 3)
-    mover = _spawn(SLOW_MOVER, store, copying)
-    waited = float(writer.stdout.readline())
-    assert [mover.wait(timeout=60), writer.wait(timeout=60)] == [0, 0]
+    mover, writer, waited = _late_write(store, SLOW_MOVER)
+    assert [mover.wait(timeout=_WAIT_S), writer.wait(timeout=_WAIT_S)] == [0, 0]
     # The copy holds access.db's write lock; the writer waits there, not on index.db.
     assert waited > 1.0
     assert _counts(store / "access.db") == {"access_log": 4, "access_stats": 1,
