@@ -54,6 +54,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
@@ -324,6 +325,34 @@ def build_lock_has_waiter(data_dir: Path, name: str = "build.lock") -> bool:
         return any(waiting_dir.iterdir())
     except OSError:
         return False
+
+
+class CorruptRecallDBError(sqlite3.DatabaseError):
+    """The store's recall.db is not a database a build can open.
+
+    A subclass of sqlite3.DatabaseError, so a caller that already catches that keeps catching it.
+    """
+
+
+def _open_build_db(db_path: Path):
+    """Open the monolithic recall.db for a build, or refuse without touching it.
+
+    The build never repairs this file. recall.db holds knowledge nodes, pending contradictions and
+    the access log, none of which a build can regenerate from transcripts, so a delete-and-rebuild
+    is a data loss the user did not ask for. The file stays byte-for-byte as it was and the message
+    names the recovery step.
+    """
+    from synapt.recall.storage import RecallDB
+
+    try:
+        return RecallDB(db_path)
+    except sqlite3.DatabaseError as exc:
+        raise CorruptRecallDBError(
+            f"{db_path} is not a readable SQLite database ({exc}). The build stopped and left it "
+            "untouched: it can hold knowledge nodes and contradictions that a build cannot regenerate. "
+            f"To recover, move it aside and keep it (with any {db_path.name}-wal and "
+            f"{db_path.name}-shm beside it), then run `synapt recall build` again."
+        ) from exc
 
 
 def _acquire_build_lock(data_dir: Path, timeout: float = 60.0, name: str = "build.lock") -> "int | None":
@@ -1016,7 +1045,7 @@ def _archive_and_build_locked(
         db = ShardedRecallDB.open(index_dir)
         print(f"  Sharded layout: {db.shard_count} data shard(s)")
     else:
-        db = RecallDB(index_dir / "recall.db")
+        db = _open_build_db(index_dir / "recall.db")
 
     # Fingerprint the inputs and short-circuit a no-op run.
     #
@@ -1842,13 +1871,17 @@ def cmd_build(args: argparse.Namespace) -> None:
     elif use_emb:
         print("[build] Computing embeddings (this may take a moment) ...")
 
-    final_index = _archive_and_build(
-        project,
-        source_dirs=source_dirs or None,
-        use_embeddings=use_emb,
-        incremental=args.incremental,
-        chatgpt_archive=args.chatgpt_archive,
-    )
+    try:
+        final_index = _archive_and_build(
+            project,
+            source_dirs=source_dirs or None,
+            use_embeddings=use_emb,
+            incremental=args.incremental,
+            chatgpt_archive=args.chatgpt_archive,
+        )
+    except CorruptRecallDBError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     if not final_index:
         print("Error: no chunks found.", file=sys.stderr)
