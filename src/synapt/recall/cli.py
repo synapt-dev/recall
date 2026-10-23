@@ -824,18 +824,23 @@ def _store_has_embeddings(project: Path) -> bool:
     ``TranscriptIndex._load_or_build_embeddings_db`` returns early unless
     ``db.has_embeddings()`` is true. Ask that same question here, read-only:
     no DDL, no migrations, no write lock, and no store created where none
-    exists yet (a new store has none).
+    exists yet (a new store has none). A store that will not open is one
+    the build rebuilds, as ``TranscriptIndex.load`` does, so it has none either.
     """
+    import sqlite3
     index_dir = project_index_dir(project)
     from synapt.recall.sharding import is_sharded
     from synapt.recall.sharded_db import ShardedRecallDB
     if not is_sharded(index_dir) and not (index_dir / "recall.db").exists():
         return False
-    db = ShardedRecallDB.open_readonly(index_dir)
     try:
-        return db.has_embeddings()
-    finally:
-        db.close()
+        db = ShardedRecallDB.open_readonly(index_dir)
+        try:
+            return db.has_embeddings()
+        finally:
+            db.close()
+    except (sqlite3.DatabaseError, OSError):
+        return False
 
 
 def _archive_and_build(

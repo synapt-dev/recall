@@ -133,6 +133,17 @@ def test_init_store_without_embeddings_says_keyword_only(tmp_path):
     assert KEYWORD_ONLY in result.stdout
 
 
+def test_embedding_check_on_a_corrupt_store_says_none(tmp_path, monkeypatch):
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    assert index_dir.resolve().is_relative_to(tmp_path.resolve())
+    (index_dir / "recall.db").write_bytes(b"this is not a sqlite database\n" * 64)
+    monkeypatch.setattr(cli, "project_index_dir", lambda project: index_dir)
+
+    # The store is rebuilt, as TranscriptIndex.load rebuilds it, so it holds no embeddings.
+    assert cli._store_has_embeddings(tmp_path) is False
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     return {
         str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
