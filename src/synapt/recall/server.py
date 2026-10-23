@@ -2082,13 +2082,16 @@ def recall_contradict(
                     (candidate promoted, existing superseded), "existing_wins" (existing
                     restored, candidate retired), or "false_positive" (both restored to
                     active, nothing superseded -- the judge's conflict flag was wrong).
-        claim: Free-text description of conflicting information (for "flag").
-               The system will search for matching knowledge nodes automatically.
-        new_content: The correct/updated information (for "flag"). If omitted,
-                     *claim* is used as both the description and the new content.
-        old_node_id: Optional knowledge node ID that the claim contradicts.
-                     If omitted, the system searches for matching nodes.
-        reason: Why this is a contradiction (for "flag").
+        claim: Free-text description of conflicting information (for "flag" and
+               "correct"; one of claim or new_content is required for both).
+               For "flag", the system searches for matching knowledge nodes with it.
+        new_content: The correct/updated information (for "flag" and "correct").
+                     If omitted, *claim* is used as both the description and the new content.
+        old_node_id: Knowledge node ID: required for "forget" and "correct"; optional
+                     for "flag", where the claim contradicts it and, if omitted, the
+                     system searches for matching nodes.
+        reason: Why this is a contradiction (for "flag"), or why the node is
+                corrected (for "correct"; default "Manual correction").
         limit: Rows to show for "list" (default 5); 0 shows all. A footer names
                shown, pending and withheld when rows are cut.
         order: "oldest" (default) or "newest" for "list", by detected_at then id.
