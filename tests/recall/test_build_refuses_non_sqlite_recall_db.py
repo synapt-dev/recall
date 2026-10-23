@@ -139,3 +139,17 @@ def test_a_broken_access_db_beside_a_healthy_store_is_not_blamed_on_recall_db(co
         _cmd_build(corrupt_store)
     assert not isinstance(exc.value, cli.CorruptRecallDBError), exc.value
     assert "move it aside" not in capsys.readouterr().err
+
+
+def test_with_embeddings_on_the_keyword_only_line_prints_then_the_refusal(corrupt_store, capsys):
+    # The embedding check before the build reads the corrupt store as having none; the build's own open then refuses.
+    args = argparse.Namespace(source=[str(corrupt_store["source"])], hf=None, chatgpt_archive=None,
+                              no_embeddings=False, incremental=False)
+    with mock.patch("synapt.recall.cli.Path.cwd", return_value=corrupt_store["project"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_build(args)
+    assert exc.value.code == 2
+    out, err = capsys.readouterr()
+    assert f"[build] {cli.KEYWORD_ONLY_LINE}" in out, out
+    assert "move it aside and keep it" in err, err
+    assert corrupt_store["db"].read_bytes() == GARBAGE
