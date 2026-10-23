@@ -295,3 +295,68 @@ def test_caller_transcripts_finds_a_session_under_a_relative_config_dir_from_ano
     found = {t.session_id for t in caller_transcripts(project)}
 
     assert "eeeeeeee-relative" in found, found
+
+
+@pytest.fixture
+def seat(homes, monkeypatch, tmp_path):
+    """A seat directory inside a gripspace of its own (a ``.grip`` at the root),
+    outside HOME, read from the seat itself."""
+    gripspace = tmp_path / "work" / "gs"
+    (gripspace / ".grip").mkdir(parents=True)
+    seat_dir = gripspace / "seat"
+    seat_dir.mkdir()
+    monkeypatch.chdir(seat_dir)
+    return seat_dir
+
+
+def test_a_claude_accounts_transcript_is_discovered_from_a_seat(homes, seat):
+    home, _, _ = homes
+    _session(home / ".claude-accounts" / "a1" / "projects", seat, "ffffffff-account")
+
+    assert core.project_transcript_dirs(seat) == [
+        home / ".claude-accounts" / "a1" / "projects" / core.project_slug(seat)
+    ]
+
+
+def test_two_accounts_holding_one_slug_are_both_listed_sorted(homes, seat):
+    home, _, _ = homes
+    accounts = home / ".claude-accounts"
+    for name in ("a2", "a1", "e", "c", "d", "b"):
+        _session(accounts / name / "projects", seat, f"ffffffff-{name}")
+
+    assert core.claude_projects_roots() == [home / ".claude" / "projects"] + [
+        accounts / name / "projects" for name in ("a1", "a2", "b", "c", "d", "e")
+    ]
+    assert core.project_transcript_dirs(seat)[:2] == [
+        accounts / "a1" / "projects" / core.project_slug(seat),
+        accounts / "a2" / "projects" / core.project_slug(seat),
+    ]
+
+
+def test_accounts_and_home_claude_are_both_read_and_listed_once_by_resolved_path(homes, seat):
+    """~/.claude stays the first root; an account that is ~/.claude through a
+    symlink is listed once."""
+    home, _, _ = homes
+    _session(home / ".claude" / "projects", seat, "ffffffff-home")
+    _session(home / ".claude-accounts" / "a1" / "projects", seat, "ffffffff-a1")
+    (home / ".claude-accounts" / "mirror").symlink_to(home / ".claude")
+    slug = core.project_slug(seat)
+
+    assert core.claude_projects_roots() == [
+        home / ".claude" / "projects",
+        home / ".claude-accounts" / "a1" / "projects",
+    ]
+    assert core.project_transcript_dirs(seat) == [
+        home / ".claude" / "projects" / slug,
+        home / ".claude-accounts" / "a1" / "projects" / slug,
+    ]
+
+
+def test_without_claude_accounts_the_roots_are_unchanged(homes, seat):
+    home, _, _ = homes
+    _session(home / ".claude" / "projects", seat, "ffffffff-home")
+
+    assert core.claude_projects_roots() == [home / ".claude" / "projects"]
+    assert core.project_transcript_dirs(seat) == [
+        home / ".claude" / "projects" / core.project_slug(seat)
+    ]

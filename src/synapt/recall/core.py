@@ -5841,6 +5841,8 @@ def claude_projects_roots(relative_to: Path | None = None) -> list[Path]:
     if xdg_style.is_dir():
         roots.append(xdg_style)
     roots.append(Path.home() / ".claude" / "projects")
+    accounts = Path.home() / ".claude-accounts"
+    roots.extend(sorted(p for p in accounts.glob("*/projects") if p.is_dir()))
     unique: list[Path] = []
     seen: set[Path] = set()
     for root in roots:
