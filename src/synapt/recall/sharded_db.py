@@ -18,13 +18,33 @@ from __future__ import annotations
 import heapq
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from synapt.recall.sharding import is_sharded, list_shards
+from synapt.recall.sharding import is_sharded, list_shards, shard_name_for_index
 from synapt.recall.storage import RecallDB
+
+
+def _wal_checkpoint_complete(conn: sqlite3.Connection, attempts: int = 3, wait_ms: int = 200) -> bool:
+    """Run ``wal_checkpoint(TRUNCATE)`` and read its row: True only when the main file holds every WAL frame.
+    A reader's open transaction makes it return busy or checkpoint fewer frames than the log holds; a short
+    bounded retry gives a brief reader time to finish. The connection's busy timeout is lowered for the attempts so
+    a long reader cannot hold the save for the full timeout."""
+    (prior_timeout,) = conn.execute("PRAGMA busy_timeout").fetchone()
+    conn.execute(f"PRAGMA busy_timeout={int(wait_ms)}")
+    try:
+        for attempt in range(attempts):
+            busy, log_frames, checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if not busy and checkpointed >= log_frames:
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(wait_ms / 1000)
+        return False
+    finally:
+        conn.execute(f"PRAGMA busy_timeout={int(prior_timeout)}")
 
 
 def _timestamp_activity(value: str) -> tuple[int, str]:
@@ -971,8 +991,17 @@ class ShardedRecallDB:
             for rowid, emb in embeddings.items():
                 shard_idx, local_rowid = self._decode_chunk_rowid(rowid)
                 grouped.setdefault(shard_idx, {})[local_rowid] = emb
+            not_checkpointed: list[str] = []
             for shard_idx, shard_embs in grouped.items():
-                self._data_dbs[shard_idx - 1].save_embeddings(shard_embs)
+                db = self._data_dbs[shard_idx - 1]
+                db.save_embeddings(shard_embs)
+                # The flat mirror copies main files only, so the write must leave the WAL first. A reader holding a
+                # transaction stops the checkpoint short, and a main file it did not reach must never be copied.
+                if not _wal_checkpoint_complete(db._conn):
+                    not_checkpointed.append(shard_name_for_index(shard_idx))
+            from synapt.recall.generations import resync_flat_layout
+
+            resync_flat_layout(self._index.path.parent, not_checkpointed=not_checkpointed)
             return
         self._index.save_embeddings(embeddings)
 
