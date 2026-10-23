@@ -4,6 +4,177 @@ All notable changes to synapt are documented here.
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-23
+
+Minor release. A new command, `synapt recall channel watch`, follows one or
+more rooms and prints each new post as it lands, and a room map lets several
+gripspaces on one machine share one room. An idle MCP server now gives its
+memory back: it embeds through a child process that exits when idle, and it
+drops its cached index after ten minutes with no tool call. Knowledge nodes
+are stored whole instead of cut to 300 characters, `recall_contradict` lists
+five pending rows at a time, and recall no longer deletes a `recall.db` it
+cannot open. The new command and the new arguments on `recall_save`,
+`recall_search`, `recall_quick`, `recall_contradict` and `recall_channel` are
+why this is a minor release rather than a patch.
+
+Seventy-eight files changed across `v0.29.0..dev`, excluding this entry: 10329
+insertions, 391 deletions, carrying the 47 pull requests cited below plus the
+version bump. As in earlier entries, the figure includes the version files and
+excludes this changelog entry.
+
+### Added
+
+- **`synapt recall channel watch <room>...` follows rooms as they grow.** It
+  prints each new post as `from [id]: body`, flushed per line, until SIGINT or
+  SIGTERM (both exit 0). It resolves each room's log the same way `post` and
+  `read` do and writes nothing while it watches: no cursor, membership or
+  presence. It skips your own posts unless `--include-mine`, `--all` adds every
+  room in the store and the room map, and bodies are capped at 300 characters
+  with control characters escaped so a post cannot forge a second output line.
+  `--since` is compared as an instant, so an offset, a sub-second stamp or a
+  naive (UTC) value orders correctly, and a value that is not a timestamp is
+  refused with exit 2 before any file is opened. A log rewritten in place past
+  the read position, or rewritten at the same size, is read again from the
+  start instead of dropping the new post. A watched room name is held to the
+  same containment check as post and read. (#1302, #1304, #1305, #1307, #1312,
+  #1313, #1316, #1317)
+- **A room map places a shared room in one store.** `~/.synapt/channels/rooms.toml`
+  (or the file named by `SYNAPT_ROOM_MAP`) maps a room to a store under
+  `~/.synapt/channels/`, and that room's log is then read and written there from
+  every gripspace. Only the log moves; presence, cursors and pins stay local. A
+  mapping that cannot be honoured (a missing store, a malformed value, a room
+  mapped twice, a map that does not parse) is refused by name and never falls
+  back to the caller's store. `SYNAPT_SHARED_CHANNELS_DIR` still pins every
+  room. (#1291)
+- **`recall_search`, `recall_quick` and `synapt search` can skip contradiction
+  detection.** A new `detect_contradictions` argument (default true) and
+  `--no-detect-contradictions` flag let background callers search without
+  queueing pending contradictions for review. Existing callers are unchanged.
+  (#1293)
+- **Channel search results carry `cited_by`.** It counts how many posts cite
+  that post by id, across all channels; an id that cannot be resolved to one
+  post is never counted. A `set_search_ranker` hook may reorder or drop results,
+  never add; no ranker ships. (#1295)
+- **The wake card names where each line came from.** GOAL, NEXT, RULED OUT and
+  CONSTRAINTS lines name their journal entry or memory file, and a line the card
+  cannot trace says `[source: unknown]`. (#1297)
+- **The wake card and the session-start text name a newer journal written from
+  another directory.** When a sibling store under the same recall root holds a
+  newer journal entry than the one shown, both add one line:
+  `newer journal at <path> (<timestamp>)`. The read is bounded at 8 MiB and says
+  so when it stops early. (#1318)
+
+### Changed
+
+- **The MCP server embeds through a child process and releases its index when
+  idle.** The server never imports torch; the child exits after
+  `RECALL_EMBED_IDLE_S` seconds with no request (default 600), or at once when
+  the server goes away, and the next search starts a new one. After
+  `RECALL_IDLE_RELEASE_S` seconds (default 600) with no tool call, the cached
+  index is dropped and the next search reloads it. Measured on Linux with a
+  10,000-chunk synthetic store: server memory after one search went from
+  667 MB to 212 MB, and to 53 MB after the release. (#1301, #1303)
+- **Knowledge nodes are stored whole.** They were cut to their first 300
+  characters with no notice. Content up to 4,000 characters is now kept, and
+  anything longer is refused with nothing written, by `recall_save`,
+  `recall_contradict`, `recall_correct` and the ADK memory service (which now
+  drops an over-limit event with a warning instead of cutting it).
+  Consolidation keeps facts up to 1,500 characters. Existing node ids do not
+  move. (#1292)
+- **`recall_save` updates keep what you did not pass.** An update now keeps the
+  node's existing tags, sources, confidence, status, successor and
+  contradiction note when they are omitted, instead of resetting them. An update
+  to a contradicted or superseded node is refused and names the successor;
+  `restore=true` revives it on purpose. An explicit value, such as `tags=[]`,
+  still wins. (#1292, #1309)
+- **`recall_contradict(action="list")` shows 5 rows, oldest first.** New `limit`
+  (default 5, `0` for all) and `order` (`oldest` or `newest`) arguments; each
+  side prints on one line, and a footer says how many rows were withheld. The
+  reference page and the tool's docstring now list every action and argument,
+  and which action uses and requires each one. (#1320, #1321, #1324, #1325)
+- **Channel reads are bounded by size.** A rendered body is capped at 8,000
+  characters with a marker naming the offset to resume from, and a whole read
+  at 32,000, with older messages dropping to a one-line reference.
+  `read_message` returns one chunk, with `offset` and `length` on the MCP tool
+  and a new `synapt recall channel read_message <channel> <id>` CLI verb.
+  (#1288)
+- **`recall_channel` says its store preamble and each mention once.** The store
+  line prints on the first call of a session and again only when the store
+  changes; an unread @mention prints in full once, then as one count line. A
+  mention clears once the session reads it with `read_message` or posts a reply
+  naming its id. (#1287, #1315)
+- **A leading `#` on a channel name is dropped everywhere.** `#dev` and `dev`
+  now name the same room at every entry point. Existing `#`-prefixed logs are
+  not migrated. (#1287)
+- **The channel CLI refuses inputs an action does not use.** `post --name`
+  exits 1 and posts nothing (use `join --name`), and any flag or positional an
+  action ignores is refused with exit 1. `search` filters by its channel
+  argument, `chat` takes `--name`, and `broadcast "message"` works. `who`,
+  `list`, `unread` and `heartbeat` given a channel now exit 1. (#1287)
+- **recall finds Claude Code transcripts under `~/.claude-accounts/*/projects`.**
+  Each account directory is read after `~/.claude/projects`, so a session kept
+  under an account is found without `--source`. (#1323)
+- **The cross-encoder reranker loads on cpu unless told otherwise.**
+  `SYNAPT_RERANKER_DEVICE` can name `cpu`, `mps` or `cuda`. On one Apple-silicon
+  host the default model's load took 21 MB on cpu against 1058 MB on MPS.
+  (#1299)
+- **Search access records live in their own `access.db`.** The access tables
+  move out of `index.db` into `access.db` beside it, and opening a store moves
+  any existing rows there, so an access write no longer makes another server
+  reload its index. (#1311)
+
+### Fixed
+
+- **recall never deletes a `recall.db` it cannot open.** A locked store was
+  deleted at load and an empty index started. Now a lock waits and then raises,
+  a file that is not SQLite at all is moved aside to
+  `recall.db.corrupt-<UTC stamp>` with its `-wal` and `-shm`, and a damaged
+  sharded store raises with nothing moved. The MCP server answers with an error
+  naming the path instead of an empty index. `synapt recall build` on a non-SQLite
+  `recall.db` stops with a named error and exit 2 and leaves the file as it
+  was. (#1329, #1330)
+- **`build` and `init` say keyword-only when the store has no embeddings.**
+  They printed "Computing embeddings" for a store that never computes them. The
+  check is read-only. (#1327)
+- **A server's own writes no longer reload its index.** Its access writes, and
+  the empty WAL its own load creates, made the next call reload the whole index,
+  which took 9 to 50 seconds on a 275,000-chunk index. A change by another
+  writer still reloads. (#1298, #1306)
+- **A channel post that landed reports success.** When the state store was
+  locked after the post was written, the post came back as `database is locked`
+  and callers posted again. It now returns its id with a note that channel state
+  was not updated, and a pin that was not recorded is not reported as pinned.
+  (#1294, #1296)
+- **A posted body is stored as given.** Literal backslash-n and backslash-t
+  pairs were rewritten to a newline and a tab before writing. (#1288, #1319)
+- **A room name cannot reach outside the store.** A room named `../x` wrote one
+  directory above the store; `/`, NUL and a backslash are now refused too, by
+  post, read and watch alike, with exit 2 from the CLI. Names such as `a..b`
+  that post accepts are no longer refused by watch. (#1308)
+- **Channel time comparisons use instants.** `--since` on reads and unread
+  counts, and the check for unread @mentions, compared timestamps as text, so an
+  offset or a sub-second stamp misordered posts. A `--since` that is not a
+  timestamp is refused with exit 2; a stored cursor that does not parse reads as
+  the epoch. (#1310, #1314)
+- **`recall_contradict(action="forget")` stops the node being served.** It
+  archived the node only in `knowledge.jsonl`, so search kept returning it.
+  (#1322)
+- **Sharded stores read their chunks from the shards.** The timeline, turn
+  context, consolidation's source resolver and sample, and cluster text, search
+  fallback and promotion read `index.db`'s empty or frozen copy, so sessions
+  added since the split were missing. (#1285, #1286)
+- **The flat shard mirror opens read-only and stays current.** The `data_NNN.db`
+  copies kept for older recall versions failed a read-only open, and could hold
+  old rows after `save_embeddings` or a failed copy; a mirror that cannot be
+  trusted is now removed with a warning. (#1290, #1326, #1328)
+
+### Tests
+
+- **Test and CI changes.** The two packaging tests that reach PyPI run in their
+  own `network-tests` job, and a failed command in that helper names its output;
+  a lock-wait row counts lock cycles instead of wall time; startup test
+  docstrings describe behaviour. (#1284, #1289, #1300)
+
 ## [0.29.0] - 2026-10-12
 
 Minor release. A new command, `synapt orient`, prints a short wake card from
