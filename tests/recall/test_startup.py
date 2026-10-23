@@ -30,15 +30,15 @@ def _bind_owned_ambient_store(request, _isolate_recall_root_env, tmp_path, monke
     """Bind the AMBIENT recall store to this test's OWN tmp_path for EVERY
     startup-context test.
 
-    The wake now resolves its journal store ambiently (dual-use wake fix,
-    Stromus ruling 2026-08-31). The conftest autouse ``_isolate_recall_root_env``
+    The wake now resolves its journal store ambiently (the dual-use wake
+    fix). The conftest autouse ``_isolate_recall_root_env``
     already strips an ambient SYNAPT_RECALL_ROOT / GRIPSPACE_ROOT from the shell,
     but with those gone ambient resolution falls through to the CWD -- which on a
     reviewer's real checkout holds a live journal. A test that seeds
     ``_journal_path(tmp_path)`` and reads ambiently then validates a DIFFERENT
     store depending on the operator's cwd population: green from an empty cwd, red
     (or silently polluted) from a populated one. That empty-cwd green is a false
-    control (Atlas r1). So bind the ambient root to tmp_path and chdir there:
+    control. So bind the ambient root to tmp_path and chdir there:
     ``_journal_path()`` (ambient, what the wake reads) is then byte-identical to
     ``_journal_path(tmp_path)`` (explicit, what these tests seed), and no test can
     reach the operator's store. Depends on ``_isolate_recall_root_env`` so it runs
@@ -773,7 +773,7 @@ class TestUncleanEndAtStartup:
         assert payload["session_id"] == self._CRASHED
 
     def test_without_a_starting_session_id_no_verdict_is_published(self, tmp_path):
-        """Call-path witness (Atlas r1): the generic startup path used to pass
+        """Call-path witness: the generic startup path used to pass
         exclude_session_id=None, so the live transcript won and every Codex
         wake would have reported itself."""
         from contextlib import ExitStack
@@ -869,7 +869,7 @@ class TestChannelReadWidensWithBacklog:
 
 
 class TestWakeStoreFollowsWorkspace:
-    """Red-first (dual-use wake `project` split, Stromus ruling 2026-08-31): the
+    """Red-first (dual-use wake `project` split): the
     wake must resolve its journal store AMBIENTLY -- workspace-aware via
     GRIPSPACE_ROOT, the same store the session's own recall/journal verbs read --
     not the cwd. The wake's whole contract is "show this session what THIS
@@ -919,7 +919,7 @@ class TestWakeStoreFollowsWorkspace:
 
     @pytest.mark.store_resolution
     def test_wake_resolves_the_same_journal_path_as_a_session_verb(self, tmp_path, monkeypatch):
-        """Stromus's contract sentence, pinned at the call site: every journal
+        """The wake's contract, pinned at the call site: every journal
         resolution the wake performs is AMBIENT (project_dir is None) -- the same
         call a session verb makes -- and a divergence guard proves the assertion
         is not vacuous (the ambient path and the explicit-cwd path genuinely
@@ -952,11 +952,11 @@ class TestWakeStoreFollowsWorkspace:
     def test_a_populated_unrelated_cwd_does_not_leak_into_an_owned_read(
         self, tmp_path, monkeypatch
     ):
-        """Discriminating witness (Atlas r1): the empty-cwd green is a false
+        """Discriminating witness: the empty-cwd green is a false
         control. With the wake resolving ambiently, a startup-context read bound
         to its OWN store must NOT see a journal that lives in some other cwd's
-        store -- exactly the operator's-real-checkout leak that made five v1
-        survivors pass only because the reviewer's cwd happened to be empty.
+        store -- exactly the operator's-real-checkout leak that lets a test pass
+        only because the cwd it ran from happened to be empty.
 
         Mutation proof: delete the ``SYNAPT_RECALL_ROOT`` binding below and the
         read falls through to the operator cwd, so the leak marker appears and
@@ -987,3 +987,50 @@ class TestWakeStoreFollowsWorkspace:
         with patch("synapt.recall.journal._get_branch", return_value=None):
             text = "\n".join(generate_startup_context(Path.cwd()))
         assert "OPERATOR-CWD-LEAK-MARKER" not in text
+
+
+def _startup_cross_cwd(tmp_path, monkeypatch, a_offset: float, b_offset: float):
+    """One entry from cwd A and one from cwd B on the same recall root; wake from B."""
+    import time
+    from synapt.recall.journal import JournalEntry, append_entry, _journal_path
+
+    def iso(offset):
+        return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + offset))
+
+    a, b = tmp_path / "cwd-a", tmp_path / "cwd-b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.delenv("SYNAPT_RECALL_WORKTREE", raising=False)   # each cwd keys its own worktree store
+    a_ts = iso(a_offset)
+    monkeypatch.chdir(a)
+    append_entry(JournalEntry(timestamp=a_ts, focus="written from A", next_steps=["a"]), _journal_path(None))
+    monkeypatch.chdir(b)
+    append_entry(JournalEntry(timestamp=iso(b_offset), focus="written from B", next_steps=["b"]), _journal_path(None))
+    return _journal_path(None).parent.parent / "cwd-a" / "journal.jsonl", a_ts
+
+
+def _startup_text() -> str:
+    with patch("synapt.recall.journal._get_branch", return_value=None):
+        return "\n".join(generate_startup_context(Path.cwd()))
+
+
+def test_startup_names_a_newer_entry_written_from_another_cwd(tmp_path, monkeypatch):
+    a_path, a_ts = _startup_cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+
+    assert _startup_text().count(f"newer journal at {a_path} ({a_ts})") == 1
+
+
+def test_startup_from_a_cwd_with_no_journal_file_names_the_other_cwds_journal(tmp_path, monkeypatch):
+    from synapt.recall.journal import _journal_path
+
+    a_path, a_ts = _startup_cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    _journal_path(None).unlink()
+
+    assert _startup_text().count(f"newer journal at {a_path} ({a_ts})") == 1
+
+
+def test_startup_from_the_cwd_that_wrote_the_newest_entry_names_no_newer_journal(tmp_path, monkeypatch):
+    _startup_cross_cwd(tmp_path, monkeypatch, a_offset=-60, b_offset=-600)
+    monkeypatch.chdir(tmp_path / "cwd-a")
+
+    assert "newer journal" not in _startup_text()

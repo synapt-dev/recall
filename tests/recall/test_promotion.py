@@ -36,7 +36,7 @@ def _seed_access(db, item_type, item_id, explicit=0, sessions=0, queries=0, tier
     """Seed access_stats with specific values for testing promotion logic."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
-    db._conn.execute(
+    db._access.execute(
         "INSERT OR REPLACE INTO access_stats "
         "(item_type, item_id, access_count, explicit_count, "
         " first_accessed, last_accessed, promotion_tier, "
@@ -44,7 +44,7 @@ def _seed_access(db, item_type, item_id, explicit=0, sessions=0, queries=0, tier
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (item_type, item_id, explicit, explicit, now, now, tier, sessions, queries),
     )
-    db._conn.commit()
+    db._access.commit()
 
 
 def _make_index_with_chunks(tmp_path, n=3):
@@ -491,7 +491,8 @@ class TestAccessSummaryTiers:
         idx._format_results([(i0, 5.0)], max_tokens=2000, query="test query")
 
         # Verify access_log has the query and session_id
-        row = db._conn.execute(
+        assert db._conn.execute("SELECT COUNT(*) FROM access_log").fetchone()[0] == 0
+        row = db._access.execute(
             "SELECT query, session_id FROM access_log "
             "WHERE item_id = 's1:t0' ORDER BY id DESC LIMIT 1"
         ).fetchone()

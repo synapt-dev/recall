@@ -354,9 +354,15 @@
       <p>List or resolve knowledge contradictions.</p>
       <table>
         <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
-        <tr><td><code>action</code></td><td>string</td><td>"list"</td><td>"list" or "resolve"</td></tr>
+        <tr><td><code>action</code></td><td>string</td><td>"list"</td><td>"list" (show pending), "resolve" (confirm/dismiss one), "flag" (report a new contradiction), "forget" (archive a knowledge node; removes from search) or "correct" (supersede a knowledge node with updated content)</td></tr>
         <tr><td><code>contradiction_id</code></td><td>int</td><td>none</td><td>ID of contradiction to resolve</td></tr>
-        <tr><td><code>resolution</code></td><td>string</td><td>"confirmed"</td><td>"confirmed" or "dismissed"</td></tr>
+        <tr><td><code>resolution</code></td><td>string</td><td>"confirmed"</td><td>"confirmed" (supersede old node) or "dismissed" (keep old node); for a contested pair, "candidate_wins", "existing_wins" or "false_positive"</td></tr>
+        <tr><td><code>claim</code></td><td>string</td><td>none</td><td>Free-text description of conflicting information (for "flag"; the system searches for matching knowledge nodes automatically). For "correct", used as the new content when <code>new_content</code> is omitted</td></tr>
+        <tr><td><code>new_content</code></td><td>string</td><td>none</td><td>The correct/updated information (for "flag" and "correct"); if omitted, <code>claim</code> is used. "correct" needs one of the two</td></tr>
+        <tr><td><code>old_node_id</code></td><td>string</td><td>none</td><td>Knowledge node ID. Optional for "flag" (if omitted, the system searches for matching nodes); required for "forget" and "correct"</td></tr>
+        <tr><td><code>reason</code></td><td>string</td><td>none</td><td>Why this is a contradiction (for "flag"); for "correct", defaults to "Manual correction"</td></tr>
+        <tr><td><code>limit</code></td><td>int</td><td>5</td><td>Rows to show for "list"; 0 shows all. A footer names shown, pending and withheld when rows are cut</td></tr>
+        <tr><td><code>order</code></td><td>string</td><td>"oldest"</td><td>"oldest" or "newest" for "list", by detected_at then id</td></tr>
       </table>
     </div>
 

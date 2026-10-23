@@ -18,13 +18,33 @@ from __future__ import annotations
 import heapq
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from synapt.recall.sharding import is_sharded, list_shards
+from synapt.recall.sharding import is_sharded, list_shards, shard_name_for_index
 from synapt.recall.storage import RecallDB
+
+
+def _wal_checkpoint_complete(conn: sqlite3.Connection, attempts: int = 3, wait_ms: int = 200) -> bool:
+    """Run ``wal_checkpoint(TRUNCATE)`` and read its row: True only when the main file holds every WAL frame.
+    A reader's open transaction makes it return busy or checkpoint fewer frames than the log holds; a short
+    bounded retry gives a brief reader time to finish. The connection's busy timeout is lowered for the attempts so
+    a long reader cannot hold the save for the full timeout."""
+    (prior_timeout,) = conn.execute("PRAGMA busy_timeout").fetchone()
+    conn.execute(f"PRAGMA busy_timeout={int(wait_ms)}")
+    try:
+        for attempt in range(attempts):
+            busy, log_frames, checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if not busy and checkpointed >= log_frames:
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(wait_ms / 1000)
+        return False
+    finally:
+        conn.execute(f"PRAGMA busy_timeout={int(prior_timeout)}")
 
 
 def _timestamp_activity(value: str) -> tuple[int, str]:
@@ -36,6 +56,29 @@ def _timestamp_activity(value: str) -> tuple[int, str]:
         return (1, f"{parsed.timestamp():020.6f}")
     except (AttributeError, TypeError, ValueError, OverflowError):
         return (0, value or "")
+
+
+# The RecallDB members a ShardedRecallDB answers from index.db through ``__getattr__``. Every one reads index tables
+# only; a member whose SQL names ``chunks`` is overridden in ShardedRecallDB instead, because index.db's chunks table
+# is empty or a frozen pre-split copy. Anything not listed, ``_conn`` included, is refused rather than read from the
+# wrong file (tests/recall/test_sharded_getattr_refusal.py holds the list to that rule).
+INDEX_ONLY_FALLTHROUGH = frozenset({
+    "access_log_count", "access_summary", "archive_cold_clusters", "chunk_link_count", "classify_all_clusters",
+    "clear_query_tail", "clear_query_tail_session", "cluster_count", "cluster_fts_search", "clusters_for_chunk",
+    "compact_access_log", "decay_distribution", "find_summary_by_content_hash", "get_access_stats",
+    "get_cached_shard_overview", "get_chunk_cluster_id", "get_chunk_cluster_map", "get_cluster",
+    "get_cluster_chunks", "get_cluster_summary", "get_cross_links_batch", "get_knowledge_embeddings",
+    "get_knowledge_embeddings_by_id", "get_knowledge_embeddings_by_ids", "get_knowledge_rowid",
+    "get_knowledge_rowids_without_embeddings", "get_metadata", "has_chunk_links", "items_at_tier", "knowledge_count",
+    "knowledge_lineage", "load_clusters", "load_query_tail_chunk_by_rowid", "load_query_tail_chunks",
+    "load_query_tail_chunks_by_rowids", "load_query_tail_chunks_for_source", "load_query_tail_cursor",
+    "load_query_tail_cursor_for_session", "load_query_tail_cursors", "load_query_tail_overview_rows",
+    "load_timeline_clusters", "mtime", "path", "query_tail_chunk_count", "query_tail_chunk_refs",
+    "query_tail_fts_search", "query_tail_fts_search_by_session", "query_tail_fts_search_raw",
+    "query_tail_id_rowid_map", "query_tail_suppressed_sessions", "recompute_decay_scores", "replace_query_tail",
+    "save_chunk_links", "save_knowledge_embeddings", "set_cached_shard_overview", "set_metadata",
+    "update_promotion_tier",
+})
 
 
 class ShardedRecallDB:
@@ -134,16 +177,18 @@ class ShardedRecallDB:
         return cls(db, [])
 
     @classmethod
-    def open_readonly(cls, index_dir: Path) -> ShardedRecallDB:
+    def open_readonly(cls, index_dir: Path, immutable: bool = False) -> ShardedRecallDB:
         """Open an existing layout without DDL, migrations, or write access.
+
+        immutable is passed to RecallDB.open_readonly for every file.
 
         Follows CURRENT the same way ``open`` does -- see its docstring.
         """
         if is_sharded(index_dir):
-            index_db = RecallDB.open_readonly(index_dir / "index.db")
+            index_db = RecallDB.open_readonly(index_dir / "index.db", immutable=immutable)
             try:
                 data_dbs = [
-                    RecallDB.open_readonly(p)
+                    RecallDB.open_readonly(p, immutable=immutable)
                     for p in list_shards(cls._data_shard_dir(index_dir))
                 ]
             except Exception:
@@ -151,7 +196,7 @@ class ShardedRecallDB:
                 raise
             return cls(index_db, data_dbs)
 
-        return cls(RecallDB.open_readonly(index_dir / "recall.db"), [])
+        return cls(RecallDB.open_readonly(index_dir / "recall.db", immutable=immutable), [])
 
     @staticmethod
     def _data_shard_dir(index_dir: Path) -> Path:
@@ -456,6 +501,51 @@ class ShardedRecallDB:
                     chunk["agent_id"]
                 }
         return result
+
+    def chunk_location(self, chunk_id: str):  # noqa: ANN201
+        """``RecallDB.chunk_location`` read from the overlay first, then each chunk shard; never ``index.db``'s
+        chunks table. A base chunk of a session the overlay suppresses is not visible."""
+        row = self._index.chunk_location(chunk_id, table="query_tail_chunks")
+        if row is not None:
+            return row
+        suppressed = self._suppressed_base_sessions()
+        for _, db in self._iter_data_shards():
+            row = db.chunk_location(chunk_id)
+            if row is not None and row[3] not in suppressed:
+                return row
+        return None
+
+    def session_turn_spans(self) -> list[dict]:
+        """``RecallDB.session_turn_spans`` merged across the chunk shards, plus the query-tail overlay.
+
+        Same visibility rule as ``session_overview``: a session the overlay suppresses is read from the overlay
+        only. ``index.db``'s own chunks table is never read.
+        """
+        merged: dict[str, dict] = {}
+
+        def fold(session_id: str, first_ts: str, last_ts: str, count: int) -> None:
+            current = merged.get(session_id)
+            if current is None:
+                merged[session_id] = {
+                    "session_id": session_id,
+                    "first_ts": first_ts,
+                    "last_ts": last_ts,
+                    "chunk_count": count,
+                }
+                return
+            current["first_ts"] = min(current["first_ts"], first_ts)
+            current["last_ts"] = max(current["last_ts"], last_ts)
+            current["chunk_count"] += count
+
+        suppressed = self._suppressed_base_sessions()
+        for _, db in self._iter_data_shards():
+            for span in db.session_turn_spans():
+                if span["session_id"] not in suppressed:
+                    fold(span["session_id"], span["first_ts"], span["last_ts"], span["chunk_count"])
+        for row in self._index.load_query_tail_overview_rows():
+            if row["turn_index"] >= 0:
+                fold(row["session_id"], row["timestamp"], row["timestamp"], 1)
+        return sorted(merged.values(), key=lambda span: span["first_ts"])
 
     def session_activity(self) -> dict[str, tuple[int, str]]:
         """Return newest activity per session across all chunk shards."""
@@ -903,8 +993,17 @@ class ShardedRecallDB:
             for rowid, emb in embeddings.items():
                 shard_idx, local_rowid = self._decode_chunk_rowid(rowid)
                 grouped.setdefault(shard_idx, {})[local_rowid] = emb
+            not_checkpointed: list[str] = []
             for shard_idx, shard_embs in grouped.items():
-                self._data_dbs[shard_idx - 1].save_embeddings(shard_embs)
+                db = self._data_dbs[shard_idx - 1]
+                db.save_embeddings(shard_embs)
+                # The flat mirror copies main files only, so the write must leave the WAL first. A reader holding a
+                # transaction stops the checkpoint short, and a main file it did not reach must never be copied.
+                if not _wal_checkpoint_complete(db._conn):
+                    not_checkpointed.append(shard_name_for_index(shard_idx))
+            from synapt.recall.generations import resync_flat_layout
+
+            resync_flat_layout(self._index.path.parent, not_checkpointed=not_checkpointed)
             return
         self._index.save_embeddings(embeddings)
 
@@ -975,8 +1074,83 @@ class ShardedRecallDB:
     # -- Passthrough for any method not explicitly wrapped ------------------
 
     def __getattr__(self, name: str):
-        """Fall through to index DB for any unhandled method."""
-        return getattr(self._index, name)
+        """Fall through to index.db for the declared index-only members; refuse everything else."""
+        if name in INDEX_ONLY_FALLTHROUGH:
+            return getattr(self._index, name)
+        raise AttributeError(
+            f"ShardedRecallDB has no {name!r}: only the index-only members in INDEX_ONLY_FALLTHROUGH fall through to "
+            "index.db, whose chunks table is not the store's. Use index_conn for index tables; read chunks through "
+            "a ShardedRecallDB method."
+        )
+
+    @property
+    def index_conn(self):  # noqa: ANN201
+        """index.db's connection, for its INDEX tables only (see ``RecallDB.index_conn``)."""
+        return self._index._conn
+
+    def _chunk_rows_by_ids(self, chunk_ids: list[str]) -> list:
+        """Rows for the given chunk ids from the overlay, then the shards; a base chunk of a session the overlay
+        suppresses is not visible."""
+        rows = list(self._index.chunk_rows_by_ids(chunk_ids, table="query_tail_chunks"))
+        found = {row["id"] for row in rows}
+        missing = [cid for cid in chunk_ids if cid not in found]
+        if missing:
+            suppressed = self._suppressed_base_sessions()
+            for _, db in self._iter_data_shards():
+                for row in db.chunk_rows_by_ids(missing):
+                    if row["id"] not in found and row["session_id"] not in suppressed:
+                        rows.append(row)
+                        found.add(row["id"])
+        return rows
+
+    def get_cluster_chunk_texts(self, cluster_id: str) -> list[dict]:
+        """``RecallDB.get_cluster_chunk_texts`` with the members' text read from the shards."""
+        ids = self._index.load_cluster_member_chunk_ids([cluster_id]).get(cluster_id, [])
+        rows = sorted(self._chunk_rows_by_ids(ids), key=lambda row: row["timestamp"] or "")
+        return [
+            {key: row[key] for key in ("user_text", "assistant_text", "tools_used", "files_touched")}
+            for row in rows
+        ]
+
+    def chunk_fts_to_clusters(
+        self, query: str, limit: int = 50, include_archived: bool = False,
+    ) -> list[tuple[str, float]]:
+        """``RecallDB.chunk_fts_to_clusters`` over the shards' FTS, mapped to clusters through index.db."""
+        from synapt.recall.storage import _escape_fts_query
+
+        fts_query = _escape_fts_query(query, use_or=True)
+        if not fts_query:
+            return []
+        try:
+            return self._chunk_fts_to_clusters(fts_query, limit, include_archived)
+        except Exception:  # same contract as RecallDB.chunk_fts_to_clusters: a failed fallback finds nothing
+            return []
+
+    def _chunk_fts_to_clusters(
+        self, fts_query: str, limit: int, include_archived: bool,
+    ) -> list[tuple[str, float]]:
+        hits = self.fts_search_raw(fts_query, limit=limit * 3)
+        if not hits:
+            return []
+        chunks = self.load_chunks_by_rowids([rowid for rowid, _ in hits])
+        score_by_chunk: dict[str, float] = {}
+        for rowid, score in hits:
+            chunk = chunks.get(rowid)
+            if chunk is not None:
+                score_by_chunk[chunk.id] = max(score, score_by_chunk.get(chunk.id, score))
+        best: dict[str, float] = {}
+        for chunk_id, cluster_id in self._index.clusters_for_chunk_ids(list(score_by_chunk), include_archived):
+            score = score_by_chunk[chunk_id]
+            if score > best.get(cluster_id, float("-inf")):
+                best[cluster_id] = score
+        return sorted(best.items(), key=lambda item: item[1], reverse=True)[:limit]
+
+    def create_singleton_cluster(self, chunk_id: str, topic: str = "") -> str | None:
+        """``RecallDB.create_singleton_cluster`` for a chunk found in the shards (or the overlay)."""
+        rows = self._chunk_rows_by_ids([chunk_id])
+        if not rows:
+            return None
+        return self._index.create_singleton_cluster(chunk_id, topic, chunk_user_text=rows[0]["user_text"] or "")
 
     # -- Lifecycle ---------------------------------------------------------
 

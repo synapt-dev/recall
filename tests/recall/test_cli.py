@@ -1136,16 +1136,15 @@ def test_cmd_journal_write_carries_forward_unresolved_next_steps(tmp_path, capsy
 
 
 def test_channel_cli_dispatches_read_with_defaults():
-    """CLI dispatches channel read with default args."""
+    """CLI dispatches channel read with default args.
+
+    The parser leaves channel and --limit unset (None) so a given input can be
+    told from a default; cmd_channel resolves them to dev and 20.
+    """
     with patch.object(sys, "argv", ["synapt", "channel", "read"]), \
-         patch("synapt.recall.cli.cmd_channel") as mock:
+         patch("synapt.recall.channel.channel_read", return_value="") as mock:
         main()
-    mock.assert_called_once()
-    args = mock.call_args[0][0]
-    assert args.action == "read"
-    assert args.channel == "dev"
-    assert args.limit == 20
-    assert args.detail is None
+    mock.assert_called_once_with(channel="dev", limit=20, since=None, surface="cli")
 
 
 def test_channel_cli_read_with_detail_flag():

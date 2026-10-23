@@ -4,8 +4,11 @@ indexing via the query_tail overlay, and the cmd_catchup wiring that drives it."
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from synapt.recall.core import parse_transcript
 from synapt.recall.query_freshness import (
@@ -433,7 +436,10 @@ def test_catchup_path_completes_a_100mb_file_within_one_call(tmp_path):
         db.close()
 
 
-def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp_path):
+@pytest.mark.parametrize("waiter_poll_seconds", [None, 2.5], ids=["host_poll", "late_poll"])
+def test_a_waiting_builder_gets_the_lock_within_two_lock_cycles_of_a_chunked_catchup_call(
+    tmp_path, waiter_poll_seconds
+):
     """Releasing and immediately re-acquiring the build lock in the same
     tight loop starves a real waiter (measured:
     a timeout=15 waiter never got in during a 200 MB chunked call, since the
@@ -447,7 +453,8 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
     idle gaps while the indexer keeps churning" model would predict): the
     indexer notices the waiter and stops ITSELF almost immediately (~0.15s
     into an 8s call, having made real partial progress), rather than running
-    the full span. The waiter's bound (<2s) is what's asserted; how the
+    the full span. The indexer's lock cycles while the waiter waits are
+    what's asserted (at most two, not a wall-time bound); how the
     indexer's own call ends (yielded early vs happened to finish) is
     asserted separately, from the indexer's own reported reason.
 
@@ -511,9 +518,24 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
     waiter_result: dict = {}
     indexer_result: dict = {}
 
+    # A loaded CI host can wake the waiter from its own poll sleep late
+    # (windows-latest 3.10 missed the old 2s wall bound with the indexer
+    # yielding correctly). late_poll stands in for that host: only the
+    # waiter thread's sleeps are stretched, the indexer runs as usual.
+    _real_sleep = time_module.sleep
+
+    def _late_sleep(seconds):
+        if threading.current_thread() is waiter_thread:
+            seconds = max(seconds, waiter_poll_seconds)
+        _real_sleep(seconds)
+
     def _waiter():
         waiter_result["start"] = time_module.monotonic()
-        fd = _acquire_build_lock(data_dir, timeout=15.0)
+        if waiter_poll_seconds is None:
+            fd = _acquire_build_lock(data_dir, timeout=15.0)
+        else:
+            with patch.object(time_module, "sleep", _late_sleep):
+                fd = _acquire_build_lock(data_dir, timeout=15.0)
         waiter_result["acquired_at"] = time_module.monotonic()
         waiter_result["fd"] = fd
         if fd is not None:
@@ -533,15 +555,24 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
     # replaces the literal.
     import synapt.recall.query_freshness as _qf_module
 
+    # The same wrapper counts the indexer's lock cycles taken while a
+    # waiting marker is present: that count, not wall time, is what the
+    # yield bounds, so a slow host cannot move it.
+    from synapt.recall.cli import build_lock_has_waiter
+
     lock_cycle_started = threading.Event()
     _real_acquire_build_lock = _qf_module._acquire_build_lock
+    cycles_with_waiter = [0]
 
     def _acquire_and_signal(*args, **kwargs):
         fd = _real_acquire_build_lock(*args, **kwargs)
         if fd is not None:
             lock_cycle_started.set()
+            if build_lock_has_waiter(data_dir):
+                cycles_with_waiter[0] += 1
         return fd
 
+    waiter_thread = threading.Thread(target=_waiter)
     readiness_patch = patch.object(_qf_module, "_acquire_build_lock", _acquire_and_signal)
     readiness_patch.start()
     try:
@@ -551,22 +582,21 @@ def test_a_waiting_builder_gets_the_lock_within_2s_of_a_chunked_catchup_call(tmp
             raise AssertionError(
                 "indexer never acquired the build lock within 10s of starting"
             )
+        waiter_thread.start()
+        waiter_thread.join(timeout=17.0)
+        indexer_thread.join(timeout=35.0)
     finally:
         readiness_patch.stop()
-
-    waiter_thread = threading.Thread(target=_waiter)
-    waiter_thread.start()
-    waiter_thread.join(timeout=17.0)
-    indexer_thread.join(timeout=35.0)
 
     assert "acquired_at" in waiter_result, "waiter never returned from _acquire_build_lock"
     assert waiter_result["fd"] is not None, "waiter timed out without acquiring the lock"
     assert "value" in indexer_result, "indexer thread never finished"
-    wait_duration = waiter_result["acquired_at"] - waiter_result["start"]
-    assert wait_duration < 2.0, (
-        f"waiting builder took {wait_duration:.2f}s to get the lock "
-        f"(should be well under the yield-check's own poll interval; "
-        f"without the fix this is close to the full ~8s call duration)"
+    # At most the cycle already past its marker check when the marker
+    # landed, plus one more if the marker landed between that check and
+    # the next acquire; without the yield this is thousands.
+    assert cycles_with_waiter[0] <= 2, (
+        f"indexer took {cycles_with_waiter[0]} lock cycles with a builder "
+        f"waiting (should yield within two)"
     )
 
     # The indexer's own call can legitimately end three ways once the

@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import time
@@ -48,6 +49,10 @@ _ONLINE_MINUTES = 5       # < 5 min  => online
 _IDLE_MINUTES = 30        # 5-30 min => idle
 _AWAY_MINUTES = 120       # 30-120 min => away
                           # > 120 min => offline (auto-leave)
+# Size bounds for a channel read, in characters of rendered body. Both are guesses
+# (~2k / ~8k tokens at 4 chars/token) to be measured; `limit` bounds only the count.
+MAX_BODY_CHARS = 8_000    # per message, at every detail level, actionable included
+MAX_READ_CHARS = 32_000   # per read; newest messages win, older ones drop to a ref
 _JOIN_MENTION_LOOKBACK_MINUTES = 10  # How far back to scan for @mentions on join
 
 # ---------------------------------------------------------------------------
@@ -106,6 +111,44 @@ def register_message_hook(
     A downstream layer may use this to register additional handlers.
     """
     _message_posted_hooks.append(hook)
+
+
+_search_ranker: Callable[[str, list[dict]], list[dict]] | None = None
+
+
+def set_search_ranker(
+    ranker: Callable[[str, list[dict]], list[dict]] | None,
+) -> Callable[[str, list[dict]], list[dict]] | None:
+    """Install a channel search ranker; returns the previous one.
+
+    The ranker receives the query and every matched result (before the
+    max_results cut) and returns them in any order; it may drop results.
+    It may not add one: a returned result that was not passed in, or one
+    returned twice, refuses the whole ranking. On a refusal or a raise the
+    default order is used. With no ranker installed the order is unchanged.
+    """
+    global _search_ranker
+    previous = _search_ranker
+    _search_ranker = ranker
+    return previous
+
+
+def _apply_search_ranker(query: str, results: list[dict]) -> list[dict]:
+    ranker = _search_ranker
+    if ranker is None:
+        return results
+    by_key = {(r["channel"], r["message_id"]): r for r in results}
+    # Everything that touches the ranker's output is guarded: it is foreign
+    # data, so a key that is missing or unhashable (a list channel) raises
+    # here. by_key above is built from our own results and stays unguarded.
+    try:
+        ranked = list(ranker(query, [dict(r) for r in results]))
+        keys = [(r["channel"], r["message_id"]) for r in ranked]
+        if len(set(keys)) != len(keys) or any(k not in by_key for k in keys):
+            return results
+    except Exception:
+        return results
+    return [by_key[k] for k in keys]
 
 
 def _clear_message_hooks() -> None:
@@ -305,14 +348,147 @@ def _filename_to_channel(stem: str) -> str:
     return stem.replace("--", ":")
 
 
+def _normalize_channel_name(channel: str) -> str:
+    """Strip leading '#' so '#dev' and 'dev' name one channel.
+
+    '#dev' is how a channel is written in prose; kept verbatim it opened a
+    separate ``#dev.jsonl`` that readers of 'dev' never saw. A lone '#' is
+    left as given rather than turned into an empty name.
+    """
+    return channel.lstrip("#") or channel
+
+
+class SharedRoomMapError(RuntimeError):
+    """The shared-room map names a room but cannot place it.
+
+    Raised instead of falling back to the caller's own store: a fallback
+    would put the post exactly where the map exists to keep it out of.
+    """
+
+
+def _room_map_path() -> Path:
+    """Return the shared-room map: ``SYNAPT_ROOM_MAP``, else ``~/.synapt/channels/rooms.toml``."""
+    override = os.environ.get("SYNAPT_ROOM_MAP")
+    if override:
+        return Path(override)
+    return Path.home() / ".synapt" / "channels" / "rooms.toml"
+
+
+def _load_room_map() -> dict[str, str]:
+    """Read ``[rooms]`` from the map file; an absent file maps nothing."""
+    path = _room_map_path()
+    if not path.is_file():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        with open(path, "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SharedRoomMapError(f"cannot read the shared-room map {path}: {exc}") from exc
+    rooms = cfg.get("rooms", {})
+    if not isinstance(rooms, dict):
+        raise SharedRoomMapError(f"[rooms] in {path} is not a table")
+    # Keys are looked up by normalised channel name, so a key written the way
+    # prose names the room ("#head") must map that room too, not be skipped.
+    normalised: dict[str, str] = {}
+    for key, target in rooms.items():
+        name = _normalize_channel_name(key)
+        if name in normalised and normalised[name] != target:
+            raise SharedRoomMapError(f"room '{name}' is mapped twice in {path}")
+        normalised[name] = target
+    return normalised
+
+
+def _mapped_room_dir(channel: str) -> Path | None:
+    """Return the store directory the map assigns to *channel*, or None.
+
+    A room shared across gripspaces (``#head``) lives in one store, and the
+    map names it as ``<org>/<project>`` under ``~/.synapt/channels``. Only
+    the room's JSONL log moves; presence, cursors and pins stay in the
+    caller's local state db. A mapped room whose directory is missing or
+    malformed is refused by name.
+    """
+    name = _normalize_channel_name(channel)
+    rooms = _load_room_map()
+    if name not in rooms:
+        return None
+    target = rooms[name]
+    parts = target.split("/") if isinstance(target, str) else []
+    if len(parts) != 2 or any(p in ("", ".", "..") for p in parts):
+        raise SharedRoomMapError(
+            f"room '{name}' in {_room_map_path()} must name '<org>/<project>', got {target!r}"
+        )
+    room_dir = Path.home() / ".synapt" / "channels" / parts[0] / parts[1]
+    if not room_dir.is_dir():
+        raise SharedRoomMapError(
+            f"room '{name}' is mapped to {room_dir} in {_room_map_path()}, and that "
+            f"directory does not exist; refusing rather than writing this room to "
+            f"another store"
+        )
+    return _guard_store_path("resolve_room_dir", room_dir)
+
+
+def _room_channels_dir(channel: str, project_dir: Path | None = None) -> Path:
+    """Return the directory holding *channel*'s log.
+
+    An explicit ``SYNAPT_SHARED_CHANNELS_DIR`` still pins every room; otherwise
+    a room in the shared-room map resolves to its mapped store, and every other
+    room to this caller's store.
+    """
+    if _shared_channels_dir() is None:
+        mapped = _mapped_room_dir(channel)
+        if mapped is not None:
+            return mapped
+    return _channels_dir(project_dir)
+
+
+def _mapped_room_paths(project_dir: Path | None = None) -> list[Path]:
+    """Return the log files of mapped rooms that live outside this caller's store."""
+    if _shared_channels_dir() is not None:
+        return []
+    own = _channels_dir(project_dir).resolve()
+    paths = []
+    for name in sorted(_load_room_map()):
+        room_dir = _mapped_room_dir(name)
+        if room_dir is not None and room_dir.resolve() != own:
+            path = room_dir / f"{_channel_to_filename(name)}.jsonl"
+            if path.exists():
+                paths.append(path)
+    return paths
+
+
+class ChannelNameError(ValueError):
+    """A room name whose log file would not sit inside its store directory."""
+
+
+def _contained_channel_file(ch_dir: Path, name: str) -> Path:
+    """Return ``ch_dir / f"{name}.jsonl"``, or raise ChannelNameError.
+
+    The joined path must resolve under ``ch_dir`` itself. NUL is refused, and
+    so is a backslash, since on Windows it is a path separator.
+    """
+    if "\0" in name or "\\" in name:
+        raise ChannelNameError(f"refusing room name {name!r}: it holds a NUL or a backslash")
+    path = ch_dir / f"{name}.jsonl"
+    if not path.resolve().is_relative_to(ch_dir.resolve()):
+        raise ChannelNameError(f"refusing room name {name!r}: it would leave the store directory")
+    if "/" in name:
+        # A room is one file in the store, never a path into a subdirectory another writer owns.
+        raise ChannelNameError(f"refusing room name {name!r}: it holds a '/'")
+    return path
+
+
 def _channel_path(channel: str, project_dir: Path | None = None) -> Path:
     """Return the JSONL log path for a channel."""
-    ch_dir = _channels_dir(project_dir)
+    ch_dir = _room_channels_dir(channel, project_dir)
     safe_name = _channel_to_filename(channel)
-    new_path = ch_dir / f"{safe_name}.jsonl"
+    new_path = _contained_channel_file(ch_dir, safe_name)
     # Migrate legacy colon-format files (not valid on Windows)
     if ":" in channel and not new_path.exists():
-        old_path = ch_dir / f"{channel}.jsonl"
+        old_path = _contained_channel_file(ch_dir, channel)
         if old_path.exists():
             old_path.rename(new_path)
     return new_path
@@ -728,6 +904,46 @@ def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+def _since_instant(s: str) -> datetime | None:
+    """Parse a ``--since`` value to an aware instant; a naive value is UTC.
+
+    Returns None when *s* is not an ISO 8601 timestamp.
+    """
+    try:
+        dt = _parse_iso(s)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+class SinceError(ValueError):
+    """A ``since`` value that is not a timestamp; boundaries print it and exit 2."""
+
+
+def _since_or_refuse(since: str) -> datetime:
+    """Parse ``since`` once; refuse a value that is not a timestamp."""
+    since_dt = _since_instant(since)
+    if since_dt is None:
+        raise SinceError(f"refusing --since {since!r}: it is not an ISO 8601 timestamp")
+    return since_dt
+
+
+def _since_or_epoch(since: str) -> datetime:
+    """Parse a stored cursor; one that is not a timestamp reads as the epoch.
+
+    Stored values never refuse: only a ``since`` the user typed does.
+    """
+    return _since_instant(since) or datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _posted_after(timestamp: object, since_dt: datetime) -> bool:
+    """True when a post's timestamp is a later instant than ``since_dt``."""
+    posted = _since_instant(str(timestamp))
+    return posted is not None and posted > since_dt
+
+
 # ---------------------------------------------------------------------------
 # Message dataclass
 # ---------------------------------------------------------------------------
@@ -1103,6 +1319,82 @@ def _extract_mentions(text: str) -> list[str]:
     return list(dict.fromkeys(_MENTION_RE.findall(text)))
 
 
+# A post id, optionally preceded by the channel it lives in ("dev m_1a2b3c4d"
+# or "#dev m_1a2b3c4d"). The word before an id is read from a short window
+# behind it, never by an optional group tried at every position, and another
+# id is never taken as that word.
+_POST_ID_RE = re.compile(r"\bm_[0-9a-f]{8}\b")
+_WORD_BEFORE_RE = re.compile(r"#?([\w.-]+)\s+$")
+
+
+def extract_post_refs(text: str) -> list[tuple[str | None, str]]:
+    """Extract cited post ids from message text, in order, deduplicated.
+
+    Returns (word_before, post_id) pairs. ``word_before`` is the word just
+    before the id, or None; whether it names a channel is decided at
+    resolution, against the channels that exist.
+    """
+    refs = []
+    for m in _POST_ID_RE.finditer(text):
+        w = _WORD_BEFORE_RE.search(text[max(0, m.start() - 64):m.start()])
+        word = w.group(1) if w else None
+        if word is not None and _POST_ID_RE.fullmatch(word):
+            word = None
+        refs.append((word, m.group(0)))
+    return list(dict.fromkeys(refs))
+
+
+def build_citation_graph(
+    posts: dict[str, list[tuple[str, str]]],
+) -> dict:
+    """Build the citation graph from ``{channel: [(post_id, body), ...]}``.
+
+    Each cited id resolves to one post, in this order:
+      (a) a channel named right before the id, if that channel holds it;
+      (b) else the citing post's own channel, if it holds it;
+      (c) else the store, only if exactly one channel holds it;
+      (d) else it is ambiguous: kept apart and never attributed to a post.
+
+    Returns a dict with:
+      edges: list of (citing_channel, citing_id, cited_channel, cited_id)
+      ambiguous: list of (citing_channel, citing_id, cited_id)
+      cited_by: {(channel, post_id): int}, the count of resolved citations
+    """
+    holders: dict[str, set[str]] = {}
+    for ch, items in posts.items():
+        for pid, _body in items:
+            holders.setdefault(pid, set()).add(ch)
+
+    edges: list[tuple[str, str, str, str]] = []
+    ambiguous: list[tuple[str, str, str]] = []
+    cited_by: dict[tuple[str, str], int] = {
+        (ch, pid): 0 for ch, items in posts.items() for pid, _ in items
+    }
+    for ch, items in posts.items():
+        for pid, body in items:
+            seen: set[tuple[str, str] | tuple[None, str]] = set()
+            for word, ref in extract_post_refs(body):
+                where = holders.get(ref, set())
+                named = _normalize_channel_name(word) if word else None
+                if named in where:
+                    target = named
+                elif ch in where:
+                    target = ch
+                elif len(where) == 1:
+                    target = next(iter(where))
+                else:
+                    target = None
+                if (target, ref) in seen:
+                    continue
+                seen.add((target, ref))
+                if target is None:
+                    ambiguous.append((ch, pid, ref))
+                    continue
+                edges.append((ch, pid, target, ref))
+                cited_by[(target, ref)] += 1
+    return {"edges": edges, "ambiguous": ambiguous, "cited_by": cited_by}
+
+
 def _store_mentions(
     msg: ChannelMessage, project_dir: Path | None = None,
 ) -> None:
@@ -1254,7 +1546,8 @@ def _append_message(
     project_dir: Path | None = None,
     channels_dir: Path | None = None,
     conn: sqlite3.Connection | None = None,
-) -> None:
+    hook_errors: list[Exception] | None = None,
+) -> Exception | None:
     """Append a message to a channel's JSONL log with file locking.
 
     Auto-generates a message ID if not already set.
@@ -1264,17 +1557,19 @@ def _append_message(
     When ``conn`` is provided it is reused for dirty-flag writes instead of
     opening a new connection (avoids SQLite lock contention when the caller
     already holds a transaction).
+
+    The written line is the message. An error after it (setting the unread
+    flags) is returned, not raised, so a caller never reports a message that
+    is in the log as failed. A hook that raises is still best-effort; when
+    ``hook_errors`` is given each such error is appended to it.
     """
-    # Unescape literal \n and \t that LLM tool calls often produce.
-    # MCP arguments are JSON strings, but models sometimes double-escape
-    # newlines (sending "\\n" instead of "\n"), resulting in literal
-    # backslash-n in the body.  Fixes recall#493.
-    if msg.body:
-        msg.body = msg.body.replace("\\n", "\n").replace("\\t", "\t")
+    # The body is stored exactly as given. An earlier unescape here turned
+    # every literal backslash-n / backslash-t into a newline / tab, which
+    # silently shortened any body that carried them (code, paths, logs).
     if not msg.id:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
     if channels_dir is not None:
-        path = channels_dir / f"{_channel_to_filename(msg.channel)}.jsonl"
+        path = _contained_channel_file(channels_dir, _channel_to_filename(msg.channel))
     else:
         path = _channel_path(msg.channel, project_dir)
     # An explicit channels_dir bypasses resolution entirely, so the write
@@ -1287,13 +1582,20 @@ def _append_message(
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
     # Set dirty flag for all other members of this channel (OSS substrate)
-    _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+    try:
+        _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
+        state_error = None
+    except Exception as exc:
+        state_error = exc
     # Fire registered hooks (mention storage, wake emission, etc.)
     for hook in _message_posted_hooks:
         try:
             hook(msg, project_dir)
-        except Exception:
-            pass  # hooks are best-effort
+        except Exception as exc:
+            # hooks are best-effort
+            if hook_errors is not None:
+                hook_errors.append(exc)
+    return state_error
 
 
 def _set_dirty_flags(
@@ -1495,6 +1797,7 @@ def _read_messages(
 ) -> list[ChannelMessage]:
     """Read all messages from a channel JSONL file, optionally filtered by timestamp."""
     messages: list[ChannelMessage] = []
+    since_dt = _since_or_epoch(since) if since else None
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -1503,7 +1806,7 @@ def _read_messages(
                     continue
                 try:
                     msg = ChannelMessage.from_dict(json.loads(line))
-                    if since and msg.timestamp <= since:
+                    if since_dt and not _posted_after(msg.timestamp, since_dt):
                         continue
                     messages.append(msg)
                 except (json.JSONDecodeError, TypeError):
@@ -1551,6 +1854,7 @@ def _read_last_timestamp(path: Path) -> str | None:
 def _count_messages_since(path: Path, since: str) -> int:
     """Count JSONL lines with timestamp > since. Used for unread counts."""
     count = 0
+    since_dt = _since_or_epoch(since)
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -1559,7 +1863,7 @@ def _count_messages_since(path: Path, since: str) -> int:
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("timestamp", "") > since:
+                    if _posted_after(data.get("timestamp", ""), since_dt):
                         count += 1
                 except (json.JSONDecodeError, TypeError):
                     continue
@@ -1588,6 +1892,7 @@ def channel_join(
             Also derives a distinct agent_id so agents sharing a griptree
             with a human session get their own presence row (recall#590).
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     griptree = _resolve_griptree(project_dir)
     display = display_name or _resolve_display_name(project_dir)
@@ -1776,6 +2081,7 @@ def channel_leave(
     display_name: str | None = None,
 ) -> str:
     """Leave a channel."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
 
@@ -1912,8 +2218,14 @@ def channel_post(
     channels_dir: Path | None = None,
     display_name: str | None = None,
     msg_type: str = "message",
+    *,
+    _notes: list[str] | None = None,
 ) -> str:
     """Post a message to a channel. If pin=True, also pin the message.
+
+    ``_notes`` (internal) collects the "posted; ..." text when the line
+    landed but something after it did not, so a caller such as broadcast
+    can carry it without parsing the result.
 
     ``channels_dir`` overrides the JSONL write location so messages can be
     posted to cross-project channels (e.g. from the dashboard switching views).
@@ -1923,6 +2235,7 @@ def channel_post(
     tool handler) can pass the agent's declared name directly.  Also
     derives a distinct agent_id per name (recall#590).
     """
+    channel = _normalize_channel_name(channel)
     now = _now_iso()
     if agent_name:
         # Explicit caller identity (e.g. the human TUI passes agent_name="human").
@@ -1949,29 +2262,57 @@ def channel_post(
     if attachment_paths:
         msg.id = _generate_msg_id(msg.timestamp, msg.from_agent, msg.body)
         msg.attachments = _copy_attachments(msg.id, attachment_paths, project_dir)
-    _append_message(msg, project_dir, channels_dir=channels_dir)
+    # Once the line is in the log the post has happened: every error from
+    # here on is reported beside the id, never raised, so a caller does not
+    # post again.
+    hook_errors: list[Exception] = []
+    state_error = _append_message(
+        msg, project_dir, channels_dir=channels_dir, hook_errors=hook_errors,
+    )
 
-    conn = _open_db(project_dir)
+    pinned = False
     try:
-        conn.execute(
-            "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
-            (now, aid),
-        )
-        if pin:
+        conn = _open_db(project_dir)
+        try:
             conn.execute(
-                "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (channel, message, msg.id, aid, now),
+                "UPDATE presence SET last_seen = ?, status = 'online' WHERE agent_id = ?",
+                (now, aid),
             )
-        conn.commit()
-    finally:
-        conn.close()
+            if pin:
+                conn.execute(
+                    "INSERT INTO pins (channel, body, message_id, pinned_by, pinned_at) "
+                    "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS "
+                    "(SELECT 1 FROM pins WHERE channel = ? AND message_id = ?)",
+                    (channel, message, msg.id, aid, now, channel, msg.id),
+                )
+            conn.commit()
+            pinned = pin
+        finally:
+            conn.close()
+    except Exception as exc:
+        state_error = state_error or exc
     attachment_suffix = ""
     if msg.attachments:
         attachment_suffix = f" [attachments: {', '.join(msg.attachments)}]"
     result = f"[#{channel}] {display}: {message}{attachment_suffix}".rstrip()
-    if pin:
+    if pinned:
         result += " (pinned)"
+    notes = []
+    if state_error is not None:
+        notes.append(f"{'pin not recorded, ' if pin and not pinned else ''}channel state not updated: {state_error}")
+    # The mention row and the addressee's unread flag are written after the
+    # line; when either step failed the addressee may not have been told, and
+    # re-posting would log the body twice.
+    if (state_error is not None or hook_errors) and _extract_mentions(message):
+        notes.append(
+            "@mention not recorded: the addressee was not notified; "
+            "ping them citing this id, do not re-post"
+        )
+    if notes:
+        note = "posted; " + "; ".join(notes)
+        result += f" ({note})"
+        if _notes is not None:
+            _notes.append(note)
     # A caller that wants to dispatch the author on this exact post (e.g. a
     # verdict) needs the id back. _append_message() already generates one
     # unconditionally; surface it rather than making every such caller
@@ -1989,8 +2330,17 @@ def channel_read(
     show_pins: bool = True,
     detail: str = "medium",
     msg_type: str | None = None,
+    max_body_chars: int = MAX_BODY_CHARS,
+    max_read_chars: int = MAX_READ_CHARS,
+    surface: str = "mcp",
 ) -> str:
     """Read recent messages from a channel.
+
+    Every body is capped at ``max_body_chars`` and the read as a whole at
+    ``max_read_chars`` (0 means unbounded); the rest is reachable through
+    ``channel_read_message`` with an offset. ``surface`` is who will read the
+    notes that say so: "mcp" names the MCP action, "cli" names the CLI
+    command, so the advice can be run from where it was printed.
 
     Filters muted agents, highlights directives targeted at the reader.
     Uses a single DB connection for all operations.
@@ -2002,6 +2352,9 @@ def channel_read(
         low    -- no pins, truncated messages (200 chars), with refs for truncated messages
         min    -- no pins, one-line per message, skip join/leave noise
     """
+    if since:
+        _since_or_refuse(since)
+    channel = _normalize_channel_name(channel)
     _detail = detail.lower()
     if _detail in ("max", "high"):
         show_pins = True
@@ -2103,6 +2456,34 @@ def channel_read(
 
     lines = []
 
+    def _capped_len(m) -> int:
+        n = len(m.body)
+        return min(n, max_body_chars) if max_body_chars else n
+
+    # Per-read budget: newest first; once spent, older messages render as a one-line ref.
+    # The newest message always renders (the per-message cap bounds it).
+    budget_refs: set[int] = set()
+    budget_left = max_read_chars
+    if max_read_chars:
+        for i in range(len(messages) - 1, -1, -1):
+            cost = _capped_len(messages[i])
+            if cost > budget_left and i != len(messages) - 1:
+                budget_refs.add(i)
+            else:
+                budget_left -= cost
+        budget_left = max(budget_left, 0)
+
+    def _cap(body: str, mid: str) -> tuple[str, str]:
+        if not max_body_chars or len(body) <= max_body_chars:
+            return body, ""
+        omitted = _estimate_token_count(body[max_body_chars:])
+        capped_messages.append((mid, omitted))
+        return body[:max_body_chars], (
+            f"... [truncated: {max_body_chars} of {len(body)} chars shown; ~{omitted} tok omitted]"
+        )
+
+    capped_messages: list[tuple[str, int]] = []
+
     # Pins at top. The block is bounded by the same limit as the messages (most recent pins),
     # because every pin rendered on every read is how one read became hundreds of KB; detail=max
     # still shows them all.
@@ -2118,8 +2499,15 @@ def channel_read(
         for pin in pins:
             ts = _render_ts(pin["pinned_at"])
             by = display_map.get(pin["pinned_by"], pin["pinned_by"])
-            mid = f" [{pin['message_id']}]" if pin["message_id"] and _show_ids else ""
-            lines.append(f"  [pin]{mid} {ts}  {by}: {pin['body']}")
+            pin_id = pin["message_id"] or "(no-id)"
+            pin_body = pin["body"] or ""
+            if max_read_chars and min(len(pin_body), max_body_chars or len(pin_body)) > budget_left:
+                lines.append(f"  [pin] [{pin_id}] {ts}  {by}  [{len(pin_body)} chars, not shown]")
+                continue
+            pin_body, pin_tag = _cap(pin_body, pin_id)
+            budget_left -= len(pin_body)
+            mid = f" [{pin['message_id']}]" if pin["message_id"] and (_show_ids or pin_tag) else ""
+            lines.append(f"  [pin]{mid} {ts}  {by}: {pin_body}{pin_tag}")
         lines.append("")
 
     # Status board after pins
@@ -2137,9 +2525,13 @@ def channel_read(
     if own_display:
         self_names.add(own_display.casefold())
     truncated_messages: list[tuple[str, int]] = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         ts = _render_ts(msg.timestamp)
         display = msg.from_display or display_map.get(msg.from_agent, msg.from_agent)
+        if idx in budget_refs:
+            role = " [human]" if role_map.get(msg.from_agent) == "human" else ""
+            lines.append(f"  {ts} [{msg.id}]  {display}{role}  [{len(msg.body)} chars, not shown]")
+            continue
         mid = f" [{msg.id}]" if msg.id and _show_ids else ""
         inline_mid = mid
         # Role marker — human messages get a distinct prefix
@@ -2169,6 +2561,12 @@ def channel_read(
             if msg.id and not _show_ids:
                 inline_mid = f" [{msg.id}]"
             truncation_tag = f" [truncated ~{omitted_tokens} tok omitted]"
+        else:
+            body, cap_tag = _cap(body, msg.id or "(no-id)")
+            if cap_tag:
+                truncation_tag = cap_tag
+                if msg.id and not _show_ids:
+                    inline_mid = f" [{msg.id}]"
         if _one_line:
             body = body.replace("\n", " ").strip()
         # Worktree tag at max detail (recall#443)
@@ -2204,6 +2602,38 @@ def channel_read(
             ),
         )
 
+    header = f"## #{channel} ({len(messages)} messages)"
+    notes = []
+    cli_read = f"synapt recall channel read_message {shlex.quote(channel)}"
+    if capped_messages and surface == "cli":
+        refs = ", ".join(
+            f"`{cli_read} {shlex.quote(message_id)} --offset {max_body_chars}` (~{tokens} tok)"
+            for message_id, tokens in capped_messages
+        )
+        notes.append(
+            f"  capped {len(capped_messages)} message(s) at {max_body_chars} chars; "
+            f"read the rest with: {refs}."
+        )
+    elif capped_messages:
+        refs = ", ".join(
+            f"message={message_id} offset={max_body_chars} (~{tokens} tok)"
+            for message_id, tokens in capped_messages
+        )
+        notes.append(
+            f"  capped {len(capped_messages)} message(s) at {max_body_chars} chars: {refs}. "
+            "Use action='read_message' with that message and offset to read the rest."
+        )
+    if budget_refs:
+        how = (f"run {cli_read} <id>" if surface == "cli"
+               else "use action='read_message' with message=<id>")
+        notes.append(
+            f"  {len(budget_refs)} older message(s) not shown (read budget {max_read_chars} chars); "
+            f"{how}."
+        )
+    if notes and header in lines:
+        at = lines.index(header) + 1
+        lines[at:at] = notes
+
     return "\n".join(lines)
 
 
@@ -2211,8 +2641,11 @@ def channel_read_message(
     message_id: str,
     channel: str = "dev",
     project_dir: Path | None = None,
+    offset: int = 0,
+    length: int = MAX_BODY_CHARS,
 ) -> str:
-    """Read a specific channel message by id."""
+    """Read a specific channel message by id, one chunk of ``length`` chars from ``offset``."""
+    channel = _normalize_channel_name(channel)
     path = _channel_path(channel, project_dir)
     if not path.exists():
         return f"Channel #{channel} has no messages yet."
@@ -2232,7 +2665,22 @@ def channel_read_message(
         if msg.attachments:
             lines.append(f"Attachments: {', '.join(msg.attachments)}")
         lines.append("")
-        lines.append(msg.body or "(empty body)")
+        body = msg.body or ""
+        offset = max(0, offset or 0)
+        if not length or length <= 0:
+            length = MAX_BODY_CHARS
+        if not body:
+            lines.append("(empty body)")
+        elif offset == 0 and len(body) <= length:
+            lines.append(body)
+        else:
+            chunk = body[offset:offset + length]
+            end = offset + len(chunk)
+            lines.append(chunk)
+            if end < len(body):
+                lines.append(f"[chars {offset}-{end} of {len(body)}; next offset={end}]")
+            else:
+                lines.append("[end of message]")
         return "\n".join(lines)
 
     return f"Message {message_id} not found in #{channel}."
@@ -2400,6 +2848,10 @@ def channel_unread_read(
                 (aid, ch),
             ).fetchone()
             last_read = cursor_row["last_read_at"] if cursor_row else "1970-01-01T00:00:00Z"
+            # a stored cursor never refuses: one that is not a timestamp reads as the epoch here,
+            # before channel_read, which refuses only a since the user typed
+            if _since_instant(str(last_read)) is None:
+                last_read = "1970-01-01T00:00:00Z"
             path = _channel_path(ch, project_dir)
             count = _count_messages_since(path, last_read) if path.exists() else 0
             if count > 0:
@@ -2433,6 +2885,7 @@ def channel_pin(
     project_dir: Path | None = None,
 ) -> str:
     """Pin a message by its ID. Looks up the message in the JSONL log."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2469,6 +2922,7 @@ def channel_unpin(
     project_dir: Path | None = None,
 ) -> str:
     """Unpin a message by its message_id."""
+    channel = _normalize_channel_name(channel)
     conn = _open_db(project_dir)
     try:
         row = conn.execute(
@@ -2501,6 +2955,7 @@ def channel_directive(
     display_name: str | None = None,
 ) -> str:
     """Post a directive message targeted at a specific agent."""
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir, name=display_name)
     now = _now_iso()
     display = display_name or _resolve_display_name(project_dir)
@@ -2509,7 +2964,7 @@ def channel_directive(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="directive", body=message, to=to,
     )
-    _append_message(msg, project_dir)
+    state_error = _append_message(msg, project_dir)
 
     # Optionally bridge to reminders
     if remind:
@@ -2518,7 +2973,10 @@ def channel_directive(
             add_reminder(f"[directive from {aid}] {message}")
         except Exception:
             pass
-    return f"[#{channel}] {display} → @{to}: {message}"
+    result = f"[#{channel}] {display} → @{to}: {message}"
+    if state_error is not None:
+        result += f" (posted; channel state not updated: {state_error})"
+    return result
 
 
 def channel_mute(
@@ -2531,6 +2989,7 @@ def channel_mute(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2558,6 +3017,7 @@ def channel_unmute(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
 
     conn = _open_db(project_dir)
@@ -2583,6 +3043,7 @@ def channel_kick(
 
     ``target`` can be an agent_id (s_*), display_name, or griptree name.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2627,9 +3088,18 @@ def channel_broadcast(
     channels = channel_list_channels(project_dir)
     if not channels:
         return "No channels to broadcast to."
+    warnings = []
     for ch in channels:
-        channel_post(ch, message, agent_name=agent_name, project_dir=project_dir, display_name=display_name)
-    return f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+        notes: list[str] = []
+        channel_post(
+            ch, message, agent_name=agent_name, project_dir=project_dir,
+            display_name=display_name, _notes=notes,
+        )
+        warnings.extend(f"#{ch}: {n}" for n in notes)
+    result = f"Broadcast to {len(channels)} channel(s): {', '.join(f'#{c}' for c in channels)}"
+    if warnings:
+        result += " (" + "; ".join(warnings) + ")"
+    return result
 
 
 def channel_board(
@@ -2645,6 +3115,7 @@ def channel_board(
     Reading returns all agents' current board entries.
     Pass an empty string to clear your entry.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
     conn = _open_db(project_dir)
@@ -2763,6 +3234,7 @@ def channel_claim(
     automatically posted to the channel so other agents see it in
     the message stream without polling the claims table.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2874,6 +3346,7 @@ def channel_claim_intent(
         (True, message) if intent claimed successfully.
         (False, message) if someone else already claimed the same intent.
     """
+    channel = _normalize_channel_name(channel)
     aid = agent_name or _agent_id(project_dir)
     now = _now_iso()
 
@@ -2894,13 +3367,24 @@ def channel_claim_intent(
         timestamp=now, from_agent=aid, from_display=display, channel=channel,
         type="intent", body=intent,
     )
-    _append_message(msg, project_dir)
+    state_error = _append_message(msg, project_dir)
 
-    # Auto-claim the intent message (silent — the intent post is the notification)
-    channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
+    # Auto-claim the intent message (silent — the intent post is the notification).
+    # The intent line has landed, so a failed claim is reported, not raised:
+    # a caller that retried would log the intent twice.
+    notes = []
+    if state_error is not None:
+        notes.append(f"channel state not updated: {state_error}")
+    try:
+        channel_claim(msg.id, channel, agent_name=aid, project_dir=project_dir, _silent=True)
+    except Exception as exc:
+        notes.append(f"claim not recorded: {exc}")
 
     display = _resolve_display_name_for(aid, project_dir)
-    return (True, f"[INTENT] {display}: {intent}")
+    result = f"[INTENT] {display}: {intent}"
+    if notes:
+        result += " (posted; " + "; ".join(notes) + ")"
+    return (True, result)
 
 
 def channel_list_channels(project_dir: Path | None = None) -> list[str]:
@@ -2910,12 +3394,12 @@ def channel_list_channels(project_dir: Path | None = None) -> list[str]:
     Use :func:`list_dm_channels` to discover an agent's DM conversations.
     """
     ch_dir = _channels_dir(project_dir)
-    if not ch_dir.exists():
-        return []
-    return sorted(
-        _filename_to_channel(p.stem) for p in ch_dir.glob("*.jsonl")
+    files = list(ch_dir.glob("*.jsonl")) if ch_dir.exists() else []
+    files += _mapped_room_paths(project_dir)
+    return sorted({
+        _filename_to_channel(p.stem) for p in files
         if not is_dm_channel(_filename_to_channel(p.stem))
-    )
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -3011,7 +3495,9 @@ def channel_messages_json(
     ``channels_dir`` overrides path resolution for cross-project reads.
     ``msg_type`` filters to messages of a specific type (e.g. "status", "claim", "pr").
     """
-    path = (channels_dir / f"{_channel_to_filename(channel)}.jsonl") if channels_dir else _channel_path(channel, project_dir)
+    channel = _normalize_channel_name(channel)
+    path = (_contained_channel_file(channels_dir, _channel_to_filename(channel))
+            if channels_dir else _channel_path(channel, project_dir))
     if not path.exists():
         return []
     messages = _read_messages(path, since=since)
@@ -3047,8 +3533,9 @@ def channel_search(
     msg_type: str | None = None,
     project_dir: Path | None = None,
     agent_id: str | None = None,
+    channel: str | None = None,
 ) -> list[dict]:
-    """Search all channels for messages matching a query.
+    """Search all channels (or only ``channel``) for messages matching a query.
 
     Args:
         query: Text to search for in message bodies.
@@ -3061,7 +3548,8 @@ def channel_search(
                   channels are excluded from search results.
 
     Returns a list of dicts with channel, message_id, from, timestamp, body,
-    type, and a match_score (number of query terms found).
+    type, a match_score (number of query terms found), and cited_by (the
+    raw count of resolved citations of that post across all channels).
     """
     terms = query.lower().split()
     if not terms and not msg_type:
@@ -3073,19 +3561,34 @@ def channel_search(
     # Build the list of channels to search: public channels + agent's DMs
     ch_dir = _channels_dir(project_dir)
     all_channels: list[str] = []
-    if ch_dir.exists():
-        for p in ch_dir.glob("*.jsonl"):
+    files = list(ch_dir.glob("*.jsonl")) if ch_dir.exists() else []
+    files += _mapped_room_paths(project_dir)
+    if files:
+        for p in files:
             name = _filename_to_channel(p.stem)
             if is_dm_channel(name):
                 if agent_id and is_dm_participant(name, agent_id):
                     all_channels.append(name)
             else:
                 all_channels.append(name)
+    # A mapped room can also have a stale file in this store; it is read once,
+    # from its mapped path.
+    all_channels = list(dict.fromkeys(all_channels))
+
+    messages = {
+        ch: _read_messages(_channel_path(ch, project_dir)) for ch in all_channels
+    }
+    cited_by = build_citation_graph(
+        {ch: [(m.id, m.body) for m in msgs] for ch, msgs in messages.items()}
+    )["cited_by"]
+
+    if channel is not None:
+        channel = _normalize_channel_name(channel)
+        all_channels = [ch for ch in all_channels if ch == channel]
 
     results: list[dict] = []
     for ch in all_channels:
-        path = _channel_path(ch, project_dir)
-        for msg in _read_messages(path):
+        for msg in messages[ch]:
             # Type filter: apply ONLY when a type is given. recall#982 --
             # an untyped search used to implicitly restrict to
             # ("message", "directive"), silently excluding every "pr",
@@ -3112,22 +3615,33 @@ def channel_search(
                 "body": msg.body,
                 "type": msg.type,
                 "score": score,
+                "cited_by": cited_by.get((ch, msg.id), 0),
             })
 
     # Sort by score descending, then timestamp descending (newest first)
     results.sort(key=lambda r: (r["score"], r["timestamp"]), reverse=True)
+    results = _apply_search_ranker(query, results)
     return results[:max_results]
 
 
 def check_directives(
     agent_name: str | None = None,
     project_dir: Path | None = None,
+    shown_mentions: set[str] | None = None,
+    cleared_mentions: set[str] | None = None,
 ) -> str:
     """Check for unread directives targeted at this agent. Fast path for hooks.
 
     Scans only messages after this agent's cursor in channels it belongs to.
     Returns formatted directives for stdout, or empty string if none pending.
     Designed to complete in < 50ms for PostToolUse hook.
+
+    ``shown_mentions``, when given, is the caller's record of mention ids
+    already printed in full: those collapse to one count line with a read
+    hint, and every newly printed id is added to it. ``None`` keeps the
+    old behaviour (every unread mention in full), which the hooks rely on.
+    ``cleared_mentions`` holds mention ids the caller has read or answered;
+    those are not listed at all.
     """
     aid = agent_name or _agent_id(project_dir)
 
@@ -3175,7 +3689,11 @@ def check_directives(
 
     # Check for unread @mentions (by agent_id or display_name)
     # Filter by earliest cursor to avoid resurfacing old mentions
-    earliest_cursor = min(cursors.values()) if cursors else "1970-01-01T00:00:00Z"
+    cursor_dt = min(
+        (_since_or_epoch(c) for c in cursors.values()),
+        default=datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    cursor_second = cursor_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     mention_conn = _open_db(project_dir)
     try:
         # Get this agent's display name for mention matching
@@ -3187,17 +3705,17 @@ def check_directives(
         # Find mentions targeting this agent, only after cursor
         if display_name:
             rows = mention_conn.execute(
-                "SELECT message_id FROM mentions "
-                "WHERE mentioned IN (?, ?) AND timestamp > ?",
-                (aid, display_name, earliest_cursor),
+                "SELECT message_id, timestamp FROM mentions "
+                "WHERE mentioned IN (?, ?) AND timestamp >= ?",
+                (aid, display_name, cursor_second),
             ).fetchall()
         else:
             rows = mention_conn.execute(
-                "SELECT message_id FROM mentions "
-                "WHERE mentioned = ? AND timestamp > ?",
-                (aid, earliest_cursor),
+                "SELECT message_id, timestamp FROM mentions "
+                "WHERE mentioned = ? AND timestamp >= ?",
+                (aid, cursor_second),
             ).fetchall()
-        mention_ids = {r["message_id"] for r in rows}
+        mention_ids = {r["message_id"] for r in rows if _posted_after(r["timestamp"], cursor_dt)}
     finally:
         mention_conn.close()
 
@@ -3228,6 +3746,8 @@ def check_directives(
     # Dedup: remove mentions that are already in pending directives
     pending_ids = {msg.id for _, msg in pending}
     mentions = [(ch, msg) for ch, msg in mentions if msg.id not in pending_ids]
+    if cleared_mentions:
+        mentions = [(ch, m) for ch, m in mentions if m.id not in cleared_mentions]
 
     # Collect recent intents from other agents (last 10 min)
     # so this agent sees what others are working on
@@ -3241,7 +3761,13 @@ def check_directives(
             if msg.type == "intent" and msg.from_agent != aid:
                 intents.append((ch, msg))
 
-    if not pending and not mentions and not intents:
+    seen_mentions: list[tuple[str, ChannelMessage]] = []
+    if shown_mentions is not None:
+        seen_mentions = [(ch, m) for ch, m in mentions if m.id in shown_mentions]
+        mentions = [(ch, m) for ch, m in mentions if m.id not in shown_mentions]
+        shown_mentions.update(m.id for _, m in mentions)
+
+    if not pending and not mentions and not seen_mentions and not intents:
         return ""
 
     # Format for output (will appear as system reminder in context)
@@ -3254,6 +3780,14 @@ def check_directives(
         lines.append(f"[channel] {len(mentions)} @mention(s):")
         for ch, msg in mentions:
             lines.append(f"  #{ch} from {msg.from_agent}: {msg.body}")
+    if seen_mentions:
+        ids = ", ".join(f"#{ch} {msg.id}" for ch, msg in seen_mentions)
+        lines.append(
+            f"[channel] {len(seen_mentions)} unread @mention(s) shown in full "
+            f"earlier ({ids}); recall_channel(action=\"read\", channel=<ch>), "
+            f"action=\"read_message\" on the id, or a post naming the id "
+            f"clears them"
+        )
     if intents:
         lines.append(f"[channel] {len(intents)} active intent(s):")
         for ch, msg in intents:
@@ -3586,3 +4120,243 @@ def _default_wake_hook(msg: ChannelMessage, project_dir: Path | None = None) -> 
 
 register_message_hook(_default_mention_hook)
 register_message_hook(_default_wake_hook)
+
+
+# ---------------------------------------------------------------------------
+# Watch: follow room logs as they grow, read-only
+# ---------------------------------------------------------------------------
+
+_WATCH_BODY_LIMIT = 300
+_WATCH_SKIP_TYPES = frozenset({"join", "leave"})
+_WATCH_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+class WatchRoomError(ValueError):
+    """A room name watch refuses before any file is opened."""
+
+
+def _check_watch_room(room: str) -> str:
+    """Return the normalized room name, or raise WatchRoomError."""
+    name = _normalize_channel_name(room)
+    if not name or name.startswith("-"):
+        raise WatchRoomError(f"refusing room name {room!r}: it is empty or starts with '-'")
+    if "/" in name:
+        raise WatchRoomError(f"refusing room name {room!r}: it would leave the store directory")
+    # The same containment post makes, against a nominal store that does not
+    # exist, so the check is lexical and opens nothing.
+    try:
+        _contained_channel_file(Path(os.sep, "synapt-store", "channels"), _channel_to_filename(name))
+    except ChannelNameError as e:
+        raise WatchRoomError(str(e)) from None
+    return name
+
+
+def _watch_room_path(channel: str, project_dir: Path | None = None) -> Path:
+    """Return *channel*'s log path by the same coordinates as post and read.
+
+    Read-only: unlike ``_channel_path`` it renames no legacy file and creates
+    no directory, and it never falls back to the local store when the log
+    lives elsewhere. A log that does not exist yet is watched for.
+    """
+    shared = _shared_channels_dir()
+    if shared is not None:
+        ch_dir = _guard_store_path("resolve_channels_dir", shared)
+    else:
+        mapped = _mapped_room_dir(channel)
+        if mapped is not None:
+            ch_dir = mapped
+        else:
+            global_dir = _global_channels_dir(project_dir)
+            if global_dir is not None:
+                ch_dir = _guard_store_path("resolve_channels_dir", global_dir)
+            else:
+                ch_dir = _guard_store_path(
+                    "resolve_channels_dir", _local_channels_dir(project_dir))
+    return _contained_channel_file(ch_dir, _channel_to_filename(channel))
+
+
+def _watch_all_rooms(project_dir: Path | None = None) -> list[str]:
+    """Every room with a log in this caller's store, plus the mapped rooms."""
+    names = set(_load_room_map()) if _shared_channels_dir() is None else set()
+    shared = _shared_channels_dir()
+    if shared is not None:
+        store = shared
+    else:
+        store = _global_channels_dir(project_dir) or _local_channels_dir(project_dir)
+    if store.is_dir():
+        names.update(_filename_to_channel(p.stem) for p in store.glob("*.jsonl"))
+    return sorted(names)
+
+
+def _watch_line(msg: ChannelMessage) -> str:
+    """One output line; control characters are escaped so a body cannot forge lines."""
+    def clean(text: str) -> str:
+        return "".join(
+            _WATCH_ESCAPES.get(ch, f"\\x{ord(ch):02x}")
+            if ord(ch) < 0x20 or ord(ch) == 0x7F else ch
+            for ch in text
+        )
+    return f"from [{clean(str(msg.from_agent))}]: {clean(str(msg.body)[:_WATCH_BODY_LIMIT])}"
+
+
+@dataclass
+class _WatchedFile:
+    path: Path
+    ident: tuple[int, int] | None = None
+    pos: int = 0
+    partial: bytes = b""
+    # The last bytes before pos, re-read on every poll: a writer that
+    # truncates in place and regrows past pos within one poll leaves size
+    # and inode unchanged, and only these bytes show the rewrite.  A rewrite
+    # whose last _WATCH_TAIL bytes before pos happen to match is not seen.
+    tail: bytes = b""
+
+
+_WATCH_TAIL = 64
+
+
+def _watch_read_tail(f, pos: int) -> bytes:
+    start = max(0, pos - _WATCH_TAIL)
+    f.seek(start)
+    return f.read(pos - start)
+
+
+def _watch_rotated(state: _WatchedFile, st: os.stat_result) -> bool:
+    """True when the log was replaced or truncated since the last poll."""
+    return (st.st_dev, st.st_ino) != state.ident or st.st_size < state.pos
+
+
+def _watch_poll(state: _WatchedFile) -> list[bytes]:
+    """Return the complete new lines in *state*'s log since the last poll.
+
+    The file is opened and closed on every poll rather than held open, so
+    the watcher never keeps a rotated file alive and never blocks a writer
+    replacing it (Windows refuses to replace a file another process holds).
+    """
+    try:
+        st = os.stat(state.path)
+    except OSError:
+        # Gone (rotated away and not yet recreated): read the next one from 0.
+        state.ident, state.pos, state.partial = None, 0, b""
+        return []
+    if _watch_rotated(state, st):
+        state.ident, state.pos, state.partial = (st.st_dev, st.st_ino), 0, b""
+        state.tail = b""
+    if st.st_size == state.pos == 0:
+        return []
+    try:
+        with open(state.path, "rb") as f:
+            if state.pos and _watch_read_tail(f, state.pos) != state.tail:
+                # Rewritten in place: read the new contents from the start.
+                state.pos, state.partial, state.tail = 0, b"", b""
+            if st.st_size == state.pos:
+                return []
+            f.seek(state.pos)
+            data = f.read()
+    except OSError:
+        return []
+    state.pos += len(data)
+    state.tail = (state.tail + data)[-_WATCH_TAIL:]
+    data = state.partial + data
+    lines = data.split(b"\n")
+    state.partial = lines.pop()
+    return lines
+
+
+def channel_watch(
+    rooms: list[str],
+    *,
+    since: str | None = None,
+    include_mine: bool = False,
+    all_rooms: bool = False,
+    interval: float = 0.2,
+    project_dir: Path | None = None,
+    out=None,
+    err=None,
+) -> None:
+    """Print each new post in *rooms* as ``from [id]: body`` until interrupted.
+
+    Read-only: no cursor, membership or presence is touched, and no file or
+    directory is created. Polls every *interval* seconds from the current end
+    of each log (or from *since*), and reopens a log that was rotated or
+    truncated. Posts sent under this caller's ``SYNAPT_AGENT_ID`` are skipped
+    unless *include_mine*. SIGINT and SIGTERM end the watch normally.
+    Raises WatchRoomError for a bad room name before any file is opened.
+    """
+    import signal
+    import sys
+    import threading
+
+    out = out or sys.stdout
+    err = err or sys.stderr
+    names = [_check_watch_room(r) for r in rooms]
+    since_dt = None
+    if since:
+        since_dt = _since_instant(since)
+        if since_dt is None:
+            raise WatchRoomError(f"refusing --since {since!r}: it is not an ISO 8601 timestamp")
+    if all_rooms:
+        names.extend(n for n in _watch_all_rooms(project_dir) if n not in names)
+    if not names:
+        raise WatchRoomError("no room to watch: name one or more rooms, or pass --all")
+
+    orphan = _orphaned_local_channel_store(project_dir) if _shared_channels_dir() is None else None
+    if orphan is not None:
+        print(
+            f"warning: {orphan} holds channel logs that are no longer live; "
+            f"watching the live store instead",
+            file=err, flush=True,
+        )
+
+    mine = os.environ.get("SYNAPT_AGENT_ID") or None
+    # Resolve every path before opening any: a name from --all skipped
+    # _check_watch_room, and its refusal must reach the caller as WatchRoomError.
+    paths = []
+    for name in names:
+        try:
+            paths.append(_watch_room_path(name, project_dir))
+        except ChannelNameError as e:
+            raise WatchRoomError(str(e)) from None
+    watched = []
+    for path in paths:
+        state = _WatchedFile(path)
+        if since is None:
+            try:
+                st = os.stat(state.path)
+                state.ident, state.pos = (st.st_dev, st.st_ino), st.st_size
+                with open(state.path, "rb") as f:
+                    state.tail = _watch_read_tail(f, state.pos)
+            except OSError:
+                pass
+        watched.append(state)
+
+    print(f"watching: {', '.join(names)}", file=err, flush=True)
+
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _stop)
+    try:
+        while True:
+            for state in watched:
+                for raw in _watch_poll(state):
+                    try:
+                        msg = ChannelMessage.from_dict(json.loads(raw.decode("utf-8")))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if msg.type in _WATCH_SKIP_TYPES:
+                        continue
+                    if since_dt is not None:
+                        posted = _since_instant(str(msg.timestamp))
+                        if posted is not None and posted <= since_dt:
+                            continue
+                    if mine and msg.from_agent == mine and not include_mine:
+                        continue
+                    print(_watch_line(msg), file=out, flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)

@@ -28,8 +28,10 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sqlite3
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,12 @@ def current_generation_dir(index_dir: Path) -> Path | None:
     return generation_dir(index_dir, name)
 
 
+def _drop_sidecars(db_path: Path) -> None:
+    """Remove the -wal, -shm and -journal files SQLite may have made beside *db_path*."""
+    for suffix in ("-wal", "-shm", "-journal"):
+        (db_path.parent / (db_path.name + suffix)).unlink(missing_ok=True)
+
+
 def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> None:
     """Mirror the newly-published generation's shards into the flat
     ``index_dir/data_NNN.db`` location too, so a reader running an OLDER
@@ -132,9 +140,11 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
     is strictly better than the alternative it replaces (returning
     nothing at all), and is the accepted, disclosed bound.
 
-    Best-effort: a failure here (e.g. a disk-full mid-copy) is logged,
-    not raised -- it only degrades an OLD reader back to pre-fix
-    behavior, and must never fail the publish a NEW reader depends on.
+    Best-effort: a failure here (e.g. a disk-full mid-copy) must never
+    fail the publish a NEW reader depends on, so it is not raised. It
+    must not leave an OLD reader on old data either: the flat set is
+    removed (an old reader cannot see a stale marker, only the files its
+    glob finds) and one warning names the failure.
     """
     import shutil as _shutil
 
@@ -149,6 +159,18 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
             tmp_copy = index_dir / f".{shard_path.name}.copy-tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
             try:
                 _shutil.copyfile(shard_path, tmp_copy)
+                # The copy keeps WAL in its header, and the cleanup below removes its -wal/-shm, so a read-only
+                # (mode=ro) open could neither find a -shm nor create one and failed. A rollback-journal file needs
+                # no sidecar to be read, so the copy is switched before it goes live. The generation shard it came
+                # from is not touched and stays WAL.
+                conn = sqlite3.connect(tmp_copy)
+                try:
+                    conn.execute("PRAGMA journal_mode=DELETE")
+                finally:
+                    conn.close()
+                # Opening the temp copy created sidecars under ITS name (a -shm for the WAL header), and the replace
+                # below moves only the main file, so they are removed here or every rebuild would leave them behind.
+                _drop_sidecars(tmp_copy)
                 os.replace(tmp_copy, target)
                 # SQLite's WAL header carries a salt that invalidates a
                 # stale -wal against a base file it wasn't written
@@ -158,8 +180,9 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
                 # this path starts clean against the file we just wrote.
                 for suffix in ("-wal", "-shm"):
                     (index_dir / (shard_path.name + suffix)).unlink(missing_ok=True)
-            except OSError:
+            except (OSError, sqlite3.Error):
                 tmp_copy.unlink(missing_ok=True)
+                _drop_sidecars(tmp_copy)
                 raise
 
         # A smaller new generation must not leave a stale extra shard
@@ -169,11 +192,61 @@ def _sync_flat_layout_for_legacy_readers(index_dir: Path, gen_path: Path) -> Non
                 for suffix in ("", "-wal", "-shm", ".schema.lock"):
                     p = old_path.parent / (old_path.name + suffix)
                     p.unlink(missing_ok=True)
-    except OSError:
+    except (OSError, sqlite3.Error) as exc:
+        # sqlite3.Error is not an OSError: the journal-mode switch opens a connection, and its failure must stay as
+        # best-effort as a copy failure.
+        _remove_flat_layout(index_dir)
         logger.warning(
-            "Failed to sync flat-layout shard mirror for legacy readers at %s",
-            index_dir, exc_info=True,
+            "Failed to sync flat-layout shard mirror for legacy readers at %s; flat shards removed: %s",
+            index_dir, exc,
         )
+
+
+def _remove_flat_layout(index_dir: Path) -> None:
+    """Remove every flat ``index_dir/data_NNN.db`` mirror shard and its sidecars, so a legacy reader finds no
+    shards rather than shards older than CURRENT. Only called while CURRENT exists, when the flat set is a mirror."""
+    from synapt.recall.sharding import list_shards
+
+    for old_path in list_shards(index_dir):
+        for suffix in ("", "-wal", "-shm", "-journal", ".schema.lock"):
+            try:
+                (old_path.parent / (old_path.name + suffix)).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove flat-layout shard %s", old_path.name + suffix)
+
+
+def resync_flat_layout(
+    index_dir: Path, *, lock_timeout: float = 30.0, not_checkpointed: Sequence[str] = (),
+) -> None:
+    """Re-mirror CURRENT's shards into the flat layout after they were written in place (e.g. embeddings saved
+    into the live generation), under the same ``generation.lock`` a publish holds. No-op with no CURRENT: the flat
+    files are then the live shards themselves.
+
+    ``not_checkpointed`` names shards whose write is still in the WAL: their main files are not current, so the
+    flat set is removed with the same warning as a failed copy rather than mirrored stale."""
+    from synapt.recall.cli import _acquire_build_lock, _release_build_lock
+
+    if read_current_generation(index_dir) is None:
+        return
+    lock_fd = _acquire_build_lock(index_dir, timeout=lock_timeout, name="generation.lock")
+    if lock_fd is None:
+        logger.warning(
+            "Failed to sync flat-layout shard mirror for legacy readers at %s; generation.lock busy", index_dir,
+        )
+        return
+    try:
+        if not_checkpointed:
+            _remove_flat_layout(index_dir)
+            logger.warning(
+                "Failed to sync flat-layout shard mirror for legacy readers at %s; flat shards removed: "
+                "WAL not checkpointed for %s", index_dir, ", ".join(not_checkpointed),
+            )
+            return
+        current = current_generation_dir(index_dir)
+        if current is not None:
+            _sync_flat_layout_for_legacy_readers(index_dir, current)
+    finally:
+        _release_build_lock(lock_fd)
 
 
 def publish_generation(

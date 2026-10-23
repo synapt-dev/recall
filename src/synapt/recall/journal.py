@@ -219,6 +219,95 @@ def _journal_path(project_dir: Path | None = None) -> Path:
     return project_worktree_dir(project_dir) / "journal.jsonl"
 
 
+# Bytes of sibling journals one wake may read. On the largest measured root (42
+# siblings, the two largest ~6.6 MiB) 8 MiB names all 40 at ~54 ms warm; 1 and 4
+# MiB check none, since the newest sibling is usually one of the two large ones.
+NEWER_JOURNAL_READ_CAP = 8 << 20
+
+
+@dataclass(frozen=True)
+class NewerJournalNotChecked:
+    """Siblings left unread because reading them would pass ``NEWER_JOURNAL_READ_CAP``."""
+
+    count: int
+
+
+def newer_journal_line(found: tuple[Path, str] | NewerJournalNotChecked | None) -> str | None:
+    """The one wake line for a ``newer_journal_elsewhere`` result, shared by both wake paths."""
+    if found is None:
+        return None
+    if isinstance(found, NewerJournalNotChecked):
+        return f"newer journal: not checked, {found.count} sibling journals over the read bound"
+    return f"newer journal at {found[0]} ({found[1]})"
+
+
+def newer_journal_elsewhere(
+    path: Path, newest: str | None
+) -> tuple[Path, str] | NewerJournalNotChecked | None:
+    """Name a sibling worktree journal under the same root holding an entry newer than *newest*.
+
+    Read side only: the wake reads ``path`` (this cwd's worktree store), but a session
+    started from another cwd on the same root writes to its own ``worktrees/<name>/``.
+    Returns the newest such (path, timestamp), or None. Fails soft.
+
+    *newest* None means nothing is shown (no floor); a *newest* that does not parse
+    returns None, since no sibling can be judged newer than it. Siblings are read
+    newest file-mtime first, and one whose mtime is not after the floor is skipped
+    unread; this misses only an entry stamped later than its file's last write.
+    Reading stops before passing ``NEWER_JOURNAL_READ_CAP`` bytes; if nothing newer
+    was found by then, a ``NewerJournalNotChecked`` says how many were left unread.
+    """
+    unparsable = datetime.min.replace(tzinfo=timezone.utc)
+
+    def _key(ts: str) -> float | None:
+        # A zone-less value is UTC, as everywhere else journals are ordered.
+        try:
+            when = _timestamp_order(ts)
+        except (TypeError, AttributeError):
+            return None
+        return None if when == unparsable else when.timestamp()
+
+    floor = None
+    if newest is not None:
+        floor = _key(newest)
+        if floor is None:
+            return None
+    best: tuple[float, Path, str] | None = None
+    try:
+        siblings = []
+        for other in path.parent.parent.glob("*/journal.jsonl"):
+            if other == path:
+                continue
+            try:
+                st = other.stat()
+            except OSError:
+                continue
+            siblings.append((st.st_mtime, st.st_size, other))
+    except OSError:
+        return None
+    siblings.sort(key=lambda s: s[0], reverse=True)
+    if floor is not None:
+        siblings = [s for s in siblings if s[0] > floor]
+    spent = 0
+    for i, (_mtime, size, other) in enumerate(siblings):
+        if spent + size > NEWER_JOURNAL_READ_CAP:
+            if best is None:
+                return NewerJournalNotChecked(len(siblings) - i)
+            break
+        spent += size
+        try:
+            entries = [e for e in _read_all_entries(other) if e.has_content()]
+        except Exception:
+            continue
+        for entry in entries:
+            when = _key(entry.timestamp)
+            if when is None or (floor is not None and when <= floor):
+                continue
+            if best is None or when > best[0]:
+                best = (when, other, entry.timestamp)
+    return None if best is None else (best[1], best[2])
+
+
 @dataclass
 class JournalEntry:
     """One session's journal entry."""

@@ -11,6 +11,7 @@ autouse fixture runs.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 
 import pytest
@@ -33,3 +34,7 @@ def scrub_ambient_process_env(
     """Remove agent-session inputs before a test establishes its own state."""
     for variable in variables:
         monkeypatch.delenv(variable, raising=False)
+    # The shared-room map defaults to a file under the real home, which no
+    # test redirects. Point it at nothing so a map the operator wrote never
+    # moves a test's room; a test of the map sets its own after this runs.
+    monkeypatch.setenv("SYNAPT_ROOM_MAP", os.devnull)

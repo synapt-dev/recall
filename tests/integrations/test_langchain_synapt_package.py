@@ -8,6 +8,8 @@ import venv
 import shutil
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "langchain-synapt"
@@ -20,13 +22,16 @@ def _venv_python(venv_dir: Path) -> Path:
 
 
 def _run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
+    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+    if result.returncode:
+        # The command's own output is the only record of WHY it failed (pip's network or resolution error), and a
+        # bare CalledProcessError prints neither stream, so put both tails in the failure.
+        raise RuntimeError(
+            f"{cmd!r} exit {result.returncode}\n"
+            f"--- stdout (last 4000 chars) ---\n{result.stdout[-4000:]}\n"
+            f"--- stderr (last 4000 chars) ---\n{result.stderr[-4000:]}"
+        )
+    return result
 
 
 def _rebuild_dist(target: Path) -> Path:
@@ -48,11 +53,13 @@ def test_langchain_synapt_package_has_required_files() -> None:
     assert (PACKAGE_DIR / "src" / "langchain_synapt" / "__init__.py").exists()
 
 
+@pytest.mark.network
 def test_langchain_synapt_builds_wheel() -> None:
     wheel = _rebuild_dist(PACKAGE_DIR)
     assert wheel.name.startswith("langchain_synapt-")
 
 
+@pytest.mark.network
 def test_langchain_synapt_installs_and_exports_history_class(tmp_path: Path) -> None:
     synapt_wheel = _rebuild_dist(REPO_ROOT)
     langchain_wheel = _rebuild_dist(PACKAGE_DIR)
@@ -82,3 +89,23 @@ def test_langchain_synapt_installs_and_exports_history_class(tmp_path: Path) -> 
         ]
     )
     assert result.stdout.strip() == "hello from wheel"
+
+
+def test_a_failed_command_names_its_own_output() -> None:
+    """A red here must say why. pip's own error (network, resolution, a bad wheel) is in its stdout and stderr, and
+    a bare CalledProcessError prints neither, so a promotion PR's red was unattributable."""
+    with pytest.raises(RuntimeError) as failed:
+        _run([sys.executable, "-c", "import sys; print('out-line'); sys.stderr.write('err-line'); sys.exit(3)"])
+    message = str(failed.value)
+    assert "exit 3" in message and "out-line" in message and "err-line" in message, message
+
+
+def test_only_the_tests_that_reach_pypi_carry_the_network_mark() -> None:
+    """`python -m build` (build isolation fetches the backend) and `pip install langchain-core` reach PyPI; CI runs
+    exactly these in their own job, so a PyPI hiccup cannot redden the required matrix."""
+    marked = {
+        name
+        for name, fn in globals().items()
+        if name.startswith("test_") and any(m.name == "network" for m in getattr(fn, "pytestmark", []))
+    }
+    assert marked == {"test_langchain_synapt_builds_wheel", "test_langchain_synapt_installs_and_exports_history_class"}

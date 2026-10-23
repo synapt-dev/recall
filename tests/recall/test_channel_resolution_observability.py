@@ -69,6 +69,7 @@ class TestChannelResolutionObservability(unittest.TestCase):
         self.assertNotIn("Caller identity:", result)
 
     def test_common_boundary_covers_every_registered_action(self) -> None:
+        from synapt.recall import server
         from synapt.recall.actions import ActionRegistry, get_action_registry
         from synapt.recall.server import recall_channel
 
@@ -84,6 +85,9 @@ class TestChannelResolutionObservability(unittest.TestCase):
         ):
             for action in actions:
                 with self.subTest(action=action):
+                    # The preamble prints once per session; each action is
+                    # checked as the first call of its own session.
+                    server._last_store_preamble = None
                     result = recall_channel(action=action)
                     self.assertEqual(
                         result,

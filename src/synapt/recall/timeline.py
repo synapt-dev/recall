@@ -76,21 +76,7 @@ def _session_info(db: RecallDB) -> list[dict]:
     Returns list of dicts with session_id, first_ts, last_ts, chunk_count,
     ordered chronologically.
     """
-    rows = db._conn.execute(
-        "SELECT session_id, MIN(timestamp) as first_ts, "
-        "MAX(timestamp) as last_ts, COUNT(*) as cnt "
-        "FROM chunks WHERE turn_index >= 0 "
-        "GROUP BY session_id ORDER BY first_ts"
-    ).fetchall()
-    return [
-        {
-            "session_id": r["session_id"],
-            "first_ts": r["first_ts"],
-            "last_ts": r["last_ts"],
-            "chunk_count": r["cnt"],
-        }
-        for r in rows
-    ]
+    return db.session_turn_spans()
 
 
 def build_timeline_clusters(
@@ -250,7 +236,7 @@ def save_timeline_clusters(db: RecallDB, clusters: list[dict]) -> None:
     Timeline clusters are session-level — they don't populate
     cluster_chunks. Only the clusters table is modified.
     """
-    cur = db._conn.cursor()
+    cur = db.index_conn.cursor()
 
     # Remove old timeline clusters + their FTS entries
     cur.execute("DROP TRIGGER IF EXISTS clusters_ad")
@@ -295,4 +281,4 @@ def save_timeline_clusters(db: RecallDB, clusters: list[dict]) -> None:
     # Rebuild FTS from all clusters (topic + timeline + access singletons): one statement, so it is bracketed
     with phase("timeline: FTS rebuild"):
         cur.execute("INSERT INTO clusters_fts(clusters_fts) VALUES ('rebuild')")
-        db._conn.commit()
+        db.index_conn.commit()

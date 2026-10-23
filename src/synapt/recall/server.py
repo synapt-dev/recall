@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -58,7 +59,6 @@ from synapt.recall.core import (
     project_data_dir,
     project_index_dir,
 )
-from synapt.recall._llm_util import truncate_at_word as _tw
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.hybrid import classify_query_intent, intent_search_params
 from synapt.recall.session_start import _pid_alive
@@ -163,6 +163,41 @@ def _index_cache_stamp(index_dir: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(stamp)
 
 
+def _adopt_post_load_stamp(stamp, post):
+    """Pick the stamp to cache after a load.
+
+    Opening index.db creates an empty index.db-wal, which moves the stamp and
+    would make the next call reload for no reason. Take the post-load stamp only
+    when that empty -wal is the single change; anything else keeps the pre-load
+    stamp, so a write that landed during the load still reloads next call.
+    """
+    added = set(post) - set(stamp)
+    if not set(stamp) <= set(post) or len(added) != 1:
+        return stamp
+    name, size, _ = added.pop()
+    if name == "index.db-wal" and size == 0 and all(e[0] != name for e in stamp):
+        return post
+    return stamp
+
+
+@contextlib.contextmanager
+def _own_write(index_dir: Path):
+    """Wrap a write this server makes to its own index (access tracking, promotions).
+
+    The write moves the WAL, so the stamp moves, and without this the next call
+    reloads the whole index as if another writer had changed it. The cache is
+    re-stamped only when it matched just before the write: a change by another
+    writer before ours still reloads.
+    """
+    global _cached_mtime
+    before = _index_cache_stamp(index_dir)
+    try:
+        yield
+    finally:
+        if index_dir == _cached_dir and before == _cached_mtime:
+            _cached_mtime = _index_cache_stamp(index_dir)
+
+
 def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
     """Load per-project index with caching. Reloads if recall.db was modified.
 
@@ -198,8 +233,9 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
                 len(_cached_index.chunks), _time.monotonic() - _load_t0,
             )
             _cached_has_embeddings = use_embeddings
-            _cached_mtime = stamp
+            _cached_mtime = _adopt_post_load_stamp(stamp, _index_cache_stamp(index_dir))
             _cached_dir = index_dir
+            _cached_index._own_write = lambda: _own_write(index_dir)
             # Set current session ID for access tracking (distinct_sessions)
             try:
                 from synapt.recall.journal import (
@@ -212,9 +248,27 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
                 pass
         return _cached_index
     except Exception as e:
+        # Nothing is cached for an error: _cached_index None makes the next call load again.
         logging.getLogger("synapt.recall").warning("Index load failed: %s", e)
         _cached_index = None
-        return None
+        raise _store_unavailable(index_dir, e) from e
+
+
+def _store_unavailable(index_dir: Path, e: Exception) -> "RecallStoreUnavailable":
+    """Name the store (and for a stale quarantine lock, the lock file, which e's message names) a load failed on."""
+    from synapt.recall.storage import QuarantineLockStale
+
+    if isinstance(e, sqlite3.OperationalError) and ("locked" in str(e) or "busy" in str(e)):
+        return RecallStoreUnavailable(f"recall store {index_dir} is locked ({e}); try again in a moment")
+    if isinstance(e, QuarantineLockStale):
+        return RecallStoreUnavailable(f"recall store {index_dir} was not moved aside: {e}")
+    if isinstance(e, sqlite3.DatabaseError) and not isinstance(e, sqlite3.OperationalError):
+        return RecallStoreUnavailable(f"recall store {index_dir} is damaged ({e}); nothing was moved or deleted")
+    return RecallStoreUnavailable(f"recall store {index_dir} could not be read ({e})")
+
+
+class RecallStoreUnavailable(RuntimeError):
+    """The store at the named path is locked or damaged; the server stays up and the next call loads again."""
 
 
 def _invalidate_cache() -> None:
@@ -227,6 +281,97 @@ def _invalidate_cache() -> None:
     _cached_mtime = ()
     _cached_dir = None
     _cached_has_embeddings = False
+
+
+# ---------------------------------------------------------------------------
+# Idle release.
+# A server that has searched holds its index (about 510 MB on a 30,000-chunk store, measured)
+# for its whole life. After RECALL_IDLE_RELEASE_S with no tool call, the cache is dropped and the
+# allocator trimmed; the next search reloads. A release never runs while a call is in flight:
+# every tool call is counted (ValidatingFastMCP.call_tool), and the release checks the count
+# under the same lock. Torch is not this release's to free: the server embeds through a child
+# (embeddings.ChildEmbeddings), so torch never enters this process.
+# ---------------------------------------------------------------------------
+
+DEFAULT_IDLE_RELEASE_S = 600.0
+_activity_lock = threading.Lock()
+_calls_in_flight = 0
+_last_activity = 0.0
+
+
+def _idle_release_seconds() -> float:
+    """The interval from ``RECALL_IDLE_RELEASE_S``; a missing value is the default, and anything
+    that is not a positive finite number is refused (ValueError), never read as "release now"."""
+    raw = os.environ.get("RECALL_IDLE_RELEASE_S", "").strip()
+    if not raw:
+        return DEFAULT_IDLE_RELEASE_S
+    value = float(raw)
+    if not value > 0 or value == float("inf"):
+        raise ValueError(f"RECALL_IDLE_RELEASE_S must be a positive finite number, got {raw!r}")
+    return value
+
+
+def _call_started() -> None:
+    global _calls_in_flight, _last_activity
+    import time as _time
+
+    with _activity_lock:
+        _calls_in_flight += 1
+        _last_activity = _time.monotonic()
+
+
+def _call_finished() -> None:
+    global _calls_in_flight, _last_activity
+    import time as _time
+
+    with _activity_lock:
+        _calls_in_flight -= 1
+        _last_activity = _time.monotonic()
+
+
+def _trim_allocator() -> None:
+    """Hand freed heap back to the OS: without it the index's share stayed resident (950 to 539
+    MB, against 442 with the trim, measured on Linux)."""
+    import ctypes
+    import sys as _sys
+
+    try:
+        if _sys.platform.startswith("linux"):
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        elif _sys.platform == "darwin":
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+            libc.malloc_zone_pressure_relief(None, ctypes.c_size_t(0))
+    except Exception:  # noqa: BLE001 - a trim is an optimisation, never a failure
+        pass
+
+
+def _release_if_idle(interval: float, now: float | None = None) -> bool:
+    """Drop the cached index when no call is in flight and none started for `interval` seconds."""
+    import gc
+    import time as _time
+
+    now = _time.monotonic() if now is None else now
+    with _activity_lock:
+        if _calls_in_flight or _cached_index is None or now < _last_activity + interval:
+            return False
+        _invalidate_cache()
+    gc.collect()
+    _trim_allocator()
+    logging.getLogger("synapt.recall").info("Idle %.0fs: index released", interval)
+    return True
+
+
+def _start_idle_release(interval: float) -> threading.Thread:
+    import time as _time
+
+    def loop() -> None:
+        while True:
+            _time.sleep(min(interval / 4, 30.0))
+            _release_if_idle(interval)
+
+    thread = threading.Thread(target=loop, name="synapt-idle-release", daemon=True)
+    thread.start()
+    return thread
 
 
 def _index_missing_message(index_dir: Path, *, historical: bool = False) -> str:
@@ -443,6 +588,7 @@ def recall_search(
     context: int = 0,
     min_confidence: float = 0.0,
     top_k: int = 0,
+    detect_contradictions: bool = True,
 ) -> str:
     """Search past coding sessions for relevant context. USE PROACTIVELY.
 
@@ -497,6 +643,9 @@ def recall_search(
         include_historical: If True, include superseded/contradicted knowledge nodes
                             in results. When multiple versions exist in the same lineage,
                             the highest-confidence one is kept (confidence-based fallback).
+        detect_contradictions: If False, skip co-retrieval contradiction
+                               detection, so the search queues no pending
+                               contradictions. For background searches.
     """
     index_dir = project_index_dir()
     freshness_line = _query_freshness_line(index_dir)
@@ -602,6 +751,7 @@ def recall_search(
             include_historical=include_historical,
             min_confidence=effective_min_confidence,
             context=context,
+            detect_contradictions=detect_contradictions,
         )
         # Combine live (current session) + indexed (past sessions) results
         parts = []
@@ -654,7 +804,7 @@ def recall_search(
 
 
 @_memory_op_tap("mem_read")
-def recall_quick(query: str) -> str:
+def recall_quick(query: str, detect_contradictions: bool = True) -> str:
     """Quick, low-cost memory check. Use this speculatively — when you're
     not sure if past context exists but want to check.
 
@@ -668,13 +818,19 @@ def recall_quick(query: str) -> str:
 
     Args:
         query: Natural language query or keywords to search for.
+        detect_contradictions: If False, skip co-retrieval contradiction
+                               detection, so the search queues no pending
+                               contradictions. For background searches.
     """
     # The tool's contract includes the knowledge-semantic fallback (measured
     # live: a paraphrase query misses keyword-wise and only the embeddings
     # reach the saved fact). The grep-intercept hook calls the same body
     # through _recall_quick_impl with semantic_fallback=False — it runs
     # inside a 500 ms budget and must never start a model load on a miss.
-    return _recall_quick_impl(query, semantic_fallback=True)
+    return _recall_quick_impl(
+        query, semantic_fallback=True,
+        detect_contradictions=detect_contradictions,
+    )
 
 
 def _bind_quick_no_fallback():
@@ -684,7 +840,9 @@ def _bind_quick_no_fallback():
     return functools.partial(_recall_quick_impl, semantic_fallback=False)
 
 
-def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
+def _recall_quick_impl(
+    query: str, semantic_fallback: bool, detect_contradictions: bool = True,
+) -> str:
     index_dir = project_index_dir()
     freshness_line = _query_freshness_line(index_dir)
     quick_budget = _cap_tokens(500)
@@ -718,6 +876,7 @@ def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
             threshold_ratio=0.2,
             knowledge_boost=params.get("knowledge_boost"),
             max_knowledge=params.get("max_knowledge"),
+            detect_contradictions=detect_contradictions,
         )
         if result:
             return _with_query_freshness(result, freshness_line)
@@ -742,6 +901,7 @@ def _recall_quick_impl(query: str, semantic_fallback: bool) -> str:
                 threshold_ratio=0.2,
                 knowledge_boost=params.get("knowledge_boost"),
                 max_knowledge=params.get("max_knowledge"),
+                detect_contradictions=detect_contradictions,
             )
             if result:
                 return _with_query_freshness(result, freshness_line)
@@ -1794,7 +1954,7 @@ def recall_stats() -> str:
         if index._db:
             n_topic = index._db.cluster_count(cluster_type="topic")
             n_timeline = index._db.cluster_count(cluster_type="timeline")
-            n_archived = index._db._conn.execute(
+            n_archived = index._db.index_conn.execute(
                 "SELECT COUNT(*) FROM clusters WHERE status = 'archived'"
             ).fetchone()[0]
             if n_topic > 0 or n_timeline > 0 or n_archived > 0:
@@ -1919,6 +2079,8 @@ def recall_contradict(
     new_content: str | None = None,
     old_node_id: str | None = None,
     reason: str | None = None,
+    limit: int = 5,
+    order: str = "oldest",
 ) -> str:
     """Manage pending knowledge contradictions.
 
@@ -1939,13 +2101,19 @@ def recall_contradict(
                     (candidate promoted, existing superseded), "existing_wins" (existing
                     restored, candidate retired), or "false_positive" (both restored to
                     active, nothing superseded -- the judge's conflict flag was wrong).
-        claim: Free-text description of conflicting information (for "flag").
-               The system will search for matching knowledge nodes automatically.
-        new_content: The correct/updated information (for "flag"). If omitted,
-                     *claim* is used as both the description and the new content.
-        old_node_id: Optional knowledge node ID that the claim contradicts.
-                     If omitted, the system searches for matching nodes.
-        reason: Why this is a contradiction (for "flag").
+        claim: Free-text description of conflicting information (for "flag" and
+               "correct"; one of claim or new_content is required for both).
+               For "flag", the system searches for matching knowledge nodes with it.
+        new_content: The correct/updated information (for "flag" and "correct").
+                     If omitted, *claim* is used as both the description and the new content.
+        old_node_id: Knowledge node ID: required for "forget" and "correct"; optional
+                     for "flag", where the claim contradicts it and, if omitted, the
+                     system searches for matching nodes.
+        reason: Why this is a contradiction (for "flag"), or why the node is
+                corrected (for "correct"; default "Manual correction").
+        limit: Rows to show for "list" (default 5); 0 shows all. A footer names
+               shown, pending and withheld when rows are cut.
+        order: "oldest" (default) or "newest" for "list", by detected_at then id.
     """
     index = _get_index()
     if index is None or not index._db:
@@ -1959,16 +2127,31 @@ def recall_contradict(
             )
 
         if action == "list":
+            if order not in ("oldest", "newest"):
+                return f"Error: order must be 'oldest' or 'newest', got '{order}'."
+            if limit < 0:
+                return f"Error: limit must be >= 0, got {limit}."
             pending = index._db.list_pending_contradictions()
             if not pending:
                 return "No pending contradictions."
+            total = len(pending)
+            pending = sorted(
+                pending,
+                key=lambda c: (c["detected_at"] or "", c["id"]),
+                reverse=(order == "newest"),
+            )
+            if limit:
+                pending = pending[:limit]
+
+            def _one_line(text: str) -> str:
+                return " ".join(str(text).split())
             # Build lookup dict once (not per-iteration)
             old_ids = {c["old_node_id"] for c in pending if c["old_node_id"]}
             node_lookup = {
                 nid: index._db.get_knowledge_node(nid)
                 for nid in old_ids
             }
-            lines = [f"Pending contradictions ({len(pending)}):"]
+            lines = [f"Pending contradictions ({total}):"]
             for c in pending:
                 old_node = node_lookup.get(c["old_node_id"]) if c["old_node_id"] else None
                 old_content = old_node["content"] if old_node else ""
@@ -1978,12 +2161,17 @@ def recall_contradict(
                 if c.get("claim_text"):
                     lines.append(f"    Claim: {c['claim_text']}")
                 if old_content:
-                    lines.append(f"    Old: {old_content}")
+                    lines.append(f"    Old: {_one_line(old_content)}")
                 elif not c["old_node_id"]:
                     lines.append("    Old: (no matching node — free-text claim)")
-                lines.append(f"    New: {c['new_content']}")
+                lines.append(f"    New: {_one_line(c['new_content'])}")
                 if c["reason"]:
                     lines.append(f"    Reason: {c['reason']}")
+            if len(pending) < total:
+                lines.append(
+                    f"\n{len(pending)} of {total} shown, "
+                    f"{total - len(pending)} withheld (limit=0 lists all)"
+                )
             return "\n".join(lines)
 
         if action == "resolve":
@@ -1997,7 +2185,7 @@ def recall_contradict(
             # Filtering by status='pending' here is correct (unlike the single post-resolve
             # fetch this replaces, which deliberately read without a status filter because it
             # ran AFTER the row had already flipped away from 'pending').
-            pending_row = index._db._conn.execute(
+            pending_row = index._db.index_conn.execute(
                 "SELECT * FROM pending_contradictions WHERE id = ? AND status = 'pending'",
                 (contradiction_id,),
             ).fetchone()
@@ -2062,6 +2250,16 @@ def recall_contradict(
                     "nodes restored to active."
                 )
 
+            if resolution == "confirmed":
+                # A row queued before flag checked the length must not be
+                # marked confirmed when the node it becomes would be refused.
+                from synapt.recall.knowledge import check_content_length
+
+                try:
+                    check_content_length(pending_row["new_content"])
+                except ValueError as exc:
+                    return f"Error: {exc} Contradiction #{contradiction_id} stays pending."
+
             ok = index._db.resolve_contradiction(contradiction_id, resolution)
             if not ok:
                 return f"Contradiction #{contradiction_id} not found or already resolved."
@@ -2095,6 +2293,9 @@ def recall_contradict(
                 return f"Knowledge node '{old_node_id}' not found."
             from synapt.recall.knowledge import update_node, _knowledge_path
             update_node(old_node_id, {"status": "archived"}, _knowledge_path())
+            # Same status in the knowledge DB (index.db when sharded, recall.db when monolithic):
+            # search and quick read it there, so a jsonl-only archive left the node still being served.
+            index._db.upsert_knowledge_node({**node, "status": "archived"})
             return f"Forgotten: node '{old_node_id}' archived. Content was: {node['content'][:100]}"
 
         if action == "correct":
@@ -2142,6 +2343,15 @@ def _handle_flag(
     effective_claim = claim or ""
     effective_content = new_content or claim or ""
     effective_reason = reason or ""
+
+    # A confirmed flag becomes a node, so it is held to the node limit before
+    # anything is queued.
+    from synapt.recall.knowledge import check_content_length
+
+    try:
+        check_content_length(effective_content)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     # If a specific node ID was provided, use it directly
     if old_node_id:
@@ -2269,6 +2479,11 @@ def _apply_supersession(
     marked contradicted with ``superseded_by`` pointing at a replacement that was never created,
     permanently (the confirm status flip already committed, so there is no retry path).
     """
+    from synapt.recall.knowledge import check_content_length
+
+    # The replacement is stored whole, so it is held to the same limit as a
+    # save, and the check runs before the old node is touched.
+    check_content_length(new_content)
     from synapt.recall.consolidate import _validate_iso_date
     valid_from = _validate_iso_date(valid_from)
     valid_until = _validate_iso_date(valid_until)
@@ -2334,7 +2549,7 @@ def _apply_supersession(
     # Create replacement node
     new_node = {
         "id": new_id,
-        "content": _tw(new_content, 300),
+        "content": new_content,
         "category": category or old_node.get("category", "workflow"),
         "confidence": old_node.get("confidence", 0.5),
         "source_sessions": source_sessions or old_node.get("source_sessions", []),
@@ -2542,6 +2757,15 @@ def recall_correct(
                   "temporal", "debug", "architecture").
     """
     from synapt.recall.corrections import log_correction
+    from synapt.recall.knowledge import check_content_length
+
+    # The node is checked before the correction is logged, so a refuse
+    # leaves corrections.jsonl untouched.
+    node_content = f"{correct_answer} (re: {question})"
+    try:
+        check_content_length(node_content)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     try:
         # Step 1: Log the correction for benchmark data
@@ -2555,7 +2779,6 @@ def recall_correct(
         # Step 2: Immediately create a knowledge node (bypass contradiction queue)
         # User corrections are already confirmed — no need for a second confirmation step.
         from synapt.recall.knowledge import KnowledgeNode, append_node
-        node_content = f"{correct_answer} (re: {question})"
         node_category = category if category else "fact"
         node = KnowledgeNode.create(
             content=node_content,
@@ -2681,16 +2904,17 @@ def _record_context_access(idx, item_type: str, item_id: str) -> None:
     """Record an explicit drill-down access and check promotions (fire-and-forget)."""
     try:
         if idx._db:
-            idx._db.record_access(
-                [{"item_type": item_type, "item_id": item_id, "score": 1.0}],
-                context="context",
-            )
-            from synapt.recall.promotion import (
-                check_promotions, execute_cheap_promotions,
-            )
-            actions = check_promotions(idx._db, item_type, item_id)
-            if actions:
-                execute_cheap_promotions(idx._db, item_type, item_id, actions)
+            with getattr(idx, "_own_write", contextlib.nullcontext)():
+                idx._db.record_access(
+                    [{"item_type": item_type, "item_id": item_id, "score": 1.0}],
+                    context="context",
+                )
+                from synapt.recall.promotion import (
+                    check_promotions, execute_cheap_promotions,
+                )
+                actions = check_promotions(idx._db, item_type, item_id)
+                if actions:
+                    execute_cheap_promotions(idx._db, item_type, item_id, actions)
     except Exception:
         pass
 
@@ -2835,17 +3059,28 @@ def recall_journal(
         return f"Journal failed: {exc}"
 
 
+def _stored_list(value) -> list[str]:
+    """A list field as read back from a stored node (it may be JSON text)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value else []
+        except ValueError:
+            return []
+    return [v for v in (value or []) if v]
+
+
 @_memory_op_tap("mem_write")
 def recall_save(
     content: str = "",
     category: str | None = None,
-    confidence: float = 0.8,
+    confidence: float | None = None,
     tags: list[str] | None = None,
     source_sessions: list[str] | None = None,
     source_turns: list[str] | None = None,
     node_id: str | None = None,
     retract: bool = False,
     restore_retracted: bool = False,
+    restore: bool = False,
 ) -> str:
     """Create, update, or retract a knowledge node.
 
@@ -2856,10 +3091,14 @@ def recall_save(
             Omitted on an update keeps the node's existing category (an
             omitted category is not "workflow"); on a create it defaults to
             "workflow". An explicit category always wins.
-        confidence: Confidence score from 0.0 to 1.0.
-        tags: Optional search tags.
-        source_sessions: Optional originating session IDs.
-        source_turns: Optional originating turn refs ("session_id:turn_num").
+        confidence: Confidence score from 0.0 to 1.0. Omitted on an update
+            keeps the node's existing confidence; on a create it is 0.8.
+        tags: Optional search tags. Omitted on an update keeps the node's
+            existing tags; an explicit [] clears them.
+        source_sessions: Optional originating session IDs (omitted on an
+            update keeps the existing ones, as tags do).
+        source_turns: Optional originating turn refs ("session_id:turn_num"),
+            kept on an update when omitted, as tags do.
         node_id: Optional stable knowledge-node ID to upsert. If omitted,
             recall_save derives a stable ID from the saved content.
         retract: If True, mark the node as retracted (hidden from search
@@ -2869,6 +3108,10 @@ def recall_save(
             without it — retraction is load-bearing and a buried fact is not
             revived silently; restore says "re-activated" and returns the
             node to search under the new content.
+        restore: Explicit deliberate restore of a contradicted or superseded
+            node (requires node_id). An update on such a node is REFUSED
+            without it and the refusal names the successor node; restore
+            makes the node active again under the new content.
     """
     try:
         import hashlib
@@ -2926,6 +3169,13 @@ def recall_save(
             if not clean_content:
                 return "Error: content is required."
 
+            from synapt.recall.knowledge import check_content_length
+
+            try:
+                check_content_length(clean_content)
+            except ValueError as exc:
+                return f"Error: {exc}"
+
             resolved_node_id = node_id or hashlib.sha1(
                 clean_content.encode("utf-8")
             ).hexdigest()[:12]
@@ -2957,6 +3207,35 @@ def recall_save(
                     "restore_retracted=true) — or file the corrected fact as a "
                     "new node."
                 )
+            replaced = existing and (
+                existing.get("status") in ("contradicted", "superseded")
+                or existing.get("superseded_by")
+            )
+            if replaced and not restore:
+                # An update must not silently revive a node a newer fact
+                # replaced. Refuse and name the successor.
+                successor = existing.get("superseded_by") or "(none recorded)"
+                return (
+                    f"Error: node {resolved_node_id} is "
+                    f"{existing.get('status')}; its successor is {successor}. "
+                    "Update the successor instead, or to revive this node "
+                    f"deliberately call recall_save(node_id='{resolved_node_id}', "
+                    "content=<the fact>, restore=true)."
+                )
+            # Same rule as category: an omitted (None) tags/sources/confidence
+            # on an update keeps the existing node's value instead of resetting
+            # it to [] / 0.8; an explicit value, including [], always wins.
+            if existing:
+                if tags is None:
+                    tags = _stored_list(existing.get("tags"))
+                if source_sessions is None:
+                    source_sessions = _stored_list(existing.get("source_sessions"))
+                if source_turns is None:
+                    source_turns = _stored_list(existing.get("source_turns"))
+                if confidence is None and existing.get("confidence") is not None:
+                    confidence = existing.get("confidence")
+            if confidence is None:
+                confidence = 0.8
             node = KnowledgeNode.create(
                 content=clean_content,
                 category=category,
@@ -2970,6 +3249,12 @@ def recall_save(
                 node.created_at = existing.get("created_at", node.created_at)
                 node.version = existing.get("version", 1) + 1
                 node.lineage_id = existing.get("lineage_id", "") or existing["id"]
+                if not replaced and existing.get("status") != "retracted":
+                    # An update keeps the node's lifecycle fields; only a
+                    # restore (or restore_retracted) makes it active again.
+                    node.status = existing.get("status") or "active"
+                    node.superseded_by = existing.get("superseded_by") or ""
+                    node.contradiction_note = existing.get("contradiction_note") or ""
             # COMPUTE AND PACK THE VECTOR BEFORE THE NODE IS COMMITTED.
             # The operation that FAILS is the PACK, not the embed: on a width
             # mismatch embed() SUCCEEDS and returns a vector of the wrong width,
@@ -3051,7 +3336,7 @@ def recall_save(
         _invalidate_cache()
         was_retracted = bool(
             existing and existing.get("status") == "retracted" and restore_retracted
-        )
+        ) or bool(replaced and restore)
         action = "re-activated" if was_retracted else ("updated" if existing else "saved")
         emb_status = "embedded for vector search" if embedded else "saved without embeddings"
         version_tag = f", v{node.version}" if node.version > 1 else ""
@@ -3357,7 +3642,7 @@ def recall_timeline(
                 sql += " AND c.branch = ?"
                 params.append(branch)
             sql += " ORDER BY c.date_start"
-            rows = db._conn.execute(sql, params).fetchall()
+            rows = db.index_conn.execute(sql, params).fetchall()
             arcs = [
                 {
                     "cluster_id": r["cluster_id"],
@@ -3436,6 +3721,27 @@ def recall_timeline(
         return f"Timeline query failed: {exc}"
 
 
+# The channel store preamble last printed by recall_channel in this process.
+_last_store_preamble: str | None = None
+
+# Mention ids recall_channel results have already printed in full.
+_shown_mentions: set[str] = set()
+
+# Mention ids this session has read (read_message) or answered (a post naming
+# the id): recall_channel results no longer list them at all.
+_cleared_mentions: set[str] = set()
+
+_MESSAGE_ID_RE = re.compile(r"\bm_[0-9a-f]{8}\b")
+
+
+def _clear_mentions_from(action: str, message: str | None, result: str) -> None:
+    """Record mention ids a successful read_message or post has dealt with."""
+    if action == "read_message" and result.startswith("## #"):
+        _cleared_mentions.add(message.strip())
+    elif action == "post" and message:
+        _cleared_mentions.update(_MESSAGE_ID_RE.findall(message))
+
+
 def recall_channel(
     action: str = "read",
     channel: str = "dev",
@@ -3449,6 +3755,8 @@ def recall_channel(
     show_pins: bool = True,
     detail: str = "medium",
     msg_type: str | None = None,
+    offset: int = 0,
+    length: int = 0,
 ) -> str:
     """Cross-worktree communication channels for multi-agent coordination.
 
@@ -3462,6 +3770,8 @@ def recall_channel(
                 "list", "search", "rename", "claim", "unclaim", "intent", "board".
         channel: Channel name (default "dev"). Any name works -- created on first post.
         message: Message body (required for "post", "directive", "broadcast") or message_id for "read_message"/pin actions.
+        offset: For "read_message": character offset to start the chunk at (default 0).
+        length: For "read_message": chunk size in characters (default 0 = 8,000).
         to: Target agent for "directive" action.
         target: Agent to mute/unmute/kick (agent_id, display name, or griptree name).
         limit: Max messages to return for "read" and max hits for "search" (default 20).
@@ -3489,12 +3799,16 @@ def recall_channel(
     state_store = None
     log_store = None
     root_source = None
+    log_source = None
     try:
         from synapt.recall.actions import get_action_registry
         from synapt.recall.channel import (
             _channels_dir,
             _db_path,
+            _normalize_channel_name,
             _orphaned_local_channel_store,
+            _room_channels_dir,
+            _room_map_path,
         )
 
         registry = get_action_registry()
@@ -3509,7 +3823,15 @@ def recall_channel(
         # the global path, since nothing in the output ever said
         # the log was elsewhere. Named unconditionally, not only when they
         # diverge: a caller should never have to infer agreement from silence.
-        log_store = _channels_dir().resolve()
+        # A room in the shared-room map lives in its mapped store, so the log
+        # line names that store and says the map put it there. Resolved before
+        # either is set, so a refused mapping never prints the caller's store.
+        own_store = _channels_dir().resolve()
+        room_store = _room_channels_dir(_normalize_channel_name(channel)).resolve()
+        log_store = room_store
+        log_source = root_source
+        if room_store != own_store:
+            log_source = f"room map {_room_map_path()}"
         orphan_dir = _orphaned_local_channel_store()
         orphan_line = ""
         if orphan_dir is not None:
@@ -3524,7 +3846,7 @@ def recall_channel(
             )
         result = registry.dispatch(
             action,
-            channel=channel,
+            channel=_normalize_channel_name(channel),
             message=message,
             to=to,
             target=target,
@@ -3535,18 +3857,29 @@ def recall_channel(
             show_pins=show_pins,
             detail=detail,
             msg_type=msg_type,
+            offset=offset,
+            length=length,
         )
-        return (
+        _clear_mentions_from(action, message, result)
+        # The store lines cost every call the same bytes while saying
+        # nothing new: print them on the first call of the session and again
+        # only when what they name changes.
+        global _last_store_preamble
+        preamble = (
             f"Channel state store: {state_store} (source: {root_source})\n"
-            f"Channel log store: {log_store} (source: {root_source})\n"
-            f"{orphan_line}{result}"
+            f"Channel log store: {log_store} (source: {log_source})\n"
+            f"{orphan_line}"
         )
+        if preamble == _last_store_preamble:
+            return result
+        _last_store_preamble = preamble
+        return f"{preamble}{result}"
     except Exception as exc:
         prefix = ""
         if state_store:
             prefix += f"Channel state store: {state_store} (source: {root_source})\n"
         if log_store:
-            prefix += f"Channel log store: {log_store} (source: {root_source})\n"
+            prefix += f"Channel log store: {log_store} (source: {log_source or root_source})\n"
         return f"{prefix}Channel failed: {exc}"
 
 
@@ -3711,7 +4044,10 @@ def _directive_suffix() -> str:
     if not _is_solo_mode():
         try:
             from synapt.recall.channel import check_directives
-            result = check_directives()
+            result = check_directives(
+                shown_mentions=_shown_mentions,
+                cleared_mentions=_cleared_mentions,
+            )
             if result:
                 parts.append(result)
         except Exception:
@@ -3863,7 +4199,11 @@ def _build_validating_fastmcp_class():
                         f"Unknown argument(s) for {name}: {sorted(unknown)}. "
                         f"Accepted: {sorted(allowed)}"
                     )
-            return await super().call_tool(name, arguments)
+            _call_started()  # counted, so an idle release never drops the index under a call
+            try:
+                return await super().call_tool(name, arguments)
+            finally:
+                _call_finished()
 
     return ValidatingFastMCP
 
@@ -3979,9 +4319,11 @@ except Exception:  # pragma: no cover - never block server start on a version pr
 
 def main():
     """Entry point for standalone synapt-recall-server."""
-    from synapt.recall.embeddings import set_process_default_device
+    from synapt.recall.embeddings import set_process_default_device, use_child_embedder
 
     set_process_default_device("cpu")  # see its docstring; SYNAPT_EMBED_DEVICE still wins
+    use_child_embedder(True)  # torch lives in a child that exits when idle, never in this process
+    interval = _idle_release_seconds()  # a bad value refuses before anything is built
     server = _build_validating_fastmcp_class()(
         "synapt-recall",
         instructions=MCP_INSTRUCTIONS,
@@ -3991,6 +4333,7 @@ def main():
     server._mcp_server.version = _PRODUCT_VERSION or _product_version()
     register_tools(server)
     _sync_claude_memory_source_on_startup()
+    _start_idle_release(interval)  # last: a main() that stops early leaves no thread behind
     server.run()
 
 

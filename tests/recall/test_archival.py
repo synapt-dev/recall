@@ -23,7 +23,7 @@ def _seed_access(
 ):
     """Seed access_stats with specific values."""
     now = datetime.now(timezone.utc).isoformat()
-    db._conn.execute(
+    db._access.execute(
         "INSERT OR REPLACE INTO access_stats "
         "(item_type, item_id, access_count, explicit_count, "
         " first_accessed, last_accessed, promotion_tier, "
@@ -33,7 +33,7 @@ def _seed_access(
          first_accessed or now, last_accessed or now,
          tier, sessions, queries, decay_score),
     )
-    db._conn.commit()
+    db._access.commit()
 
 
 def _seed_cluster(db, cluster_id, topic="test topic", status="active"):
@@ -55,12 +55,12 @@ def _seed_cluster(db, cluster_id, topic="test topic", status="active"):
 
 def _seed_access_log(db, item_type, item_id, created_at, query="test", score=1.0):
     """Insert an access_log entry with a specific timestamp."""
-    db._conn.execute(
+    db._access.execute(
         "INSERT INTO access_log (item_type, item_id, context, session_id, query, score, created_at) "
         "VALUES (?, ?, 'search', 'sess-1', ?, ?, ?)",
         (item_type, item_id, query, score, created_at),
     )
-    db._conn.commit()
+    db._access.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -118,13 +118,13 @@ class TestDecayScores:
     def test_invalid_timestamp_defaults_to_1(self, tmp_path):
         """Items with unparseable timestamps should get decay_score=1.0."""
         db = _make_db(tmp_path)
-        db._conn.execute(
+        db._access.execute(
             "INSERT INTO access_stats "
             "(item_type, item_id, access_count, explicit_count, "
             " first_accessed, last_accessed, promotion_tier) "
             "VALUES ('chunk', 'c1', 1, 1, 'invalid', 'invalid', 'raw')",
         )
-        db._conn.commit()
+        db._access.commit()
 
         db.recompute_decay_scores()
         stats = db.get_access_stats("chunk", "c1")
@@ -280,7 +280,8 @@ class TestCompactAccessLog:
         assert count == 2
 
         # Check archive has aggregated entry
-        row = db._conn.execute(
+        assert db._conn.execute("SELECT COUNT(*) FROM access_log").fetchone()[0] == 0
+        row = db._access.execute(
             "SELECT * FROM access_log_archive WHERE item_id = 'c1'"
         ).fetchone()
         assert row is not None
@@ -292,7 +293,8 @@ class TestCompactAccessLog:
         assert set(queries) == {"topic A", "topic B"}
 
         # Original entries should be deleted
-        remaining = db._conn.execute(
+        assert db._conn.execute("SELECT COUNT(*) FROM access_log").fetchone()[0] == 0
+        remaining = db._access.execute(
             "SELECT COUNT(*) FROM access_log WHERE item_id = 'c1'"
         ).fetchone()[0]
         assert remaining == 0
@@ -307,7 +309,8 @@ class TestCompactAccessLog:
         count = db.compact_access_log(retention_days=90)
         assert count == 0
 
-        remaining = db._conn.execute(
+        assert db._conn.execute("SELECT COUNT(*) FROM access_log").fetchone()[0] == 0
+        remaining = db._access.execute(
             "SELECT COUNT(*) FROM access_log WHERE item_id = 'c1'"
         ).fetchone()[0]
         assert remaining == 1
@@ -324,7 +327,8 @@ class TestCompactAccessLog:
         count = db.compact_access_log(retention_days=90)
         assert count == 2
 
-        archive_rows = db._conn.execute(
+        assert db._conn.execute("SELECT COUNT(*) FROM access_log").fetchone()[0] == 0
+        archive_rows = db._access.execute(
             "SELECT * FROM access_log_archive WHERE item_id = 'c1'"
         ).fetchall()
         assert len(archive_rows) == 2

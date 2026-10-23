@@ -1292,6 +1292,9 @@ class TranscriptIndex:
 
         # Current session ID (set by MCP server for access tracking)
         self._current_session_id: str = ""
+        # The MCP server wraps its own writes (access tracking, promotions) so they do not
+        # read as another writer and reload the index on the next call.
+        self._own_write = contextlib.nullcontext
 
         # Chunk ID -> index mapping (for rowid conversion)
         self._id_to_idx: dict[str, int] = {
@@ -2120,6 +2123,7 @@ class TranscriptIndex:
         min_confidence: float = 0.0,
         context: int = 0,
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Search transcripts and return formatted context string.
 
@@ -2153,6 +2157,9 @@ class TranscriptIndex:
                 the context. None = no cap (all qualifying nodes compete).
                 Set to e.g. 5 to prevent knowledge from crowding out raw
                 conversation chunks.
+            detect_contradictions: When False, skip co-retrieval
+                contradiction detection, so the search queues no pending
+                contradictions. Default True.
 
         Returns:
             Formatted string ready for prompt injection, or empty string.
@@ -2179,7 +2186,7 @@ class TranscriptIndex:
             query, max_chunks, max_tokens, max_sessions, after, before,
             half_life, threshold_ratio, depth, include_archived,
             include_historical, now, knowledge_boost, max_knowledge,
-            agent_id,
+            agent_id, detect_contradictions,
         )
         cached = self._query_cache.get(cache_key)
         if cached is not None:
@@ -2276,6 +2283,7 @@ class TranscriptIndex:
                 emb_weight=emb_weight, knowledge_boost=_knowledge_boost,
                 now=now, max_knowledge=max_knowledge,
                 intent=intent, agent_id=agent_id,
+                detect_contradictions=detect_contradictions,
             )
         else:
             result = self._global_lookup(
@@ -2287,6 +2295,7 @@ class TranscriptIndex:
                 now=now, max_knowledge=max_knowledge,
                 intent=intent, min_confidence=min_confidence, context=context,
                 agent_id=agent_id,
+                detect_contradictions=detect_contradictions,
             )
 
         # Cache the result (LRU eviction when full)
@@ -2333,6 +2342,7 @@ class TranscriptIndex:
         min_confidence: float = 0.0,
         context: int = 0,
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Score all chunks globally, return top-K."""
         if self._db and (self._rowid_to_idx or self._db.knowledge_count() > 0):
@@ -2345,6 +2355,7 @@ class TranscriptIndex:
                 now=now, max_knowledge=max_knowledge, intent=intent,
                 min_confidence=min_confidence, context=context,
                 agent_id=agent_id,
+                detect_contradictions=detect_contradictions,
             )
         return self._global_lookup_bm25(
             query, query_tokens, max_chunks, max_tokens, date_filter,
@@ -2373,6 +2384,7 @@ class TranscriptIndex:
         min_confidence: float = 0.0,
         context: int = 0,
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Global lookup using FTS5 (SQLite backend)."""
         # Extract entities once and share across knowledge + FTS search
@@ -2384,6 +2396,7 @@ class TranscriptIndex:
             knowledge_boost=knowledge_boost, emb_weight=emb_weight,
             query_entities=query_entities, intent=intent,
             after=after, before=before,
+            detect_contradictions=detect_contradictions,
         )
         semantic_search_used = self._last_knowledge_semantic_used
 
@@ -2781,26 +2794,27 @@ class TranscriptIndex:
             if self._current_session_id:
                 item["session_id"] = self._current_session_id
         if access_items and self._db:
-            try:
-                self._db.record_access(access_items, context="search")
-            except Exception:
-                pass
+            with self._own_write():
+                try:
+                    self._db.record_access(access_items, context="search")
+                except Exception:
+                    pass
 
-            try:
-                from synapt.recall.promotion import (
-                    check_promotions, execute_cheap_promotions,
-                )
-                for item in access_items:
-                    actions = check_promotions(
-                        self._db, item["item_type"], item["item_id"],
+                try:
+                    from synapt.recall.promotion import (
+                        check_promotions, execute_cheap_promotions,
                     )
-                    if actions:
-                        execute_cheap_promotions(
-                            self._db, item["item_type"],
-                            item["item_id"], actions,
+                    for item in access_items:
+                        actions = check_promotions(
+                            self._db, item["item_type"], item["item_id"],
                         )
-            except Exception:
-                pass
+                        if actions:
+                            execute_cheap_promotions(
+                                self._db, item["item_type"],
+                                item["item_id"], actions,
+                            )
+                except Exception:
+                    pass
 
         if len(lines) <= 1:
             return ""
@@ -2947,6 +2961,7 @@ class TranscriptIndex:
         max_knowledge: int | None = None,
         intent: str = "",
         agent_id: str | None = None,
+        detect_contradictions: bool = True,
     ) -> str:
         """Search sessions newest-first, stop early if enough hits found."""
         # Knowledge results are always searched globally (not per-session)
@@ -2955,6 +2970,7 @@ class TranscriptIndex:
                 query, max_chunks, include_historical=include_historical,
                 knowledge_boost=knowledge_boost, emb_weight=emb_weight,
                 intent=intent, after=after, before=before,
+                detect_contradictions=detect_contradictions,
             )
             if self._db else []
         )
@@ -3218,6 +3234,7 @@ class TranscriptIndex:
         intent: str = "",
         after: str | None = None,
         before: str | None = None,
+        detect_contradictions: bool = True,
     ) -> list[dict]:
         """Search knowledge nodes via FTS5 + embedding hybrid.
 
@@ -3419,8 +3436,12 @@ class TranscriptIndex:
             # Co-retrieval conflict detection (Phase 8c): when two active
             # nodes in the same category have divergent content, queue a
             # pending contradiction for user review. Has its own try/except
-            # internally — never disrupts search results.
-            self._last_conflicts = self._detect_co_retrieval_conflicts(results)
+            # internally — never disrupts search results. Callers that run many
+            # searches nobody asked about pass detect_contradictions=False.
+            self._last_conflicts = (
+                self._detect_co_retrieval_conflicts(results)
+                if detect_contradictions else []
+            )
 
             return results
         except Exception:
@@ -4009,27 +4030,28 @@ class TranscriptIndex:
             if self._current_session_id:
                 item["session_id"] = self._current_session_id
         if all_access and self._db:
-            try:
-                self._db.record_access(all_access, context="search")
-            except Exception:
-                pass  # Never fail a search due to access tracking
+            with self._own_write():
+                try:
+                    self._db.record_access(all_access, context="search")
+                except Exception:
+                    pass  # Never fail a search due to access tracking
 
-            # Check promotions for emitted items (cheap actions only)
-            try:
-                from synapt.recall.promotion import (
-                    check_promotions, execute_cheap_promotions,
-                )
-                for item in all_access:
-                    actions = check_promotions(
-                        self._db, item["item_type"], item["item_id"],
+                # Check promotions for emitted items (cheap actions only)
+                try:
+                    from synapt.recall.promotion import (
+                        check_promotions, execute_cheap_promotions,
                     )
-                    if actions:
-                        execute_cheap_promotions(
-                            self._db, item["item_type"],
-                            item["item_id"], actions,
+                    for item in all_access:
+                        actions = check_promotions(
+                            self._db, item["item_type"], item["item_id"],
                         )
-            except Exception:
-                pass  # Never fail a search due to promotions
+                        if actions:
+                            execute_cheap_promotions(
+                                self._db, item["item_type"],
+                                item["item_id"], actions,
+                            )
+                except Exception:
+                    pass  # Never fail a search due to promotions
 
         # Populate working memory with emitted items
         # Build a lookup for knowledge node content
@@ -4390,12 +4412,7 @@ class TranscriptIndex:
         chunk = self._get_chunk(idx) if idx is not None else None
         if chunk is None and self._db:
             # Try DB lookup
-            row = self._db._conn.execute(
-                "SELECT transcript_path, byte_offset, byte_length, "
-                "session_id, turn_index, timestamp "
-                "FROM chunks WHERE id = ?",
-                (chunk_id,),
-            ).fetchone()
+            row = self._db.chunk_location(chunk_id)
             if row:
                 chunk = TranscriptChunk(
                     id=chunk_id,
@@ -4543,26 +4560,50 @@ class TranscriptIndex:
         # Prefer ShardedRecallDB (auto-detects monolithic recall.db or sharded layout)
         from synapt.recall.sharding import is_sharded
         if db_path.exists() or is_sharded(directory):
-            db = None
-            try:
-                db = ShardedRecallDB.open(directory)
-                chunks = db.load_chunk_headers()
-                return cls(
-                    chunks,
-                    use_embeddings=use_embeddings,
-                    cache_dir=directory,
-                    db=db,
-                    lazy_chunks=True,
-                )
-            except (sqlite3.DatabaseError, OSError) as exc:
-                logger.warning("Corrupt recall DB, rebuilding: %s", exc)
-                if db is not None:
-                    with contextlib.suppress(Exception):
-                        db.close()
-                if not is_sharded(directory):
-                    with contextlib.suppress(OSError):
-                        db_path.unlink()
-                # Fall through to JSONL path or empty index
+            from synapt.recall.storage import _schema_reads_alone, quarantine_recall_db, wait_for_store
+            # A second pass opens the store another load put in place while this one waited on the quarantine lock.
+            for _attempt in range(2):
+                db = None
+                try:
+                    if db_path.exists() and _schema_reads_alone(db_path):
+                        # Only a main file that reads gets a plain connection: closing one on a damaged file drops its -wal.
+                        wait_for_store(db_path)
+                    elif db_path.exists() and not is_sharded(directory):
+                        # No read-write connection may open on it: sqlite deletes the -wal when it closes one, and
+                        # Windows cannot move a file this process holds open.
+                        raise sqlite3.DatabaseError("recall.db is not a database")
+                    db = ShardedRecallDB.open(directory)
+                    chunks = db.load_chunk_headers()
+                    return cls(
+                        chunks,
+                        use_embeddings=use_embeddings,
+                        cache_dir=directory,
+                        db=db,
+                        lazy_chunks=True,
+                    )
+                except sqlite3.OperationalError:
+                    # A healthy store raises it too ("database is locked", "disk I/O error"); the file is never touched.
+                    if db is not None:
+                        with contextlib.suppress(Exception):
+                            db.close()
+                    raise
+                except sqlite3.DatabaseError as exc:
+                    if db is not None:
+                        with contextlib.suppress(Exception):
+                            db.close()
+                    if is_sharded(directory):
+                        # A damaged sharded store is never moved; the caller names it.
+                        raise
+                    try:
+                        st = os.stat(db_path)
+                    except FileNotFoundError:
+                        break
+                    if _schema_reads_alone(db_path):
+                        # recall.db itself reads, so the error came from beside it; moving it aside would be wrong.
+                        raise
+                    if quarantine_recall_db(db_path, (st.st_dev, st.st_ino), exc) or not db_path.exists():
+                        break
+            # Fall through to JSONL path or empty index
 
         # Legacy JSONL — load and auto-migrate to SQLite
         if chunks_path.exists():
@@ -5802,6 +5843,17 @@ def claude_projects_roots(relative_to: Path | None = None) -> list[Path]:
     ``projects`` directory, before ``~/.claude``: the roots other transcript
     readers (ccusage) look in, so a session under any of them is not invisible.
 
+    After ``~/.claude``, each ``~/.claude-accounts/<account>/projects`` directory
+    is read too, sorted by path, so a session kept under a per-account directory
+    is found without ``--source``. Callers differ: ``_claude_memory_dir`` and
+    ``project_transcript_dir`` take the first root that holds what they look for,
+    so an earlier root still wins there; ``project_transcript_dirs`` (what
+    ``recall build`` reads), ``project_transcript_dirs_any_root`` and the CLI's
+    directory list collect every root, so a project kept under both ``~/.claude``
+    and an account now reads the transcripts from both. A gripspace's ``memory/``
+    that exists only under an account is now admitted and indexed as its Claude
+    Code memory.
+
     A listed directory that is not absolute (after ``~`` expands) is relative to
     the directory Claude Code ran in, which for a project's transcripts is the
     project itself (measured: ``CLAUDE_CONFIG_DIR=relcfg claude -p`` wrote
@@ -5824,6 +5876,8 @@ def claude_projects_roots(relative_to: Path | None = None) -> list[Path]:
     if xdg_style.is_dir():
         roots.append(xdg_style)
     roots.append(Path.home() / ".claude" / "projects")
+    accounts = Path.home() / ".claude-accounts"
+    roots.extend(sorted(p for p in accounts.glob("*/projects") if p.is_dir()))
     unique: list[Path] = []
     seen: set[Path] = set()
     for root in roots:

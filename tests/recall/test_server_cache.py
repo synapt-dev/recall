@@ -109,3 +109,53 @@ def test_label_empty_result_surfaces_skipped_lines(tmp_path, monkeypatch):
     assert "huge-session" in out
     assert "6,000,000" in out
     assert "SYNAPT_MAX_TRANSCRIPT_LINE_BYTES" in out
+
+
+def _two_loads(tmp_path, monkeypatch):
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    (index_dir / "index.db").write_bytes(b"base")
+    wal = index_dir / "index.db-wal"
+    wal.write_bytes(b"first")
+    loaded = [SimpleNamespace(chunks=[], _db=None) for _ in range(2)]
+    calls = []
+
+    def fake_load(directory, use_embeddings=False):
+        calls.append(directory)
+        return loaded[len(calls) - 1]
+
+    monkeypatch.setattr(server, "_cached_index", None)
+    monkeypatch.setattr(server, "_cached_mtime", ())
+    monkeypatch.setattr(server, "_cached_dir", None)
+    monkeypatch.setattr(server, "_cached_has_embeddings", False)
+    monkeypatch.setattr(server, "project_index_dir", lambda: index_dir)
+    monkeypatch.setattr(server.TranscriptIndex, "load", fake_load)
+    return wal, loaded, calls
+
+
+def test_the_servers_own_write_does_not_reload_the_index(tmp_path, monkeypatch):
+    """Access tracking writes the WAL at the end of every search; read as another writer,
+    it reloaded the whole index (275k chunks, 10-50 s) on the next call."""
+    wal, loaded, calls = _two_loads(tmp_path, monkeypatch)
+
+    first = server._get_index(use_embeddings=False)
+    with first._own_write():
+        wal.write_bytes(b"first+access-rows")
+    second = server._get_index(use_embeddings=False)
+
+    assert second is first is loaded[0]
+    assert len(calls) == 1
+
+
+def test_another_writer_before_our_own_write_still_reloads(tmp_path, monkeypatch):
+    wal, loaded, calls = _two_loads(tmp_path, monkeypatch)
+
+    first = server._get_index(use_embeddings=False)
+    wal.write_bytes(b"another-writer")
+    with first._own_write():
+        wal.write_bytes(b"another-writer+access-rows")
+    second = server._get_index(use_embeddings=False)
+
+    assert first is loaded[0]
+    assert second is loaded[1]
+    assert len(calls) == 2

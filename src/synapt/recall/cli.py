@@ -54,6 +54,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
@@ -80,6 +81,7 @@ from synapt.recall.core import (
 )
 from synapt.recall.chatgpt import parse_chatgpt_archive
 from synapt.recall.progress import ProgressLog, phase
+from synapt.recall.storage import _schema_reads_alone  # noqa: F401  (moved; cli callers and tests import it here)
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.journal import (
     latest_transcript_path,
@@ -324,6 +326,43 @@ def build_lock_has_waiter(data_dir: Path, name: str = "build.lock") -> bool:
         return any(waiting_dir.iterdir())
     except OSError:
         return False
+
+
+class CorruptRecallDBError(sqlite3.DatabaseError):
+    """The store's recall.db is not a database a build can open.
+
+    A subclass of sqlite3.DatabaseError, so a caller that already catches that keeps catching it.
+    """
+
+
+def _open_build_db(db_path: Path):
+    """Open the monolithic recall.db for a build, or refuse without touching it.
+
+    The build never repairs this file. recall.db holds knowledge nodes, pending contradictions and
+    the access log, none of which a build can regenerate from transcripts, so a delete-and-rebuild
+    is a data loss the user did not ask for. The file stays byte-for-byte as it was and the message
+    names the recovery step.
+    """
+    from synapt.recall.storage import RecallDB
+
+    try:
+        return RecallDB(db_path)
+    except sqlite3.OperationalError:
+        # A subclass of DatabaseError, and a healthy store raises it: "database is locked" behind
+        # another process's write, "disk I/O error". Telling a user to move a healthy store aside
+        # would be wrong, so these keep their own error.
+        raise
+    except sqlite3.DatabaseError as exc:
+        if _schema_reads_alone(db_path):
+            # recall.db itself reads, so the error came from something the open touches beside it (access.db,
+            # where it moves legacy access rows) or from a later step; naming recall.db would be wrong.
+            raise
+        raise CorruptRecallDBError(
+            f"{db_path} is not a readable SQLite database ({exc}). The build stopped and left it "
+            "untouched: it can hold knowledge nodes and contradictions that a build cannot regenerate. "
+            f"To recover, move it aside and keep it (with any {db_path.name}-wal and "
+            f"{db_path.name}-shm beside it), then run `synapt recall build` again."
+        ) from exc
 
 
 def _acquire_build_lock(data_dir: Path, timeout: float = 60.0, name: str = "build.lock") -> "int | None":
@@ -812,6 +851,43 @@ class _PressureWatchdog:
         return False  # never swallow: a stop must reach the caller that releases the lock
 
 
+KEYWORD_ONLY_LINE = (
+    "Embeddings are not built for this store; it searches by keyword only."
+)
+
+
+def _store_has_embeddings(project: Path) -> bool:
+    """Whether a build of *project* will compute embeddings.
+
+    The build always opens a SQLite store (sharded or not), and
+    ``TranscriptIndex._load_or_build_embeddings_db`` returns early unless
+    ``db.has_embeddings()`` is true. Ask that same question here, read-only:
+    no DDL, no migrations, no write lock, and no store created where none
+    exists yet (a new store has none). A store that will not open is reported
+    as having none; the build's own open of that store then decides what happens.
+    A WAL-mode store in a directory this process cannot write fails the plain
+    read-only open (it needs a -shm); it is read again as immutable.
+    """
+    import sqlite3
+    index_dir = project_index_dir(project)
+    from synapt.recall.sharding import is_sharded
+    from synapt.recall.sharded_db import ShardedRecallDB
+    if not is_sharded(index_dir) and not (index_dir / "recall.db").exists():
+        return False
+    for immutable in (False, True):
+        try:
+            db = ShardedRecallDB.open_readonly(index_dir, immutable=immutable)
+            try:
+                return db.has_embeddings()
+            finally:
+                db.close()
+        except sqlite3.OperationalError:
+            continue
+        except (sqlite3.DatabaseError, OSError):
+            return False
+    return False
+
+
 def _archive_and_build(
     project_dir: Path,
     source_dirs: list[Path] | None = None,
@@ -979,7 +1055,7 @@ def _archive_and_build_locked(
         db = ShardedRecallDB.open(index_dir)
         print(f"  Sharded layout: {db.shard_count} data shard(s)")
     else:
-        db = RecallDB(index_dir / "recall.db")
+        db = _open_build_db(index_dir / "recall.db")
 
     # Fingerprint the inputs and short-circuit a no-op run.
     #
@@ -1330,7 +1406,7 @@ def _archive_and_build_locked(
             # Skip clusters that already have LLM summaries (preserved across rebuilds).
             llm_cluster_ids = {
                 r["cluster_id"]
-                for r in db._conn.execute(
+                for r in db.index_conn.execute(
                     "SELECT cluster_id FROM cluster_summaries WHERE method = 'llm'"
                 ).fetchall()
             }
@@ -1385,7 +1461,7 @@ def _archive_and_build_locked(
                 if tags:
                     cl["tags"] = tags
                     new_search = cl.get("search_text", "") + " " + " ".join(tags)
-                    db._conn.execute(
+                    db.index_conn.execute(
                         "UPDATE clusters SET tags = ?, search_text = ? "
                         "WHERE cluster_id = ?",
                         (json.dumps(tags), new_search, cl["cluster_id"]),
@@ -1393,7 +1469,7 @@ def _archive_and_build_locked(
                     tagged += 1
             tags_log.done()
             if tagged:
-                db._conn.commit()
+                db.index_conn.commit()
                 # FTS is kept in sync by the clusters_au trigger on UPDATE;
                 # save_timeline_clusters() also does a full FTS rebuild.
                 print(f"  Tags: {tagged} topic clusters tagged")
@@ -1800,16 +1876,22 @@ def cmd_build(args: argparse.Namespace) -> None:
             print("Specify --source, --hf, or --chatgpt-archive explicitly.", file=sys.stderr)
             sys.exit(1)
 
-    if use_emb:
+    if use_emb and not _store_has_embeddings(project):
+        print(f"[build] {KEYWORD_ONLY_LINE}")
+    elif use_emb:
         print("[build] Computing embeddings (this may take a moment) ...")
 
-    final_index = _archive_and_build(
-        project,
-        source_dirs=source_dirs or None,
-        use_embeddings=use_emb,
-        incremental=args.incremental,
-        chatgpt_archive=args.chatgpt_archive,
-    )
+    try:
+        final_index = _archive_and_build(
+            project,
+            source_dirs=source_dirs or None,
+            use_embeddings=use_emb,
+            incremental=args.incremental,
+            chatgpt_archive=args.chatgpt_archive,
+        )
+    except CorruptRecallDBError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     if not final_index:
         print("Error: no chunks found.", file=sys.stderr)
@@ -1874,6 +1956,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         max_sessions=args.max_sessions,
         after=args.after,
         before=args.before,
+        detect_contradictions=not getattr(args, "no_detect_contradictions", False),
     )
     t_search = time.perf_counter()
 
@@ -3357,6 +3440,76 @@ def cmd_remind(args: argparse.Namespace) -> None:
     print(f"Added reminder{sticky_label}: {reminder.text} (id: {reminder.id})")
 
 
+# The inputs each `channel` action uses. Any other input the caller gives is
+# refused before anything runs: accepting a flag and ignoring it reports
+# success for something that did not happen. A new flag or action must be
+# added here, and tests/recall/test_channel_cli_unused_flags.py checks every
+# action against every input the parser defines.
+_CHANNEL_ACTION_INPUTS: dict[str, frozenset[str]] = {
+    "post": frozenset({"channel", "message", "pin", "type"}),
+    "read": frozenset({"channel", "limit", "since", "detail"}),
+    "who": frozenset(),
+    "join": frozenset({"channel", "name"}),
+    "leave": frozenset({"channel"}),
+    "heartbeat": frozenset(),
+    "unread": frozenset(),
+    "pin": frozenset({"channel", "message"}),
+    "directive": frozenset({"channel", "message", "to"}),
+    "mute": frozenset({"channel", "target"}),
+    "unmute": frozenset({"channel", "target"}),
+    "kick": frozenset({"channel", "target"}),
+    "broadcast": frozenset({"message"}),
+    "list": frozenset(),
+    "search": frozenset({"channel", "message"}),
+    "chat": frozenset({"channel", "name", "target", "limit"}),
+    "read_message": frozenset({"channel", "message", "offset", "length"}),
+    "watch": frozenset({"channel", "message", "rooms", "since", "include_mine",
+                         "all_rooms"}),
+}
+
+_CHANNEL_INPUT_LABELS = {"channel": "<channel>", "message": "<message>",
+                         "rooms": "<room>...", "include_mine": "--include-mine",
+                         "all_rooms": "--all"}
+
+_CHANNEL_INPUT_HINTS = {
+    ("post", "name"): (
+        "; to post as another agent, run 'synapt recall channel join "
+        "<channel> --name <name>' first, then post without --name"
+    ),
+}
+
+
+# Every input the `channel` parser defines, in the order refusals check them.
+_CHANNEL_INPUT_DESTS = ("channel", "message", "limit", "since", "pin", "type",
+                        "to", "target", "detail", "name", "offset", "length",
+                        "rooms", "include_mine", "all_rooms")
+
+
+def _channel_inputs_given(args: argparse.Namespace) -> list[str]:
+    """Inputs the caller actually gave (every channel input defaults to None or False)."""
+    given = []
+    for dest in _CHANNEL_INPUT_DESTS:
+        value = getattr(args, dest, None)
+        if value is not None and value is not False and value != []:
+            given.append(dest)
+    return given
+
+
+def _refuse_unused_channel_inputs(action: str, args: argparse.Namespace) -> None:
+    used = _CHANNEL_ACTION_INPUTS[action]
+    for dest in _channel_inputs_given(args):
+        if dest in used:
+            continue
+        label = _CHANNEL_INPUT_LABELS.get(dest, "--" + dest)
+        # The value is never echoed: it may carry anything, escapes included.
+        print(
+            f"synapt recall channel {action}: {label} is not used by '{action}'"
+            f"{_CHANNEL_INPUT_HINTS.get((action, dest), '; remove it')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def cmd_channel(args: argparse.Namespace) -> None:
     """Cross-worktree agent communication channels."""
     from synapt.recall.channel import (
@@ -3364,6 +3517,7 @@ def cmd_channel(args: argparse.Namespace) -> None:
         channel_leave,
         channel_post,
         channel_read,
+        channel_read_message,
         channel_who,
         channel_heartbeat,
         channel_unread,
@@ -3377,6 +3531,11 @@ def cmd_channel(args: argparse.Namespace) -> None:
     )
 
     action = args.action
+    if action == "broadcast" and args.message is None:
+        # Documented form: broadcast "message". With one positional, argparse
+        # fills the channel slot; broadcast has no channel, so it is the body.
+        args.message, args.channel = args.channel, None
+    _refuse_unused_channel_inputs(action, args)
     channel = args.channel or "dev"
 
     if action == "join":
@@ -3397,12 +3556,44 @@ def cmd_channel(args: argparse.Namespace) -> None:
         }
         if getattr(args, "type", None):
             post_kwargs["msg_type"] = args.type
-        print(channel_post(**post_kwargs))
+        from synapt.recall.channel import ChannelNameError
+        try:
+            print(channel_post(**post_kwargs))
+        except ChannelNameError as e:
+            print(f"synapt recall channel post: {e}", file=sys.stderr)
+            sys.exit(2)
     elif action == "read":
-        read_kwargs: dict = {"channel": channel, "limit": args.limit, "since": args.since}
+        limit = args.limit if args.limit is not None else 20
+        read_kwargs: dict = {"channel": channel, "limit": limit, "since": args.since,
+                             "surface": "cli"}
         if getattr(args, "detail", None):
             read_kwargs["detail"] = args.detail
-        print(channel_read(**read_kwargs))
+        from synapt.recall.channel import SinceError
+        try:
+            print(channel_read(**read_kwargs))
+        except SinceError as e:
+            print(f"synapt recall channel read: {e}", file=sys.stderr)
+            sys.exit(2)
+    elif action == "watch":
+        from synapt.recall.channel import WatchRoomError, channel_watch
+        rooms = [r for r in (args.channel, args.message, *(args.rooms or [])) if r is not None]
+        try:
+            channel_watch(rooms, since=args.since, include_mine=args.include_mine,
+                          all_rooms=args.all_rooms)
+        except WatchRoomError as e:
+            print(f"synapt recall channel watch: {e}", file=sys.stderr)
+            sys.exit(2)
+    elif action == "read_message":
+        if not args.message:
+            print("Usage: synapt recall channel read_message <channel> <id> "
+                  "[--offset N] [--length N]", file=sys.stderr)
+            sys.exit(1)
+        rm_kwargs: dict = {"channel": channel}
+        if args.offset is not None:
+            rm_kwargs["offset"] = args.offset
+        if args.length is not None:
+            rm_kwargs["length"] = args.length
+        print(channel_read_message(args.message, **rm_kwargs))
     elif action == "who":
         print(channel_who())
     elif action == "heartbeat":
@@ -3457,7 +3648,7 @@ def cmd_channel(args: argparse.Namespace) -> None:
             print("Usage: synapt recall channel search <channel> \"query\"", file=sys.stderr)
             sys.exit(1)
         from synapt.recall.channel import channel_search
-        results = channel_search(args.message)
+        results = channel_search(args.message, channel=channel)
         if not results:
             print("No matching messages.")
         else:
@@ -3474,8 +3665,8 @@ def cmd_channel(args: argparse.Namespace) -> None:
         from synapt.recall.channel_chat import main as chat_main
         chat_main(
             channel=channel,
-            name=args.target,  # reuse --target for --name
-            poll=float(args.limit) if args.limit != 20 else 1.0,
+            name=args.name or args.target,  # --target kept for older callers
+            poll=float(args.limit) if args.limit is not None else 1.0,
         )
 
 
@@ -3735,7 +3926,7 @@ def generate_startup_context(
     # the result rather than an invisible implementation detail.
     try:
         from synapt.recall.journal import _read_all_entries, _journal_path, _dedup_entries
-        from synapt.recall.journal import format_for_session_start
+        from synapt.recall.journal import format_for_session_start, newer_journal_elsewhere, newer_journal_line
         # Ambient (None): resolve the session-consistent journal store, not cwd
         # (see the branch-context leg above; dual-use wake fix).
         jf = _journal_path()
@@ -3769,6 +3960,15 @@ def generate_startup_context(
                 latest_authored_journal_timestamp = authored[0].timestamp
             for entry in shown_entries:
                 journal_lines.append(format_for_session_start(entry))
+            newer = newer_journal_line(newer_journal_elsewhere(
+                jf, shown_entries[0].timestamp if shown_entries else None
+            ))
+            if newer:
+                journal_lines.append(newer)
+        else:
+            newer = newer_journal_line(newer_journal_elsewhere(jf, None))
+            if newer:
+                journal_lines.append(newer)
     except Exception:
         pass
 
@@ -4590,7 +4790,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(f"  Start a Claude Code or Codex session, then run 'synapt init' again to index.")
     else:
         use_emb = not args.no_embeddings
-        if use_emb:
+        if use_emb and not _store_has_embeddings(project):
+            print(f"  {KEYWORD_ONLY_LINE}")
+        elif use_emb:
             print("  Computing embeddings ...")
 
         final_index = _archive_and_build(
@@ -4891,7 +5093,7 @@ def cmd_maintain(args: argparse.Namespace) -> None:
         # Count what is LEFT with the grinder's own eligibility criteria rather
         # than a paraphrase of them: a backlog measured by a slightly different
         # query is a number about a different question.
-        remaining = db._conn.execute(
+        remaining = db.index_conn.execute(
             "SELECT COUNT(*) "
             "FROM clusters c "
             "LEFT JOIN cluster_summaries cs "
@@ -5451,6 +5653,10 @@ def make_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--after", default=None, help="Only results after this date (ISO 8601, e.g. 2026-02-28)")
     search_parser.add_argument("--before", default=None, help="Only results before this date (ISO 8601, e.g. 2026-03-01)")
     search_parser.add_argument("--profile", action="store_true", help="Show per-phase timing breakdown")
+    search_parser.add_argument(
+        "--no-detect-contradictions", action="store_true",
+        help="Skip co-retrieval contradiction detection (queue no pending contradictions)",
+    )
 
     # Benchmark
     code_parser = subparsers.add_parser(
@@ -5665,13 +5871,16 @@ def make_parser() -> argparse.ArgumentParser:
                                 choices=["post", "read", "who", "join", "leave",
                                          "heartbeat", "unread", "pin",
                                          "directive", "mute", "unmute", "kick",
-                                         "broadcast", "list", "search", "chat"],
+                                         "broadcast", "list", "search", "chat",
+                                         "read_message", "watch"],
                                 help="Channel action")
-    channel_parser.add_argument("channel", nargs="?", default="dev",
+    channel_parser.add_argument("channel", nargs="?", default=None,
                                 help="Channel name (default: dev)")
     channel_parser.add_argument("message", nargs="?", default=None,
-                                help="Message body (for post/pin/directive/broadcast)")
-    channel_parser.add_argument("--limit", type=int, default=20,
+                                help="Message body (for post/pin/directive/search; "
+                                     "broadcast takes it as its only positional); "
+                                     "the message id for read_message")
+    channel_parser.add_argument("--limit", type=int, default=None,
                                 help="Max messages to return (for 'read' action, default: 20)")
     channel_parser.add_argument("--since", default=None,
                                 help="Only messages after this ISO timestamp (for 'read' action)")
@@ -5688,7 +5897,17 @@ def make_parser() -> argparse.ArgumentParser:
                                 choices=["max", "high", "medium", "low", "min"],
                                 help="Output detail level for read (default: medium)")
     channel_parser.add_argument("--name", default=None,
-                                help="Display name for join action")
+                                help="Display name for join and chat (other actions refuse it)")
+    channel_parser.add_argument("--offset", type=int, default=None,
+                                help="First char to read (for 'read_message'; default: 0)")
+    channel_parser.add_argument("--length", type=int, default=None,
+                                help="Chars to read from --offset (for 'read_message'; default: 8000)")
+    channel_parser.add_argument("rooms", nargs="*", default=None,
+                                help="More rooms to follow (for 'watch', after the first two)")
+    channel_parser.add_argument("--include-mine", dest="include_mine", action="store_true",
+                                help="Also show posts sent under SYNAPT_AGENT_ID (for 'watch')")
+    channel_parser.add_argument("--all", dest="all_rooms", action="store_true",
+                                help="Watch every room in the store and the room map (for 'watch')")
 
     catchup_parser = subparsers.add_parser(
         "catchup",

@@ -59,7 +59,8 @@ def _claude_memory_dir(gripspace_root: Path) -> Path:
     """The directory Claude Code itself writes this gripspace's memory
     files to: ``<root>/<slug>/memory/`` under the first root of
     ``claude_projects_roots`` (configured roots first, then
-    ``~/.config/claude``, then ``~/.claude``) that has one, where ``<slug>``
+    ``~/.config/claude``, then ``~/.claude``, then each
+    ``~/.claude-accounts/<account>``) that has one, where ``<slug>``
     is Claude Code's own path-to-directory-name convention (``project_slug``,
     already used for transcript discovery). With none, the first root's path,
     which the caller finds is not a directory."""
