@@ -2271,6 +2271,9 @@ def recall_contradict(
                 return f"Knowledge node '{old_node_id}' not found."
             from synapt.recall.knowledge import update_node, _knowledge_path
             update_node(old_node_id, {"status": "archived"}, _knowledge_path())
+            # Same status in the knowledge DB (index.db when sharded, recall.db when monolithic):
+            # search and quick read it there, so a jsonl-only archive left the node still being served.
+            index._db.upsert_knowledge_node({**node, "status": "archived"})
             return f"Forgotten: node '{old_node_id}' archived. Content was: {node['content'][:100]}"
 
         if action == "correct":
