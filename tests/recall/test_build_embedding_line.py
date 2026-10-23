@@ -274,6 +274,8 @@ def test_embedding_check_on_a_wal_shard_without_shm(tmp_path, monkeypatch, where
     for path in locked:
         path.chmod(0o555)
     try:
+        if locked and os.access(gen_dir, os.W_OK):
+            pytest.skip("chmod did not make the directory unwritable here (Windows, or root)")
         assert cli._store_has_embeddings(tmp_path) is embedded
         after = _snapshot(index_dir)
     finally:
