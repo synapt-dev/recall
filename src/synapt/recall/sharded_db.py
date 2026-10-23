@@ -972,7 +972,13 @@ class ShardedRecallDB:
                 shard_idx, local_rowid = self._decode_chunk_rowid(rowid)
                 grouped.setdefault(shard_idx, {})[local_rowid] = emb
             for shard_idx, shard_embs in grouped.items():
-                self._data_dbs[shard_idx - 1].save_embeddings(shard_embs)
+                db = self._data_dbs[shard_idx - 1]
+                db.save_embeddings(shard_embs)
+                # The flat mirror copies main files only, so the write must leave the WAL first.
+                db._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            from synapt.recall.generations import resync_flat_layout
+
+            resync_flat_layout(self._index.path.parent)
             return
         self._index.save_embeddings(embeddings)
 
