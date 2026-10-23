@@ -81,6 +81,7 @@ from synapt.recall.core import (
 )
 from synapt.recall.chatgpt import parse_chatgpt_archive
 from synapt.recall.progress import ProgressLog, phase
+from synapt.recall.storage import _schema_reads_alone  # noqa: F401  (moved; cli callers and tests import it here)
 from synapt.recall.embeddings import get_embedding_provider
 from synapt.recall.journal import (
     latest_transcript_path,
@@ -332,23 +333,6 @@ class CorruptRecallDBError(sqlite3.DatabaseError):
 
     A subclass of sqlite3.DatabaseError, so a caller that already catches that keeps catching it.
     """
-
-
-def _schema_reads_alone(db_path: Path) -> bool:
-    """Whether SQLite reads db_path's main file on its own: read-only and immutable, so nothing beside it is opened
-    or written (a plain mode=ro open creates a -shm). It reads the main file only, not the WAL: a store whose main
-    file reads is never named as the unreadable one."""
-    try:
-        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
-    except sqlite3.Error:
-        return False
-    try:
-        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        return True
-    except sqlite3.Error:
-        return False
-    finally:
-        conn.close()
 
 
 def _open_build_db(db_path: Path):
