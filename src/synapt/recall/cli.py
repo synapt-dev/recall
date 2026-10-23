@@ -824,8 +824,8 @@ def _store_has_embeddings(project: Path) -> bool:
     ``TranscriptIndex._load_or_build_embeddings_db`` returns early unless
     ``db.has_embeddings()`` is true. Ask that same question here, read-only:
     no DDL, no migrations, no write lock, and no store created where none
-    exists yet (a new store has none). A store that will not open is one
-    the build rebuilds, as ``TranscriptIndex.load`` does, so it has none either.
+    exists yet (a new store has none). A store that will not open is reported
+    as having none; the build's own open of that store then decides what happens.
     A WAL-mode store in a directory this process cannot write fails the plain
     read-only open (it needs a -shm); it is read again as immutable.
     """
