@@ -133,3 +133,28 @@ def test_save_embeddings_under_an_open_reader_never_leaves_a_stale_flat_set(stor
         _assert_flat_equals_current(index_dir)
     else:
         assert len(lines) == 1 and "flat shards removed" in lines[0], lines
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["quiet", "open-reader"])
+def test_save_embeddings_leaves_the_shard_busy_timeout_as_it_found_it(store, held):
+    index_dir, _ = store
+    seed = ShardedRecallDB.open(index_dir)
+    seed.save_chunks(_chunks(5))
+    seed.close()
+    db = ShardedRecallDB.open(index_dir)
+    reader = sqlite3.connect(list_shards(current_generation_dir(index_dir))[1])
+    try:
+        if held:
+            reader.execute("BEGIN")
+            reader.execute("SELECT count(*) FROM chunks").fetchone()
+        conn = db._data_dbs[1]._conn
+        (before,) = conn.execute("PRAGMA busy_timeout").fetchone()
+        db.save_embeddings({ShardedRecallDB._encode_chunk_rowid(2, 1): [0.1] * 384})
+        (after,) = conn.execute("PRAGMA busy_timeout").fetchone()
+        if held:
+            reader.rollback()
+    finally:
+        reader.close()
+        db.close()
+    assert before != 200
+    assert after == before
