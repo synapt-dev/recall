@@ -822,19 +822,16 @@ def _store_has_embeddings(project: Path) -> bool:
 
     The build always opens a SQLite store (sharded or not), and
     ``TranscriptIndex._load_or_build_embeddings_db`` returns early unless
-    ``db.has_embeddings()`` is true. Ask that same question here, without
-    creating a store that does not exist yet (a new store has none).
+    ``db.has_embeddings()`` is true. Ask that same question here, read-only:
+    no DDL, no migrations, no write lock, and no store created where none
+    exists yet (a new store has none).
     """
     index_dir = project_index_dir(project)
     from synapt.recall.sharding import is_sharded
-    from synapt.recall.storage import RecallDB
-    if is_sharded(index_dir):
-        from synapt.recall.sharded_db import ShardedRecallDB
-        db = ShardedRecallDB.open(index_dir)
-    elif (index_dir / "recall.db").exists():
-        db = RecallDB(index_dir / "recall.db")
-    else:
+    from synapt.recall.sharded_db import ShardedRecallDB
+    if not is_sharded(index_dir) and not (index_dir / "recall.db").exists():
         return False
+    db = ShardedRecallDB.open_readonly(index_dir)
     try:
         return db.has_embeddings()
     finally:
