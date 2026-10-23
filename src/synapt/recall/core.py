@@ -4560,19 +4560,28 @@ class TranscriptIndex:
         # Prefer ShardedRecallDB (auto-detects monolithic recall.db or sharded layout)
         from synapt.recall.sharding import is_sharded
         if db_path.exists() or is_sharded(directory):
-            from synapt.recall.storage import _schema_reads_alone, quarantine_recall_db, wait_for_store
+            import time
+
+            from synapt.recall.storage import (
+                LOAD_BUSY_TIMEOUT_S,
+                _schema_reads_alone,
+                quarantine_recall_db,
+                wait_for_store,
+            )
+            # One bound for the whole load: the schema wait and every shard's open share it.
+            t_end = time.monotonic() + LOAD_BUSY_TIMEOUT_S
             # A second pass opens the store another load put in place while this one waited on the quarantine lock.
             for _attempt in range(2):
                 db = None
                 try:
                     if db_path.exists() and _schema_reads_alone(db_path):
                         # Only a main file that reads gets a plain connection: closing one on a damaged file drops its -wal.
-                        wait_for_store(db_path)
+                        wait_for_store(db_path, deadline=t_end)
                     elif db_path.exists() and not is_sharded(directory):
                         # No read-write connection may open on it: sqlite deletes the -wal when it closes one, and
                         # Windows cannot move a file this process holds open.
                         raise sqlite3.DatabaseError("recall.db is not a database")
-                    db = ShardedRecallDB.open(directory)
+                    db = ShardedRecallDB.open(directory, deadline=t_end)
                     chunks = db.load_chunk_headers()
                     return cls(
                         chunks,
@@ -4581,11 +4590,15 @@ class TranscriptIndex:
                         db=db,
                         lazy_chunks=True,
                     )
-                except sqlite3.OperationalError:
+                except sqlite3.OperationalError as exc:
                     # A healthy store raises it too ("database is locked", "disk I/O error"); the file is never touched.
                     if db is not None:
                         with contextlib.suppress(Exception):
                             db.close()
+                    if "locked" in str(exc).lower():
+                        raise sqlite3.OperationalError(
+                            f"database is locked: {db_path} (waited {LOAD_BUSY_TIMEOUT_S:g} s)"
+                        ) from exc
                     raise
                 except sqlite3.DatabaseError as exc:
                     if db is not None:
