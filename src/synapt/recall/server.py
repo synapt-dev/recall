@@ -2081,6 +2081,7 @@ def recall_contradict(
     reason: str | None = None,
     limit: int = 5,
     order: str = "oldest",
+    successor_node_id: str | None = None,
 ) -> str:
     """Manage pending knowledge contradictions.
 
@@ -2114,6 +2115,10 @@ def recall_contradict(
         limit: Rows to show for "list" (default 5); 0 shows all. A footer names
                shown, pending and withheld when rows are cut.
         order: "oldest" (default) or "newest" for "list", by detected_at then id.
+        successor_node_id: For "correct" only: an EXISTING active knowledge node that
+                           supersedes old_node_id. No node is minted; the old node is
+                           marked contradicted with superseded_by set to it. Give it
+                           instead of claim/new_content, not with them.
     """
     index = _get_index()
     if index is None or not index._db:
@@ -2121,6 +2126,11 @@ def recall_contradict(
 
     try:
         if action == "flag":
+            if successor_node_id:
+                return (
+                    "Error: successor_node_id is taken by 'correct', not 'flag'. Use "
+                    "recall_contradict(action='correct', old_node_id=..., successor_node_id=...)."
+                )
             return _handle_flag(
                 index, claim=claim, new_content=new_content,
                 old_node_id=old_node_id, reason=reason,
@@ -2301,6 +2311,39 @@ def recall_contradict(
         if action == "correct":
             if not old_node_id:
                 return "Error: old_node_id is required for 'correct'. Provide the knowledge node ID to update."
+            if successor_node_id:
+                # Every refusal runs before any write, so a refused call leaves
+                # the old node exactly as it was.
+                if claim or new_content:
+                    return "Error: give successor_node_id OR claim/new_content for 'correct', not both."
+                node = index._db.get_knowledge_node(old_node_id)
+                if not node:
+                    return f"Knowledge node '{old_node_id}' not found."
+                if node.get("status", "active") != "active":
+                    # Repointing an already-superseded node orphans its first successor.
+                    return f"old node {old_node_id} is {node.get('status')}; correct an active node"
+                if successor_node_id == old_node_id:
+                    return f"Error: a node cannot supersede itself ('{old_node_id}')."
+                successor = index._db.get_knowledge_node(successor_node_id)
+                if not successor:
+                    return f"Error: successor node '{successor_node_id}' not found."
+                if successor.get("status", "active") != "active":
+                    return (
+                        f"Error: successor node '{successor_node_id}' is "
+                        f"{successor.get('status')}; name an active node."
+                    )
+                # NEITHER lineage_id moves: both nodes may already carry a
+                # lineage, and superseded_by is the edge a walk follows. The
+                # successor itself is not touched.
+                _mark_superseded(
+                    index._db,
+                    node,
+                    successor_id=successor_node_id,
+                    lineage_id=None,
+                    reason=reason or "Manual correction",
+                    now=datetime.now(timezone.utc).isoformat(),
+                )
+                return f"Corrected: '{old_node_id}' superseded by existing node '{successor_node_id}'."
             if not claim and not new_content:
                 return "Error: claim or new_content is required for 'correct'. Provide the corrected information."
             node = index._db.get_knowledge_node(old_node_id)
@@ -2511,40 +2554,17 @@ def _apply_supersession(
     # contradicted record is a strictly newer version of this node id, so no
     # ordering question arises even if the records are ever read out of order.
     new_id = uuid.uuid4().hex[:12]
-    updates = {
-        "lineage_id": lineage_id,
-        "status": "contradicted",
-        "valid_until": now,
-        "contradiction_note": reason,
-        "updated_at": now,
-        "superseded_by": new_id,
-    }
-    # `version` is left ALONE: it is the node's LINEAGE position (the successor
-    # below takes old_version + 1, and `knowledge_lineage` orders by it), so
-    # bumping the predecessor here would make the two share a number and the
-    # lineage would read A v2, B v3, C v3 instead of 1, 2, 3. The newest-record
-    # question is `revision`'s job, and `update_node` owns that bump.
-    old_node.update(updates)
-    db.upsert_knowledge_node(old_node)
+    _mark_superseded(
+        db, old_node, successor_id=new_id, lineage_id=lineage_id, reason=reason, now=now,
+    )
 
     from synapt.recall.knowledge import (
         KnowledgeNode,
         _knowledge_path,
         append_node,
-        update_node,
     )
 
     kn_path = _knowledge_path()
-    if not update_node(old_node_id, updates, kn_path):
-        # `update_node` returns False for a node the jsonl does not carry — a
-        # db-only node (`_create_knowledge_from_claim` produces them). Ignoring
-        # that return silently left the transition in SQLite only, where the next
-        # sync decides by the jsonl and cannot see the node at all. Append the
-        # full record instead of returning False's version of success.
-        #
-        # `append_node` stamps the revision from the file, so this transition
-        # does not set one itself.
-        append_node(KnowledgeNode.from_dict(old_node), kn_path)
 
     # Create replacement node
     new_node = {
@@ -2570,6 +2590,46 @@ def _apply_supersession(
     # from the other direction: the sync would not carry it, and the successor
     # would be invisible to every jsonl-derived reader.
     append_node(KnowledgeNode.from_dict(new_node), kn_path)
+
+
+def _mark_superseded(db, old_node: dict, successor_id: str, lineage_id: str | None, reason: str, now: str) -> None:
+    """Mark *old_node* contradicted and superseded by *successor_id*, in both stores.
+
+    The one update dict for both supersession paths (a minted replacement, or an
+    existing successor named by ``recall_contradict(action="correct",
+    successor_node_id=...)``), so the two cannot drift.
+    """
+    from synapt.recall.knowledge import KnowledgeNode, _knowledge_path, append_node, update_node
+
+    updates = {
+        "status": "contradicted",
+        "valid_until": now,
+        "contradiction_note": reason,
+        "updated_at": now,
+        "superseded_by": successor_id,
+    }
+    if lineage_id is not None:
+        # None (the existing-successor path) leaves the node's lineage as it is.
+        updates["lineage_id"] = lineage_id
+    # `version` is left ALONE: it is the node's LINEAGE position (the successor
+    # takes old_version + 1, and `knowledge_lineage` orders by it), so
+    # bumping the predecessor here would make the two share a number and the
+    # lineage would read A v2, B v3, C v3 instead of 1, 2, 3. The newest-record
+    # question is `revision`'s job, and `update_node` owns that bump.
+    old_node.update(updates)
+    db.upsert_knowledge_node(old_node)
+
+    kn_path = _knowledge_path()
+    if not update_node(old_node["id"], updates, kn_path):
+        # `update_node` returns False for a node the jsonl does not carry — a
+        # db-only node (`_create_knowledge_from_claim` produces them). Ignoring
+        # that return silently left the transition in SQLite only, where the next
+        # sync decides by the jsonl and cannot see the node at all. Append the
+        # full record instead of returning False's version of success.
+        #
+        # `append_node` stamps the revision from the file, so this transition
+        # does not set one itself.
+        append_node(KnowledgeNode.from_dict(old_node), kn_path)
 
 
 def _apply_contest_resolution(
