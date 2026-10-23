@@ -228,3 +228,65 @@ def test_embedding_check_leaves_a_sharded_store_untouched(tmp_path, monkeypatch,
             conn.commit()
         finally:
             conn.close()
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+@pytest.mark.parametrize("where", ["wal_no_shm", "unwritable_dir"])
+def test_embedding_check_on_a_wal_shard_without_shm(tmp_path, monkeypatch, where, embedded):
+    index_dir = tmp_path / "index"
+    monkeypatch.setattr(cli, "project_index_dir", lambda project: index_dir)
+    assert cli.project_index_dir(tmp_path).resolve().is_relative_to(tmp_path.resolve())
+    index_dir.mkdir()
+    RecallDB(index_dir / "index.db").close()
+    db = ShardedRecallDB.open(index_dir)
+    try:
+        db.save_chunks([
+            TranscriptChunk(
+                id=f"s1:t{i}", session_id="s1", timestamp=f"2026-10-23T00:0{i}:00Z",
+                turn_index=i, user_text=f"question {i}", assistant_text=f"answer {i}",
+            )
+            for i in range(3)
+        ])
+    finally:
+        db.close()
+    gen_dir = current_generation_dir(index_dir)
+    data_shards = sorted(gen_dir.glob("data_*.db"))
+    assert data_shards, "published generation holds no data shard"
+    if embedded:
+        conn = sqlite3.connect(data_shards[0])
+        try:
+            conn.execute(
+                "UPDATE chunks SET embedding = ? WHERE rowid = (SELECT min(rowid) FROM chunks)",
+                (pack_embedding([0.0] * 384),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    # The store is closed; take away any -shm so the open must make its own.
+    for shm in index_dir.rglob("*-shm"):
+        shm.unlink()
+    modes = {shard.name: _is_wal_mode(shard) for shard in data_shards}
+    print("data shard WAL mode:", modes)
+    assert all(modes.values())
+
+    before = _snapshot(index_dir)
+    locked = [index_dir, gen_dir] if where == "unwritable_dir" else []
+    for path in locked:
+        path.chmod(0o555)
+    try:
+        assert cli._store_has_embeddings(tmp_path) is embedded
+        after = _snapshot(index_dir)
+    finally:
+        for path in locked:
+            path.chmod(0o755)
+
+    assert {name: after.get(name) for name in before} == before
+    new_files = set(after) - set(before)
+    if where == "unwritable_dir":
+        assert not new_files, sorted(new_files)
+    else:
+        allowed = {
+            str(Path(f"{shard}-{suffix}").relative_to(index_dir))
+            for shard in data_shards for suffix in ("wal", "shm")
+        }
+        assert new_files <= allowed, sorted(new_files - allowed)

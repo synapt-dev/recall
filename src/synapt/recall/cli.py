@@ -826,6 +826,8 @@ def _store_has_embeddings(project: Path) -> bool:
     no DDL, no migrations, no write lock, and no store created where none
     exists yet (a new store has none). A store that will not open is one
     the build rebuilds, as ``TranscriptIndex.load`` does, so it has none either.
+    A WAL-mode store in a directory this process cannot write fails the plain
+    read-only open (it needs a -shm); it is read again as immutable.
     """
     import sqlite3
     index_dir = project_index_dir(project)
@@ -833,14 +835,18 @@ def _store_has_embeddings(project: Path) -> bool:
     from synapt.recall.sharded_db import ShardedRecallDB
     if not is_sharded(index_dir) and not (index_dir / "recall.db").exists():
         return False
-    try:
-        db = ShardedRecallDB.open_readonly(index_dir)
+    for immutable in (False, True):
         try:
-            return db.has_embeddings()
-        finally:
-            db.close()
-    except (sqlite3.DatabaseError, OSError):
-        return False
+            db = ShardedRecallDB.open_readonly(index_dir, immutable=immutable)
+            try:
+                return db.has_embeddings()
+            finally:
+                db.close()
+        except sqlite3.OperationalError:
+            continue
+        except (sqlite3.DatabaseError, OSError):
+            return False
+    return False
 
 
 def _archive_and_build(
