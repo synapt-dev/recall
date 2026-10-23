@@ -129,7 +129,8 @@ def test_r5_lock_error_leaves_healthy_db_untouched(tmp_path):
     with mock.patch.object(core.ShardedRecallDB, "open", side_effect=locked):
         outcome = _load(tmp_path)
     _measure("R5", tmp_path, sha, outcome)
-    assert outcome == "raised OperationalError: database is locked"
+    assert outcome.startswith("raised OperationalError: database is locked")
+    assert str(tmp_path / "recall.db") in outcome, outcome  # the error names the store's path
     assert _sha(tmp_path / "recall.db") == sha
     assert _quarantined(tmp_path) == []
 
@@ -343,7 +344,7 @@ import sqlite3, sys, time
 conn = sqlite3.connect(sys.argv[1], isolation_level=None)
 conn.execute("BEGIN IMMEDIATE")
 print("ready", flush=True)
-time.sleep(3)
+time.sleep(1.2)
 conn.execute("COMMIT")
 conn.close()
 """
@@ -364,7 +365,7 @@ def test_p1b_b_open_waits_out_second_process_writer_and_keeps_store(tmp_path):
         assert TranscriptIndex.load(tmp_path) is not None
         waited = time.monotonic() - t0
         assert writer.wait(timeout=5) == 0
-        assert waited >= 2.0, f"the load returned after {waited:.2f}s, before the writer committed"
+        assert waited >= 1.0, f"the load returned after {waited:.2f}s, before the writer committed"
     finally:
         writer.kill()
         writer.wait()

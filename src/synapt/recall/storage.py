@@ -860,15 +860,24 @@ def _schema_reads_alone(db_path: Path) -> bool:
         conn.close()
 
 
-def wait_for_store(db_path: Path) -> None:
+def _busy_seconds(deadline: float | None, default: float) -> float:
+    """The busy wait for one attempt: ``default`` with no deadline, else what is left of it (at least 1 ms)."""
+    if deadline is None:
+        return default
+    return max(0.001, min(default, deadline - time.monotonic()))
+
+
+def wait_for_store(db_path: Path, deadline: float | None = None) -> None:
     """Read recall.db's schema, waiting out another connection's lock for LOAD_BUSY_TIMEOUT_S.
 
-    Past the bound sqlite raises OperationalError ("database is locked"), and it goes to the caller unchanged:
-    a lock is told from damage by that error, never by guessing.
+    ``deadline`` (a time.monotonic() value) bounds the wait instead, so one load shares a single bound
+    with the opens that follow it. Past the bound sqlite raises OperationalError ("database is locked"),
+    and it goes to the caller unchanged: a lock is told from damage by that error, never by guessing.
     """
-    conn = sqlite3.connect(str(db_path), timeout=LOAD_BUSY_TIMEOUT_S)
+    wait = _busy_seconds(deadline, LOAD_BUSY_TIMEOUT_S)
+    conn = sqlite3.connect(str(db_path), timeout=wait)
     try:
-        conn.execute(f"PRAGMA busy_timeout={int(LOAD_BUSY_TIMEOUT_S * 1000)}")
+        conn.execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
     finally:
         conn.close()
@@ -965,11 +974,17 @@ class RecallDB:
     per-row embedding BLOBs, and key/value metadata.
     """
 
-    def __init__(self, db_path: Path | str):
+    def __init__(self, db_path: Path | str, deadline: float | None = None):
         self._path = Path(db_path)
+        # A time.monotonic() bound on the open's lock waits; None waits as every writer does (30 s per statement).
+        self._deadline = deadline
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._open_with_race_retry()
         self._move_access_rows()
+        if self._deadline is not None:
+            # The deadline bounds the open only: the connection a caller keeps waits as every writer does.
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            self._deadline = None
 
     def _index_has_access_rows(self) -> bool:
         return any(
@@ -1277,6 +1292,8 @@ class RecallDB:
                     last_exc = exc
                     if deadline is None:
                         deadline = time.monotonic() + _SCHEMA_OPEN_RETRY_SECONDS
+                        if self._deadline is not None:
+                            deadline = min(deadline, self._deadline)
             assert deadline is not None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1302,11 +1319,12 @@ class RecallDB:
     # -- connection --------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._path), timeout=5.0)
+        conn = sqlite3.connect(str(self._path), timeout=_busy_seconds(self._deadline, 5.0))
         # busy_timeout FIRST: the journal_mode PRAGMA below can return an
         # immediate (unretried) SQLITE_BUSY on a store another process is
         # setting up, and it must wait like every other statement does.
-        conn.execute("PRAGMA busy_timeout=30000")  # 30s — builds can be slow
+        # 30s — builds can be slow; a deadline caps it at what is left.
+        conn.execute(f"PRAGMA busy_timeout={int(_busy_seconds(self._deadline, 30.0) * 1000)}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row

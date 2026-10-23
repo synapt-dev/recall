@@ -150,7 +150,7 @@ class ShardedRecallDB:
         return grouped
 
     @classmethod
-    def open(cls, index_dir: Path) -> ShardedRecallDB:
+    def open(cls, index_dir: Path, deadline: float | None = None) -> ShardedRecallDB:
         """Open a sharded or monolithic recall database.
 
         Auto-detects layout:
@@ -166,14 +166,17 @@ class ShardedRecallDB:
         rebuild in progress. An index never rebuilt since this system
         landed has no CURRENT yet; falls back to the flat legacy layout
         (shards directly under ``index_dir``) unchanged.
+
+        ``deadline`` (a time.monotonic() value) is handed to every RecallDB
+        as it is, so N+1 opens share one bound rather than one each.
         """
         if is_sharded(index_dir):
-            index_db = RecallDB(index_dir / "index.db")
-            data_dbs = [RecallDB(p) for p in list_shards(cls._data_shard_dir(index_dir))]
+            index_db = RecallDB(index_dir / "index.db", deadline=deadline)
+            data_dbs = [RecallDB(p, deadline=deadline) for p in list_shards(cls._data_shard_dir(index_dir))]
             return cls(index_db, data_dbs)
 
         # Monolithic: single recall.db serves as both index and data
-        db = RecallDB(index_dir / "recall.db")
+        db = RecallDB(index_dir / "recall.db", deadline=deadline)
         return cls(db, [])
 
     @classmethod
