@@ -96,3 +96,17 @@ def test_control_the_same_fixture_with_no_corrupt_file_builds(corrupt_store, cap
     assert "[build] Done!" in capsys.readouterr().out
     with sqlite3.connect(corrupt_store["db"]) as conn:
         conn.execute("select count(*) from sqlite_master").fetchone()
+
+
+@pytest.mark.parametrize("message", ["database is locked", "disk I/O error"])
+def test_an_operational_error_on_a_healthy_store_keeps_its_own_error(corrupt_store, capsys, message):
+    # OperationalError subclasses DatabaseError; a locked or I/O-failing store is not corrupt, and the
+    # refusal's "move it aside" would send a user to move a healthy store. A real lock waits out the
+    # 30 s busy timeout, so the open raises the error the lock produces.
+    corrupt_store["db"].unlink()
+    with mock.patch("synapt.recall.storage.RecallDB", side_effect=sqlite3.OperationalError(message)):
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            _cmd_build(corrupt_store)
+    assert not isinstance(exc.value, cli.CorruptRecallDBError)
+    assert str(exc.value) == message
+    assert "move it aside" not in capsys.readouterr().err

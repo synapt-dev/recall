@@ -346,6 +346,11 @@ def _open_build_db(db_path: Path):
 
     try:
         return RecallDB(db_path)
+    except sqlite3.OperationalError:
+        # A subclass of DatabaseError, and a healthy store raises it: "database is locked" behind
+        # another process's write, "disk I/O error". Telling a user to move a healthy store aside
+        # would be wrong, so these keep their own error.
+        raise
     except sqlite3.DatabaseError as exc:
         raise CorruptRecallDBError(
             f"{db_path} is not a readable SQLite database ({exc}). The build stopped and left it "
