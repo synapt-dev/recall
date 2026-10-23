@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -214,10 +215,15 @@ def _remove_flat_layout(index_dir: Path) -> None:
                 logger.warning("Failed to remove flat-layout shard %s", old_path.name + suffix)
 
 
-def resync_flat_layout(index_dir: Path, *, lock_timeout: float = 30.0) -> None:
+def resync_flat_layout(
+    index_dir: Path, *, lock_timeout: float = 30.0, not_checkpointed: Sequence[str] = (),
+) -> None:
     """Re-mirror CURRENT's shards into the flat layout after they were written in place (e.g. embeddings saved
     into the live generation), under the same ``generation.lock`` a publish holds. No-op with no CURRENT: the flat
-    files are then the live shards themselves."""
+    files are then the live shards themselves.
+
+    ``not_checkpointed`` names shards whose write is still in the WAL: their main files are not current, so the
+    flat set is removed with the same warning as a failed copy rather than mirrored stale."""
     from synapt.recall.cli import _acquire_build_lock, _release_build_lock
 
     if read_current_generation(index_dir) is None:
@@ -229,6 +235,13 @@ def resync_flat_layout(index_dir: Path, *, lock_timeout: float = 30.0) -> None:
         )
         return
     try:
+        if not_checkpointed:
+            _remove_flat_layout(index_dir)
+            logger.warning(
+                "Failed to sync flat-layout shard mirror for legacy readers at %s; flat shards removed: "
+                "WAL not checkpointed for %s", index_dir, ", ".join(not_checkpointed),
+            )
+            return
         current = current_generation_dir(index_dir)
         if current is not None:
             _sync_flat_layout_for_legacy_readers(index_dir, current)

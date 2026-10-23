@@ -108,3 +108,28 @@ def test_failed_flat_copy_removes_the_flat_set_and_names_the_failure(store, monk
     assert list_shards(index_dir) == []
     lines = [r.getMessage() for r in caplog.records if "flat-layout shard mirror" in r.getMessage()]
     assert len(lines) == 1 and "flat shards removed" in lines[0], lines
+
+
+def test_save_embeddings_under_an_open_reader_never_leaves_a_stale_flat_set(store, caplog):
+    index_dir, _ = store
+    seed = ShardedRecallDB.open(index_dir)
+    seed.save_chunks(_chunks(5))
+    seed.close()
+    db = ShardedRecallDB.open(index_dir)
+    reader = sqlite3.connect(list_shards(current_generation_dir(index_dir))[1])
+    try:
+        # A reader holding a transaction stops the checkpoint short of the main file the mirror copies.
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM chunks").fetchone()
+        with caplog.at_level(logging.WARNING, logger="synapt.recall.generations"):
+            db.save_embeddings({ShardedRecallDB._encode_chunk_rowid(2, 1): [0.1] * 384})
+        reader.rollback()
+    finally:
+        reader.close()
+        db.close()
+    lines = [r.getMessage() for r in caplog.records if "flat-layout shard mirror" in r.getMessage()]
+    if list_shards(index_dir):
+        assert lines == []
+        _assert_flat_equals_current(index_dir)
+    else:
+        assert len(lines) == 1 and "flat shards removed" in lines[0], lines
