@@ -360,3 +360,40 @@ def test_without_claude_accounts_the_roots_are_unchanged(homes, seat):
     assert core.project_transcript_dirs(seat) == [
         home / ".claude" / "projects" / core.project_slug(seat)
     ]
+
+
+def test_a_memory_dir_only_under_an_account_is_the_one_read(homes, seat):
+    from synapt.recall.claude_memory_source import _claude_memory_dir
+
+    home, _, _ = homes
+    gripspace = seat.parent
+    memory = home / ".claude-accounts" / "a1" / "projects" / core.project_slug(gripspace) / "memory"
+    memory.mkdir(parents=True)
+
+    assert _claude_memory_dir(gripspace) == memory
+
+
+def test_a_memory_dir_under_home_claude_still_wins_over_an_account(homes, seat):
+    from synapt.recall.claude_memory_source import _claude_memory_dir
+
+    home, _, _ = homes
+    gripspace = seat.parent
+    slug = core.project_slug(gripspace)
+    (home / ".claude-accounts" / "a1" / "projects" / slug / "memory").mkdir(parents=True)
+    home_memory = home / ".claude" / "projects" / slug / "memory"
+    home_memory.mkdir(parents=True)
+
+    assert _claude_memory_dir(gripspace) == home_memory
+
+
+def test_a_project_under_home_claude_and_an_account_reads_both_for_build(homes, seat):
+    home, _, _ = homes
+    slug = core.project_slug(seat)
+    _session(home / ".claude" / "projects", seat, "ffffffff-home")
+    _session(home / ".claude-accounts" / "a1" / "projects", seat, "ffffffff-account")
+
+    assert core.project_transcript_dirs(seat) == [
+        home / ".claude" / "projects" / slug,
+        home / ".claude-accounts" / "a1" / "projects" / slug,
+    ]
+    assert core.project_transcript_dir(seat) == home / ".claude" / "projects" / slug

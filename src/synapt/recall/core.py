@@ -5819,6 +5819,17 @@ def claude_projects_roots(relative_to: Path | None = None) -> list[Path]:
     ``projects`` directory, before ``~/.claude``: the roots other transcript
     readers (ccusage) look in, so a session under any of them is not invisible.
 
+    After ``~/.claude``, each ``~/.claude-accounts/<account>/projects`` directory
+    is read too, sorted by path, so a session kept under a per-account directory
+    is found without ``--source``. Callers differ: ``_claude_memory_dir`` and
+    ``project_transcript_dir`` take the first root that holds what they look for,
+    so an earlier root still wins there; ``project_transcript_dirs`` (what
+    ``recall build`` reads), ``project_transcript_dirs_any_root`` and the CLI's
+    directory list collect every root, so a project kept under both ``~/.claude``
+    and an account now reads the transcripts from both. A gripspace's ``memory/``
+    that exists only under an account is now admitted and indexed as its Claude
+    Code memory.
+
     A listed directory that is not absolute (after ``~`` expands) is relative to
     the directory Claude Code ran in, which for a project's transcripts is the
     project itself (measured: ``CLAUDE_CONFIG_DIR=relcfg claude -p`` wrote
