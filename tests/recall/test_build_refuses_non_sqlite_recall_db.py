@@ -110,3 +110,32 @@ def test_an_operational_error_on_a_healthy_store_keeps_its_own_error(corrupt_sto
     assert not isinstance(exc.value, cli.CorruptRecallDBError)
     assert str(exc.value) == message
     assert "move it aside" not in capsys.readouterr().err
+
+
+def _healthy_store_with_a_legacy_access_row(store):
+    from synapt.recall.storage import RecallDB
+
+    store["db"].unlink()
+    RecallDB(store["db"]).close()
+    with sqlite3.connect(store["db"]) as conn:
+        conn.execute("INSERT INTO access_log (item_type, item_id, query, score, session_id, context, created_at) "
+                     "VALUES ('chunk', 'c1', 'q', 1.0, 's1', 'ctx', '2026-03-01T10:00:00Z')")
+    (store["index_dir"] / "access.db").unlink(missing_ok=True)
+
+
+def test_control_a_legacy_access_row_moves_out_on_open(corrupt_store):
+    _healthy_store_with_a_legacy_access_row(corrupt_store)
+    cli._open_build_db(corrupt_store["db"]).close()
+    with sqlite3.connect(corrupt_store["db"]) as conn:
+        assert conn.execute("SELECT count(*) FROM access_log").fetchone()[0] == 0
+
+
+def test_a_broken_access_db_beside_a_healthy_store_is_not_blamed_on_recall_db(corrupt_store, capsys):
+    # The open moves legacy access rows into access.db; a non-SQLite access.db raises DatabaseError from inside the
+    # open. recall.db reads, so the refusal must not tell the user to move it aside.
+    _healthy_store_with_a_legacy_access_row(corrupt_store)
+    (corrupt_store["index_dir"] / "access.db").write_bytes(GARBAGE)
+    with pytest.raises(sqlite3.DatabaseError) as exc:
+        _cmd_build(corrupt_store)
+    assert not isinstance(exc.value, cli.CorruptRecallDBError), exc.value
+    assert "move it aside" not in capsys.readouterr().err

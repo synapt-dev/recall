@@ -334,6 +334,23 @@ class CorruptRecallDBError(sqlite3.DatabaseError):
     """
 
 
+def _schema_reads_alone(db_path: Path) -> bool:
+    """Whether SQLite reads db_path's main file on its own: read-only and immutable, so nothing beside it is opened
+    or written (a plain mode=ro open creates a -shm). It reads the main file only, not the WAL: a store whose main
+    file reads is never named as the unreadable one."""
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def _open_build_db(db_path: Path):
     """Open the monolithic recall.db for a build, or refuse without touching it.
 
@@ -352,6 +369,10 @@ def _open_build_db(db_path: Path):
         # would be wrong, so these keep their own error.
         raise
     except sqlite3.DatabaseError as exc:
+        if _schema_reads_alone(db_path):
+            # recall.db itself reads, so the error came from something the open touches beside it (access.db,
+            # where it moves legacy access rows) or from a later step; naming recall.db would be wrong.
+            raise
         raise CorruptRecallDBError(
             f"{db_path} is not a readable SQLite database ({exc}). The build stopped and left it "
             "untouched: it can hold knowledge nodes and contradictions that a build cannot regenerate. "
