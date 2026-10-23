@@ -1189,7 +1189,9 @@ class RecallDB:
         return conn
 
     @classmethod
-    def open_readonly(cls, db_path: Path | str, busy_timeout_ms: int = 2000) -> "RecallDB":
+    def open_readonly(
+        cls, db_path: Path | str, busy_timeout_ms: int = 2000, immutable: bool = False,
+    ) -> "RecallDB":
         """Open an EXISTING index for reads only.
 
         No schema DDL, no migrations, a short busy timeout, and SQLite's
@@ -1204,11 +1206,15 @@ class RecallDB:
         Raises ``sqlite3.OperationalError`` if the file does not exist: a
         read-only open never mints a store, and a missing index must read as
         "missing", not as "empty".
+
+        immutable=True adds SQLite's immutable=1: no locks and no
+        -shm, so a WAL-mode file opens even in a directory this process
+        cannot write. It reads the main file only; use it as a fallback.
         """
         path = Path(db_path)
         if not path.exists():
             raise sqlite3.OperationalError(f"no index at {path}")
-        uri = path.resolve().as_uri() + "?mode=ro"
+        uri = path.resolve().as_uri() + ("?mode=ro&immutable=1" if immutable else "?mode=ro")
         conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000)
         conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
         conn.execute("PRAGMA query_only=1")

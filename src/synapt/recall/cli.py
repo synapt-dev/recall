@@ -812,6 +812,43 @@ class _PressureWatchdog:
         return False  # never swallow: a stop must reach the caller that releases the lock
 
 
+KEYWORD_ONLY_LINE = (
+    "Embeddings are not built for this store; it searches by keyword only."
+)
+
+
+def _store_has_embeddings(project: Path) -> bool:
+    """Whether a build of *project* will compute embeddings.
+
+    The build always opens a SQLite store (sharded or not), and
+    ``TranscriptIndex._load_or_build_embeddings_db`` returns early unless
+    ``db.has_embeddings()`` is true. Ask that same question here, read-only:
+    no DDL, no migrations, no write lock, and no store created where none
+    exists yet (a new store has none). A store that will not open is reported
+    as having none; the build's own open of that store then decides what happens.
+    A WAL-mode store in a directory this process cannot write fails the plain
+    read-only open (it needs a -shm); it is read again as immutable.
+    """
+    import sqlite3
+    index_dir = project_index_dir(project)
+    from synapt.recall.sharding import is_sharded
+    from synapt.recall.sharded_db import ShardedRecallDB
+    if not is_sharded(index_dir) and not (index_dir / "recall.db").exists():
+        return False
+    for immutable in (False, True):
+        try:
+            db = ShardedRecallDB.open_readonly(index_dir, immutable=immutable)
+            try:
+                return db.has_embeddings()
+            finally:
+                db.close()
+        except sqlite3.OperationalError:
+            continue
+        except (sqlite3.DatabaseError, OSError):
+            return False
+    return False
+
+
 def _archive_and_build(
     project_dir: Path,
     source_dirs: list[Path] | None = None,
@@ -1800,7 +1837,9 @@ def cmd_build(args: argparse.Namespace) -> None:
             print("Specify --source, --hf, or --chatgpt-archive explicitly.", file=sys.stderr)
             sys.exit(1)
 
-    if use_emb:
+    if use_emb and not _store_has_embeddings(project):
+        print(f"[build] {KEYWORD_ONLY_LINE}")
+    elif use_emb:
         print("[build] Computing embeddings (this may take a moment) ...")
 
     final_index = _archive_and_build(
@@ -4708,7 +4747,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(f"  Start a Claude Code or Codex session, then run 'synapt init' again to index.")
     else:
         use_emb = not args.no_embeddings
-        if use_emb:
+        if use_emb and not _store_has_embeddings(project):
+            print(f"  {KEYWORD_ONLY_LINE}")
+        elif use_emb:
             print("  Computing embeddings ...")
 
         final_index = _archive_and_build(

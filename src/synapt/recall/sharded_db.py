@@ -177,16 +177,18 @@ class ShardedRecallDB:
         return cls(db, [])
 
     @classmethod
-    def open_readonly(cls, index_dir: Path) -> ShardedRecallDB:
+    def open_readonly(cls, index_dir: Path, immutable: bool = False) -> ShardedRecallDB:
         """Open an existing layout without DDL, migrations, or write access.
+
+        immutable is passed to RecallDB.open_readonly for every file.
 
         Follows CURRENT the same way ``open`` does -- see its docstring.
         """
         if is_sharded(index_dir):
-            index_db = RecallDB.open_readonly(index_dir / "index.db")
+            index_db = RecallDB.open_readonly(index_dir / "index.db", immutable=immutable)
             try:
                 data_dbs = [
-                    RecallDB.open_readonly(p)
+                    RecallDB.open_readonly(p, immutable=immutable)
                     for p in list_shards(cls._data_shard_dir(index_dir))
                 ]
             except Exception:
@@ -194,7 +196,7 @@ class ShardedRecallDB:
                 raise
             return cls(index_db, data_dbs)
 
-        return cls(RecallDB.open_readonly(index_dir / "recall.db"), [])
+        return cls(RecallDB.open_readonly(index_dir / "recall.db", immutable=immutable), [])
 
     @staticmethod
     def _data_shard_dir(index_dir: Path) -> Path:
