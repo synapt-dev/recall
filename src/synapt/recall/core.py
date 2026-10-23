@@ -4560,26 +4560,50 @@ class TranscriptIndex:
         # Prefer ShardedRecallDB (auto-detects monolithic recall.db or sharded layout)
         from synapt.recall.sharding import is_sharded
         if db_path.exists() or is_sharded(directory):
-            db = None
-            try:
-                db = ShardedRecallDB.open(directory)
-                chunks = db.load_chunk_headers()
-                return cls(
-                    chunks,
-                    use_embeddings=use_embeddings,
-                    cache_dir=directory,
-                    db=db,
-                    lazy_chunks=True,
-                )
-            except (sqlite3.DatabaseError, OSError) as exc:
-                logger.warning("Corrupt recall DB, rebuilding: %s", exc)
-                if db is not None:
-                    with contextlib.suppress(Exception):
-                        db.close()
-                if not is_sharded(directory):
-                    with contextlib.suppress(OSError):
-                        db_path.unlink()
-                # Fall through to JSONL path or empty index
+            from synapt.recall.storage import _schema_reads_alone, quarantine_recall_db, wait_for_store
+            # A second pass opens the store another load put in place while this one waited on the quarantine lock.
+            for _attempt in range(2):
+                db = None
+                try:
+                    if db_path.exists() and _schema_reads_alone(db_path):
+                        # Only a main file that reads gets a plain connection: closing one on a damaged file drops its -wal.
+                        wait_for_store(db_path)
+                    elif db_path.exists() and not is_sharded(directory):
+                        # No read-write connection may open on it: sqlite deletes the -wal when it closes one, and
+                        # Windows cannot move a file this process holds open.
+                        raise sqlite3.DatabaseError("recall.db is not a database")
+                    db = ShardedRecallDB.open(directory)
+                    chunks = db.load_chunk_headers()
+                    return cls(
+                        chunks,
+                        use_embeddings=use_embeddings,
+                        cache_dir=directory,
+                        db=db,
+                        lazy_chunks=True,
+                    )
+                except sqlite3.OperationalError:
+                    # A healthy store raises it too ("database is locked", "disk I/O error"); the file is never touched.
+                    if db is not None:
+                        with contextlib.suppress(Exception):
+                            db.close()
+                    raise
+                except sqlite3.DatabaseError as exc:
+                    if db is not None:
+                        with contextlib.suppress(Exception):
+                            db.close()
+                    if is_sharded(directory):
+                        # A damaged sharded store is never moved; the caller names it.
+                        raise
+                    try:
+                        st = os.stat(db_path)
+                    except FileNotFoundError:
+                        break
+                    if _schema_reads_alone(db_path):
+                        # recall.db itself reads, so the error came from beside it; moving it aside would be wrong.
+                        raise
+                    if quarantine_recall_db(db_path, (st.st_dev, st.st_ino), exc) or not db_path.exists():
+                        break
+            # Fall through to JSONL path or empty index
 
         # Legacy JSONL — load and auto-migrate to SQLite
         if chunks_path.exists():

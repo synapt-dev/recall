@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -247,9 +248,27 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
                 pass
         return _cached_index
     except Exception as e:
+        # Nothing is cached for an error: _cached_index None makes the next call load again.
         logging.getLogger("synapt.recall").warning("Index load failed: %s", e)
         _cached_index = None
-        return None
+        raise _store_unavailable(index_dir, e) from e
+
+
+def _store_unavailable(index_dir: Path, e: Exception) -> "RecallStoreUnavailable":
+    """Name the store (and for a stale quarantine lock, the lock file, which e's message names) a load failed on."""
+    from synapt.recall.storage import QuarantineLockStale
+
+    if isinstance(e, sqlite3.OperationalError) and ("locked" in str(e) or "busy" in str(e)):
+        return RecallStoreUnavailable(f"recall store {index_dir} is locked ({e}); try again in a moment")
+    if isinstance(e, QuarantineLockStale):
+        return RecallStoreUnavailable(f"recall store {index_dir} was not moved aside: {e}")
+    if isinstance(e, sqlite3.DatabaseError) and not isinstance(e, sqlite3.OperationalError):
+        return RecallStoreUnavailable(f"recall store {index_dir} is damaged ({e}); nothing was moved or deleted")
+    return RecallStoreUnavailable(f"recall store {index_dir} could not be read ({e})")
+
+
+class RecallStoreUnavailable(RuntimeError):
+    """The store at the named path is locked or damaged; the server stays up and the next call loads again."""
 
 
 def _invalidate_cache() -> None:

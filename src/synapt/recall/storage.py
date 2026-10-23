@@ -833,6 +833,130 @@ def _build_entity_anchored_query(
 # ---------------------------------------------------------------------------
 
 
+# Wait this long for another connection's lock before a load gives up and names it. Measured on the cloud box
+# (2026-10-23): a one-row 4 KiB write transaction on a WAL recall.db takes 0.08 ms median, 0.12 ms max over 200;
+# 2 s is over ten thousand of those. A lock that blocks this schema read waits out LOAD_BUSY_TIMEOUT_S and raises;
+# one that blocks the store's own schema writes at open waits out RecallDB's 30 s busy timeout and then its open
+# retry (measured: 60 s before it raises).
+LOAD_BUSY_TIMEOUT_S = 2.0
+# A quarantine lock older than this belongs to a load that died; it is named and refused, never broken.
+QUARANTINE_LOCK_STALE_S = 60.0
+
+
+def _schema_reads_alone(db_path: Path) -> bool:
+    """Whether SQLite reads db_path's main file on its own: read-only and immutable, so nothing beside it is opened
+    or written (a plain mode=ro open creates a -shm). It reads the main file only, not the WAL: a store whose main
+    file reads is never named as the unreadable one."""
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def wait_for_store(db_path: Path) -> None:
+    """Read recall.db's schema, waiting out another connection's lock for LOAD_BUSY_TIMEOUT_S.
+
+    Past the bound sqlite raises OperationalError ("database is locked"), and it goes to the caller unchanged:
+    a lock is told from damage by that error, never by guessing.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=LOAD_BUSY_TIMEOUT_S)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(LOAD_BUSY_TIMEOUT_S * 1000)}")
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    finally:
+        conn.close()
+
+
+class QuarantineLockStale(RuntimeError):
+    """A quarantine lock outlived QUARANTINE_LOCK_STALE_S; it is left in place for a person to look at."""
+
+
+def _quarantine_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _before_quarantine_lock() -> None:
+    """Test seam: runs between the corrupt check and the quarantine lock."""
+
+
+def _move(src: str, dst: str) -> None:
+    """Move src to dst, refusing an existing dst: link refuses the name, then the old name goes."""
+    os.link(src, dst)
+    os.unlink(src)
+
+
+def _take_quarantine_lock(lock_path: str) -> int:
+    while True:
+        try:
+            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - os.stat(lock_path).st_mtime
+            except FileNotFoundError:
+                continue
+            if age > QUARANTINE_LOCK_STALE_S:
+                raise QuarantineLockStale(
+                    f"quarantine lock {lock_path} is {age:.0f}s old; a load died holding it. "
+                    f"Nothing was moved. Check no load is running, then remove it by hand."
+                ) from None
+            time.sleep(0.05)
+
+
+def quarantine_recall_db(db_path: Path, first_id: tuple[int, int], exc: Exception) -> bool:
+    """Move a recall.db that is not a database aside, with its -wal and -shm, so a fresh store can open.
+
+    first_id is (st_dev, st_ino) taken when the DatabaseError was first seen. Under an exclusive lock file the
+    file is stat'ed again: a changed or missing file was already quarantined by another load, so nothing moves
+    and False is returned. The move is all-or-nothing: a sidecar that fails to move rolls everything back and
+    the error is raised. Never unlinks a name without a link to its bytes. The -wal and -shm move first: while the
+    corrupt main file still holds the name no store can be created there, so no fresh sidecar is moved by name.
+    """
+    _before_quarantine_lock()
+    lock_path = f"{db_path}.quarantine.lock"
+    fd = _take_quarantine_lock(lock_path)
+    try:
+        try:
+            st = os.stat(db_path)
+        except FileNotFoundError:
+            return False
+        if (st.st_dev, st.st_ino) != first_id:
+            return False
+        stamp = _quarantine_stamp()
+        n = 0
+        while True:
+            target = f"{db_path}.corrupt-{stamp}" + (f"-{n}" if n else "")
+            moved = []
+            try:
+                for suffix in ("-wal", "-shm", ""):
+                    try:
+                        _move(f"{db_path}{suffix}", f"{target}{suffix}")
+                    except FileNotFoundError:
+                        if not suffix:
+                            raise
+                        continue
+                    moved.append(suffix)
+                break
+            except BaseException as e:
+                for suffix in reversed(moved):
+                    _move(f"{target}{suffix}", f"{db_path}{suffix}")
+                if not isinstance(e, FileExistsError):
+                    raise
+                n += 1
+        logger.warning("Corrupt recall DB moved aside to %s, starting empty: %s", target, exc)
+        return True
+    finally:
+        os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(lock_path)
+
+
 class RecallDB:
     """SQLite storage backend for the recall index.
 
