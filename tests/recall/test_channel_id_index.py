@@ -315,9 +315,12 @@ class IdIndexTest(unittest.TestCase):
         self._post("first m_00000025")
         before = os.path.getsize(self._log())
         msg = self._post("second m_00000025")
-        line = (json.dumps(msg.to_dict()) + "\n").encode("utf-8")
-        self.assertEqual(os.path.getsize(self._log()) - before, len(line))
-        self.assertTrue(self._log().read_bytes().endswith(line))
+        # the log is written in text mode, so its line ending is the
+        # platform's: compare the added bytes without it
+        added = self._log().read_bytes()[before:]
+        self.assertFalse(added.startswith((b"\n", b"\r")), added[:4])
+        self.assertTrue(added.endswith(b"\n"))
+        self.assertEqual(added.rstrip(b"\r\n"), json.dumps(msg.to_dict()).encode("utf-8"))
 
     # R26
 
