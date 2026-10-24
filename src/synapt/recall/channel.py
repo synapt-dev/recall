@@ -1882,7 +1882,13 @@ def _append_message(
         f.flush()
         end = f.tell()
     # The id index is part of the post, not a hook: its error is returned.
-    state_error = _index_appended_line(msg, path, start, end, project_dir, conn=conn)
+    # It holds this project's logs only: a post written to another project's
+    # log (channels_dir) is not indexed, or that log's offsets would move the
+    # local cursor. Paths are compared resolved, since the store may be
+    # reached through a symlink.
+    state_error = None
+    if path.resolve() == _channel_path(msg.channel, project_dir).resolve():
+        state_error = _index_appended_line(msg, path, start, end, project_dir, conn=conn)
     # Set dirty flag for all other members of this channel (OSS substrate)
     try:
         _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)

@@ -339,6 +339,28 @@ class IdIndexTest(unittest.TestCase):
         code, out = self._cli("m_00000021")
         self.assertEqual((code, out), (7, "? (dev log is shorter than its index)\n"))
 
+    # R22
+
+    def test_other_project_log_is_not_indexed(self):
+        self._post("local m_00000022")
+        before = self._cursor()
+        other = Path(self.tmpdir) / "other" / "channels"
+        err = ch._append_message(_msg("elsewhere m_00000122 m_00000022"), channels_dir=other)
+        self.assertIsNone(err)
+        self.assertTrue((other / "dev.jsonl").exists())
+        self.assertEqual(self._cursor(), before)
+        self.assertEqual(self._indexed("m_00000122"), set())
+        self.assertEqual(len(self._indexed("m_00000022")), 1)
+
+    def test_symlinked_local_log_is_indexed(self):
+        self._post("local m_00000222")
+        link = Path(self.tmpdir) / "link"
+        link.symlink_to(self._log().parent, target_is_directory=True)
+        msg = _msg("through the link m_00000322")
+        self.assertIsNone(ch._append_message(msg, channels_dir=link))
+        self.assertEqual(self._indexed("m_00000322"), {msg.id})
+        self.assertEqual(self._cursor(), (self._log().stat().st_size, msg.id))
+
 
 if __name__ == "__main__":
     unittest.main()
