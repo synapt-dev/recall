@@ -8,6 +8,8 @@ that cannot be read prints "?" with the reason, never "none".
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -233,6 +235,50 @@ class WhatChangedTest(unittest.TestCase):
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         conn.close()
         self.assertEqual(tables, {"mentions"})
+
+    # R29
+
+    def test_skipped_fragment_named_in_label_and_latest(self):
+        self._two_sessions()
+        self._knowledge([])
+        self._post("before m_0000ab29", sender=ME, ts=_ts("10:30"))
+        with open(ch._channel_path("dev"), "a", encoding="utf-8") as f:
+            f.write('{"body": "killed mid-line", "id": "m_00')
+        self._post("after m_0000ab29", ts=_ts("11:30"))
+        label = self._kind(self._block(), 3)[0]
+        self.assertTrue(label.endswith("; skipped 1 unreadable line(s) in dev"), label)
+        args = cli.make_parser().parse_args(["channel", "latest", "m_0000ab29"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.cmd_channel(args)
+        self.assertIn("skipped 1 unreadable line(s) in dev\n", out.getvalue())
+
+    # R30
+
+    def _skip_rows(self, rows):
+        conn = sqlite3.connect(str(ch._db_path()))
+        conn.executemany("INSERT INTO id_refs_skips (channel, byte_offset, skipped_at) "
+                         "VALUES (?, ?, ?)", rows)
+        conn.commit()
+        conn.close()
+
+    def test_skip_before_t_not_in_label(self):
+        self._two_sessions()
+        self._knowledge([])
+        self._post("cited m_0000ab30", sender=ME, ts=_ts("10:30"))
+        self._skip_rows([("dev", 1, "2026-03-01T10:30:00Z")])
+        self.assertNotIn("skipped", self._kind(self._block(), 3)[0])
+        self._skip_rows([("dev", 2, "2026-03-01T11:30:00Z")])
+        self.assertTrue(self._kind(self._block(), 3)[0].endswith(
+            "; skipped 1 unreadable line(s) in dev"))
+        # an index from before the skips table reads as no skips, not '?'
+        conn = sqlite3.connect(str(ch._db_path()))
+        conn.execute("DROP TABLE id_refs_skips")
+        conn.commit()
+        conn.close()
+        label = self._kind(self._block(), 3)[0]
+        self.assertTrue(label.startswith("(3) ids I cited: shown 1 of 1"), label)
+        self.assertEqual(ch.channel_latest("m_0000ab30")["unknown"], None)
 
 
 # R23

@@ -3555,6 +3555,8 @@ def _channel_latest_cli(args: argparse.Namespace) -> None:
     if result["unknown"] is not None:
         print(f"? ({result['unknown']})")
         sys.exit(7)
+    for room, count in sorted(result.get("skipped", {}).items()):
+        print(f"skipped {count} unreadable line(s) in {room}")
     if not result["posts"]:
         print("none")
         sys.exit(3)

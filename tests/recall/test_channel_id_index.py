@@ -265,19 +265,118 @@ class IdIndexTest(unittest.TestCase):
 
     # R17 (append path)
 
-    def test_malformed_gap_line_holds_cursor(self):
+    def test_malformed_gap_line_is_skipped_and_recorded(self):
         self._post("indexed first m_00000017")
         bad_at = os.path.getsize(self._log())
         with open(self._log(), "a", encoding="utf-8") as f:
             f.write('{"body": "half an object m_00000a17", "id": \n')
         self._raw_line("after the bad line m_00000b17", "m_0000b017")
         msg = self._post("then a post m_00000c17")
-        self.assertLessEqual(self._cursor()[0], bad_at)
+        self.assertEqual(self._cursor(), (os.path.getsize(self._log()), msg.id))
+        self.assertEqual(self._skips(), [("dev", bad_at)])
         self.assertEqual(self._indexed("m_00000c17"), {msg.id})
         self.assertEqual(self._indexed("m_00000b17"), {"m_0000b017"})
-        # explicit catch-up steps past the complete bad line
+        # catch-up over the same line records it once
+        conn = sqlite3.connect(str(ch._db_path()))
+        conn.execute("UPDATE id_refs_cursor SET byte_offset = 0")
+        conn.commit()
+        conn.close()
         ch.id_refs_catch_up()
         self.assertEqual(self._cursor()[0], os.path.getsize(self._log()))
+        self.assertEqual(self._skips(), [("dev", bad_at)])
+
+    def _skips(self):
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            return conn.execute("SELECT channel, byte_offset FROM id_refs_skips "
+                                "ORDER BY byte_offset").fetchall()
+        finally:
+            conn.close()
+
+    # R24
+
+    def test_post_after_fragment_stands_alone(self):
+        self._post("indexed m_00000024")
+        frag_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "killed mid-line m_00000a24", "id": "m_00')
+        msg = self._post("after the fragment m_00000b24")
+        self.assertIn(msg.id, [json.loads(l)["id"] for l in
+                               self._log().read_text().splitlines()[-1:]])
+        self.assertIn("after the fragment m_00000b24", ch.channel_read("dev", limit=5))
+        self.assertEqual([p["message_id"] for p in ch.channel_latest("m_00000b24")["posts"]],
+                         [msg.id])
+        self.assertEqual(self._cursor(), (os.path.getsize(self._log()), msg.id))
+        self.assertEqual(self._skips(), [("dev", frag_at)])
+
+    # R25
+
+    def test_post_adds_exactly_its_line(self):
+        self._post("first m_00000025")
+        before = os.path.getsize(self._log())
+        msg = self._post("second m_00000025")
+        line = (json.dumps(msg.to_dict()) + "\n").encode("utf-8")
+        self.assertEqual(os.path.getsize(self._log()) - before, len(line))
+        self.assertTrue(self._log().read_bytes().endswith(line))
+
+    # R26
+
+    def test_post_to_empty_or_new_room_prepends_nothing(self):
+        self._post("new room m_00000026", room="fresh")
+        self.assertEqual(self._log("fresh").read_bytes()[:1], b"{")
+        self._log("empty").parent.mkdir(parents=True, exist_ok=True)
+        self._log("empty").write_bytes(b"")
+        self._post("empty room m_00000026", room="empty")
+        self.assertEqual(self._log("empty").read_bytes()[:1], b"{")
+
+    # R27
+
+    def test_post_waits_for_a_writer_holding_the_lock_mid_line(self):
+        import threading
+        import time
+        from synapt.recall._filelock import lock_exclusive, unlock
+        self._post("before m_00000027")
+        held, done = threading.Event(), []
+
+        def writer():
+            with open(self._log(), "a", encoding="utf-8") as f:
+                lock_exclusive(f)
+                f.write('{"body": "held m_00000a27", ')
+                f.flush()
+                held.set()
+                time.sleep(0.5)
+                f.write('"id": "m_0000a027"}\n')
+                f.flush()
+                done.append(time.monotonic())
+                unlock(f)
+
+        t = threading.Thread(target=writer)
+        t.start()
+        self.assertTrue(held.wait(5))
+        msg = self._post("while held m_00000b27")
+        posted = time.monotonic()
+        t.join(5)
+        self.assertTrue(done and posted >= done[0])
+        lines = self._log().read_text().splitlines()
+        self.assertEqual([json.loads(l)["id"] for l in lines[-2:]], ["m_0000a027", msg.id])
+        self.assertEqual(self._skips(), [])
+
+    # R28
+
+    def test_fill_passes_a_fragment_at_the_cursor(self):
+        self._post("indexed m_00000028")
+        frag_at = self._cursor()[0]
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "torn m_00000a28", "id": "m_0000a0')
+        msg = self._post("after m_00000b28")
+        self.assertEqual(self._cursor(), (os.path.getsize(self._log()), msg.id))
+        self.assertEqual(self._skips(), [("dev", frag_at)])
+        self.assertEqual(self._indexed("m_00000a28"), set())
+        conn = sqlite3.connect(str(ch._db_path()))
+        ids = {r[0] for r in conn.execute("SELECT message_id FROM id_refs")}
+        conn.close()
+        self.assertNotIn("m_0000a0", ids)
+        self.assertEqual(len(ids), 2)
 
     # R18
 
@@ -316,15 +415,17 @@ class IdIndexTest(unittest.TestCase):
             # killed after the object, before its newline: it parses, and is
             # still not a line
             f.write('{"body": "killed before its newline m_00000b20", "id": "m_0000b020"}')
-        msg = self._post("then a post m_00000c20")
-        self.assertEqual(self._cursor(), (whole, "m_0000a020"))
-        self.assertEqual(self._indexed("m_00000b20"), set())
-        self.assertEqual(self._indexed("m_00000a20"), {"m_0000a020"})
-        self.assertEqual(self._indexed("m_00000c20"), {msg.id})
+        # a post now ends that line first, so the gap fill is driven directly
+        stored = self._cursor()[0]
+        records, reach, reach_id, skipped = ch._fill_gap(
+            self._log(), stored, os.path.getsize(self._log()))
+        self.assertEqual((reach, reach_id, skipped), (whole, "m_0000a020", []))
+        self.assertEqual([d["id"] for d in records], ["m_0000a020"])
         # catch-up: a log ending in a partial line stops at the last newline
         with open(self._log(), "a", encoding="utf-8") as f:
             f.write('{"body": "killed again m_00000d20"')
         ch.id_refs_catch_up()
+        self.assertEqual(self._indexed("m_00000b20"), set())
         log = self._log().read_bytes()
         self.assertEqual(self._cursor()[0], log.rfind(b"\n") + 1)
         self.assertLess(self._cursor()[0], len(log))
