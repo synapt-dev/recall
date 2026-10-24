@@ -1800,14 +1800,18 @@ def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
         for room, path in _indexed_rooms(project_dir):
             if not path.exists():
                 continue
+            # the log is read and parsed before the write lock is taken
+            stored = _read_id_cursor(conn, room)
+            cursor = stored or 0
+            size = path.stat().st_size
+            start = cursor if cursor <= size else 0  # a rewritten log is read again
+            records, skipped, stop = _read_log_lines(path, start, size)
+            rows = [r for d in records for r in _id_ref_rows(d, room)]
             conn.execute("BEGIN IMMEDIATE")
             try:
-                stored = _read_id_cursor(conn, room)
-                cursor = stored or 0
-                size = path.stat().st_size
-                start = cursor if cursor <= size else 0  # a rewritten log is read again
-                records, skipped, stop = _read_log_lines(path, start, size)
-                rows = [r for d in records for r in _id_ref_rows(d, room)]
+                if cursor > size:
+                    # the old skips name offsets of a log that is gone
+                    conn.execute("DELETE FROM id_refs_skips WHERE channel = ?", (room,))
                 _insert_id_refs(conn, rows)
                 _record_id_skips(conn, room, skipped)
                 last_id = records[-1].get("id", "") if records else ""
