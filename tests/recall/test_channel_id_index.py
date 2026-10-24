@@ -220,9 +220,124 @@ class IdIndexTest(unittest.TestCase):
         self.assertEqual(self._indexed("m_000000aa"), {a.id})
         self.assertEqual(self._indexed("m_000000bb"), {b.id})
         cursor = self._cursor()[0]
-        # never past a line it did not index: here, A's end (B's line follows)
-        self.assertLessEqual(cursor, seen["c_start"])
-        self.assertEqual(cursor, seen["a"][1])
+        # never past a line it did not index: B filled A's line and stopped at
+        # its own end; C's line is past it
+        self.assertEqual(cursor, seen["c_start"])
+
+    # R15
+
+    def test_raw_line_then_post_fills_gap(self):
+        self._post("indexed first m_00000015")
+        self._raw_line("written raw m_00000a15", "m_0000a015")
+        msg = self._post("then a post m_00000b15")
+        self.assertEqual(self._cursor(), (os.path.getsize(self._log()), msg.id))
+        self.assertEqual(self._indexed("m_00000a15"), {"m_0000a015"})
+        self.assertEqual(self._indexed("m_00000b15"), {msg.id})
+
+    # R16
+
+    def test_gap_filled_by_other_writer_cursor_never_moves_back(self):
+        real = ch._index_appended_line
+        a = _msg("from A m_000000a1", sender="a_a")
+        b = _msg("from B m_000000b1", sender="a_b")
+        seen = {}
+
+        def interleave(msg, path, start, end, *args, **kw):
+            if msg is a and "a" not in seen:
+                seen["a"] = (start, end)
+                # A's line is written; B writes and fills the gap holding it
+                self.assertIsNone(ch._append_message(b))
+                seen["b_end"] = os.path.getsize(path)
+                seen["after_b"] = self._cursor()[0]
+            return real(msg, path, start, end, *args, **kw)
+
+        with patch.object(ch, "_index_appended_line", side_effect=interleave):
+            self.assertIsNone(ch._append_message(a))
+        self.assertEqual(seen["after_b"], seen["b_end"])
+        self.assertEqual(self._cursor(), (seen["b_end"], b.id))
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            rows = conn.execute("SELECT message_id FROM id_refs WHERE token = ?",
+                                ("m_000000a1",)).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(rows, [(a.id,)])
+
+    # R17 (append path)
+
+    def test_malformed_gap_line_holds_cursor(self):
+        self._post("indexed first m_00000017")
+        bad_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half an object m_00000a17", "id": \n')
+        self._raw_line("after the bad line m_00000b17", "m_0000b017")
+        msg = self._post("then a post m_00000c17")
+        self.assertLessEqual(self._cursor()[0], bad_at)
+        self.assertEqual(self._indexed("m_00000c17"), {msg.id})
+        self.assertEqual(self._indexed("m_00000b17"), {"m_0000b017"})
+        # explicit catch-up steps past the complete bad line
+        ch.id_refs_catch_up()
+        self.assertEqual(self._cursor()[0], os.path.getsize(self._log()))
+
+    # R18
+
+    def test_dm_token_never_reaches_latest(self):
+        self._post("private m_00000018", room="dm:a_one:a_two")
+        self.assertEqual(self._indexed("m_00000018"), {self._last_dm_id()})
+        self.assertEqual(ch.channel_latest("m_00000018"), {"posts": [], "unknown": None})
+        code, out = self._cli("m_00000018")
+        self.assertEqual((code, out), (3, "none\n"))
+
+    def _last_dm_id(self):
+        line = self._log("dm:a_one:a_two").read_text().splitlines()[-1]
+        return json.loads(line)["id"]
+
+    # R19
+
+    def test_gap_over_bound_then_post_stays_behind(self):
+        self._post("indexed m_00000019")
+        before = self._cursor()[0]
+        for i in range(70):
+            self._raw_line("x" * 1000 + " m_00000a19", f"m_2{i:07x}")
+        msg = self._post("then a post m_00000019")
+        self.assertEqual(self._cursor()[0], before)
+        self.assertIn(msg.id, self._indexed("m_00000019"))
+        gap = os.path.getsize(self._log()) - before
+        code, out = self._cli("m_00000019")
+        self.assertEqual((code, out), (7, f"? (dev behind by {gap} bytes)\n"))
+
+    # R20
+
+    def test_partial_last_line_stops_gap_fill_and_catch_up(self):
+        self._post("indexed m_00000020")
+        self._raw_line("complete raw m_00000a20", "m_0000a020")
+        whole = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            # killed after the object, before its newline: it parses, and is
+            # still not a line
+            f.write('{"body": "killed before its newline m_00000b20", "id": "m_0000b020"}')
+        msg = self._post("then a post m_00000c20")
+        self.assertEqual(self._cursor(), (whole, "m_0000a020"))
+        self.assertEqual(self._indexed("m_00000b20"), set())
+        self.assertEqual(self._indexed("m_00000a20"), {"m_0000a020"})
+        self.assertEqual(self._indexed("m_00000c20"), {msg.id})
+        # catch-up: a log ending in a partial line stops at the last newline
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "killed again m_00000d20"')
+        ch.id_refs_catch_up()
+        log = self._log().read_bytes()
+        self.assertEqual(self._cursor()[0], log.rfind(b"\n") + 1)
+        self.assertLess(self._cursor()[0], len(log))
+
+    # R21
+
+    def test_log_shorter_than_cursor_is_unknown(self):
+        self._post("indexed m_00000021")
+        self._post("another m_00000021")
+        with open(self._log(), "r+b") as f:
+            f.truncate(10)
+        code, out = self._cli("m_00000021")
+        self.assertEqual((code, out), (7, "? (dev log is shorter than its index)\n"))
 
 
 if __name__ == "__main__":

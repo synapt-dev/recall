@@ -1600,28 +1600,69 @@ def _insert_id_refs(conn: sqlite3.Connection, rows: list[tuple]) -> None:
     )
 
 
-def _move_id_cursor(
-    conn: sqlite3.Connection, channel: str, start: int, new_offset: int, message_id: str,
-) -> bool:
-    """Move *channel*'s cursor from *start* to *new_offset*; False if it is not at *start*.
-
-    A missing cursor counts as offset 0. The cursor never skips a line it did
-    not index: when another line landed between, it stays and the room reads
-    behind until a catch-up fills the gap.
-    """
+def _read_id_cursor(conn: sqlite3.Connection, channel: str) -> int | None:
     row = conn.execute(
         "SELECT byte_offset FROM id_refs_cursor WHERE channel = ?", (channel,)
     ).fetchone()
-    stored = row[0] if row is not None else 0
-    if stored != start:
-        return False
-    conn.execute(
-        "INSERT INTO id_refs_cursor (channel, byte_offset, last_message_id) "
-        "VALUES (?, ?, ?) ON CONFLICT(channel) DO UPDATE SET "
-        "byte_offset = excluded.byte_offset, last_message_id = excluded.last_message_id",
-        (channel, new_offset, message_id),
-    )
-    return True
+    return row[0] if row is not None else None
+
+
+def _move_id_cursor(
+    conn: sqlite3.Connection, channel: str, stored: int | None, new_offset: int,
+    message_id: str,
+) -> bool:
+    """Move *channel*'s cursor from *stored* to *new_offset*; False if it is not at *stored*.
+
+    *stored* is the offset read in this transaction (None: no cursor row).
+    The update is conditional on it, so a cursor another writer moved is
+    never written over.
+    """
+    if stored is None:
+        cur = conn.execute(
+            "INSERT INTO id_refs_cursor (channel, byte_offset, last_message_id) "
+            "VALUES (?, ?, ?) ON CONFLICT(channel) DO NOTHING",
+            (channel, new_offset, message_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE id_refs_cursor SET byte_offset = ?, last_message_id = ? "
+            "WHERE channel = ? AND byte_offset = ?",
+            (new_offset, message_id, channel, stored),
+        )
+    return cur.rowcount == 1
+
+
+def _fill_gap(path: Path, stored: int, start: int) -> tuple[list[dict], int, str]:
+    """Parse the lines of *path* in [stored, start).
+
+    Returns the records, how far the cursor may go and the id of the last
+    record before that point.
+
+    Only whole lines are read. The cursor may go over the lines that parsed,
+    up to the first that did not or to a last line with no newline; every
+    line that parses is returned, so its ids are indexed either way.
+    """
+    with open(path, "rb") as f:
+        f.seek(stored)
+        data = f.read(start - stored)
+    cut = data.rfind(b"\n") + 1  # a line a killed writer left unfinished is not read
+    records: list[dict] = []
+    reach, reach_id = stored, ""
+    clean = True
+    pos = 0
+    for line in data[:cut].splitlines(keepends=True):
+        pos += len(line)
+        try:
+            d = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            d = None
+        if isinstance(d, dict):
+            records.append(d)
+            if clean:
+                reach, reach_id = stored + pos, d.get("id", "")
+        else:
+            clean = False
+    return records, reach, reach_id
 
 
 def _index_appended_line(
@@ -1634,9 +1675,12 @@ def _index_appended_line(
 ) -> Exception | None:
     """Index the ids of the line just written at [start, end) of *path*.
 
-    The tokens and the cursor move are one transaction. An error is returned,
-    not raised: the line is already in the log, and the cursor left at
-    *start* makes the room read behind.
+    The cursor read, the read of any gap before *start*, the tokens and the
+    cursor move are one write transaction. A gap of at most BEHIND_BOUND
+    bytes (lines another writer did not index) is indexed here too, and the
+    cursor moves over it only as far as its lines parsed. The cursor only
+    moves forward. An error is returned, not raised: the line is already in
+    the log, and the cursor left behind it makes the room read behind.
     """
     owns_conn = conn is None
     try:
@@ -1644,9 +1688,28 @@ def _index_appended_line(
             conn = _open_db(project_dir)
         try:
             try:
-                _insert_id_refs(conn, _id_ref_rows(msg.to_dict(), msg.channel))
-                new_offset = end
-                _move_id_cursor(conn, msg.channel, start, new_offset, msg.id)
+                if conn.in_transaction:
+                    # take the write lock before the cursor is read
+                    conn.execute("UPDATE id_refs_cursor SET byte_offset = byte_offset "
+                                 "WHERE channel = ?", (msg.channel,))
+                else:
+                    conn.execute("BEGIN IMMEDIATE")
+                stored = _read_id_cursor(conn, msg.channel)
+                at = stored or 0
+                rows = _id_ref_rows(msg.to_dict(), msg.channel)
+                new_offset, last_id = None, msg.id
+                if at == start:
+                    new_offset = end
+                elif at < start and start - at <= BEHIND_BOUND:
+                    records, reach, reach_id = _fill_gap(path, at, start)
+                    rows = [r for d in records for r in _id_ref_rows(d, msg.channel)] + rows
+                    if reach == start:
+                        new_offset = end
+                    elif reach > at:
+                        new_offset, last_id = reach, reach_id
+                _insert_id_refs(conn, rows)
+                if new_offset is not None:
+                    _move_id_cursor(conn, msg.channel, stored, new_offset, last_id)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -1695,18 +1758,22 @@ def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
         for room, path in _indexed_rooms(project_dir):
             if not path.exists():
                 continue
-            row = conn.execute(
-                "SELECT byte_offset FROM id_refs_cursor WHERE channel = ?", (room,)
-            ).fetchone()
-            cursor = row[0] if row is not None else 0
-            size = path.stat().st_size
-            start = cursor if cursor <= size else 0  # a rewritten log is read again
-            records, stop = _read_log_records(path, start, size)
-            with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                stored = _read_id_cursor(conn, room)
+                cursor = stored or 0
+                size = path.stat().st_size
+                start = cursor if cursor <= size else 0  # a rewritten log is read again
+                records, stop = _read_log_records(path, start, size)
                 rows = [r for d in records for r in _id_ref_rows(d, room)]
                 _insert_id_refs(conn, rows)
                 last_id = records[-1].get("id", "") if records else ""
-                _move_id_cursor(conn, room, cursor, stop, last_id)
+                if stop != cursor:
+                    _move_id_cursor(conn, room, stored, stop, last_id)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
             read[room] = stop - start
     finally:
         conn.close()
