@@ -1076,6 +1076,15 @@ CREATE TABLE IF NOT EXISTS id_refs_cursor (
     last_message_id TEXT NOT NULL DEFAULT ''
 );
 
+-- Complete log lines the id index could not parse and moved past, one row
+-- per line, so a reader can say a line was skipped instead of hiding it.
+CREATE TABLE IF NOT EXISTS id_refs_skips (
+    channel TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL,
+    skipped_at TEXT NOT NULL,
+    UNIQUE (channel, byte_offset)
+);
+
 CREATE TABLE IF NOT EXISTS wake_requests (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     target TEXT NOT NULL,
@@ -1632,37 +1641,70 @@ def _move_id_cursor(
     return cur.rowcount == 1
 
 
-def _fill_gap(path: Path, stored: int, start: int) -> tuple[list[dict], int, str]:
-    """Parse the lines of *path* in [stored, start).
+def _parse_log_lines(data: bytes, offset: int) -> tuple[list[dict], list[int], int]:
+    """Parse the complete lines of *data*, read from *offset* of a log.
 
-    Returns the records, how far the cursor may go and the id of the last
-    record before that point.
-
-    Only whole lines are read. The cursor may go over the lines that parsed,
-    up to the first that did not or to a last line with no newline; every
-    line that parses is returned, so its ids are indexed either way.
+    Returns the records, the log offsets of the complete lines that did not
+    parse (skipped) and the end of the last complete line. A last line with
+    no newline is not read: a writer may still be writing it.
     """
-    with open(path, "rb") as f:
-        f.seek(stored)
-        data = f.read(start - stored)
-    cut = data.rfind(b"\n") + 1  # a line a killed writer left unfinished is not read
+    cut = data.rfind(b"\n") + 1
     records: list[dict] = []
-    reach, reach_id = stored, ""
-    clean = True
+    skipped: list[int] = []
     pos = 0
     for line in data[:cut].splitlines(keepends=True):
-        pos += len(line)
         try:
             d = json.loads(line)
         except (ValueError, UnicodeDecodeError):
             d = None
         if isinstance(d, dict):
             records.append(d)
-            if clean:
-                reach, reach_id = stored + pos, d.get("id", "")
         else:
-            clean = False
-    return records, reach, reach_id
+            skipped.append(offset + pos)
+        pos += len(line)
+    return records, skipped, offset + cut
+
+
+def _record_id_skips(conn: sqlite3.Connection, channel: str, offsets: list[int]) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.executemany(
+        "INSERT OR IGNORE INTO id_refs_skips (channel, byte_offset, skipped_at) "
+        "VALUES (?, ?, ?)",
+        [(channel, off, now) for off in offsets],
+    )
+
+
+def id_refs_skip_counts(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Each room's skip times, from id_refs_skips, DM rooms left out; an index without the table has none."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "id_refs_skips" not in tables:
+        return {}
+    skips: dict[str, list[str]] = {}
+    for room, at in conn.execute("SELECT channel, skipped_at FROM id_refs_skips"):
+        if is_dm_channel(room):
+            continue  # a DM's name holds its two participants; never print it
+        skips.setdefault(room, []).append(at)
+    return skips
+
+
+def _fill_gap(
+    path: Path, stored: int, start: int,
+) -> tuple[list[dict], int, str, list[int]]:
+    """Parse the lines of *path* in [stored, start).
+
+    Returns the records, how far the cursor may go, the id of the last
+    record before that point and the offsets of the lines skipped.
+
+    Only whole lines are read. A complete line that does not parse is
+    skipped and the cursor may go past it; a last line with no newline
+    stops the cursor before it.
+    """
+    with open(path, "rb") as f:
+        f.seek(stored)
+        data = f.read(start - stored)
+    records, skipped, reach = _parse_log_lines(data, stored)
+    reach_id = records[-1].get("id", "") if records else ""
+    return records, reach, reach_id, skipped
 
 
 def _index_appended_line(
@@ -1701,8 +1743,9 @@ def _index_appended_line(
                 if at == start:
                     new_offset = end
                 elif at < start and start - at <= BEHIND_BOUND:
-                    records, reach, reach_id = _fill_gap(path, at, start)
+                    records, reach, reach_id, skipped = _fill_gap(path, at, start)
                     rows = [r for d in records for r in _id_ref_rows(d, msg.channel)] + rows
+                    _record_id_skips(conn, msg.channel, skipped)
                     if reach == start:
                         new_offset = end
                     elif reach > at:
@@ -1726,19 +1769,18 @@ def _read_log_records(path: Path, offset: int, size: int) -> tuple[list[dict], i
     """Parse the complete lines of *path* in [offset, size); return them and the end of the last."""
     if size <= offset:
         return [], offset
+    records, _, stop = _read_log_lines(path, offset, size)
+    return records, stop
+
+
+def _read_log_lines(path: Path, offset: int, size: int) -> tuple[list[dict], list[int], int]:
+    """_parse_log_lines over [offset, size) of *path*."""
+    if size <= offset:
+        return [], [], offset
     with open(path, "rb") as f:
         f.seek(offset)
         data = f.read(size - offset)
-    cut = data.rfind(b"\n") + 1  # a line still being written is left for later
-    records = []
-    for line in data[:cut].splitlines():
-        try:
-            d = json.loads(line)
-        except (ValueError, UnicodeDecodeError):
-            continue
-        if isinstance(d, dict):
-            records.append(d)
-    return records, offset + cut
+    return _parse_log_lines(data, offset)
 
 
 def _indexed_rooms(project_dir: Path | None = None) -> list[tuple[str, Path]]:
@@ -1764,9 +1806,10 @@ def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
                 cursor = stored or 0
                 size = path.stat().st_size
                 start = cursor if cursor <= size else 0  # a rewritten log is read again
-                records, stop = _read_log_records(path, start, size)
+                records, skipped, stop = _read_log_lines(path, start, size)
                 rows = [r for d in records for r in _id_ref_rows(d, room)]
                 _insert_id_refs(conn, rows)
+                _record_id_skips(conn, room, skipped)
                 last_id = records[-1].get("id", "") if records else ""
                 if stop != cursor:
                     _move_id_cursor(conn, room, stored, stop, last_id)
@@ -1855,10 +1898,14 @@ def channel_latest(
                 continue
             found.setdefault(mid, {"message_id": mid, "channel": room, "from": agent,
                                    "timestamp": ts, "excerpt": excerpt})
+        skipped = {room: len(at) for room, at in id_refs_skip_counts(conn).items()}
     finally:
         conn.close()
     posts = sorted(found.values(), key=lambda p: p["timestamp"], reverse=True)[:n]
-    return {"posts": posts, "unknown": None}
+    result = {"posts": posts, "unknown": None}
+    if skipped:
+        result["skipped"] = skipped
+    return result
 
 
 def _append_message(
@@ -1903,6 +1950,15 @@ def _append_message(
         # between open() and the lock.
         f.seek(0, os.SEEK_END)
         start = f.tell()
+        # A writer killed mid-line left no newline: end its line first, or
+        # this post would join it and no reader could parse either.
+        with open(path, "rb") as tail:
+            tail.seek(max(start - 1, 0))
+            last = tail.read(1)
+        if start and last != b"\n":
+            f.write("\n")
+            f.flush()
+            start = f.tell()
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
         end = f.tell()

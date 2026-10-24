@@ -1570,6 +1570,8 @@ class ChangedKind:
     # (epoch, line) in the order shown, newest first
     items: list[tuple[float, str]] = field(default_factory=list)
     unknown: str | None = None
+    # appended to the label line, e.g. lines the id index skipped since T
+    note: str = ""
 
 
 @dataclass
@@ -1663,6 +1665,7 @@ def _addressed_to(project_dir: Path | None, me: str, since: float) -> list[tuple
 
 def _cited_ids(
     project_dir: Path | None, me: str, start: float, since: float,
+    kind: ChangedKind | None = None,
 ) -> list[tuple[float, str]]:
     from synapt.recall import channel
 
@@ -1671,6 +1674,13 @@ def _cited_ids(
     except channel.IdIndexUnknown as exc:
         raise _KindUnknown(str(exc)) from None
     try:
+        if kind is not None:
+            notes = []
+            for room, times in sorted(channel.id_refs_skip_counts(conn).items()):
+                count = sum(1 for at in times if _timestamp_epoch(at) > since)
+                if count:
+                    notes.append(f"skipped {count} unreadable line(s) in {room}")
+            kind.note = "; ".join(notes)
         mine = [r[:5] for r in gap_rows if r[3] == me]
         mine += conn.execute(
             "SELECT token, message_id, channel, from_agent, timestamp FROM id_refs "
@@ -1730,7 +1740,8 @@ def gather_what_changed(
     readers = [
         lambda: _changed_nodes(index_dir, since, sessions),
         lambda: _addressed_to(project_dir, me(), since),
-        lambda: _cited_ids(project_dir, me(), _first_event_epoch(previous.path), since),
+        lambda: _cited_ids(project_dir, me(), _first_event_epoch(previous.path), since,
+                           kinds[2]),
     ]
     for kind, read in zip(kinds, readers):
         try:
@@ -1764,16 +1775,17 @@ def format_what_changed(found: WhatChanged | None) -> list[str]:
                 dealt = True
     for i, kind in enumerate(found.kinds):
         label = f"({i + 1}) {kind.label}:"
+        note = f"; {kind.note}" if kind.note else ""
         if kind.unknown is not None:
             lines.append(f"{label} ? ({kind.unknown}; {_UNKNOWN_HINT})")
         elif not kind.items:
-            lines.append(f"{label} none since {since}")
+            lines.append(f"{label} none since {since}{note}")
         else:
             items = kind.items[:shown[i]]
             total = len(kind.items)
             oldest = min(at for at, _ in items)
             lines.append(f"{label} shown {len(items)} of {total}, withheld "
-                         f"{total - len(items)}, oldest shown {_minute(oldest)}")
+                         f"{total - len(items)}, oldest shown {_minute(oldest)}{note}")
             lines.extend(f"  {line}" for _, line in items)
     return lines
 
