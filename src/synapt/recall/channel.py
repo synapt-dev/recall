@@ -1054,6 +1054,28 @@ CREATE TABLE IF NOT EXISTS mentions (
 
 CREATE INDEX IF NOT EXISTS idx_mentions_mentioned ON mentions(mentioned);
 
+-- Which posts name an id (a post id or a dotted key), so a lookup does not
+-- scan every room. excerpt is the body's first 80 characters, for display.
+CREATE TABLE IF NOT EXISTS id_refs (
+    token TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    excerpt TEXT NOT NULL DEFAULT '',
+    UNIQUE (token, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_id_refs_token_ts ON id_refs(token, timestamp);
+
+-- How far into each room's log id_refs has read. It only moves forward over
+-- lines it indexed, so a gap between it and the file's end reads as behind.
+CREATE TABLE IF NOT EXISTS id_refs_cursor (
+    channel TEXT PRIMARY KEY,
+    byte_offset INTEGER NOT NULL,
+    last_message_id TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS wake_requests (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     target TEXT NOT NULL,
@@ -1541,6 +1563,304 @@ def _emit_message_wakes(msg: ChannelMessage, project_dir: Path | None = None) ->
         conn.close()
 
 
+# Ids a post can name: post ids, dotted numeric keys and short dotted keys.
+# Matched whole, so 1.234567 never matches inside 1.23456789.
+_ID_TOKEN_RE = re.compile(
+    r"(?<![\w.])(?:m_[0-9a-f]{8}|[0-9]\.[0-9]{5,}|c[0-9]{1,3}\.[0-9]{2,4})(?!\w|\.\w)"
+)
+
+# A room whose index cursor trails its log by more than this many bytes reads
+# as unknown ("?"); a smaller gap is read from the log in memory.
+BEHIND_BOUND = 65_536
+
+_EXCERPT_CHARS = 80
+
+
+def _id_tokens(body: str) -> list[str]:
+    """Return the distinct ids named in *body*, in order of first use."""
+    return list(dict.fromkeys(m.group(0) for m in _ID_TOKEN_RE.finditer(body or "")))
+
+
+def _id_ref_rows(d: dict, channel: str) -> list[tuple]:
+    """id_refs rows for one log record (the dict form of a message)."""
+    body = d.get("body") or ""
+    return [
+        (tok, d.get("id", ""), channel, d.get("from", ""), d.get("timestamp", ""),
+         body[:_EXCERPT_CHARS])
+        for tok in _id_tokens(body)
+    ]
+
+
+def _insert_id_refs(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    conn.executemany(
+        "INSERT OR IGNORE INTO id_refs "
+        "(token, message_id, channel, from_agent, timestamp, excerpt) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+
+def _read_id_cursor(conn: sqlite3.Connection, channel: str) -> int | None:
+    row = conn.execute(
+        "SELECT byte_offset FROM id_refs_cursor WHERE channel = ?", (channel,)
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
+def _move_id_cursor(
+    conn: sqlite3.Connection, channel: str, stored: int | None, new_offset: int,
+    message_id: str,
+) -> bool:
+    """Move *channel*'s cursor from *stored* to *new_offset*; False if it is not at *stored*.
+
+    *stored* is the offset read in this transaction (None: no cursor row).
+    The update is conditional on it, so a cursor another writer moved is
+    never written over.
+    """
+    if stored is None:
+        cur = conn.execute(
+            "INSERT INTO id_refs_cursor (channel, byte_offset, last_message_id) "
+            "VALUES (?, ?, ?) ON CONFLICT(channel) DO NOTHING",
+            (channel, new_offset, message_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE id_refs_cursor SET byte_offset = ?, last_message_id = ? "
+            "WHERE channel = ? AND byte_offset = ?",
+            (new_offset, message_id, channel, stored),
+        )
+    return cur.rowcount == 1
+
+
+def _fill_gap(path: Path, stored: int, start: int) -> tuple[list[dict], int, str]:
+    """Parse the lines of *path* in [stored, start).
+
+    Returns the records, how far the cursor may go and the id of the last
+    record before that point.
+
+    Only whole lines are read. The cursor may go over the lines that parsed,
+    up to the first that did not or to a last line with no newline; every
+    line that parses is returned, so its ids are indexed either way.
+    """
+    with open(path, "rb") as f:
+        f.seek(stored)
+        data = f.read(start - stored)
+    cut = data.rfind(b"\n") + 1  # a line a killed writer left unfinished is not read
+    records: list[dict] = []
+    reach, reach_id = stored, ""
+    clean = True
+    pos = 0
+    for line in data[:cut].splitlines(keepends=True):
+        pos += len(line)
+        try:
+            d = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            d = None
+        if isinstance(d, dict):
+            records.append(d)
+            if clean:
+                reach, reach_id = stored + pos, d.get("id", "")
+        else:
+            clean = False
+    return records, reach, reach_id
+
+
+def _index_appended_line(
+    msg: ChannelMessage,
+    path: Path,
+    start: int,
+    end: int,
+    project_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> Exception | None:
+    """Index the ids of the line just written at [start, end) of *path*.
+
+    The cursor read, the read of any gap before *start*, the tokens and the
+    cursor move are one write transaction. A gap of at most BEHIND_BOUND
+    bytes (lines another writer did not index) is indexed here too, and the
+    cursor moves over it only as far as its lines parsed. The cursor only
+    moves forward. An error is returned, not raised: the line is already in
+    the log, and the cursor left behind it makes the room read behind.
+    """
+    owns_conn = conn is None
+    try:
+        if owns_conn:
+            conn = _open_db(project_dir)
+        try:
+            try:
+                if conn.in_transaction:
+                    # take the write lock before the cursor is read
+                    conn.execute("UPDATE id_refs_cursor SET byte_offset = byte_offset "
+                                 "WHERE channel = ?", (msg.channel,))
+                else:
+                    conn.execute("BEGIN IMMEDIATE")
+                stored = _read_id_cursor(conn, msg.channel)
+                at = stored or 0
+                rows = _id_ref_rows(msg.to_dict(), msg.channel)
+                new_offset, last_id = None, msg.id
+                if at == start:
+                    new_offset = end
+                elif at < start and start - at <= BEHIND_BOUND:
+                    records, reach, reach_id = _fill_gap(path, at, start)
+                    rows = [r for d in records for r in _id_ref_rows(d, msg.channel)] + rows
+                    if reach == start:
+                        new_offset = end
+                    elif reach > at:
+                        new_offset, last_id = reach, reach_id
+                _insert_id_refs(conn, rows)
+                if new_offset is not None:
+                    _move_id_cursor(conn, msg.channel, stored, new_offset, last_id)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        finally:
+            if owns_conn:
+                conn.close()
+    except Exception as exc:
+        return exc
+    return None
+
+
+def _read_log_records(path: Path, offset: int, size: int) -> tuple[list[dict], int]:
+    """Parse the complete lines of *path* in [offset, size); return them and the end of the last."""
+    if size <= offset:
+        return [], offset
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read(size - offset)
+    cut = data.rfind(b"\n") + 1  # a line still being written is left for later
+    records = []
+    for line in data[:cut].splitlines():
+        try:
+            d = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(d, dict):
+            records.append(d)
+    return records, offset + cut
+
+
+def _indexed_rooms(project_dir: Path | None = None) -> list[tuple[str, Path]]:
+    return [(room, _channel_path(room, project_dir))
+            for room in channel_list_channels(project_dir)]
+
+
+def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
+    """Index every room's log from its cursor to its end; return bytes read per room.
+
+    This writes (and creates the store if needed). It is run on request,
+    never by a read.
+    """
+    read: dict[str, int] = {}
+    conn = _open_db(project_dir)
+    try:
+        for room, path in _indexed_rooms(project_dir):
+            if not path.exists():
+                continue
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                stored = _read_id_cursor(conn, room)
+                cursor = stored or 0
+                size = path.stat().st_size
+                start = cursor if cursor <= size else 0  # a rewritten log is read again
+                records, stop = _read_log_records(path, start, size)
+                rows = [r for d in records for r in _id_ref_rows(d, room)]
+                _insert_id_refs(conn, rows)
+                last_id = records[-1].get("id", "") if records else ""
+                if stop != cursor:
+                    _move_id_cursor(conn, room, stored, stop, last_id)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            read[room] = stop - start
+    finally:
+        conn.close()
+    return read
+
+
+class IdIndexUnknown(Exception):
+    """The id index cannot answer; the message says why."""
+
+
+def open_id_index_ro(
+    project_dir: Path | None = None,
+) -> tuple[sqlite3.Connection, list[tuple]]:
+    """Open the id index read-only and read each room's unindexed gap once.
+
+    Returns the connection and the id_refs rows of the log lines past each
+    room's cursor (a gap of at most BEHIND_BOUND bytes, read in memory).
+    Nothing is created. Raises IdIndexUnknown when the index cannot answer.
+    The caller closes the connection.
+    """
+    db_path = _db_path(project_dir)
+    if not db_path.exists():
+        raise IdIndexUnknown("index absent")
+    try:
+        conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error as exc:
+        raise IdIndexUnknown(f"store not readable: {exc}") from None
+    try:
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        except sqlite3.Error as exc:
+            raise IdIndexUnknown(f"store not readable: {exc}") from None
+        if not {"id_refs", "id_refs_cursor"} <= tables:
+            raise IdIndexUnknown("index absent")
+        cursors = dict(conn.execute("SELECT channel, byte_offset FROM id_refs_cursor"))
+        gap_rows: list[tuple] = []
+        for room, path in _indexed_rooms(project_dir):
+            size = path.stat().st_size if path.exists() else 0
+            cursor = cursors.get(room, 0)
+            if cursor > size:
+                raise IdIndexUnknown(f"{room} log is shorter than its index")
+            if size - cursor > BEHIND_BOUND:
+                raise IdIndexUnknown(f"{room} behind by {size - cursor} bytes")
+            records, _ = _read_log_records(path, cursor, size)
+            gap_rows.extend(r for d in records for r in _id_ref_rows(d, room))
+    except BaseException:
+        conn.close()
+        raise
+    return conn, gap_rows
+
+
+def channel_latest(
+    token: str, n: int = 3, project_dir: Path | None = None,
+) -> dict:
+    """The newest *n* posts naming *token* across rooms, read from the id index.
+
+    Read-only: the store is opened mode=ro and nothing is created. Returns
+    ``{"posts": [...], "unknown": None}`` or, when the index cannot answer,
+    ``{"posts": [], "unknown": "<why>"}``. A room behind by at most
+    BEHIND_BOUND bytes has its gap read from the log in memory.
+    """
+    try:
+        conn, gap_rows = open_id_index_ro(project_dir)
+    except IdIndexUnknown as exc:
+        return {"posts": [], "unknown": str(exc)}
+    try:
+        found: dict[str, dict] = {}
+        for row in gap_rows:
+            if row[0] == token:
+                found[row[1]] = {"message_id": row[1], "channel": row[2],
+                                 "from": row[3], "timestamp": row[4], "excerpt": row[5]}
+        for mid, room, agent, ts, excerpt in conn.execute(
+            "SELECT message_id, channel, from_agent, timestamp, excerpt FROM id_refs "
+            "WHERE token = ?",
+            (token,),
+        ):
+            if is_dm_channel(room):
+                continue
+            found.setdefault(mid, {"message_id": mid, "channel": room, "from": agent,
+                                   "timestamp": ts, "excerpt": excerpt})
+    finally:
+        conn.close()
+    posts = sorted(found.values(), key=lambda p: p["timestamp"], reverse=True)[:n]
+    return {"posts": posts, "unknown": None}
+
+
 def _append_message(
     msg: ChannelMessage,
     project_dir: Path | None = None,
@@ -1579,14 +1899,26 @@ def _append_message(
     from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
         lock_exclusive(f)
+        # Offsets are taken under the lock: another writer may have appended
+        # between open() and the lock.
+        f.seek(0, os.SEEK_END)
+        start = f.tell()
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
+        end = f.tell()
+    # The id index is part of the post, not a hook: its error is returned.
+    # It holds this project's logs only: a post written to another project's
+    # log (channels_dir) is not indexed, or that log's offsets would move the
+    # local cursor. Paths are compared resolved, since the store may be
+    # reached through a symlink.
+    state_error = None
+    if path.resolve() == _channel_path(msg.channel, project_dir).resolve():
+        state_error = _index_appended_line(msg, path, start, end, project_dir, conn=conn)
     # Set dirty flag for all other members of this channel (OSS substrate)
     try:
         _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
-        state_error = None
     except Exception as exc:
-        state_error = exc
+        state_error = state_error or exc
     # Fire registered hooks (mention storage, wake emission, etc.)
     for hook in _message_posted_hooks:
         try:

@@ -1329,6 +1329,7 @@ def recall_resume(
             freshness_line,
         )
 
+    caller_sources = caller_transcripts(Path.cwd())
     index = load_resume_index(index_dir)
     try:
         try:
@@ -1337,7 +1338,7 @@ def recall_resume(
                 session_id=session_id,
                 limit=turns,
                 journal_path=_journal_path(),
-                caller_sources=caller_transcripts(Path.cwd()),
+                caller_sources=caller_sources,
                 agent_id=os.environ.get("SYNAPT_AGENT_ID"),
             )
         except ResumeError as exc:
@@ -1366,7 +1367,10 @@ def recall_resume(
     except Exception:
         pass
 
-    return _with_query_freshness(format_resume(view), freshness_line)
+    from synapt.recall.resume import what_changed_block
+
+    block = what_changed_block(caller_sources, index_dir, None, os.environ.get("SYNAPT_AGENT_ID"))
+    return _with_query_freshness(block + "\n\n" + format_resume(view), freshness_line)
 
 _BUILD_RECEIPT_LOCK = threading.Lock()
 _BUILD_ID_RE = re.compile(r"^build_[0-9a-f]{12}$")
