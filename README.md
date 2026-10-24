@@ -79,7 +79,7 @@ Start the MCP server with `synapt server` (stdio). Then:
 | Before answering anything about the past | `recall_quick(query=…)`; use `recall_search` when you need more |
 | A saved fact changed | `recall_save(node_id=<id>, content=<the new fact>, category=<same category>)`; do not save a second node |
 | Two saved facts disagree | `recall_contradict(action="correct", old_node_id=<id>, new_content=…, reason=…)` |
-| Name an existing node as the newer fact | `recall_contradict(action="correct", old_node_id=<id>, successor_node_id=<existing id>, reason=…)` (no node minted; old node must be active) |
+| Name an existing node as the newer fact | `recall_contradict(action="correct", old_node_id=<id>, successor_node_id=<existing id>, reason=…)` (no node minted; old node must be active; a lineage walk does not follow `superseded_by`, so to read the chain of corrections walk `superseded_by` from node to node) |
 | The user asks you to forget something | `recall_save(node_id=<id>, retract=true)`; it no longer appears in search |
 | You need a retracted fact back deliberately | `recall_save(node_id=<id>, content=<the fact>, category=<its category>, restore_retracted=true)`; updating a retracted node is otherwise refused — retraction is not silently undone |
 | End of a working session | `recall_journal(action="write", focus=…, done=…, decisions=…, next_steps=…)` |

@@ -2120,17 +2120,18 @@ def recall_contradict(
                            marked contradicted with superseded_by set to it. Give it
                            instead of claim/new_content, not with them.
     """
+    if successor_node_id and action != "correct":
+        return (
+            f"Error: successor_node_id is taken by 'correct' only, not '{action}'. Use "
+            "recall_contradict(action='correct', old_node_id=..., successor_node_id=...)."
+        )
+
     index = _get_index()
     if index is None or not index._db:
         return "No index found. Run `synapt recall setup` first."
 
     try:
         if action == "flag":
-            if successor_node_id:
-                return (
-                    "Error: successor_node_id is taken by 'correct', not 'flag'. Use "
-                    "recall_contradict(action='correct', old_node_id=..., successor_node_id=...)."
-                )
             return _handle_flag(
                 index, claim=claim, new_content=new_content,
                 old_node_id=old_node_id, reason=reason,
