@@ -462,6 +462,34 @@ class IdIndexTest(unittest.TestCase):
         self.assertEqual(self._indexed("m_00000322"), {msg.id})
         self.assertEqual(self._cursor(), (self._log().stat().st_size, msg.id))
 
+    # R31
+
+    def test_dm_fragment_not_named_to_any_caller(self):
+        room = "dm:a_one:a_two"
+        self._post("in the dm m_00000031", room=room)
+        with open(self._log(room), "a", encoding="utf-8") as f:
+            f.write('{"body": "killed mid-line", "id": "m_00')
+        self._post("dm again m_00000031", room=room)
+        self._post("public m_00000b31")
+        result = ch.channel_latest("m_00000b31")
+        self.assertEqual([k for k in result.get("skipped", {}) if k.startswith("dm:")], [])
+        args = cli.make_parser().parse_args(["channel", "latest", "m_00000b31"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.cmd_channel(args)
+        self.assertIn("public m_00000b31", out.getvalue())
+        self.assertNotIn("dm:", out.getvalue())
+
+    # R33
+
+    def test_catch_up_records_non_json_line(self):
+        self._post("indexed m_00000033")
+        bad_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write("not json at all\n")
+        ch.id_refs_catch_up()
+        self.assertEqual(self._skips(), [("dev", bad_at)])
+
 
 if __name__ == "__main__":
     unittest.main()

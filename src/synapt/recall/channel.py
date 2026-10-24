@@ -1675,12 +1675,14 @@ def _record_id_skips(conn: sqlite3.Connection, channel: str, offsets: list[int])
 
 
 def id_refs_skip_counts(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """Each room's skip times, from id_refs_skips; an index without the table has none."""
+    """Each room's skip times, from id_refs_skips, DM rooms left out; an index without the table has none."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "id_refs_skips" not in tables:
         return {}
     skips: dict[str, list[str]] = {}
     for room, at in conn.execute("SELECT channel, skipped_at FROM id_refs_skips"):
+        if is_dm_channel(room):
+            continue  # a DM's name holds its two participants; never print it
         skips.setdefault(room, []).append(at)
     return skips
 

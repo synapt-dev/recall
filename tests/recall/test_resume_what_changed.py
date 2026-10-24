@@ -280,6 +280,21 @@ class WhatChangedTest(unittest.TestCase):
         self.assertTrue(label.startswith("(3) ids I cited: shown 1 of 1"), label)
         self.assertEqual(ch.channel_latest("m_0000ab30")["unknown"], None)
 
+    # R32
+
+    def test_dm_fragment_not_named_in_label(self):
+        self._two_sessions()
+        self._knowledge([])
+        room = "dm:a_one:a_two"
+        self._post("cited m_0000ab32", sender=ME, ts=_ts("10:30"))
+        self._post("in the dm", ts=_ts("11:00"), room=room)
+        with open(ch._channel_path(room), "a", encoding="utf-8") as f:
+            f.write('{"body": "killed mid-line", "id": "m_00')
+        self._post("dm again", ts=_ts("11:30"), room=room)
+        label = self._kind(self._block(), 3)[0]
+        self.assertTrue(label.startswith("(3) ids I cited: shown 1 of 1"), label)
+        self.assertNotIn("dm:", label)
+
 
 # R23
 
