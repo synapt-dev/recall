@@ -1809,8 +1809,9 @@ def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
             rows = [r for d in records for r in _id_ref_rows(d, room)]
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if cursor > size:
-                    # the old skips name offsets of a log that is gone
+                if cursor > size and _read_id_cursor(conn, room) == stored:
+                    # the old skips name offsets of a log that is gone; a writer that
+                    # moved the cursor since the parse has already cleared them
                     conn.execute("DELETE FROM id_refs_skips WHERE channel = ?", (room,))
                 _insert_id_refs(conn, rows)
                 _record_id_skips(conn, room, skipped)

@@ -608,6 +608,55 @@ class IdIndexTest(unittest.TestCase):
         self.assertEqual(again, first)
         self.assertEqual(self._indexed("m_00000a05"), {"m_0000a005"})
 
+    def _skip_rows(self):
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            return conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                "WHERE channel = 'dev' ORDER BY byte_offset").fetchall()
+        finally:
+            conn.close()
+
+    def test_catch_up_of_an_unchanged_log_keeps_its_skips(self):
+        # cursor == size, the usual catch-up with nothing new, clears nothing
+        self._post("indexed m_000000d6")
+        frag_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f6", "id": \n')
+        ch.id_refs_catch_up()
+        first = self._skip_rows()
+        self.assertEqual([r[0] for r in first], [frag_at])
+        self.assertEqual(self._cursor()[0], os.path.getsize(self._log()))
+        ch.id_refs_catch_up()
+        self.assertEqual(self._skip_rows(), first)
+
+    def test_catch_up_of_a_rewritten_log_keeps_a_skip_another_writer_recorded(self):
+        # another writer handled the rewrite between the parse and the lock
+        self._post("indexed m_000000d7")
+        frag_at = os.path.getsize(self._log())
+        head = self._log().read_bytes()
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f7", "id": \n')
+        self._raw_line("a long line that the rewrite drops " * 4, "m_00000a07")
+        ch.id_refs_catch_up()
+        self._log().write_bytes(head + b'{"other half": \n')
+        new_size = os.path.getsize(self._log())
+        self.assertLess(new_size, self._cursor()[0])
+        theirs = (frag_at, "2000-01-01T00:00:00Z")
+
+        def other_writer():
+            conn = sqlite3.connect(str(ch._db_path()))
+            conn.execute("DELETE FROM id_refs_skips WHERE channel = 'dev'")
+            conn.execute("INSERT INTO id_refs_skips (channel, byte_offset, skipped_at) "
+                         "VALUES ('dev', ?, ?)", theirs)
+            conn.execute("UPDATE id_refs_cursor SET byte_offset = ? WHERE channel = 'dev'",
+                         (new_size,))
+            conn.commit()
+            conn.close()
+        with self._wrap_read(other_writer):
+            ch.id_refs_catch_up()
+        self.assertEqual(self._skip_rows(), [theirs])
+        self.assertEqual(self._cursor()[0], new_size)
+
 
 if __name__ == "__main__":
     unittest.main()
