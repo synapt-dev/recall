@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -492,6 +493,169 @@ class IdIndexTest(unittest.TestCase):
             f.write("not json at all\n")
         ch.id_refs_catch_up()
         self.assertEqual(self._skips(), [("dev", bad_at)])
+
+    # catch-up reads the log before it takes the write lock
+
+    def _wrap_read(self, after):
+        real = ch._read_log_lines
+        fired = []
+
+        def read(path, offset, size):
+            out = real(path, offset, size)
+            if not fired:
+                fired.append(True)
+                after()
+            return out
+        return patch("synapt.recall.channel._read_log_lines", side_effect=read)
+
+    def test_catch_up_keeps_a_post_written_mid_parse(self):
+        self._post("indexed m_000000d1")
+        frag_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f1", "id": \n')
+        self._raw_line("not yet indexed m_000000a1", "m_00000a01")
+        mid = []
+        with self._wrap_read(lambda: mid.append(self._post("mid-parse m_000000e1"))):
+            ch.id_refs_catch_up()
+        self.assertEqual(self._indexed("m_000000e1"), {mid[0].id})
+        self.assertEqual(self._skips(), [("dev", frag_at)])
+
+    def test_catch_up_leaves_a_cursor_moved_mid_parse(self):
+        self._post("indexed m_000000d2")
+        self._raw_line("not yet indexed m_000000a2", "m_00000a02")
+        moved_to = os.path.getsize(self._log()) + 7
+
+        def move():
+            conn = sqlite3.connect(str(ch._db_path()))
+            conn.execute("UPDATE id_refs_cursor SET byte_offset = ? WHERE channel = ?",
+                         (moved_to, "dev"))
+            conn.commit()
+            conn.close()
+        with self._wrap_read(move):
+            ch.id_refs_catch_up()
+        self.assertEqual(self._cursor()[0], moved_to)
+        self.assertEqual(self._indexed("m_000000a2"), {"m_00000a02"})
+
+    def test_catch_up_parses_outside_a_transaction(self):
+        self._post("indexed m_000000d3")
+        self._raw_line("not yet indexed m_000000a3", "m_00000a03")
+        real_open, real_read = ch._open_db, ch._read_log_lines
+        conns, seen = [], []
+
+        def open_db(*a, **kw):
+            conns.append(real_open(*a, **kw))
+            return conns[-1]
+
+        def read(path, offset, size):
+            seen.append(conns[-1].in_transaction)
+            return real_read(path, offset, size)
+        with patch("synapt.recall.channel._open_db", side_effect=open_db), \
+                patch("synapt.recall.channel._read_log_lines", side_effect=read):
+            ch.id_refs_catch_up()
+        self.assertTrue(seen)
+        self.assertEqual(seen, [False] * len(seen))
+        self.assertEqual(self._indexed("m_000000a3"), {"m_00000a03"})
+
+    def test_catch_up_of_a_rewritten_log_records_its_skips_anew(self):
+        self._post("indexed m_000000d4")
+        frag_at = os.path.getsize(self._log())
+        head = self._log().read_bytes()
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f4", "id": \n')
+        self._raw_line("a long line that the rewrite drops " * 4, "m_00000a04")
+        ch.id_refs_catch_up()
+
+        def skip_rows():
+            conn = sqlite3.connect(str(ch._db_path()))
+            try:
+                return conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                    "WHERE channel = 'dev'").fetchall()
+            finally:
+                conn.close()
+        first = skip_rows()
+        self.assertEqual([r[0] for r in first], [frag_at])
+        self._log().write_bytes(head + b'{"other half": \n')
+        self.assertLess(os.path.getsize(self._log()), self._cursor()[0])
+        time.sleep(1.1)
+        ch.id_refs_catch_up()
+        again = skip_rows()
+        self.assertEqual([r[0] for r in again], [frag_at])
+        self.assertGreater(again[0][1], first[0][1])
+
+    def test_catch_up_of_a_grown_log_keeps_its_earlier_skips(self):
+        # only a rewritten log (cursor past the end) clears a room's skips; a log that grew keeps them
+        self._post("indexed m_000000d5")
+        frag_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f5", "id": \n')
+        ch.id_refs_catch_up()
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            first = conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                 "WHERE channel = 'dev'").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([r[0] for r in first], [frag_at])
+        self._raw_line("written after the first catch-up m_00000a05", "m_0000a005")
+        self.assertGreaterEqual(os.path.getsize(self._log()), self._cursor()[0])
+        ch.id_refs_catch_up()
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            again = conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                 "WHERE channel = 'dev'").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(again, first)
+        self.assertEqual(self._indexed("m_00000a05"), {"m_0000a005"})
+
+    def _skip_rows(self):
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            return conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                "WHERE channel = 'dev' ORDER BY byte_offset").fetchall()
+        finally:
+            conn.close()
+
+    def test_catch_up_of_an_unchanged_log_keeps_its_skips(self):
+        # cursor == size, the usual catch-up with nothing new, clears nothing
+        self._post("indexed m_000000d6")
+        frag_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f6", "id": \n')
+        ch.id_refs_catch_up()
+        first = self._skip_rows()
+        self.assertEqual([r[0] for r in first], [frag_at])
+        self.assertEqual(self._cursor()[0], os.path.getsize(self._log()))
+        ch.id_refs_catch_up()
+        self.assertEqual(self._skip_rows(), first)
+
+    def test_catch_up_of_a_rewritten_log_keeps_a_skip_another_writer_recorded(self):
+        # another writer handled the rewrite between the parse and the lock
+        self._post("indexed m_000000d7")
+        frag_at = os.path.getsize(self._log())
+        head = self._log().read_bytes()
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f7", "id": \n')
+        self._raw_line("a long line that the rewrite drops " * 4, "m_00000a07")
+        ch.id_refs_catch_up()
+        self._log().write_bytes(head + b'{"other half": \n')
+        new_size = os.path.getsize(self._log())
+        self.assertLess(new_size, self._cursor()[0])
+        theirs = (frag_at, "2000-01-01T00:00:00Z")
+
+        def other_writer():
+            conn = sqlite3.connect(str(ch._db_path()))
+            conn.execute("DELETE FROM id_refs_skips WHERE channel = 'dev'")
+            conn.execute("INSERT INTO id_refs_skips (channel, byte_offset, skipped_at) "
+                         "VALUES ('dev', ?, ?)", theirs)
+            conn.execute("UPDATE id_refs_cursor SET byte_offset = ? WHERE channel = 'dev'",
+                         (new_size,))
+            conn.commit()
+            conn.close()
+        with self._wrap_read(other_writer):
+            ch.id_refs_catch_up()
+        self.assertEqual(self._skip_rows(), [theirs])
+        self.assertEqual(self._cursor()[0], new_size)
 
 
 if __name__ == "__main__":
