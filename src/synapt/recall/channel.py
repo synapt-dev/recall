@@ -1780,6 +1780,52 @@ def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
     return read
 
 
+class IdIndexUnknown(Exception):
+    """The id index cannot answer; the message says why."""
+
+
+def open_id_index_ro(
+    project_dir: Path | None = None,
+) -> tuple[sqlite3.Connection, list[tuple]]:
+    """Open the id index read-only and read each room's unindexed gap once.
+
+    Returns the connection and the id_refs rows of the log lines past each
+    room's cursor (a gap of at most BEHIND_BOUND bytes, read in memory).
+    Nothing is created. Raises IdIndexUnknown when the index cannot answer.
+    The caller closes the connection.
+    """
+    db_path = _db_path(project_dir)
+    if not db_path.exists():
+        raise IdIndexUnknown("index absent")
+    try:
+        conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error as exc:
+        raise IdIndexUnknown(f"store not readable: {exc}") from None
+    try:
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        except sqlite3.Error as exc:
+            raise IdIndexUnknown(f"store not readable: {exc}") from None
+        if not {"id_refs", "id_refs_cursor"} <= tables:
+            raise IdIndexUnknown("index absent")
+        cursors = dict(conn.execute("SELECT channel, byte_offset FROM id_refs_cursor"))
+        gap_rows: list[tuple] = []
+        for room, path in _indexed_rooms(project_dir):
+            size = path.stat().st_size if path.exists() else 0
+            cursor = cursors.get(room, 0)
+            if cursor > size:
+                raise IdIndexUnknown(f"{room} log is shorter than its index")
+            if size - cursor > BEHIND_BOUND:
+                raise IdIndexUnknown(f"{room} behind by {size - cursor} bytes")
+            records, _ = _read_log_records(path, cursor, size)
+            gap_rows.extend(r for d in records for r in _id_ref_rows(d, room))
+    except BaseException:
+        conn.close()
+        raise
+    return conn, gap_rows
+
+
 def channel_latest(
     token: str, n: int = 3, project_dir: Path | None = None,
 ) -> dict:
@@ -1790,37 +1836,16 @@ def channel_latest(
     ``{"posts": [], "unknown": "<why>"}``. A room behind by at most
     BEHIND_BOUND bytes has its gap read from the log in memory.
     """
-    db_path = _db_path(project_dir)
-    if not db_path.exists():
-        return {"posts": [], "unknown": "index absent"}
     try:
-        conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
-    except sqlite3.Error as exc:
-        return {"posts": [], "unknown": f"store not readable: {exc}"}
+        conn, gap_rows = open_id_index_ro(project_dir)
+    except IdIndexUnknown as exc:
+        return {"posts": [], "unknown": str(exc)}
     try:
-        try:
-            tables = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'")}
-        except sqlite3.Error as exc:
-            return {"posts": [], "unknown": f"store not readable: {exc}"}
-        if not {"id_refs", "id_refs_cursor"} <= tables:
-            return {"posts": [], "unknown": "index absent"}
-        cursors = dict(conn.execute("SELECT channel, byte_offset FROM id_refs_cursor"))
         found: dict[str, dict] = {}
-        for room, path in _indexed_rooms(project_dir):
-            size = path.stat().st_size if path.exists() else 0
-            cursor = cursors.get(room, 0)
-            if cursor > size:
-                return {"posts": [], "unknown": f"{room} log is shorter than its index"}
-            if size - cursor > BEHIND_BOUND:
-                return {"posts": [], "unknown": f"{room} behind by {size - cursor} bytes"}
-            records, _ = _read_log_records(path, cursor, size)
-            for d in records:
-                for row in _id_ref_rows(d, room):
-                    if row[0] == token:
-                        found[row[1]] = {"message_id": row[1], "channel": room,
-                                         "from": row[3], "timestamp": row[4],
-                                         "excerpt": row[5]}
+        for row in gap_rows:
+            if row[0] == token:
+                found[row[1]] = {"message_id": row[1], "channel": row[2],
+                                 "from": row[3], "timestamp": row[4], "excerpt": row[5]}
         for mid, room, agent, ts, excerpt in conn.execute(
             "SELECT message_id, channel, from_agent, timestamp, excerpt FROM id_refs "
             "WHERE token = ?",

@@ -1548,3 +1548,245 @@ def format_resume(view: ResumeView, max_chars: int = 600) -> str:
             lines.append(f"  tools: {', '.join(turn.tools_used)}")
 
     return "\n".join(lines)
+
+
+# What changed since this agent's previous session: printed above the tail.
+# Each kind is read on its own; one that cannot be read prints "?" with the
+# reason, never "none".
+
+WHAT_CHANGED_LINES = 12
+_CORRECTED_STATUSES = ("contradicted", "superseded", "retracted")
+_UNKNOWN_HINT = "run synapt recall build or synapt recall channel latest <id> --catch-up"
+_CITED_POSTS = 3
+
+
+class _KindUnknown(Exception):
+    """A kind's source cannot be read; the message says why."""
+
+
+@dataclass
+class ChangedKind:
+    label: str
+    # (epoch, line) in the order shown, newest first
+    items: list[tuple[float, str]] = field(default_factory=list)
+    unknown: str | None = None
+
+
+@dataclass
+class WhatChanged:
+    since: float
+    previous_session: str
+    kinds: list[ChangedKind]
+
+
+def _minute(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%m-%d %H:%M")
+
+
+def _iso_minute(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def _connect_ro(path: Path):
+    import sqlite3
+
+    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
+
+
+def _tables(conn) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def _session_ids(raw: str) -> set[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except ValueError:
+        return set()
+    return {str(v) for v in value} if isinstance(value, list) else set()
+
+
+def _changed_nodes(index_dir: Path, since: float, sessions: set[str]) -> list[tuple[float, str]]:
+    from synapt.recall.sharding import live_store_path
+
+    store = live_store_path(index_dir)
+    if not store.exists():
+        raise _KindUnknown("knowledge store absent")
+    conn = _connect_ro(store)
+    try:
+        if "knowledge" not in _tables(conn):
+            raise _KindUnknown("knowledge table absent")
+        rows = conn.execute(
+            "SELECT id, status, superseded_by, updated_at, content, source_sessions "
+            "FROM knowledge WHERE status IN (?, ?, ?)",
+            _CORRECTED_STATUSES,
+        ).fetchall()
+    finally:
+        conn.close()
+    found = []
+    for node_id, status, successor, updated_at, content, sources in rows:
+        at = _timestamp_epoch(updated_at)
+        if at <= since:
+            continue
+        line = f"{node_id} {status}"
+        if successor:
+            line += f" -> {successor}"
+        line += f" {_minute(at)} {' '.join((content or '').split())[:60]}"
+        mine = bool(sessions & _session_ids(sources))
+        found.append((not mine, -at, at, line))
+    found.sort()
+    return [(at, line) for _, _, at, line in found]
+
+
+def _addressed_to(project_dir: Path | None, me: str, since: float) -> list[tuple[float, str]]:
+    from synapt.recall import channel
+
+    store = channel._db_path(project_dir)
+    if not store.exists():
+        raise _KindUnknown("channel store absent")
+    conn = _connect_ro(store)
+    try:
+        if "mentions" not in _tables(conn):
+            raise _KindUnknown("mentions table absent")
+        rows = conn.execute(
+            "SELECT message_id, channel, timestamp FROM mentions WHERE mentioned = ?", (me,)
+        ).fetchall()
+    finally:
+        conn.close()
+    found = []
+    for message_id, room, timestamp in rows:
+        at = _timestamp_epoch(timestamp)
+        if at > since and not channel.is_dm_channel(room):
+            found.append((at, f"{message_id} {room} {_minute(at)}"))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return found
+
+
+def _cited_ids(
+    project_dir: Path | None, me: str, start: float, since: float,
+) -> list[tuple[float, str]]:
+    from synapt.recall import channel
+
+    try:
+        conn, gap_rows = channel.open_id_index_ro(project_dir)
+    except channel.IdIndexUnknown as exc:
+        raise _KindUnknown(str(exc)) from None
+    try:
+        mine = [r[:5] for r in gap_rows if r[3] == me]
+        mine += conn.execute(
+            "SELECT token, message_id, channel, from_agent, timestamp FROM id_refs "
+            "WHERE from_agent = ?", (me,)
+        ).fetchall()
+        cited: dict[str, float] = {}
+        for token, _, room, _, timestamp in mine:
+            at = _timestamp_epoch(timestamp)
+            if start <= at <= since and not channel.is_dm_channel(room):
+                cited[token] = max(at, cited.get(token, at))
+        found = []
+        for token, cited_at in sorted(cited.items(), key=lambda kv: kv[1], reverse=True):
+            posts: dict[str, tuple[float, str]] = {}
+            rows = [r[:5] for r in gap_rows if r[0] == token]
+            rows += conn.execute(
+                "SELECT token, message_id, channel, from_agent, timestamp FROM id_refs "
+                "WHERE token = ?", (token,)
+            ).fetchall()
+            for _, message_id, room, agent, timestamp in rows:
+                if not channel.is_dm_channel(room):
+                    posts[message_id] = (_timestamp_epoch(timestamp), agent)
+            newest = sorted(posts.items(), key=lambda kv: kv[1][0], reverse=True)[:_CITED_POSTS]
+            named = ", ".join(f"{mid} ({agent}, {_minute(at)})" for mid, (at, agent) in newest)
+            found.append((cited_at, f"{token}: {named}"))
+    finally:
+        conn.close()
+    return found
+
+
+def gather_what_changed(
+    transcripts: list[CallerTranscript],
+    index_dir: Path,
+    project_dir: Path | None = None,
+    agent_id: str | None = None,
+) -> WhatChanged | None:
+    """Read what changed since the caller's previous session; None if there was none.
+
+    *transcripts* are the caller's, newest first (caller_transcripts): the
+    newest is this session, the next is the previous one, and T is its last
+    event. Every read is read-only. A kind that cannot be read carries the
+    reason instead of items.
+    """
+    if len(transcripts) < 2:
+        return None
+    previous = transcripts[1]
+    since = _timestamp_epoch(previous.latest_timestamp)
+    sessions = {t.session_id for t in transcripts}
+    kinds = [ChangedKind("nodes"), ChangedKind("addressed to me"), ChangedKind("ids I cited")]
+
+    def me() -> str:
+        if agent_id:
+            return agent_id
+        from synapt.recall import channel
+
+        return channel._agent_id(project_dir)
+
+    readers = [
+        lambda: _changed_nodes(index_dir, since, sessions),
+        lambda: _addressed_to(project_dir, me(), since),
+        lambda: _cited_ids(project_dir, me(), _first_event_epoch(previous.path), since),
+    ]
+    for kind, read in zip(kinds, readers):
+        try:
+            kind.items = read()
+        except _KindUnknown as exc:
+            kind.unknown = str(exc)
+        except Exception as exc:
+            kind.unknown = f"{type(exc).__name__}: {exc}"
+    return WhatChanged(since, previous.session_id, kinds)
+
+
+def format_what_changed(found: WhatChanged | None) -> list[str]:
+    """The block's lines: at most WHAT_CHANGED_LINES, header and labels included.
+
+    Item lines are dealt round-robin across the kinds, newest first within
+    each, until the lines are used; each label names what it withheld.
+    """
+    if found is None:
+        return ["What changed: no earlier session"]
+    since = _iso_minute(found.since)
+    lines = [f"What changed since {since} (previous session {found.previous_session[:8]})"]
+    room = WHAT_CHANGED_LINES - len(lines) - len(found.kinds)
+    shown = [0] * len(found.kinds)
+    dealt = True
+    while room > 0 and dealt:
+        dealt = False
+        for i, kind in enumerate(found.kinds):
+            if room > 0 and kind.unknown is None and shown[i] < len(kind.items):
+                shown[i] += 1
+                room -= 1
+                dealt = True
+    for i, kind in enumerate(found.kinds):
+        label = f"({i + 1}) {kind.label}:"
+        if kind.unknown is not None:
+            lines.append(f"{label} ? ({kind.unknown}; {_UNKNOWN_HINT})")
+        elif not kind.items:
+            lines.append(f"{label} none since {since}")
+        else:
+            items = kind.items[:shown[i]]
+            total = len(kind.items)
+            oldest = min(at for at, _ in items)
+            lines.append(f"{label} shown {len(items)} of {total}, withheld "
+                         f"{total - len(items)}, oldest shown {_minute(oldest)}")
+            lines.extend(f"  {line}" for _, line in items)
+    return lines
+
+
+def what_changed_block(
+    transcripts: list[CallerTranscript],
+    index_dir: Path,
+    project_dir: Path | None = None,
+    agent_id: str | None = None,
+) -> str:
+    """The block as text. It never raises: a failure prints as '?'."""
+    try:
+        found = gather_what_changed(transcripts, index_dir, project_dir, agent_id)
+        return "\n".join(format_what_changed(found))
+    except Exception as exc:
+        return f"What changed: ? ({type(exc).__name__}: {exc})"

@@ -1906,6 +1906,22 @@ def cmd_build(args: argparse.Namespace) -> None:
     # index_dir is the store this build wrote: derived from the working directory with an explicit project, which
     # suppresses the environment's store roots. The zero-argument resolver reads those roots and names another store.
     print(f"  Saved to: {index_dir}")
+    _catch_up_id_index()
+
+
+def _catch_up_id_index() -> None:
+    """Bring the channel id index up to each room log's end after a build.
+
+    Only an existing channel store is caught up; a build never creates one.
+    A failure is printed and never fails the build.
+    """
+    from synapt.recall import channel
+
+    try:
+        if channel._db_path().exists():
+            channel.id_refs_catch_up()
+    except Exception as exc:
+        print(f"[build] id index catch-up failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def cmd_code(args: argparse.Namespace) -> None:
@@ -2637,6 +2653,12 @@ def cmd_resume(args: argparse.Namespace) -> None:
     # answered this resume; a repointed editable install can keep reporting
     # the same declared version while the linked worktree underneath it
     # changes out from under every running process.
+    # What changed since the previous session goes first, above the tail.
+    from synapt.recall.resume import what_changed_block
+
+    print(what_changed_block(caller_sources, index_dir, getattr(args, "project", None),
+                             os.environ.get("SYNAPT_AGENT_ID")))
+    print()
     print(_with_provenance(_with_query_freshness(format_resume(view), freshness_line)))
     _print_transcript_gap(args, project)
     from synapt.recall.build_deferrals import deferral_notice

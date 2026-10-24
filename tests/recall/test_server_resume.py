@@ -204,9 +204,11 @@ def test_recall_resume_passes_session_and_turns_and_renders(monkeypatch, tmp_pat
         patch("synapt.recall.freshness.check_index_freshness", side_effect=RuntimeError("no fs")),
         patch("synapt.recall.resume.format_resume", return_value="RENDERED") as fmt,
         patch.object(server, "_query_freshness_line", return_value="Freshness: NOT_BOUND"),
+        patch("synapt.recall.resume.what_changed_block", return_value="WHAT CHANGED"),
     ):
         result = server.recall_resume(session_id="ab", turns=3)
-        assert result.startswith("RENDERED")
+        # what changed since the previous session goes first, above the tail
+        assert result.startswith("WHAT CHANGED\n\nRENDERED")
         assert "Freshness: NOT_BOUND" in result
 
     kwargs = build.call_args.kwargs
