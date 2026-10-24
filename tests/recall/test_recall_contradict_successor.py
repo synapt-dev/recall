@@ -197,7 +197,35 @@ def test_r10_flag_with_successor_refused(env):
     out = env.call(action="flag", old_node_id=env.old, successor_node_id=env.succ, claim="x")
     assert count() == before
     _assert_old_untouched(env)
-    assert out.startswith("Error: successor_node_id is taken by 'correct', not 'flag'.")
+    assert out.startswith("Error: successor_node_id is taken by 'correct' only, not 'flag'.")
+
+
+def _store_hash(e):
+    rows = []
+    for table in ("knowledge", "pending_contradictions"):
+        rows.append(repr([tuple(r) for r in e.db._conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]))
+    rows.append(e.kn_path.read_bytes().hex())
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("action", ["flag", "forget", "resolve", "list"])
+def test_r14_non_correct_action_with_successor_refused(env, action):
+    pending = env.call(action="flag", old_node_id=env.old, claim="successor probe: a pending row")
+    assert not pending.startswith("Error")
+    before = _store_hash(env)
+    out = env.call(action=action, old_node_id=env.old, successor_node_id=env.succ,
+                   claim="x", contradiction_id=1)
+    assert _store_hash(env) == before
+    assert out == (
+        f"Error: successor_node_id is taken by 'correct' only, not '{action}'. Use "
+        "recall_contradict(action='correct', old_node_id=..., successor_node_id=...)."
+    )
+
+
+def test_r15_correct_with_successor_still_works(env):
+    out = _correct(env)
+    assert out == f"Corrected: '{env.old}' superseded by existing node '{env.succ}'."
+    assert env.db.get_knowledge_node(env.old)["superseded_by"] == env.succ
 
 
 def test_r11_text_path_still_mints_one_node(env):
