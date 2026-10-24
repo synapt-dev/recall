@@ -79,7 +79,7 @@ def test_historical_lock_held_reports_build_in_progress_not_missing(tmp_path):
 def _busy_freshness_line():
     return (
         "Freshness: BUSY session=c7dc26db indexed_through=unknown "
-        "live_bytes=944 indexed_now=0B/0chunks wall=0.000s remaining=unknown "
+        "live_bytes=944 indexed_now=0B/0chunks refresh_wall=0.000s remaining=unknown "
         "cut_short=true reason=build_lock"
     )
 
