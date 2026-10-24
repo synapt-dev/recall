@@ -1054,6 +1054,28 @@ CREATE TABLE IF NOT EXISTS mentions (
 
 CREATE INDEX IF NOT EXISTS idx_mentions_mentioned ON mentions(mentioned);
 
+-- Which posts name an id (a post id or a dotted key), so a lookup does not
+-- scan every room. excerpt is the body's first 80 characters, for display.
+CREATE TABLE IF NOT EXISTS id_refs (
+    token TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    excerpt TEXT NOT NULL DEFAULT '',
+    UNIQUE (token, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_id_refs_token_ts ON id_refs(token, timestamp);
+
+-- How far into each room's log id_refs has read. It only moves forward over
+-- lines it indexed, so a gap between it and the file's end reads as behind.
+CREATE TABLE IF NOT EXISTS id_refs_cursor (
+    channel TEXT PRIMARY KEY,
+    byte_offset INTEGER NOT NULL,
+    last_message_id TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS wake_requests (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     target TEXT NOT NULL,
@@ -1541,6 +1563,212 @@ def _emit_message_wakes(msg: ChannelMessage, project_dir: Path | None = None) ->
         conn.close()
 
 
+# Ids a post can name: post ids, dotted numeric keys and short dotted keys.
+# Matched whole, so 1.234567 never matches inside 1.23456789.
+_ID_TOKEN_RE = re.compile(
+    r"(?<![\w.])(?:m_[0-9a-f]{8}|[0-9]\.[0-9]{5,}|c[0-9]{1,3}\.[0-9]{2,4})(?!\w|\.\w)"
+)
+
+# A room whose index cursor trails its log by more than this many bytes reads
+# as unknown ("?"); a smaller gap is read from the log in memory.
+BEHIND_BOUND = 65_536
+
+_EXCERPT_CHARS = 80
+
+
+def _id_tokens(body: str) -> list[str]:
+    """Return the distinct ids named in *body*, in order of first use."""
+    return list(dict.fromkeys(m.group(0) for m in _ID_TOKEN_RE.finditer(body or "")))
+
+
+def _id_ref_rows(d: dict, channel: str) -> list[tuple]:
+    """id_refs rows for one log record (the dict form of a message)."""
+    body = d.get("body") or ""
+    return [
+        (tok, d.get("id", ""), channel, d.get("from", ""), d.get("timestamp", ""),
+         body[:_EXCERPT_CHARS])
+        for tok in _id_tokens(body)
+    ]
+
+
+def _insert_id_refs(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    conn.executemany(
+        "INSERT OR IGNORE INTO id_refs "
+        "(token, message_id, channel, from_agent, timestamp, excerpt) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+
+def _move_id_cursor(
+    conn: sqlite3.Connection, channel: str, start: int, new_offset: int, message_id: str,
+) -> bool:
+    """Move *channel*'s cursor from *start* to *new_offset*; False if it is not at *start*.
+
+    A missing cursor counts as offset 0. The cursor never skips a line it did
+    not index: when another line landed between, it stays and the room reads
+    behind until a catch-up fills the gap.
+    """
+    row = conn.execute(
+        "SELECT byte_offset FROM id_refs_cursor WHERE channel = ?", (channel,)
+    ).fetchone()
+    stored = row[0] if row is not None else 0
+    if stored != start:
+        return False
+    conn.execute(
+        "INSERT INTO id_refs_cursor (channel, byte_offset, last_message_id) "
+        "VALUES (?, ?, ?) ON CONFLICT(channel) DO UPDATE SET "
+        "byte_offset = excluded.byte_offset, last_message_id = excluded.last_message_id",
+        (channel, new_offset, message_id),
+    )
+    return True
+
+
+def _index_appended_line(
+    msg: ChannelMessage,
+    path: Path,
+    start: int,
+    end: int,
+    project_dir: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> Exception | None:
+    """Index the ids of the line just written at [start, end) of *path*.
+
+    The tokens and the cursor move are one transaction. An error is returned,
+    not raised: the line is already in the log, and the cursor left at
+    *start* makes the room read behind.
+    """
+    owns_conn = conn is None
+    try:
+        if owns_conn:
+            conn = _open_db(project_dir)
+        try:
+            try:
+                _insert_id_refs(conn, _id_ref_rows(msg.to_dict(), msg.channel))
+                new_offset = end
+                _move_id_cursor(conn, msg.channel, start, new_offset, msg.id)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        finally:
+            if owns_conn:
+                conn.close()
+    except Exception as exc:
+        return exc
+    return None
+
+
+def _read_log_records(path: Path, offset: int, size: int) -> tuple[list[dict], int]:
+    """Parse the complete lines of *path* in [offset, size); return them and the end of the last."""
+    if size <= offset:
+        return [], offset
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read(size - offset)
+    cut = data.rfind(b"\n") + 1  # a line still being written is left for later
+    records = []
+    for line in data[:cut].splitlines():
+        try:
+            d = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(d, dict):
+            records.append(d)
+    return records, offset + cut
+
+
+def _indexed_rooms(project_dir: Path | None = None) -> list[tuple[str, Path]]:
+    return [(room, _channel_path(room, project_dir))
+            for room in channel_list_channels(project_dir)]
+
+
+def id_refs_catch_up(project_dir: Path | None = None) -> dict[str, int]:
+    """Index every room's log from its cursor to its end; return bytes read per room.
+
+    This writes (and creates the store if needed). It is run on request,
+    never by a read.
+    """
+    read: dict[str, int] = {}
+    conn = _open_db(project_dir)
+    try:
+        for room, path in _indexed_rooms(project_dir):
+            if not path.exists():
+                continue
+            row = conn.execute(
+                "SELECT byte_offset FROM id_refs_cursor WHERE channel = ?", (room,)
+            ).fetchone()
+            cursor = row[0] if row is not None else 0
+            size = path.stat().st_size
+            start = cursor if cursor <= size else 0  # a rewritten log is read again
+            records, stop = _read_log_records(path, start, size)
+            with conn:
+                rows = [r for d in records for r in _id_ref_rows(d, room)]
+                _insert_id_refs(conn, rows)
+                last_id = records[-1].get("id", "") if records else ""
+                _move_id_cursor(conn, room, cursor, stop, last_id)
+            read[room] = stop - start
+    finally:
+        conn.close()
+    return read
+
+
+def channel_latest(
+    token: str, n: int = 3, project_dir: Path | None = None,
+) -> dict:
+    """The newest *n* posts naming *token* across rooms, read from the id index.
+
+    Read-only: the store is opened mode=ro and nothing is created. Returns
+    ``{"posts": [...], "unknown": None}`` or, when the index cannot answer,
+    ``{"posts": [], "unknown": "<why>"}``. A room behind by at most
+    BEHIND_BOUND bytes has its gap read from the log in memory.
+    """
+    db_path = _db_path(project_dir)
+    if not db_path.exists():
+        return {"posts": [], "unknown": "index absent"}
+    try:
+        conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error as exc:
+        return {"posts": [], "unknown": f"store not readable: {exc}"}
+    try:
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        except sqlite3.Error as exc:
+            return {"posts": [], "unknown": f"store not readable: {exc}"}
+        if not {"id_refs", "id_refs_cursor"} <= tables:
+            return {"posts": [], "unknown": "index absent"}
+        cursors = dict(conn.execute("SELECT channel, byte_offset FROM id_refs_cursor"))
+        found: dict[str, dict] = {}
+        for room, path in _indexed_rooms(project_dir):
+            size = path.stat().st_size if path.exists() else 0
+            cursor = cursors.get(room, 0)
+            if cursor > size:
+                return {"posts": [], "unknown": f"{room} log is shorter than its index"}
+            if size - cursor > BEHIND_BOUND:
+                return {"posts": [], "unknown": f"{room} behind by {size - cursor} bytes"}
+            records, _ = _read_log_records(path, cursor, size)
+            for d in records:
+                for row in _id_ref_rows(d, room):
+                    if row[0] == token:
+                        found[row[1]] = {"message_id": row[1], "channel": room,
+                                         "from": row[3], "timestamp": row[4],
+                                         "excerpt": row[5]}
+        for mid, room, agent, ts, excerpt in conn.execute(
+            "SELECT message_id, channel, from_agent, timestamp, excerpt FROM id_refs "
+            "WHERE token = ?",
+            (token,),
+        ):
+            if is_dm_channel(room):
+                continue
+            found.setdefault(mid, {"message_id": mid, "channel": room, "from": agent,
+                                   "timestamp": ts, "excerpt": excerpt})
+    finally:
+        conn.close()
+    posts = sorted(found.values(), key=lambda p: p["timestamp"], reverse=True)[:n]
+    return {"posts": posts, "unknown": None}
+
+
 def _append_message(
     msg: ChannelMessage,
     project_dir: Path | None = None,
@@ -1579,14 +1807,20 @@ def _append_message(
     from synapt.recall._filelock import lock_exclusive
     with open(path, "a", encoding="utf-8") as f:
         lock_exclusive(f)
+        # Offsets are taken under the lock: another writer may have appended
+        # between open() and the lock.
+        f.seek(0, os.SEEK_END)
+        start = f.tell()
         f.write(json.dumps(msg.to_dict()) + "\n")
         f.flush()
+        end = f.tell()
+    # The id index is part of the post, not a hook: its error is returned.
+    state_error = _index_appended_line(msg, path, start, end, project_dir, conn=conn)
     # Set dirty flag for all other members of this channel (OSS substrate)
     try:
         _set_dirty_flags(msg.channel, msg.from_agent, project_dir, conn=conn)
-        state_error = None
     except Exception as exc:
-        state_error = exc
+        state_error = state_error or exc
     # Fire registered hooks (mention storage, wake emission, etc.)
     for hook in _message_posted_hooks:
         try:

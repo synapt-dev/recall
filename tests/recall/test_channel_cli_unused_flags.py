@@ -39,6 +39,7 @@ EXPECTED = {
     "chat": {"channel", "name", "target", "limit"},
     "read_message": {"channel", "message", "offset", "length"},
     "watch": {"channel", "message", "rooms", "since", "include_mine", "all_rooms"},
+    "latest": {"channel", "n", "catch_up"},
 }
 
 VALUES = {
@@ -54,6 +55,8 @@ VALUES = {
     "length": ["--length", "1"],
     "include_mine": ["--include-mine"],
     "all_rooms": ["--all"],
+    "n": ["--n", "1"],
+    "catch_up": ["--catch-up"],
 }
 
 
@@ -150,7 +153,8 @@ def test_unused_input_is_refused_before_anything_runs(action, dest, calls, capsy
     rc = _call(_argv(action, dest))
     err = capsys.readouterr().err.strip().splitlines()
     label = {"channel": "<channel>", "message": "<message>", "rooms": "<room>...",
-             "include_mine": "--include-mine", "all_rooms": "--all"}.get(dest, "--" + dest)
+             "include_mine": "--include-mine", "all_rooms": "--all",
+             "catch_up": "--catch-up"}.get(dest, "--" + dest)
     assert rc == 1
     assert len(err) == 1, err
     assert f"{label} is not used by '{action}'" in err[0]

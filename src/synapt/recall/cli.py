@@ -3465,11 +3465,13 @@ _CHANNEL_ACTION_INPUTS: dict[str, frozenset[str]] = {
     "read_message": frozenset({"channel", "message", "offset", "length"}),
     "watch": frozenset({"channel", "message", "rooms", "since", "include_mine",
                          "all_rooms"}),
+    "latest": frozenset({"channel", "n", "catch_up"}),
 }
 
 _CHANNEL_INPUT_LABELS = {"channel": "<channel>", "message": "<message>",
                          "rooms": "<room>...", "include_mine": "--include-mine",
-                         "all_rooms": "--all"}
+                         "all_rooms": "--all",
+                         "catch_up": "--catch-up"}
 
 _CHANNEL_INPUT_HINTS = {
     ("post", "name"): (
@@ -3482,7 +3484,7 @@ _CHANNEL_INPUT_HINTS = {
 # Every input the `channel` parser defines, in the order refusals check them.
 _CHANNEL_INPUT_DESTS = ("channel", "message", "limit", "since", "pin", "type",
                         "to", "target", "detail", "name", "offset", "length",
-                        "rooms", "include_mine", "all_rooms")
+                        "rooms", "include_mine", "all_rooms", "n", "catch_up")
 
 
 def _channel_inputs_given(args: argparse.Namespace) -> list[str]:
@@ -3508,6 +3510,35 @@ def _refuse_unused_channel_inputs(action: str, args: argparse.Namespace) -> None
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _channel_latest_cli(args: argparse.Namespace) -> None:
+    """synapt recall channel latest <id> [--n N] [--catch-up]: exit 0 found, 3 none, 7 unknown."""
+    from synapt.recall.channel import _ID_TOKEN_RE, channel_latest, id_refs_catch_up
+    token = args.channel
+    if not token:
+        print("Usage: synapt recall channel latest <id> [--n 3] [--catch-up]", file=sys.stderr)
+        sys.exit(1)
+    if not _ID_TOKEN_RE.fullmatch(token):
+        print("synapt recall channel latest: not an id the index holds "
+              "(m_ + 8 hex, N.NNNNN..., cN.NN)", file=sys.stderr)
+        sys.exit(2)
+    n = args.n if args.n is not None else 3
+    if n < 1:
+        print("synapt recall channel latest: --n must be at least 1", file=sys.stderr)
+        sys.exit(2)
+    if args.catch_up:
+        id_refs_catch_up()
+    result = channel_latest(token, n=n)
+    if result["unknown"] is not None:
+        print(f"? ({result['unknown']})")
+        sys.exit(7)
+    if not result["posts"]:
+        print("none")
+        sys.exit(3)
+    for p in result["posts"]:
+        excerpt = " ".join(p["excerpt"].split())
+        print(f"  #{p['channel']} {p['timestamp'][:16]}  {p['from']}: {excerpt}")
 
 
 def cmd_channel(args: argparse.Namespace) -> None:
@@ -3536,6 +3567,9 @@ def cmd_channel(args: argparse.Namespace) -> None:
         # fills the channel slot; broadcast has no channel, so it is the body.
         args.message, args.channel = args.channel, None
     _refuse_unused_channel_inputs(action, args)
+    if action == "latest":
+        _channel_latest_cli(args)
+        return
     channel = args.channel or "dev"
 
     if action == "join":
@@ -5872,7 +5906,7 @@ def make_parser() -> argparse.ArgumentParser:
                                          "heartbeat", "unread", "pin",
                                          "directive", "mute", "unmute", "kick",
                                          "broadcast", "list", "search", "chat",
-                                         "read_message", "watch"],
+                                         "read_message", "watch", "latest"],
                                 help="Channel action")
     channel_parser.add_argument("channel", nargs="?", default=None,
                                 help="Channel name (default: dev)")
@@ -5908,6 +5942,10 @@ def make_parser() -> argparse.ArgumentParser:
                                 help="Also show posts sent under SYNAPT_AGENT_ID (for 'watch')")
     channel_parser.add_argument("--all", dest="all_rooms", action="store_true",
                                 help="Watch every room in the store and the room map (for 'watch')")
+    channel_parser.add_argument("--n", type=int, default=None,
+                                help="Posts to show (for 'latest'; default: 3)")
+    channel_parser.add_argument("--catch-up", dest="catch_up", action="store_true",
+                                help="Index every room's unindexed lines first (for 'latest')")
 
     catchup_parser = subparsers.add_parser(
         "catchup",
