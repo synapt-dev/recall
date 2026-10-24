@@ -5,6 +5,11 @@ session). Three kinds are read, all read-only: knowledge nodes corrected
 after T, posts addressed to the agent id after T, and the ids the agent
 cited in its previous session with the newest posts naming each. A kind
 that cannot be read prints "?" with the reason, never "none".
+
+At the boundaries the kinds compare against different windows: nodes and
+addressed are what happened after T, cited is what the previous session
+itself cited (start to T inclusive), and the unreadable-line note is a
+different clock, the skipped_at the catch-up recorded, counted after T.
 """
 
 import argparse
@@ -294,6 +299,71 @@ class WhatChangedTest(unittest.TestCase):
         label = self._kind(self._block(), 3)[0]
         self.assertTrue(label.startswith("(3) ids I cited: shown 1 of 1"), label)
         self.assertNotIn("dm:", label)
+
+    # boundaries: one microsecond either side of T and of the session start
+
+    T_EXACT = "2026-03-01T11:00:00.000000Z"
+    T_AFTER = "2026-03-01T11:00:00.000001Z"
+    S_EXACT = "2026-03-01T10:00:00.000000Z"
+    S_BEFORE = "2026-03-01T09:59:59.999999Z"
+
+    def _apart(self, a, b):
+        # a parser that lost the microsecond must not pass a row on stamps it reads as equal
+        self.assertNotEqual(resume._timestamp_epoch(a), resume._timestamp_epoch(b))
+
+    def test_node_updated_at_t_is_not_after_t(self):
+        self._apart(self.T_AFTER, self.T_EXACT)
+        self._two_sessions()
+        self._knowledge([
+            ("kn_at", "superseded", "", _ts("09:00"), self.T_EXACT, []),
+            ("kn_past", "superseded", "", _ts("09:00"), self.T_AFTER, []),
+        ])
+        nodes = self._kind(self._block(), 1)
+        self.assertEqual(nodes[0], "(1) nodes: shown 1 of 1, withheld 0, oldest shown 03-01 11:00")
+        self.assertEqual([n.split()[0] for n in nodes[1:]], ["kn_past"])
+
+    def test_post_addressed_at_t_is_not_after_t(self):
+        self._apart(self.T_AFTER, self.T_EXACT)
+        self._two_sessions()
+        self._knowledge([])
+        self._post(f"@{ME} at the edge", ts=self.T_EXACT)
+        past = self._post(f"@{ME} just past", ts=self.T_AFTER)
+        kind = self._kind(self._block(), 2)
+        self.assertEqual(kind, ["(2) addressed to me: shown 1 of 1, withheld 0, oldest shown 03-01 11:00",
+                                f"  {past.id} dev 03-01 11:00"])
+
+    def test_id_cited_at_t_is_in_the_previous_session(self):
+        self._apart(self.T_AFTER, self.T_EXACT)
+        self._two_sessions()
+        self._knowledge([])
+        self._post("cited m_0000ab40", sender=ME, ts=self.T_EXACT)
+        self._post("cited m_0000ab41", sender=ME, ts=self.T_AFTER)
+        kind = self._kind(self._block(), 3)
+        self.assertEqual(kind[0], "(3) ids I cited: shown 1 of 1, withheld 0, oldest shown 03-01 11:00")
+        self.assertTrue(kind[1].startswith("  m_0000ab40: "), kind)
+
+    def test_id_cited_at_start_is_in_the_previous_session(self):
+        self._apart(self.S_BEFORE, self.S_EXACT)
+        self._two_sessions()
+        self._knowledge([])
+        self._post("cited m_0000ab42", sender=ME, ts=self.S_EXACT)
+        self._post("cited m_0000ab43", sender=ME, ts=self.S_BEFORE)
+        kind = self._kind(self._block(), 3)
+        self.assertEqual(kind[0], "(3) ids I cited: shown 1 of 1, withheld 0, oldest shown 03-01 10:00")
+        self.assertTrue(kind[1].startswith("  m_0000ab42: "), kind)
+
+    def test_line_skipped_at_t_is_not_after_t(self):
+        self._apart(self.T_AFTER, self.T_EXACT)
+        self._two_sessions()
+        self._knowledge([])
+        self._post("cited m_0000ab44", sender=ME, ts=_ts("10:30"))
+        self._skip_rows([("dev", 1, self.T_EXACT)])
+        label = self._kind(self._block(), 3)[0]
+        self.assertTrue(label.startswith("(3) ids I cited: shown 1 of 1"), label)
+        self.assertNotIn("skipped", label)
+        self._skip_rows([("dev", 2, self.T_AFTER)])
+        self.assertTrue(self._kind(self._block(), 3)[0].endswith(
+            "; skipped 1 unreadable line(s) in dev"))
 
 
 # R23
