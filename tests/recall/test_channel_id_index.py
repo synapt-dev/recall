@@ -582,6 +582,32 @@ class IdIndexTest(unittest.TestCase):
         self.assertEqual([r[0] for r in again], [frag_at])
         self.assertGreater(again[0][1], first[0][1])
 
+    def test_catch_up_of_a_grown_log_keeps_its_earlier_skips(self):
+        # only a rewritten log (cursor past the end) clears a room's skips; a log that grew keeps them
+        self._post("indexed m_000000d5")
+        frag_at = os.path.getsize(self._log())
+        with open(self._log(), "a", encoding="utf-8") as f:
+            f.write('{"body": "half m_000000f5", "id": \n')
+        ch.id_refs_catch_up()
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            first = conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                 "WHERE channel = 'dev'").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([r[0] for r in first], [frag_at])
+        self._raw_line("written after the first catch-up m_00000a05", "m_0000a005")
+        self.assertGreaterEqual(os.path.getsize(self._log()), self._cursor()[0])
+        ch.id_refs_catch_up()
+        conn = sqlite3.connect(str(ch._db_path()))
+        try:
+            again = conn.execute("SELECT byte_offset, skipped_at FROM id_refs_skips "
+                                 "WHERE channel = 'dev'").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(again, first)
+        self.assertEqual(self._indexed("m_00000a05"), {"m_0000a005"})
+
 
 if __name__ == "__main__":
     unittest.main()
