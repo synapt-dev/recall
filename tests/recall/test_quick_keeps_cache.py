@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from synapt.recall import server
+from synapt.recall import query_freshness, server
 from synapt.recall.core import TranscriptIndex
 from synapt.recall.query_freshness import refresh_current_session
 
@@ -76,14 +76,28 @@ def test_footer_names_refresh_wall_and_call_wall(store, monkeypatch):
         return counting_load(cls, directory, use_embeddings=use_embeddings)
 
     monkeypatch.setattr(TranscriptIndex, "load", classmethod(slow_load))
+    # The sleep sits outside the refresh's own clock, so refresh_wall stays
+    # under delay while call_wall, which starts before the refresh, holds it.
+    fixture_refresh = query_freshness.refresh_current_session
+    refreshes: list[Path] = []
+
+    def slow_refresh(index_dir, caller_root):
+        refreshes.append(index_dir)
+        time.sleep(delay)
+        return fixture_refresh(index_dir, caller_root)
+
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.refresh_current_session", slow_refresh
+    )
 
     out = _quick(QUERY)
 
     footer = out.rsplit("\n", 1)[-1]
     assert footer.startswith("Freshness: "), out
     assert loads, "the stub load never ran"
+    assert refreshes, "the stub refresh never ran"
     assert " wall=" not in footer
-    assert _wall("call_wall", footer) >= delay
+    assert _wall("call_wall", footer) >= 2 * delay
     assert _wall("refresh_wall", footer) < delay
 
 
