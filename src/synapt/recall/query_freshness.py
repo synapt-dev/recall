@@ -871,8 +871,14 @@ def catchup_oversize_transcripts(
     return results
 
 
-def format_query_freshness(result: QueryFreshnessResult) -> str:
-    """Render one stable, caller-scoped freshness line."""
+def format_query_freshness(
+    result: QueryFreshnessResult, call_wall_seconds: float | None = None,
+) -> str:
+    """Render one stable, caller-scoped freshness line.
+
+    refresh_wall times only the caller-tail refresh; call_wall, when given,
+    times the whole tool call the line closes.
+    """
     parts = [f"Freshness: {result.state.value}"]
     if result.session_id:
         parts.append(f"session={session_label(result.session_id)}")
@@ -892,7 +898,12 @@ def format_query_freshness(result: QueryFreshnessResult) -> str:
                 f"indexed_now={result.indexed_now_bytes}B/"
                 f"{result.indexed_now_chunks}chunks"
             ),
-            f"wall={result.wall_seconds:.3f}s",
+            f"refresh_wall={result.wall_seconds:.3f}s",
+            *(
+                [f"call_wall={call_wall_seconds:.3f}s"]
+                if call_wall_seconds is not None
+                else []
+            ),
             "remaining=" + (
                 f"{result.remaining_bytes}B"
                 if result.remaining_bytes is not None

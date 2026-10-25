@@ -413,8 +413,17 @@ def _index_missing_message(index_dir: Path, *, historical: bool = False) -> str:
     return f"No index found at {index_dir}. Run `synapt recall setup` first."
 
 
+class _FreshnessLine(str):
+    """The freshness label, carrying its result and the call's start so the
+    footer can add call_wall when the call ends."""
+
+    result: object
+    started: float
+
+
 def _query_freshness_line(index_dir: Path) -> str:
     """Run the bounded caller-tail preflight and return its stable label."""
+    started = time.monotonic()
     from synapt.recall.query_freshness import (
         QueryFreshnessResult,
         QueryFreshnessState,
@@ -431,10 +440,20 @@ def _query_freshness_line(index_dir: Path) -> str:
         )
     if result.index_changed:
         _invalidate_cache()
-    return format_query_freshness(result)
+    line = _FreshnessLine(format_query_freshness(result))
+    line.result = result
+    line.started = started
+    return line
 
 
 def _with_query_freshness(result: str, freshness_line: str) -> str:
+    if isinstance(freshness_line, _FreshnessLine):
+        from synapt.recall.query_freshness import format_query_freshness
+
+        freshness_line = format_query_freshness(
+            freshness_line.result,
+            call_wall_seconds=time.monotonic() - freshness_line.started,
+        )
     return f"{result}\n\n{freshness_line}"
 
 
