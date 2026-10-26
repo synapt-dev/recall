@@ -436,3 +436,90 @@ def test_a_a_search_after_the_release_answers_as_before_it(tmp_path, monkeypatch
             provider.close()
         embeddings.use_child_embedder(False)
     assert before and after == before
+
+
+# --- the entry clients start: `synapt server` runs synapt/server.py:_serve, not this module's main ---
+
+def _serve_with(monkeypatch, run, entry=None):
+    """Drive synapt.server._serve() with plugins, the startup memory sync and the MCP loop stubbed;
+    record each idle-release start (with the interval) and the order of the start and the run."""
+    import synapt.plugins
+    import synapt.server
+    from synapt.recall import server as recall_server
+
+    events = []
+    monkeypatch.setattr(synapt.plugins, "register_plugins", lambda mcp: [])
+    monkeypatch.setattr(recall_server, "_sync_claude_memory_source_on_startup", lambda: None)
+    monkeypatch.setattr(recall_server, "_start_idle_release", lambda interval: events.append(("release", interval)))
+    monkeypatch.setattr(recall_server.ValidatingFastMCP, "run", lambda self, *a, **k: run(events))
+    try:
+        (entry or synapt.server._serve)()
+    finally:
+        child = embeddings._use_child_embedder
+        embeddings.use_child_embedder(False)
+    return events, child
+
+
+def test_a_synapt_server_starts_the_idle_release_before_it_runs(monkeypatch):
+    monkeypatch.setenv("RECALL_IDLE_RELEASE_S", "42")
+    events, child = _serve_with(monkeypatch, lambda events: events.append(("run",)))
+    # the release thread is started once, with the configured interval, and before the server runs
+    assert events == [("release", 42.0), ("run",)]
+    # and torch goes to the child on this entry too, so the server process never holds the model
+    assert child is True
+
+
+def test_a_synapt_server_refuses_a_bad_idle_interval_before_it_builds_anything(monkeypatch):
+    from synapt.recall import server as recall_server
+
+    monkeypatch.setenv("RECALL_IDLE_RELEASE_S", "0")
+    built = []
+    monkeypatch.setattr(recall_server.ValidatingFastMCP, "__init__", lambda self, *a, **k: built.append(1))
+    with pytest.raises(ValueError):
+        _serve_with(monkeypatch, lambda events: events.append(("run",)))
+    assert built == []
+
+
+def test_a_synapt_server_that_stops_before_running_starts_no_release(monkeypatch):
+    import synapt.plugins
+
+    class Stop(Exception):
+        pass
+
+    def stop(mcp):
+        raise Stop
+
+    monkeypatch.delenv("RECALL_IDLE_RELEASE_S", raising=False)
+    monkeypatch.setattr(synapt.plugins, "register_plugins", stop)
+    events = []
+    from synapt.recall import server as recall_server
+
+    monkeypatch.setattr(recall_server, "_sync_claude_memory_source_on_startup", lambda: None)
+    monkeypatch.setattr(recall_server, "_start_idle_release", lambda interval: events.append(("release", interval)))
+    import synapt.server
+
+    try:
+        with pytest.raises(Stop):
+            synapt.server._serve()
+    finally:
+        embeddings.use_child_embedder(False)
+    assert events == []
+
+
+def test_a_the_synapt_console_script_reaches_the_entry_that_starts_the_release(monkeypatch):
+    # Resolve the name a client actually runs, from pyproject, not from a function picked by hand:
+    # `synapt server` -> [project.scripts] synapt -> its server subcommand. A refactor that routes
+    # the subcommand to a third entry without the release fails here, not as a footprint at 17 h.
+    import importlib
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    target = tomllib.loads(pyproject.read_text())["project"]["scripts"]["synapt"]
+    module, _, attr = target.partition(":")
+    console_main = getattr(importlib.import_module(module), attr)
+    monkeypatch.setattr(sys, "argv", ["synapt", "server"])
+    monkeypatch.setenv("RECALL_IDLE_RELEASE_S", "42")
+    events, child = _serve_with(monkeypatch, lambda events: events.append(("run",)), entry=console_main)
+    assert events == [("release", 42.0), ("run",)]
+    assert child is True
