@@ -507,17 +507,14 @@ def test_a_synapt_server_that_stops_before_running_starts_no_release(monkeypatch
 
 
 def test_a_the_synapt_console_script_reaches_the_entry_that_starts_the_release(monkeypatch):
-    # Resolve the name a client actually runs, from pyproject, not from a function picked by hand:
-    # `synapt server` -> [project.scripts] synapt -> its server subcommand. A refactor that routes
-    # the subcommand to a third entry without the release fails here, not as a footprint at 17 h.
-    import importlib
-    import tomllib
-    from pathlib import Path
+    # Resolve the name a client actually runs, from the installed console scripts, not from a
+    # function picked by hand: `synapt server` -> the `synapt` script -> its server subcommand. A
+    # refactor that routes the subcommand to a third entry without the release fails here, not as a
+    # footprint at 17 h.
+    from importlib.metadata import entry_points
 
-    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-    target = tomllib.loads(pyproject.read_text())["project"]["scripts"]["synapt"]
-    module, _, attr = target.partition(":")
-    console_main = getattr(importlib.import_module(module), attr)
+    (script,) = entry_points(group="console_scripts", name="synapt")
+    console_main = script.load()
     monkeypatch.setattr(sys, "argv", ["synapt", "server"])
     monkeypatch.setenv("RECALL_IDLE_RELEASE_S", "42")
     events, child = _serve_with(monkeypatch, lambda events: events.append(("run",)), entry=console_main)
