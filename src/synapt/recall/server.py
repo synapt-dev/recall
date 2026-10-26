@@ -4401,13 +4401,22 @@ except Exception:  # pragma: no cover - never block server start on a version pr
     _PRODUCT_VERSION = ""
 
 
-def main():
-    """Entry point for standalone synapt-recall-server."""
+def _prepare_server_process() -> float:
+    """The process setup every server entry runs before it builds anything: CPU by default, torch in
+    a child, and the idle interval read (a bad value refuses here, before anything is built). Returns
+    the interval; the caller starts the release thread with it just before it runs. Both entries call
+    this: `synapt server` (synapt/server.py) is what clients start, and this module's main() is the
+    standalone one, so a setup kept in only one of them leaves the other holding its index for life."""
     from synapt.recall.embeddings import set_process_default_device, use_child_embedder
 
     set_process_default_device("cpu")  # see its docstring; SYNAPT_EMBED_DEVICE still wins
     use_child_embedder(True)  # torch lives in a child that exits when idle, never in this process
-    interval = _idle_release_seconds()  # a bad value refuses before anything is built
+    return _idle_release_seconds()
+
+
+def main():
+    """Entry point for standalone synapt-recall-server."""
+    interval = _prepare_server_process()
     server = _build_validating_fastmcp_class()(
         "synapt-recall",
         instructions=MCP_INSTRUCTIONS,
