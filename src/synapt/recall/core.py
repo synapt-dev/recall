@@ -4905,6 +4905,25 @@ _gripspace_cache: dict[str, tuple[Path | None, float]] = {}
 _GRIPSPACE_CACHE_TTL = 60.0  # seconds
 
 
+def _is_gr1_cache_root(home: Path) -> bool:
+    """True when ``home/.grip`` is gr1's machine-level bare-repo cache and not a gr2 workspace.
+
+    gr1 keeps that cache at ``$GRIP_CACHE_DIR`` or ``$HOME/.grip/cache`` (grip
+    src/core/workspace_cache.rs), so at $HOME the ``.grip`` marker is ambiguous. Read as a
+    workspace, every folder under $HOME resolved to $HOME, and with any repo directly under it
+    (``~/.nvm``) the env-bound marker write planted ``$HOME/.synapt/gripspace-root``. A
+    ``.grip`` holding nothing but ``cache`` (dotfiles aside), with no ``grip.toml`` beside it,
+    is the cache; anything else gr2 writes there (a spec, per-desk state) keeps it a workspace.
+    """
+    if (home / "grip.toml").is_file():
+        return False
+    try:
+        names = {p.name for p in (home / ".grip").iterdir() if not p.name.startswith(".")}
+    except OSError:
+        return False
+    return names <= {"cache"}
+
+
 def _find_gripspace_root(path: Path) -> Path | None:
     """Walk up from *path* to find the gr1 or gr2 workspace root.
 
@@ -5000,7 +5019,7 @@ def _find_gripspace_root(path: Path) -> Path | None:
         # membership claim entirely: the directory resolves to itself, its
         # data lands where no other surface in that workspace looks, and
         # nothing anywhere reports a problem.
-        if (current / ".grip").is_dir():
+        if (current / ".grip").is_dir() and not (current == home and _is_gr1_cache_root(current)):
             _gripspace_cache[cache_key] = (current, time.monotonic())
             return current
         # Don't walk above $HOME
