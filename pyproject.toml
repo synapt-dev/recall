@@ -121,7 +121,10 @@ full = [
 dev = ["watchfiles>=0.20"]
 test = [
     "build>=1.0",
-    "pytest>=7.0",
+    # Upper bound: pytest 9.2.0 removed Function._nodeid, which pytest-benchmark 5.3.0 reads, so
+    # every tests/recall/test_benchmarks.py row errors at setup. Lift it when a pytest-benchmark
+    # release supports pytest 9.2 (ionelmc/pytest-benchmark#321).
+    "pytest>=7.0,<9.2",
     "pytest-asyncio>=0.23",
     "tomli>=2.0; python_version < '3.11'",
     "numpy",
