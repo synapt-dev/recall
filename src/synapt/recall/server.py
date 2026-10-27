@@ -2056,7 +2056,9 @@ def recall_consolidate(
         adapter_path: Optional LoRA adapter path for knowledge extraction.
     """
     try:
-        from synapt.recall.consolidate import consolidate
+        from synapt.recall.consolidate import (
+            consolidate, _resolve_consolidation_model, inference_refusal_detail,
+        )
         kwargs: dict = {"dry_run": dry_run, "force": force}
         if model:
             kwargs["model"] = model
@@ -2068,6 +2070,9 @@ def recall_consolidate(
                 f"Dry run: {result.entries_processed} entries, "
                 f"{result.clusters_found} clusters found"
             )
+        if result.inference_unavailable:
+            resolved = _resolve_consolidation_model(model or None)
+            return f"Consolidation refused: {inference_refusal_detail(result, resolved)}"
         parts = []
         if result.nodes_created:
             parts.append(f"{result.nodes_created} created")

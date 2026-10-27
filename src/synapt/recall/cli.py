@@ -3362,7 +3362,9 @@ def cmd_consolidate(args: argparse.Namespace) -> None:
             print(format_knowledge_for_display(other))
         return
 
-    from synapt.recall.consolidate import consolidate, _resolve_consolidation_model
+    from synapt.recall.consolidate import (
+        consolidate, _resolve_consolidation_model, inference_refusal_detail,
+    )
 
     project = Path.cwd().resolve()
     # Resolve here rather than passing None through, so the line below prints the model
@@ -3388,6 +3390,11 @@ def cmd_consolidate(args: argparse.Namespace) -> None:
             print(f"\n[consolidate] Dry run: {result.entries_processed} entries, "
                   f"no clusters found (entries may not be related enough).")
         return
+
+    # Every model call failed, so "nothing extracted" would be a false all-clear.
+    if result.inference_unavailable:
+        print(f"[consolidate] refused: {inference_refusal_detail(result, model)}", file=sys.stderr)
+        sys.exit(1)
 
     parts = []
     if result.nodes_created:

@@ -386,6 +386,25 @@ class ConsolidationResult:
     nodes_emitted: int = 0
     nodes_rejected: int = 0
     rejected_preview: list[str] = field(default_factory=list)
+    # Model calls tried and failed (no backend, or the backend raised). An unparseable reply
+    # counts as tried, not failed: the model ran. A cache hit or a dry run counts nothing.
+    inference_attempts: int = 0
+    inference_failures: int = 0
+    backend_error: str = ""
+
+    @property
+    def inference_unavailable(self) -> bool:
+        """True when inference was tried and every attempt failed: the model never ran."""
+        return self.inference_failures > 0 and self.inference_failures == self.inference_attempts
+
+
+def inference_refusal_detail(result: ConsolidationResult, model: str) -> str:
+    """The reason text shown when a run is refused because no model backend could run."""
+    return (
+        f"no model backend could run ({result.backend_error}). "
+        f"{result.inference_failures} of {result.inference_attempts} inference attempts "
+        f"failed; nothing was extracted. Model: {model}."
+    )
 
 
 def _validate_iso_date(value: str | None) -> str | None:
@@ -4402,12 +4421,17 @@ def consolidate(
             client = _get_consolidation_client()
             if client is None:
                 logger.error("No model backend available for consolidation")
+                result.inference_attempts += 1
+                result.inference_failures += 1
+                if not result.backend_error:
+                    result.backend_error = "no backend: router found none and MLX is unavailable"
                 return False
         prompt = _build_consolidation_prompt(
             cluster, existing_nodes, project_dir,
             adapter_path=adapter_path,
         )
         response_budget = _estimate_response_budget(prompt)
+        result.inference_attempts += 1
         try:
             response = client.chat(
                 model=model,
@@ -4418,6 +4442,9 @@ def consolidate(
             )
         except Exception as exc:
             logger.warning("Inference failed for cluster: %s", exc)
+            result.inference_failures += 1
+            if not result.backend_error:
+                result.backend_error = f"{type(client).__name__}: {exc}"
             return False
 
         parsed = _parse_llm_response(response)
