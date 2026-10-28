@@ -339,3 +339,72 @@ def test_a_lifted_suppression_matches_a_fresh_load(tmp_path, monkeypatch):
         assert kept == fresh
     finally:
         server._invalidate_cache()
+
+
+def test_another_connection_that_reads_and_closes_keeps_the_cache(store):
+    """A connection that opens, reads and closes writes nothing; on Linux the file stamp can still move.
+
+    Not covered, by design: a wal_checkpoint by ANOTHER connection moves PRAGMA data_version too (measured
+    2 -> 3 on sqlite3), so it reloads once. Recall forces one only beside a write (a published generation,
+    saved embeddings), and an automatic checkpoint runs on a commit or on the last close, never while the
+    cached index holds its own connection open.
+    """
+    import sqlite3
+
+    _, index_dir, loads = store
+    _quick(QUERY)
+    name = "index.db" if (index_dir / "index.db").exists() else "recall.db"
+    conn = sqlite3.connect(index_dir / name)
+    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    conn.close()
+
+    server._get_index(use_embeddings=False)
+    _quick(QUERY)
+
+    assert len(loads) == 1, f"reloads after another connection read and closed: {len(loads) - 1}"
+
+
+@pytest.fixture
+def sharded(tmp_path, monkeypatch):
+    """A sharded store: index.db plus one data shard holding a base chunk, wired into the server."""
+    from synapt.recall.core import TranscriptChunk
+    from synapt.recall.storage import RecallDB
+
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    RecallDB(index_dir / "index.db").close()
+    shard = RecallDB(index_dir / "data_0001.db")
+    shard.save_chunks([TranscriptChunk(
+        id="base:t0", session_id="base", timestamp="2026-08-29T00:00:00Z", turn_index=0,
+        user_text=f"base {QUERY}", assistant_text="",
+    )])
+    shard.close()
+    monkeypatch.setattr(server, "project_index_dir", lambda: index_dir)
+    loads: list[Path] = []
+    real_load = TranscriptIndex.load.__func__
+
+    def counting_load(cls, directory, use_embeddings=False):
+        loads.append(directory)
+        return real_load(cls, directory, use_embeddings=use_embeddings)
+
+    monkeypatch.setattr(TranscriptIndex, "load", classmethod(counting_load))
+    server._invalidate_cache()
+    yield index_dir, loads
+    server._invalidate_cache()
+
+
+def test_a_foreign_commit_to_a_data_shard_reloads(sharded):
+    import sqlite3
+
+    index_dir, loads = sharded
+    server._get_index(use_embeddings=False)
+    assert len(server._held_dbs(server._cached_index)) == 2  # index.db and the shard
+    conn = sqlite3.connect(index_dir / "data_0001.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS foreign_probe (n INTEGER)")
+    conn.execute("INSERT INTO foreign_probe VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    server._get_index(use_embeddings=False)
+
+    assert len(loads) == 2

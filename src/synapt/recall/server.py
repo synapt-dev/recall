@@ -146,6 +146,9 @@ _cached_index: TranscriptIndex | None = None
 _cached_mtime: tuple[tuple[str, int, int], ...] = ()
 _cached_dir: Path | None = None
 _cached_has_embeddings: bool = False
+# What the cached index's own connections saw: see _cache_token. The file stamp above still decides for
+# files no connection holds (chunks.jsonl, a recall.db the sharded layout does not read).
+_cached_token: tuple | None = None
 # Set while our own caller-tail refresh writes over a cache that matched the store just before it:
 # a read in that window keeps the cached index instead of reloading over our half-taken write.
 _own_refresh_in_flight: bool = False
@@ -192,13 +195,75 @@ def _own_write(index_dir: Path):
     re-stamped only when it matched just before the write: a change by another
     writer before ours still reloads.
     """
-    global _cached_mtime
+    global _cached_mtime, _cached_token
     before = _index_cache_stamp(index_dir)
+    matched = _cache_matches(index_dir)
     try:
         yield
     finally:
-        if index_dir == _cached_dir and before == _cached_mtime:
+        if matched:
             _cached_mtime = _index_cache_stamp(index_dir)
+            _cached_token = _cache_token(_cached_index)
+        elif index_dir == _cached_dir and before == _cached_mtime:
+            _cached_mtime = _index_cache_stamp(index_dir)
+
+
+def _held_dbs(index: TranscriptIndex | None) -> list:
+    """The RecallDB connections the index reads: index.db (or recall.db) and each data shard."""
+    db = getattr(index, "_db", None)
+    if db is None:
+        return []
+    if hasattr(db, "_data_dbs"):
+        return [db._index, *db._data_dbs]
+    return [db]
+
+
+def _cache_token(index: TranscriptIndex | None, *, at_open: bool = False):
+    """Whether the files the cached index reads have changed, by its own connections, or None if unreadable.
+
+    PRAGMA data_version on each connection moves only when ANOTHER connection commits to that file, never
+    on a close or a WAL checkpoint, which move a file stamp with no write at all (a checkpoint on close
+    rewrites the main file, and on Linux removes -wal). The inode catches a file replaced underneath its
+    connection, and the CURRENT generation name catches a published generation. at_open takes each
+    connection's value from the moment it opened, so a commit that landed during a load still reloads.
+    """
+    dbs = _held_dbs(index)
+    if not dbs:
+        return None
+    parts = []
+    for db in dbs:
+        version = db.data_version_at_open if at_open else db.data_version()
+        if version is None:
+            return None
+        try:
+            inode = os.stat(db.path).st_ino
+        except OSError:
+            return None
+        parts.append((str(db.path), inode, version))
+    from synapt.recall.generations import read_current_generation
+
+    return read_current_generation(Path(dbs[0].path).parent), tuple(parts)
+
+
+def _unheld(stamp, index: TranscriptIndex | None):  # noqa: ANN001, ANN201
+    """The stamp's entries for files none of the index's connections holds (with their -wal)."""
+    held = set()
+    for db in _held_dbs(index):
+        held.update({Path(db.path).name, f"{Path(db.path).name}-wal"})
+    return tuple(e for e in stamp if e[0] not in held)
+
+
+def _cache_matches(index_dir: Path) -> bool:
+    """The cached index still stands for the store at index_dir."""
+    if _cached_index is None or index_dir != _cached_dir:
+        return False
+    if not _held_dbs(_cached_index):
+        # No connection to ask (a chunks.jsonl index, a stub): the file stamp decides, as before.
+        return _index_cache_stamp(index_dir) == _cached_mtime
+    token = _cache_token(_cached_index)
+    if token is None or token != _cached_token:
+        return False
+    return _unheld(_index_cache_stamp(index_dir), _cached_index) == _unheld(_cached_mtime, _cached_index)
 
 
 def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
@@ -208,7 +273,7 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
         use_embeddings: If False, skip embedding model loading for faster
             startup. Use for recall_quick which only needs BM25/knowledge.
     """
-    global _cached_index, _cached_mtime, _cached_dir, _cached_has_embeddings
+    global _cached_index, _cached_mtime, _cached_dir, _cached_has_embeddings, _cached_token
     index_dir = project_index_dir()
 
     stamp = _index_cache_stamp(index_dir)
@@ -218,9 +283,9 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
     try:
         needs_reload = (
             _cached_index is None
-            or (stamp != _cached_mtime and not _own_refresh_in_flight)
             or index_dir != _cached_dir
             or (use_embeddings and not _cached_has_embeddings)
+            or (not _own_refresh_in_flight and not _cache_matches(index_dir))
         )
         if needs_reload:
             # Close old DB connection before replacing cached index
@@ -237,6 +302,7 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
             )
             _cached_has_embeddings = use_embeddings
             _cached_mtime = _adopt_post_load_stamp(stamp, _index_cache_stamp(index_dir))
+            _cached_token = _cache_token(_cached_index, at_open=True)
             _cached_dir = index_dir
             _cached_index._own_write = lambda: _own_write(index_dir)
             # Set current session ID for access tracking (distinct_sessions)
@@ -276,12 +342,13 @@ class RecallStoreUnavailable(RuntimeError):
 
 def _invalidate_cache() -> None:
     """Reset cached index so next search reloads from disk."""
-    global _cached_index, _cached_mtime, _cached_dir, _cached_has_embeddings
+    global _cached_index, _cached_mtime, _cached_dir, _cached_has_embeddings, _cached_token
     if _cached_index is not None and getattr(_cached_index, '_db', None) is not None:
         with contextlib.suppress(Exception):
             _cached_index._db.close()
     _cached_index = None
     _cached_mtime = ()
+    _cached_token = None
     _cached_dir = None
     _cached_has_embeddings = False
 
@@ -438,9 +505,10 @@ def _query_freshness_line(index_dir: Path) -> str:
     # take the tail in place. A change by another writer before ours still reloads.
     from synapt.recall.query_freshness import REFRESH_PROBE
 
-    before = _index_cache_stamp(index_dir)
-    matched = _cached_index is not None and index_dir == _cached_dir and before == _cached_mtime
-    probe = {"stamp": lambda: _index_cache_stamp(index_dir)} if matched else None
+    matched = _cache_matches(index_dir)
+    before = _cached_token
+    held = _cached_index
+    probe = {"token": lambda: _cache_token(held)} if matched else None
     global _own_refresh_in_flight
     _own_refresh_in_flight = matched
     token = REFRESH_PROBE.set(probe)
@@ -452,8 +520,11 @@ def _query_freshness_line(index_dir: Path) -> str:
                 state=QueryFreshnessState.ERROR,
                 reason=f"{type(exc).__name__}:{exc}",
             )
+        ours = _only_our_write(before, probe)
         if result.index_changed:
-            _take_tail(index_dir, _only_our_write(before, probe))
+            _take_tail(index_dir, ours)
+        elif ours is not None:
+            _rebaseline(index_dir, ours)
     finally:
         REFRESH_PROBE.reset(token)
         _own_refresh_in_flight = False
@@ -464,24 +535,30 @@ def _query_freshness_line(index_dir: Path) -> str:
 
 
 def _only_our_write(before, probe: dict | None):  # noqa: ANN001, ANN201
-    """The stamp our own refresh left, or None when anything but our write may have moved the store.
+    """The cache token our own refresh left, or None when another connection may have committed.
 
-    None unless: the cache matched the store before the call; the refresh's connection saw the same
-    stamp when it opened (no commit in between); its PRAGMA data_version did not move from open to close
-    (no other connection committed while it ran); and no stamped file but the one it writes moved.
+    The refresh reads its own connection's data_version, THEN the cached token, when it opens; and the
+    cached token, THEN its data_version again, just before it releases the build lock. None unless the
+    cached token at open still equals the one the cache matched (no commit since that check), and the
+    refresh's data_version never moved (no other connection committed while it ran, up to the last
+    token read). Then the last token read is the new baseline: it differs only by our own commits.
     """
     if not probe or "open" not in probe or "after" not in probe:
         return None
-    (at_open, v_open, name), (after, v_after, _) = probe["open"], probe["after"]
-    if at_open != before or v_open is None or v_open != v_after or not name:
+    (v_open, at_open), (base, v_after) = probe["open"], probe["after"]
+    if before is None or at_open != before or v_open is None or v_open != v_after or base is None:
         return None
-    ours = (name, f"{name}-wal")
-    if [e for e in before if e[0] not in ours] != [e for e in after if e[0] not in ours]:
-        return None
-    return after
+    return base
 
 
-def _take_tail(index_dir: Path, stamp) -> None:  # noqa: ANN001
+def _rebaseline(index_dir: Path, token) -> None:  # noqa: ANN001
+    """Our own refresh committed and changed no searchable rows: the cache still stands, at a new baseline."""
+    global _cached_mtime, _cached_token
+    _cached_token = token
+    _cached_mtime = _index_cache_stamp(index_dir)
+
+
+def _take_tail(index_dir: Path, token) -> None:  # noqa: ANN001
     """After our own refresh changed the query tail: swap in the cached index with the new tail, or reload.
 
     The swap is one assignment of a NEW index (TranscriptIndex.with_tail), so a reader holding the
@@ -489,7 +566,7 @@ def _take_tail(index_dir: Path, stamp) -> None:  # noqa: ANN001
     without embeddings, so a semantic call after it loads again.
     """
     global _cached_index, _cached_mtime, _cached_has_embeddings
-    fresh = TranscriptIndex.with_tail(_cached_index) if stamp is not None else None
+    fresh = TranscriptIndex.with_tail(_cached_index) if token is not None else None
     if fresh is None:
         _invalidate_cache()
         return
@@ -497,7 +574,7 @@ def _take_tail(index_dir: Path, stamp) -> None:  # noqa: ANN001
     fresh._current_session_id = _cached_index._current_session_id
     _cached_index = fresh
     _cached_has_embeddings = False
-    _cached_mtime = stamp
+    _rebaseline(index_dir, token)
 
 
 def _with_query_freshness(result: str, freshness_line: str) -> str:
