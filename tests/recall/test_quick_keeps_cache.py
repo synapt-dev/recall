@@ -275,3 +275,19 @@ def test_a_call_that_indexes_nothing_keeps_the_cache(store, monkeypatch):
 
     assert "below_threshold" in out
     assert len(loads) == 1
+
+
+def test_a_shrunk_tail_matches_a_fresh_load(store):
+    transcript, index_dir, _ = store
+    first = transcript.read_text()
+    _append_turn(transcript)
+    _quick(QUERY)
+    assert len(server._get_index(use_embeddings=False).chunks) == 2
+    transcript.write_text(first)
+
+    _quick(QUERY)
+
+    kept = sorted(chunk.id for chunk in server._get_index(use_embeddings=False).chunks)
+    fresh = sorted(chunk.id for chunk in TranscriptIndex.load(index_dir).chunks)
+    assert kept == fresh
+    assert len(fresh) == 1
