@@ -291,3 +291,51 @@ def test_a_shrunk_tail_matches_a_fresh_load(store):
     fresh = sorted(chunk.id for chunk in TranscriptIndex.load(index_dir).chunks)
     assert kept == fresh
     assert len(fresh) == 1
+
+
+def test_a_lifted_suppression_matches_a_fresh_load(tmp_path, monkeypatch):
+    """A tail that stops suppressing the base brings base chunks back that the cached index had dropped."""
+    from synapt.recall.core import parse_transcript
+    from synapt.recall.storage import RecallDB
+
+    from tests.recall.test_query_freshness import SESSION
+
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    for minute in range(20, 24):
+        _write_turn(transcript, f"base turn {minute} {QUERY} " + "x" * 200, "answer", minute)
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    db = RecallDB(index_dir / "recall.db")
+    db.save_chunks(parse_transcript(transcript))
+    db.close()
+    policy = {"value": _policy()}
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts",
+        lambda root: [_source(transcript)],
+    )
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.refresh_current_session",
+        lambda index_dir, caller_root: refresh_current_session(
+            index_dir, caller_root, policy=policy["value"]
+        ),
+    )
+    monkeypatch.setattr(server, "project_index_dir", lambda: index_dir)
+    server._invalidate_cache()
+    try:
+        _quick(QUERY)
+        assert server._get_index(use_embeddings=False)._suppressed_sessions == {SESSION}
+        # The same bytes in a different order: the cursor's prefix no longer proves the source,
+        # so the refresh clears the session's tail and reparses it, here only part of the way.
+        text = transcript.read_text().replace("base turn 20", "BASE TURN 20")
+        transcript.write_text(text)
+        first_turn_end = text.find("\n", text.find("\n") + 1) + 1
+        policy["value"] = _policy(step_bytes=first_turn_end, byte_cap=first_turn_end)
+
+        out = _quick(QUERY)
+
+        assert "PARTIAL" in out or "partial" in out, out
+        kept = sorted(chunk.id for chunk in server._get_index(use_embeddings=False).chunks)
+        fresh = sorted(chunk.id for chunk in TranscriptIndex.load(index_dir).chunks)
+        assert kept == fresh
+    finally:
+        server._invalidate_cache()
