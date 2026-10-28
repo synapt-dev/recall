@@ -146,6 +146,9 @@ _cached_index: TranscriptIndex | None = None
 _cached_mtime: tuple[tuple[str, int, int], ...] = ()
 _cached_dir: Path | None = None
 _cached_has_embeddings: bool = False
+# Set while our own caller-tail refresh writes over a cache that matched the store just before it:
+# a read in that window keeps the cached index instead of reloading over our half-taken write.
+_own_refresh_in_flight: bool = False
 
 
 def _index_cache_stamp(index_dir: Path) -> tuple[tuple[str, int, int], ...]:
@@ -215,7 +218,7 @@ def _get_index(use_embeddings: bool = True) -> TranscriptIndex | None:
     try:
         needs_reload = (
             _cached_index is None
-            or stamp != _cached_mtime
+            or (stamp != _cached_mtime and not _own_refresh_in_flight)
             or index_dir != _cached_dir
             or (use_embeddings and not _cached_has_embeddings)
         )
@@ -431,19 +434,70 @@ def _query_freshness_line(index_dir: Path) -> str:
         refresh_current_session,
     )
 
+    # Read before the refresh: only a cache that matched the store just before our own write may
+    # take the tail in place. A change by another writer before ours still reloads.
+    from synapt.recall.query_freshness import REFRESH_PROBE
+
+    before = _index_cache_stamp(index_dir)
+    matched = _cached_index is not None and index_dir == _cached_dir and before == _cached_mtime
+    probe = {"stamp": lambda: _index_cache_stamp(index_dir)} if matched else None
+    global _own_refresh_in_flight
+    _own_refresh_in_flight = matched
+    token = REFRESH_PROBE.set(probe)
     try:
-        result = refresh_current_session(index_dir, Path.cwd())
-    except Exception as exc:
-        result = QueryFreshnessResult(
-            state=QueryFreshnessState.ERROR,
-            reason=f"{type(exc).__name__}:{exc}",
-        )
-    if result.index_changed:
-        _invalidate_cache()
+        try:
+            result = refresh_current_session(index_dir, Path.cwd())
+        except Exception as exc:
+            result = QueryFreshnessResult(
+                state=QueryFreshnessState.ERROR,
+                reason=f"{type(exc).__name__}:{exc}",
+            )
+        if result.index_changed:
+            _take_tail(index_dir, _only_our_write(before, probe))
+    finally:
+        REFRESH_PROBE.reset(token)
+        _own_refresh_in_flight = False
     line = _FreshnessLine(format_query_freshness(result))
     line.result = result
     line.started = started
     return line
+
+
+def _only_our_write(before, probe: dict | None):  # noqa: ANN001, ANN201
+    """The stamp our own refresh left, or None when anything but our write may have moved the store.
+
+    None unless: the cache matched the store before the call; the refresh's connection saw the same
+    stamp when it opened (no commit in between); its PRAGMA data_version did not move from open to close
+    (no other connection committed while it ran); and no stamped file but the one it writes moved.
+    """
+    if not probe or "open" not in probe or "after" not in probe:
+        return None
+    (at_open, v_open, name), (after, v_after, _) = probe["open"], probe["after"]
+    if at_open != before or v_open is None or v_open != v_after or not name:
+        return None
+    ours = (name, f"{name}-wal")
+    if [e for e in before if e[0] not in ours] != [e for e in after if e[0] not in ours]:
+        return None
+    return after
+
+
+def _take_tail(index_dir: Path, stamp) -> None:  # noqa: ANN001
+    """After our own refresh changed the query tail: swap in the cached index with the new tail, or reload.
+
+    The swap is one assignment of a NEW index (TranscriptIndex.with_tail), so a reader holding the
+    old one keeps a whole index, and the new one starts with an empty query cache. It is built
+    without embeddings, so a semantic call after it loads again.
+    """
+    global _cached_index, _cached_mtime, _cached_has_embeddings
+    fresh = TranscriptIndex.with_tail(_cached_index) if stamp is not None else None
+    if fresh is None:
+        _invalidate_cache()
+        return
+    fresh._own_write = lambda: _own_write(index_dir)
+    fresh._current_session_id = _cached_index._current_session_id
+    _cached_index = fresh
+    _cached_has_embeddings = False
+    _cached_mtime = stamp
 
 
 def _with_query_freshness(result: str, freshness_line: str) -> str:

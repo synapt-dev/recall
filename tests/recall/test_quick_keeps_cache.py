@@ -20,7 +20,6 @@ from synapt.recall.query_freshness import refresh_current_session
 
 from tests.recall.test_query_freshness import _policy, _source, _write_turn
 
-APPEND_NOT_BUILT = pytest.mark.xfail(strict=True, reason="in-place append not built")
 QUERY = "lanternfish harbour"
 
 
@@ -105,17 +104,29 @@ def _append_turn(transcript: Path) -> None:
     _write_turn(transcript, f"second {QUERY} zephyrquartz", "second answer", 21)
 
 
-@APPEND_NOT_BUILT
-def test_new_chunks_are_found_without_a_full_load(store):
+def test_new_chunks_are_found_without_a_full_load(store, monkeypatch):
     transcript, _, loads = store
     _quick(QUERY)
     assert len(loads) == 1
     _append_turn(transcript)
 
+    built: list[int] = []
+    real_with_tail = TranscriptIndex.with_tail.__func__
+
+    def spy_with_tail(cls, old):
+        index = real_with_tail(cls, old)
+        if index is not None:
+            built.append(len(index._query_cache))
+        return index
+
+    monkeypatch.setattr(TranscriptIndex, "with_tail", classmethod(spy_with_tail))
+
     out = _quick("zephyrquartz")
 
     assert "zephyrquartz" in out
     assert len(loads) == 1, f"full loads after the append: {len(loads) - 1}"
+    # The new index answers from the store, never from a query cache made before the tail.
+    assert built == [0]
 
 
 def _ranked(index: TranscriptIndex, query: str) -> list[tuple[str, float]]:
@@ -135,7 +146,6 @@ def _ranked(index: TranscriptIndex, query: str) -> list[tuple[str, float]]:
     return [(index.chunks[idx].id, score) for idx, score in seen[-1]]
 
 
-@APPEND_NOT_BUILT
 def test_appended_index_ranks_like_a_fresh_load(store):
     transcript, index_dir, loads = store
     _quick(QUERY)
@@ -151,7 +161,6 @@ def test_appended_index_ranks_like_a_fresh_load(store):
         assert abs(a - b) <= 1e-9
 
 
-@APPEND_NOT_BUILT
 def test_reader_mid_append_sees_one_whole_index(store, monkeypatch):
     transcript, index_dir, loads = store
     _quick(QUERY)
@@ -183,3 +192,83 @@ def test_reader_mid_append_sees_one_whole_index(store, monkeypatch):
     assert seen[0][0] == seen[0][1]
     assert seen[0][0] in (before, after)
     assert len(loads) == 1, f"full loads around the append: {len(loads) - 1}"
+
+
+def _foreign_commit(index_dir: Path) -> None:
+    """A commit by another connection to the file the store writes, as another server or a build makes."""
+    import sqlite3
+
+    name = "index.db" if (index_dir / "index.db").exists() else "recall.db"
+    conn = sqlite3.connect(index_dir / name)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS foreign_probe (n INTEGER)")
+        conn.execute("INSERT INTO foreign_probe VALUES (1)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_foreign_commit_between_calls_reloads(store):
+    _, index_dir, loads = store
+    _quick(QUERY)
+    _foreign_commit(index_dir)
+
+    _quick(QUERY)
+
+    assert len(loads) == 2
+
+
+def test_a_foreign_commit_before_the_refresh_opens_reloads(store, monkeypatch):
+    transcript, index_dir, loads = store
+    _quick(QUERY)
+    _append_turn(transcript)
+    fixture_refresh = query_freshness.refresh_current_session
+
+    def foreign_first(index_dir, caller_root):
+        _foreign_commit(index_dir)
+        return fixture_refresh(index_dir, caller_root)
+
+    monkeypatch.setattr("synapt.recall.query_freshness.refresh_current_session", foreign_first)
+
+    out = _quick("zephyrquartz")
+
+    assert "zephyrquartz" in out
+    assert len(loads) == 2, "a commit after the stamp read was taken as our own tail"
+
+
+def test_a_foreign_commit_inside_the_refresh_reloads(store, monkeypatch):
+    transcript, index_dir, loads = store
+    _quick(QUERY)
+    _append_turn(transcript)
+    from synapt.recall.storage import RecallDB
+
+    real_replace = RecallDB.replace_query_tail
+
+    def replace_then_foreign(self, *args, **kwargs):
+        result = real_replace(self, *args, **kwargs)
+        _foreign_commit(index_dir)
+        return result
+
+    monkeypatch.setattr(RecallDB, "replace_query_tail", replace_then_foreign)
+
+    out = _quick("zephyrquartz")
+
+    assert "zephyrquartz" in out
+    assert len(loads) == 2, "a commit during our refresh was taken as our own tail"
+
+
+def test_a_call_that_indexes_nothing_keeps_the_cache(store, monkeypatch):
+    transcript, _, loads = store
+    _quick(QUERY)
+    _append_turn(transcript)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.refresh_current_session",
+        lambda index_dir, caller_root: refresh_current_session(
+            index_dir, caller_root, policy=_policy(byte_trigger=1 << 30, age_threshold_seconds=1 << 30)
+        ),
+    )
+
+    out = _quick(QUERY)
+
+    assert "below_threshold" in out
+    assert len(loads) == 1

@@ -1308,6 +1308,11 @@ class TranscriptIndex:
 
         if db is not None and db.chunk_count() > 0:
             self._refresh_rowid_map()
+        # The sessions the query tail suppressed when this index was read; with_tail compares them.
+        self._suppressed_sessions: set[str] = set()
+        if db is not None:
+            with contextlib.suppress(Exception):
+                self._suppressed_sessions = set(db.query_tail_suppressed_sessions())
 
         # Content profile — adapts filters and retrieval to content type
         from synapt.recall.content_profile import (
@@ -4545,6 +4550,36 @@ class TranscriptIndex:
 
         manifest["chunks_hash"] = h.hexdigest()[:16]
         atomic_json_write(manifest, directory / "manifest.json")
+
+    @classmethod
+    def with_tail(cls, old: TranscriptIndex) -> TranscriptIndex | None:
+        """A new index over old's base chunks and the store's current query tail, or None to reload.
+
+        A caller-tail refresh writes only the query-tail tables, so the base chunks a load would read
+        are the ones old already holds. The tail is small, so it is read again whole, and the merge is
+        the loader's own (sharded_db.ShardedRecallDB._merge_overlay_chunks): base chunks the tail
+        replaces by id or suppresses by session drop out, the tail is added. old is not changed, so a
+        reader still holding it sees one whole index. None when old cannot rebuild the merge: it is not
+        a lazy store index, or a suppression or a tail id it hid has gone, since the base chunks that
+        would come back are not in old.
+        """
+        db = old._db
+        if db is None or not old._lazy_chunks or not old._idx_to_rowid:
+            return None
+        overlay = db.load_query_tail_chunks()
+        overlay_ids = {chunk.id for chunk in overlay}
+        suppressed = db.query_tail_suppressed_sessions()
+        old_overlay_ids = {old.chunks[i].id for i, rowid in old._idx_to_rowid.items() if rowid < 0}
+        if not old_overlay_ids <= overlay_ids or not old._suppressed_sessions <= suppressed:
+            return None
+        base = [
+            old.chunks[i] for i, rowid in old._idx_to_rowid.items()
+            if rowid >= 0 and old.chunks[i].id not in overlay_ids
+            and old.chunks[i].session_id not in suppressed
+        ]
+        index = cls(base + overlay, use_embeddings=False, cache_dir=None, db=db, lazy_chunks=True)
+        index._suppressed_sessions = suppressed
+        return index
 
     @classmethod
     def load(cls, directory: Path, use_embeddings: bool = False) -> TranscriptIndex:

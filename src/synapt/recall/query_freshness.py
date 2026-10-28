@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import time
@@ -184,6 +185,23 @@ def _parse_slice(
     )
 
 
+# Set by a caller that must know whether the store changed under this refresh by any writer but it:
+# a dict holding "stamp", a no-argument callable. The refresh fills "open" (that stamp and the index
+# connection's PRAGMA data_version right after it opens) and "after" (both again just before it closes),
+# so the caller can tell its own commit from another connection's (data_version moves only on those),
+# and the name of the database file it writes.
+REFRESH_PROBE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("refresh_probe", default=None)
+
+
+def _probe_read(db, probe: dict, when: str) -> None:  # noqa: ANN001
+    try:
+        version = db._index._conn.execute("PRAGMA data_version").fetchone()[0]
+        name = Path(db._index.path).name
+    except Exception:
+        version, name = None, ""
+    probe[when] = (probe["stamp"](), version, name)
+
+
 def refresh_current_session(
     index_dir: Path,
     caller_root: Path | None = None,
@@ -240,6 +258,9 @@ def refresh_current_session(
     db = None
     try:
         db = ShardedRecallDB.open(index_dir)
+        probe = REFRESH_PROBE.get()
+        if probe is not None:
+            _probe_read(db, probe, "open")
         cursor = db.load_query_tail_cursor(key)
         prior_session_cursor = db.load_query_tail_cursor_for_session(source.session_id)
         base_extent = db.session_indexed_extent(source.session_id)
@@ -471,6 +492,9 @@ def refresh_current_session(
         )
     finally:
         if db is not None:
+            probe = REFRESH_PROBE.get()
+            if probe is not None and "open" in probe:
+                _probe_read(db, probe, "after")
             db.close()
         _release_build_lock(lock_fd)
 
