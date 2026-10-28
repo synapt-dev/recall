@@ -4572,10 +4572,10 @@ class TranscriptIndex:
         old_overlay_ids = {old.chunks[i].id for i, rowid in old._idx_to_rowid.items() if rowid < 0}
         if not old_overlay_ids <= overlay_ids or not old._suppressed_sessions <= suppressed:
             return None
+        # old's own tail chunks drop out here too: the check above put every one of their ids in overlay_ids.
         base = [
-            old.chunks[i] for i, rowid in old._idx_to_rowid.items()
-            if rowid >= 0 and old.chunks[i].id not in overlay_ids
-            and old.chunks[i].session_id not in suppressed
+            chunk for chunk in old.chunks
+            if chunk.id not in overlay_ids and chunk.session_id not in suppressed
         ]
         index = cls(base + overlay, use_embeddings=False, cache_dir=None, db=db, lazy_chunks=True)
         index._suppressed_sessions = suppressed

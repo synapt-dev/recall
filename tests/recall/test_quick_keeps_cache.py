@@ -164,7 +164,8 @@ def test_appended_index_ranks_like_a_fresh_load(store):
 def test_reader_mid_append_sees_one_whole_index(store, monkeypatch):
     transcript, index_dir, loads = store
     _quick(QUERY)
-    before = len(server._get_index(use_embeddings=False).chunks)
+    held = server._get_index(use_embeddings=False)
+    before = len(held.chunks)
     _append_turn(transcript)
     seen: list[tuple[int, int]] = []
     wrapped = refresh_current_session
@@ -188,6 +189,8 @@ def test_reader_mid_append_sees_one_whole_index(store, monkeypatch):
     after = len(server._get_index(use_embeddings=False).chunks)
 
     assert after > before
+    # The index a reader already held is never changed under it.
+    assert len(held.chunks) == before
     assert len(seen) == 1
     assert seen[0][0] == seen[0][1]
     assert seen[0][0] in (before, after)
