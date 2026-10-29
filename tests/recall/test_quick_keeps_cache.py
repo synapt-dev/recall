@@ -7,6 +7,7 @@ own chunks, the server must not reload every chunk from the store.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -473,6 +474,7 @@ def test_a_shard_commit_inside_the_refresh_reloads(sharded, tmp_path, monkeypatc
     assert len(loads) == loaded + 1, "a data-shard commit during our refresh was taken as our own"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows refuses to replace a file an open connection holds, so the case cannot arise there")
 def test_a_held_file_replaced_under_its_connection_does_not_match(store):
     """The inode is the only part of the token that sees a file replaced under the cached connection (that
     connection still reads the old file, so its data_version cannot move)."""
@@ -489,6 +491,7 @@ def test_a_held_file_replaced_under_its_connection_does_not_match(store):
     assert not server._cache_matches(index_dir)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows refuses to replace a file an open connection holds, so the case cannot arise there")
 def test_a_held_file_replaced_inside_the_refresh_reloads(store, monkeypatch):
     """A file replaced under the refresh's own connection does not move that connection's data_version, so
     only the inode in the token's first part shows it: the next call reloads instead of keeping a cache whose
