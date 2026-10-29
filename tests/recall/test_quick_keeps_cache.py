@@ -487,3 +487,102 @@ def test_a_held_file_replaced_under_its_connection_does_not_match(store):
     os.replace(index_dir / f"{name}.swap", index_dir / name)
 
     assert not server._cache_matches(index_dir)
+
+
+def test_a_held_file_replaced_inside_the_refresh_reloads(store, monkeypatch):
+    """A file replaced under the refresh's own connection does not move that connection's data_version, so
+    only the inode in the token's first part shows it: the next call reloads instead of keeping a cache whose
+    connection's file was replaced."""
+    import os
+    import sqlite3
+
+    from synapt.recall.storage import RecallDB
+
+    transcript, index_dir, loads = store
+    _quick(QUERY)
+    _append_turn(transcript)
+    name = "index.db" if (index_dir / "index.db").exists() else "recall.db"
+    real_replace = RecallDB.replace_query_tail
+
+    def replace_then_swap_file(self, *args, **kwargs):
+        result = real_replace(self, *args, **kwargs)
+        src = sqlite3.connect(index_dir / name)
+        dst = sqlite3.connect(index_dir / f"{name}.swap")
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        os.replace(index_dir / f"{name}.swap", index_dir / name)
+        return result
+
+    monkeypatch.setattr(RecallDB, "replace_query_tail", replace_then_swap_file)
+    _quick("zephyrquartz")
+
+    # Asserted after this call: the next call's own refresh commits and reloads whatever this one decided.
+    assert len(loads) == 2, "a file replaced during our refresh was taken as our own baseline"
+
+
+_BEFORE = ("gen-1", (("index.db", 111, 5), ("data_0001.db", 222, 7)))
+
+
+def _window(after):
+    """A probe whose refresh connection never saw another commit (data_version 3 at open and after)."""
+    return {"open": (3, _BEFORE), "after": (after, 3)}
+
+
+@pytest.mark.parametrize(
+    "after, ours",
+    [
+        (("gen-1", (("index.db", 111, 6), ("data_0001.db", 222, 7))), True),
+        (("gen-1", (("index.db", 999, 6), ("data_0001.db", 222, 7))), False),
+        (("gen-1", (("index.db", 999, 5), ("data_0001.db", 222, 7))), False),
+        (("gen-1", (("index.db", 111, 6), ("data_0001.db", 222, 8))), False),
+        (("gen-2", (("index.db", 111, 6), ("data_0001.db", 222, 7))), False),
+    ],
+    ids=["own-commit", "file-replaced", "file-replaced-unwritten", "shard-moved", "generation-moved"],
+)
+def test_only_our_write_lets_only_the_refresh_files_data_version_move(after, ours):
+    """Inside the window only the refresh's own file's data_version may move: a new inode there, a moved
+    data shard, or a new CURRENT generation was another writer, so there is no baseline to keep."""
+    got = server._only_our_write(_BEFORE, _window(after))
+
+    assert (got == after) if ours else (got is None)
+
+
+def test_a_generation_published_inside_the_refresh_reloads(sharded, tmp_path, monkeypatch):
+    """Our refresh never moves the CURRENT generation: a generation published while it runs is another writer's,
+    so the next call reloads instead of keeping the cache at a baseline that holds it."""
+    from synapt.recall.generations import read_current_generation
+    from synapt.recall.storage import RecallDB
+
+    index_dir, loads = sharded
+    transcript = tmp_path / "gen_caller.jsonl"
+    _write_turn(transcript, f"first {QUERY} note", "first answer", 20)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts", lambda root: [_source(transcript)]
+    )
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.refresh_current_session",
+        lambda index_dir, caller_root: refresh_current_session(index_dir, caller_root, policy=_policy()),
+    )
+    _quick(QUERY)
+    loaded = len(loads)
+    _append_turn(transcript)
+    real_replace = RecallDB.replace_query_tail
+    seen = {}
+
+    def replace_then_publish(self, *args, **kwargs):
+        result = real_replace(self, *args, **kwargs)
+        before = read_current_generation(index_dir)
+        (index_dir / "CURRENT").write_text("probe-generation-0001\n")
+        seen["gen"] = (before, read_current_generation(index_dir))
+        return result
+
+    monkeypatch.setattr(RecallDB, "replace_query_tail", replace_then_publish)
+    _quick("zephyrquartz")
+    monkeypatch.setattr(RecallDB, "replace_query_tail", real_replace)
+    assert seen and seen["gen"][0] != seen["gen"][1], f"precondition: CURRENT did not move {seen}"
+    _quick(QUERY)
+
+    assert len(loads) == loaded + 1, "a generation published inside our refresh was taken as our own"

@@ -542,17 +542,19 @@ def _only_our_write(before, probe: dict | None):  # noqa: ANN001, ANN201
     cached token, THEN its data_version again, just before it releases the build lock. None unless the
     cached token at open still equals the one the cache matched (no commit since that check), and the
     refresh's data_version never moved (no other connection committed to its file while it ran, up to
-    the last token read), and no other part of the token moved (no data shard and no generation). Then
-    the last token read is the new baseline: it differs only by our own commits.
+    the last token read), and nothing in the token moved but that file's data_version (no data shard, no
+    generation, and not its path or inode). Then the last token read is the new baseline: it differs only
+    by our own commits.
     """
     if not probe or "open" not in probe or "after" not in probe:
         return None
     (v_open, at_open), (base, v_after) = probe["open"], probe["after"]
     if before is None or at_open != before or v_open is None or v_open != v_after or base is None:
         return None
-    # The refresh's own connection is the token's first part only. Any other part (a data shard) or the
-    # CURRENT generation that moved inside the window was another writer, so it is not our baseline.
-    if at_open[0] != base[0] or at_open[1][1:] != base[1][1:]:
+    # Only the data_version of the token's first part (the refresh's own file) may move. Any other part (a
+    # data shard), the CURRENT generation, or the first part's path or inode that moved inside the window
+    # was another writer: a file replaced under the refresh does not move its connection's data_version.
+    if at_open[0] != base[0] or at_open[1][1:] != base[1][1:] or at_open[1][0][:2] != base[1][0][:2]:
         return None
     return base
 
