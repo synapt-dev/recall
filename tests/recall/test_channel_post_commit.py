@@ -354,3 +354,40 @@ class PostLandedNotesTest(unittest.TestCase):
         self.assertNotIn("(pinned)", result)
         self.assertIn("pin not recorded, channel state not updated: disk I/O error", result)
         self.assertEqual(self._count("SELECT COUNT(*) FROM pins"), 0)
+
+
+class CliPostUnderHeldLockTest(unittest.TestCase):
+    """`synapt recall channel post` exits 0 for a post that landed under a held lock.
+
+    A script that posts through the CLI (a shell wrapper, a cron job) reads the exit code, not
+    the text. Before the fix the CLI raised after the line landed, so a wrapper retried and the
+    channel got the body twice; the function rows above do not go through the CLI's exit path.
+    """
+
+    setUp = PostCommitTest.setUp
+    tearDown = PostCommitTest.tearDown
+    _hold_write_lock = PostCommitTest._hold_write_lock
+    _release = PostCommitTest._release
+    _lines = PostCommitTest._lines
+
+    def test_r29_cli_post_under_a_held_lock_exits_0_once_with_the_id(self):
+        import contextlib
+        import io
+
+        from synapt.recall import cli
+
+        args = cli.make_parser().parse_args(["channel", "post", "dev", "landed via cli"])
+        out = io.StringIO()
+        code = 0
+        self._hold_write_lock()
+        with contextlib.redirect_stdout(out):
+            try:
+                cli.cmd_channel(args)
+            except SystemExit as e:
+                code = e.code
+        self._release()
+        lines = self._lines()
+        self.assertEqual(code, 0)
+        self.assertEqual([l["body"] for l in lines], ["landed via cli"])
+        self.assertEqual(PostCommitTest._id(out.getvalue()), lines[0]["id"])
+        self.assertIn("channel state not updated: database is locked", out.getvalue())
