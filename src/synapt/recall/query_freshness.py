@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import time
@@ -184,6 +185,32 @@ def _parse_slice(
     )
 
 
+# Set by a caller that must know whether another connection committed while this refresh ran:
+# a dict holding "token", a no-argument callable reading the caller's own view of the store.
+# Right after it opens, the refresh reads its connection's PRAGMA data_version, THEN the token ("open");
+# just before it releases the build lock, the token, THEN its data_version again ("after"). data_version
+# moves on other connections' commits and their TRUNCATE checkpoints, so an unchanged value means no other
+# commit up to the last token read.
+REFRESH_PROBE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("refresh_probe", default=None)
+
+
+def _refresh_data_version(db) -> int | None:  # noqa: ANN001
+    try:
+        return db._index.data_version()
+    except Exception:
+        return None
+
+
+def _probe_open(db, probe: dict) -> None:  # noqa: ANN001
+    version = _refresh_data_version(db)
+    probe["open"] = (version, probe["token"]())
+
+
+def _probe_after(db, probe: dict) -> None:  # noqa: ANN001
+    token = probe["token"]()
+    probe["after"] = (token, _refresh_data_version(db))
+
+
 def refresh_current_session(
     index_dir: Path,
     caller_root: Path | None = None,
@@ -240,6 +267,9 @@ def refresh_current_session(
     db = None
     try:
         db = ShardedRecallDB.open(index_dir)
+        probe = REFRESH_PROBE.get()
+        if probe is not None:
+            _probe_open(db, probe)
         cursor = db.load_query_tail_cursor(key)
         prior_session_cursor = db.load_query_tail_cursor_for_session(source.session_id)
         base_extent = db.session_indexed_extent(source.session_id)
@@ -471,6 +501,9 @@ def refresh_current_session(
         )
     finally:
         if db is not None:
+            probe = REFRESH_PROBE.get()
+            if probe is not None and "open" in probe:
+                _probe_after(db, probe)
             db.close()
         _release_build_lock(lock_fd)
 

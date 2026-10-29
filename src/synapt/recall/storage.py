@@ -974,6 +974,9 @@ class RecallDB:
     per-row embedding BLOBs, and key/value metadata.
     """
 
+    # This connection's data_version when it opened (None until it has); see data_version().
+    data_version_at_open: int | None = None
+
     def __init__(self, db_path: Path | str, deadline: float | None = None):
         self._path = Path(db_path)
         # A time.monotonic() bound on the open's lock waits; None waits as every writer does (30 s per statement).
@@ -1284,6 +1287,9 @@ class RecallDB:
                 lock_exclusive(lock_file)
                 try:
                     self._conn = self._connect()
+                    # Read before anything else on this connection: a commit by another connection after
+                    # this point moves data_version(), so a reader that keeps this value sees it.
+                    self.data_version_at_open = self.data_version()
                     self._ensure_schema()
                     return
                 except sqlite3.OperationalError as exc:
@@ -1886,6 +1892,17 @@ class RecallDB:
     @property
     def path(self) -> Path:
         return self._path
+
+    def data_version(self) -> int | None:
+        """This connection's PRAGMA data_version, or None if it cannot be read here.
+
+        The value moves when ANOTHER connection commits to this file or runs a TRUNCATE (or RESTART)
+        checkpoint on it, and never on this connection's own commits or checkpoints, or a close.
+        """
+        try:
+            return self._conn.execute("PRAGMA data_version").fetchone()[0]
+        except Exception:
+            return None
 
     @property
     def mtime(self) -> float:
