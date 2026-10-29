@@ -1351,20 +1351,12 @@ class TranscriptIndex:
                 self.content_profile.total_chunks,
             )
 
-        if self._rowid_to_idx:
-            # FTS5 is ready — skip in-memory BM25
-            self._bm25 = None
-        else:
-            # Build in-memory BM25 index (no DB or DB not yet populated)
-            self._bm25 = BM25()
-            corpus = []
-            for chunk in self.chunks:
-                tokens = _tokenize(chunk.text)
-                # Boost tools and files by repeating them
-                boost_text = " ".join(chunk.tools_used + chunk.files_touched)
-                tokens.extend(_tokenize(boost_text))
-                corpus.append(tokens)
-            self._bm25.index(corpus)
+        # In-memory BM25 serves search only while FTS5 does not hold these
+        # chunks. With a DB (the build path, which saves straight to FTS5) it
+        # is built on first need, so a build never holds the token corpus.
+        self._bm25: BM25 | None = None
+        if self._db is None:
+            self._bm25 = self._build_bm25()
 
         # Optional embedding index
         self._embeddings: list[list[float]] | None = None
@@ -1842,6 +1834,25 @@ class TranscriptIndex:
             if rowid is not None:
                 self._rowid_to_idx[rowid] = i
                 self._idx_to_rowid[i] = rowid
+
+    def _build_bm25(self) -> BM25:
+        """Index every chunk's tokens in an in-memory BM25."""
+        bm25 = BM25()
+        corpus = []
+        for chunk in self.chunks:
+            tokens = _tokenize(chunk.text)
+            # Boost tools and files by repeating them
+            boost_text = " ".join(chunk.tools_used + chunk.files_touched)
+            tokens.extend(_tokenize(boost_text))
+            corpus.append(tokens)
+        bm25.index(corpus)
+        return bm25
+
+    def _ensure_bm25(self) -> BM25:
+        """The in-memory BM25, built on first need when a DB deferred it."""
+        if self._bm25 is None:
+            self._bm25 = self._build_bm25()
+        return self._bm25
 
     def _load_or_build_embeddings(self, cache_dir: Path | None):
         """Build or load cached embeddings for all chunks."""
@@ -2853,7 +2864,7 @@ class TranscriptIndex:
             )
             return ""
 
-        scores = self._bm25.score(query_tokens)
+        scores = self._ensure_bm25().score(query_tokens)
 
         # In summary mode, zero out non-journal chunks
         if depth == "summary":
@@ -3158,7 +3169,7 @@ class TranscriptIndex:
         agent_id: str | None = None,
     ) -> str:
         """Progressive session search using in-memory BM25 (legacy fallback)."""
-        bm25_scores = self._bm25.score(query_tokens)
+        bm25_scores = self._ensure_bm25().score(query_tokens)
 
         # In summary mode, zero out raw transcript chunks (keep journal only)
         if depth == "summary":
