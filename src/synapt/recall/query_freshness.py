@@ -189,8 +189,8 @@ def _parse_slice(
 # a dict holding "token", a no-argument callable reading the caller's own view of the store.
 # Right after it opens, the refresh reads its connection's PRAGMA data_version, THEN the token ("open");
 # just before it releases the build lock, the token, THEN its data_version again ("after"). data_version
-# moves only on other connections' commits, so an unchanged value means no other commit up to the last
-# token read.
+# moves on other connections' commits and their TRUNCATE checkpoints, so an unchanged value means no other
+# commit up to the last token read.
 REFRESH_PROBE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("refresh_probe", default=None)
 
 

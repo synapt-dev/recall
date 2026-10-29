@@ -344,8 +344,8 @@ def test_a_lifted_suppression_matches_a_fresh_load(tmp_path, monkeypatch):
 def test_another_connection_that_reads_and_closes_keeps_the_cache(store):
     """A connection that opens, reads and closes writes nothing; on Linux the file stamp can still move.
 
-    Not covered, by design: a wal_checkpoint by ANOTHER connection moves PRAGMA data_version too (measured
-    2 -> 3 on sqlite3), so it reloads once. Recall forces one only beside a write (a published generation,
+    Not covered, by design: a TRUNCATE checkpoint by ANOTHER connection moves PRAGMA data_version too
+    (measured 2 -> 3 on sqlite3), so it reloads once; see the checkpoint row below. Recall forces one only beside a write (a published generation,
     saved embeddings), and an automatic checkpoint runs on a commit or on the last close, never while the
     cached index holds its own connection open.
     """
@@ -362,6 +362,27 @@ def test_another_connection_that_reads_and_closes_keeps_the_cache(store):
     _quick(QUERY)
 
     assert len(loads) == 1, f"reloads after another connection read and closed: {len(loads) - 1}"
+
+
+@pytest.mark.parametrize("mode, reloads", [("PASSIVE", 0), ("TRUNCATE", 1)])
+def test_a_checkpoint_by_another_connection(store, mode, reloads):
+    """Another connection checkpoints the WAL and writes nothing: a PASSIVE checkpoint keeps the cache, and a
+    TRUNCATE checkpoint moves PRAGMA data_version on the cached connection, so it reloads exactly once."""
+    import sqlite3
+
+    _, index_dir, loads = store
+    _quick(QUERY)
+    name = "index.db" if (index_dir / "index.db").exists() else "recall.db"
+    conn = sqlite3.connect(index_dir / name)
+    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+    conn.close()
+
+    server._get_index(use_embeddings=False)
+    _quick(QUERY)
+    _quick(QUERY)
+
+    assert len(loads) == 1 + reloads, f"{mode}: reloads after another connection checkpointed: {len(loads) - 1}"
 
 
 @pytest.fixture
@@ -408,3 +429,61 @@ def test_a_foreign_commit_to_a_data_shard_reloads(sharded):
     server._get_index(use_embeddings=False)
 
     assert len(loads) == 2
+
+
+def test_a_shard_commit_inside_the_refresh_reloads(sharded, tmp_path, monkeypatch):
+    """Our refresh writes through index.db only: a commit by another connection to a DATA SHARD while it runs
+    is not ours, so the next call reloads instead of keeping the cache at a baseline that holds it."""
+    import sqlite3
+
+    from synapt.recall.storage import RecallDB
+
+    index_dir, loads = sharded
+    transcript = tmp_path / "shard_caller.jsonl"
+    _write_turn(transcript, f"first {QUERY} note", "first answer", 20)
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.caller_transcripts", lambda root: [_source(transcript)]
+    )
+    monkeypatch.setattr(
+        "synapt.recall.query_freshness.refresh_current_session",
+        lambda index_dir, caller_root: refresh_current_session(index_dir, caller_root, policy=_policy()),
+    )
+    _quick(QUERY)
+    assert len(server._held_dbs(server._cached_index)) == 2  # index.db and the shard
+    loaded = len(loads)
+    _append_turn(transcript)
+    real_replace = RecallDB.replace_query_tail
+
+    def replace_then_shard_commit(self, *args, **kwargs):
+        result = real_replace(self, *args, **kwargs)
+        conn = sqlite3.connect(index_dir / "data_0001.db")
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS foreign_probe (n INTEGER)")
+            conn.execute("INSERT INTO foreign_probe VALUES (1)")
+            conn.commit()
+        finally:
+            conn.close()
+        return result
+
+    monkeypatch.setattr(RecallDB, "replace_query_tail", replace_then_shard_commit)
+    _quick("zephyrquartz")
+    monkeypatch.setattr(RecallDB, "replace_query_tail", real_replace)
+    _quick(QUERY)
+
+    assert len(loads) == loaded + 1, "a data-shard commit during our refresh was taken as our own"
+
+
+def test_a_held_file_replaced_under_its_connection_does_not_match(store):
+    """The inode is the only part of the token that sees a file replaced under the cached connection (that
+    connection still reads the old file, so its data_version cannot move)."""
+    import os
+    import shutil
+
+    _, index_dir, _ = store
+    _quick(QUERY)
+    assert server._cache_matches(index_dir)
+    name = "index.db" if (index_dir / "index.db").exists() else "recall.db"
+    shutil.copyfile(index_dir / name, index_dir / f"{name}.swap")
+    os.replace(index_dir / f"{name}.swap", index_dir / name)
+
+    assert not server._cache_matches(index_dir)

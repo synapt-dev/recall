@@ -1896,8 +1896,8 @@ class RecallDB:
     def data_version(self) -> int | None:
         """This connection's PRAGMA data_version, or None if it cannot be read here.
 
-        The value moves when ANOTHER connection commits to this file, and never on this
-        connection's own commits, a close or a checkpoint.
+        The value moves when ANOTHER connection commits to this file or runs a TRUNCATE (or RESTART)
+        checkpoint on it, and never on this connection's own commits or checkpoints, or a close.
         """
         try:
             return self._conn.execute("PRAGMA data_version").fetchone()[0]

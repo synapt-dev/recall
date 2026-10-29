@@ -221,9 +221,10 @@ def _held_dbs(index: TranscriptIndex | None) -> list:
 def _cache_token(index: TranscriptIndex | None, *, at_open: bool = False):
     """Whether the files the cached index reads have changed, by its own connections, or None if unreadable.
 
-    PRAGMA data_version on each connection moves only when ANOTHER connection commits to that file, never
-    on a close or a WAL checkpoint, which move a file stamp with no write at all (a checkpoint on close
-    rewrites the main file, and on Linux removes -wal). The inode catches a file replaced underneath its
+    PRAGMA data_version on each connection moves when ANOTHER connection commits to that file or runs a
+    TRUNCATE (or RESTART) checkpoint on it, and never on a close or a PASSIVE checkpoint, which move a file
+    stamp with no write at all (a checkpoint on close rewrites the main file, and on Linux removes -wal). So
+    another connection's TRUNCATE checkpoint reloads once. The inode catches a file replaced underneath its
     connection, and the CURRENT generation name catches a published generation. at_open takes each
     connection's value from the moment it opened, so a commit that landed during a load still reloads.
     """
@@ -540,13 +541,18 @@ def _only_our_write(before, probe: dict | None):  # noqa: ANN001, ANN201
     The refresh reads its own connection's data_version, THEN the cached token, when it opens; and the
     cached token, THEN its data_version again, just before it releases the build lock. None unless the
     cached token at open still equals the one the cache matched (no commit since that check), and the
-    refresh's data_version never moved (no other connection committed while it ran, up to the last
-    token read). Then the last token read is the new baseline: it differs only by our own commits.
+    refresh's data_version never moved (no other connection committed to its file while it ran, up to
+    the last token read), and no other part of the token moved (no data shard and no generation). Then
+    the last token read is the new baseline: it differs only by our own commits.
     """
     if not probe or "open" not in probe or "after" not in probe:
         return None
     (v_open, at_open), (base, v_after) = probe["open"], probe["after"]
     if before is None or at_open != before or v_open is None or v_open != v_after or base is None:
+        return None
+    # The refresh's own connection is the token's first part only. Any other part (a data shard) or the
+    # CURRENT generation that moved inside the window was another writer, so it is not our baseline.
+    if at_open[0] != base[0] or at_open[1][1:] != base[1][1:]:
         return None
     return base
 
