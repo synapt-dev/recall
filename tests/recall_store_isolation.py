@@ -135,6 +135,9 @@ class StoreIsolationPolicy:
         self.session_root: Path | None = None
         self.session_channel_root: Path | None = None
         self.session_data_root: Path | None = None
+        # pytest's own basetemp, set once the session starts. ``tmp_path`` lives
+        # here, and ``--basetemp`` may put it outside the system temp directory.
+        self.session_basetemp: Path | None = None
         self.allow_live: bool = False
         self.current_item = None
         self._announced: set[str] = set()
@@ -187,6 +190,8 @@ class StoreIsolationPolicy:
         if contained_by(path, self.session_data_root):
             return
         if contained_by(path, _tmp_root()):
+            return
+        if self.session_basetemp is not None and contained_by(path, self.session_basetemp):
             return
         raise RecallStoreIsolationError(
             "recall test isolation violation\n"

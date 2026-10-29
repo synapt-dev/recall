@@ -294,6 +294,21 @@ def _natural_resolution_per_test(monkeypatch):
     scrub_ambient_process_env(monkeypatch)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _allow_pytest_basetemp(tmp_path_factory):
+    """Let the data-root guard accept pytest's own basetemp.
+
+    ``tmp_path`` lives under the basetemp, which is normally beneath the system
+    temp directory. ``--basetemp`` can put it anywhere, and then every
+    ``project_dir=tmp_path`` was refused as an escape. The allowance is read
+    from pytest itself, so it names the directory pytest owns for this run and
+    nothing wider; the product guard is unchanged.
+    """
+    POLICY.session_basetemp = tmp_path_factory.getbasetemp()
+    yield
+    POLICY.session_basetemp = None
+
+
 @pytest.fixture(autouse=True)
 def _unwind_extra_protected_roots():
     """Decoy roots never outlive the test that registered them."""
