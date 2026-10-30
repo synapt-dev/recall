@@ -728,6 +728,28 @@ def test_explicit_project_dir_outside_the_test_root_is_refused(
         core_mod.project_data_dir(repo_checkout)
 
 
+def test_basetemp_allowance_does_not_admit_a_root_outside_it(
+    strict_data_root, store_isolation_error, tmp_path_factory, monkeypatch
+):
+    """Allowing pytest's basetemp must not widen the guard past it.
+
+    The checkout is the outside path again; the test only means something when
+    it sits outside both the basetemp and the system temp directory.
+    """
+    import tempfile
+
+    from recall_store_isolation import contained_by
+
+    monkeypatch.delenv("SYNAPT_RECALL_ROOT", raising=False)
+    repo_checkout = Path(__file__).resolve().parents[2]
+    for root in (tmp_path_factory.getbasetemp(), Path(tempfile.gettempdir())):
+        if contained_by(repo_checkout, root):
+            pytest.skip(f"checkout {repo_checkout} sits inside {root}")
+
+    with pytest.raises(store_isolation_error):
+        core_mod.project_data_dir(repo_checkout)
+
+
 # ---------------------------------------------------------------------------
 # The guard must not be disarmable by a nested run
 # ---------------------------------------------------------------------------
